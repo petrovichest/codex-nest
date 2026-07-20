@@ -7,7 +7,8 @@ the public internet.
 ## Raspberry Pi OS 64-bit / ARM64
 
 1. Install Node.js 24 LTS and Codex CLI `0.144.6` for the same Linux user that will
-   run the service. Sign in with Codex CLI as that user.
+   run the service. Sign in with Codex CLI as that user. The supplied systemd unit
+   expects a per-user Node 24 installation at `~/.local/node-v24`.
 2. Clone the repository and run `npm ci`, `npm run lint`, `npm run typecheck`,
    `npm test`, and `npm run build`.
 3. Run `npm run protocol:generate` and confirm the generated directory has no diff.
