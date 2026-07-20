@@ -21,6 +21,10 @@ the public internet.
 7. Check `/api/v1/health`, browser authentication, WebSocket reconnect, a service
    restart, and one manual real turn only after explicitly accepting quota/network use.
 
+The example unit keeps `/usr`, `/boot`, and `/etc` read-only, while project paths
+remain governed by the normal permissions of the service user. Add stricter systemd
+path restrictions only when every registered project root is known in advance.
+
 Deployment updates are Git-only: commit locally, push, pull on the Pi, rebuild, and
 restart only `codexnest.service`. Never copy application files directly to the Pi.
 
