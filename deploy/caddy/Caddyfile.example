@@ -1,0 +1,4 @@
+codexnest.lan {
+    tls /etc/ssl/codexnest/fullchain.pem /etc/ssl/codexnest/private.key
+    reverse_proxy 127.0.0.1:4310
+}

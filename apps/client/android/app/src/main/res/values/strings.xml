@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CodexNest</string>
+    <string name="title_activity_main">CodexNest</string>
+    <string name="package_name">com.codexnest.app</string>
+    <string name="custom_url_scheme">com.codexnest.app</string>
+</resources>

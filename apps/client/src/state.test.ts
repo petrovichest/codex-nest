@@ -1,0 +1,94 @@
+import { describe, expect, it } from "vitest";
+
+import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
+
+import { clientReducer, initialState, sortThreads } from "./state";
+
+const baseThread: ThreadSummary = {
+  id: "one",
+  projectId: null,
+  title: "One",
+  preview: "",
+  cwd: "/work",
+  state: "running",
+  unread: false,
+  pinned: false,
+  archived: false,
+  createdAt: 1,
+  updatedAt: 2,
+  currentTurnId: "turn",
+};
+
+const snapshot: AppSnapshot = {
+  sequence: 4,
+  connection: { state: "ready", message: null, syncedAt: null },
+  projects: [],
+  threads: [baseThread],
+  attention: [],
+  models: [],
+  pushConfigured: false,
+};
+
+describe("clientReducer", () => {
+  it("resets all projection data on a reconnect snapshot", () => {
+    const dirty = { ...initialState, details: { old: { summary: baseThread, turns: [] } } };
+    const next = clientReducer(dirty, { type: "snapshot", snapshot });
+    expect(next.snapshot).toBe(snapshot);
+    expect(next.network).toBe("connected");
+    expect(next.details.old).toBeDefined();
+  });
+
+  it("replaces an item completion after ordered streaming deltas", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: { summary: baseThread, turns: [{ id: "turn", status: "inProgress", items: [] }] },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { type: "agentMessage", id: "item", status: "inProgress", text: "Прив" },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { type: "agentMessage", id: "item", status: "completed", text: "Привет" },
+      },
+    });
+    expect(state.details.one?.turns[0]?.items).toEqual([
+      { type: "agentMessage", id: "item", status: "completed", text: "Привет" },
+    ]);
+  });
+
+  it("sorts attention, running, terminal unread, pinned, then recency", () => {
+    const threads = [
+      { ...baseThread, id: "normal", state: "idle" as const, currentTurnId: null, updatedAt: 100 },
+      { ...baseThread, id: "pinned", state: "idle" as const, currentTurnId: null, pinned: true },
+      {
+        ...baseThread,
+        id: "unread",
+        state: "completed" as const,
+        currentTurnId: null,
+        unread: true,
+      },
+      { ...baseThread, id: "running" },
+      { ...baseThread, id: "attention", state: "needsAttention" as const },
+    ];
+    expect(sortThreads(threads).map((thread) => thread.id)).toEqual([
+      "attention",
+      "running",
+      "unread",
+      "pinned",
+      "normal",
+    ]);
+  });
+});

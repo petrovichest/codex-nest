@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.data/
+*.tsbuildinfo
+.DS_Store
+*.log
+.env.local
+.env.*.local
+apps/client/android/.gradle/
+apps/client/android/local.properties
+apps/client/android/app/build/
+apps/client/android/app/google-services.json
+*.jks
+*.keystore
+release/
