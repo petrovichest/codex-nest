@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/codexnest
+WorkingDirectory=%h/codex-nest
 EnvironmentFile=%h/.config/codexnest/server.env
 ExecStart=%h/.local/node-v24/bin/node %h/codex-nest/apps/server/dist/index.js
 Restart=on-failure
