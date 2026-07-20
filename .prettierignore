@@ -1,0 +1,6 @@
+node_modules/
+**/dist/
+apps/server/src/codex/generated/
+apps/client/android/
+package-lock.json
+START_HERE.md

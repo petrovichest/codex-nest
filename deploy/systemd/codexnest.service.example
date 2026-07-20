@@ -1,0 +1,21 @@
+[Unit]
+Description=CodexNest server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/codexnest
+EnvironmentFile=%h/.config/codexnest/server.env
+ExecStart=/usr/bin/npm run start -w @codexnest/server
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/codexnest %h/.codex
+
+[Install]
+WantedBy=default.target
