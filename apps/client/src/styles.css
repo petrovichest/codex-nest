@@ -2303,6 +2303,7 @@ pre {
     transform: translateX(-104%);
     box-shadow: var(--shadow);
     transition: transform 180ms ease;
+    will-change: transform;
   }
 
   .sidebar.open {
@@ -2328,6 +2329,18 @@ pre {
     border-radius: 0;
     background: rgb(20 21 19 / 38%);
     backdrop-filter: blur(2px);
+    transition: opacity 180ms ease;
+  }
+
+  .app-frame.drawer-dragging .sidebar {
+    transform: translateX(var(--drawer-drag-translate, -104%));
+    transition: none;
+  }
+
+  .app-frame.drawer-dragging .drawer-backdrop {
+    opacity: var(--drawer-drag-progress, 0);
+    backdrop-filter: none;
+    transition: none;
   }
 
   .content {

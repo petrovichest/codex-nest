@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -7,9 +7,21 @@ import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
 import { App } from "./App";
 
 const connection = vi.hoisted(() => vi.fn());
+const capacitor = vi.hoisted(() => ({
+  addListener: vi.fn(),
+  backHandler: null as (() => void) | null,
+  getPlatform: vi.fn(() => "web"),
+  removeListener: vi.fn(),
+}));
 
 vi.mock("./connection", () => ({ useConnection: connection }));
 vi.mock("./push", () => ({ usePushNotifications: vi.fn() }));
+vi.mock("@capacitor/core", () => ({
+  Capacitor: { getPlatform: capacitor.getPlatform },
+}));
+vi.mock("@capacitor/app", () => ({
+  App: { addListener: capacitor.addListener },
+}));
 
 const baseThread: ThreadSummary = {
   id: "newer",
@@ -29,12 +41,20 @@ const baseThread: ThreadSummary = {
 };
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.stubGlobal(
     "matchMedia",
     vi
       .fn()
       .mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
   );
+  capacitor.backHandler = null;
+  capacitor.getPlatform.mockReturnValue("web");
+  capacitor.removeListener.mockResolvedValue(undefined);
+  capacitor.addListener.mockImplementation(async (_event: string, listener: () => void) => {
+    capacitor.backHandler = listener;
+    return { remove: capacitor.removeListener };
+  });
   localStorage.clear();
 });
 
@@ -221,6 +241,178 @@ describe("App routing and navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
     expect(api.readPermissionSettings).toHaveBeenCalledOnce();
   });
+
+  it("tracks a mobile swipe and opens the session drawer after the threshold", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 180, clientY: 204 }] });
+
+    expect(frame).toHaveClass("drawer-dragging");
+    expect(frame.style.getPropertyValue("--drawer-drag-progress")).toBe(String(100 / 300));
+    expect(view.container.querySelector(".drawer-backdrop")).not.toBeNull();
+
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).toHaveClass("open");
+  });
+
+  it("tracks a reverse swipe and closes the open session drawer after the threshold", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 220, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 120, clientY: 204 }] });
+
+    expect(frame).toHaveClass("drawer-dragging");
+    expect(frame.style.getPropertyValue("--drawer-drag-progress")).toBe(String(1 - 100 / 300));
+
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
+  });
+
+  it("keeps the drawer open after a short reverse swipe", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 220, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 150, clientY: 202 }] });
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(sidebar).toHaveClass("open");
+  });
+
+  it("rejects short, vertical, leftward and multitouch drawer gestures", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 150, clientY: 202 }] });
+    expect(frame).toHaveClass("drawer-dragging");
+    fireEvent.touchEnd(frame, { touches: [] });
+    expect(sidebar).not.toHaveClass("open");
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 95, clientY: 250 }] });
+    expect(frame).not.toHaveClass("drawer-dragging");
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 40, clientY: 202 }] });
+    expect(frame).not.toHaveClass("drawer-dragging");
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchStart(frame, {
+      touches: [
+        { clientX: 80, clientY: 200 },
+        { clientX: 100, clientY: 220 },
+      ],
+    });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 200, clientY: 202 }] });
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
+  });
+
+  it("resets a drawer gesture on touch cancellation and ignores it on desktop", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 180, clientY: 202 }] });
+    fireEvent.touchCancel(frame);
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
+
+    view.unmount();
+    vi.mocked(window.matchMedia).mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+    const desktopView = renderApp("/threads/newer");
+    const desktopFrame = desktopView.container.querySelector(".app-frame") as HTMLDivElement;
+    const desktopSidebar = desktopView.container.querySelector(".sidebar") as HTMLElement;
+    fireEvent.touchStart(desktopFrame, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(desktopFrame, { touches: [{ clientX: 200, clientY: 202 }] });
+    fireEvent.touchEnd(desktopFrame, { touches: [] });
+
+    expect(desktopFrame).not.toHaveClass("drawer-dragging");
+    expect(desktopSidebar).not.toHaveClass("open");
+  });
+
+  it("opens and closes the session drawer with Android Back", async () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    await waitFor(() => expect(capacitor.addListener).toHaveBeenCalledOnce());
+
+    act(() => capacitor.backHandler?.());
+    expect(sidebar).toHaveClass("open");
+
+    await waitFor(() => expect(capacitor.addListener).toHaveBeenCalledTimes(2));
+    act(() => capacitor.backHandler?.());
+    expect(sidebar).not.toHaveClass("open");
+  });
+
+  it("leaves Android Back to Capacitor outside a session", async () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    renderApp("/new");
+    await act(async () => Promise.resolve());
+
+    expect(capacitor.addListener).not.toHaveBeenCalled();
+  });
 });
 
 function renderApp(path: string) {
@@ -238,6 +430,14 @@ function statusFor(title: string): Element {
   const status = screen.getByRole("link", { name: title }).querySelector(".status");
   if (!status) throw new Error(`Missing status for ${title}`);
   return status;
+}
+
+function mockMobileViewport() {
+  vi.mocked(window.matchMedia).mockReturnValue({
+    matches: true,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  } as unknown as MediaQueryList);
 }
 
 function snapshot(threads: ThreadSummary[]): AppSnapshot {
