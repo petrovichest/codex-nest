@@ -5,12 +5,14 @@ import type {
   ActivityItem,
   AppSnapshot,
   ModelOption,
+  QueuedMessage,
   SessionSettings,
   ServerEvent,
   ThreadDetail,
   ThreadOutcome,
   ThreadState,
   ThreadSummary,
+  TurnProgress,
   TurnView,
 } from "@codexnest/protocol";
 
@@ -33,6 +35,7 @@ export class AppProjection extends EventEmitter {
   private readonly threads = new Map<string, CachedThread>();
   private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
+  private readonly progress = new Map<string, TurnProgress>();
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -116,7 +119,11 @@ export class AppProjection extends EventEmitter {
   async readThread(id: string): Promise<ThreadDetail> {
     const local = this.threads.get(id);
     if (local && this.unmaterializedThreads.has(id)) {
-      return { summary: this.toSummary(local), turns: [] };
+      return {
+        summary: this.toSummary(local),
+        turns: [],
+        queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
+      };
     }
     const result = parseThreadRead(
       await this.bridge.request<unknown>(
@@ -134,7 +141,10 @@ export class AppProjection extends EventEmitter {
     this.threads.set(id, cached);
     return {
       summary: this.toSummary(cached),
-      turns: result.thread.turns.map(normalizeTurn),
+      turns: result.thread.turns.map((turn) =>
+        normalizeTurn(turn, this.progress.get(turnKey(id, turn.id))),
+      ),
+      queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
     };
   }
 
@@ -180,6 +190,11 @@ export class AppProjection extends EventEmitter {
   removeProject(projectId: string): void {
     this.publish({ type: "project.removed", projectId });
     for (const thread of this.threads.values()) this.publishThread(thread.thread.id);
+  }
+
+  publishQueue(threadId: string, messages: QueuedMessage[]): void {
+    this.publish({ type: "queue.changed", threadId, messages });
+    this.publishThread(threadId);
   }
 
   upsertThread(thread: Thread, archived = false): ThreadSummary {
@@ -378,10 +393,24 @@ export class AppProjection extends EventEmitter {
       case "thread/closed":
         this.threads.delete(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
+        for (const key of this.progress.keys()) {
+          if (key.startsWith(`${notification.params.threadId}:`)) this.progress.delete(key);
+        }
         this.publish({ type: "thread.removed", threadId: notification.params.threadId });
         break;
       case "turn/started": {
         this.unmaterializedThreads.delete(notification.params.threadId);
+        const progress = emptyProgress(notification.params.turn.startedAt);
+        this.progress.set(
+          turnKey(notification.params.threadId, notification.params.turn.id),
+          progress,
+        );
+        this.publish({
+          type: "turn.progressed",
+          threadId: notification.params.threadId,
+          turnId: notification.params.turn.id,
+          progress,
+        });
         if (this.threads.has(notification.params.threadId)) {
           this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }
@@ -408,6 +437,37 @@ export class AppProjection extends EventEmitter {
           });
           this.publishThread(notification.params.threadId);
         }
+        break;
+      }
+      case "turn/plan/updated": {
+        const key = turnKey(notification.params.threadId, notification.params.turnId);
+        const progress = {
+          ...(this.progress.get(key) ?? emptyProgress(null)),
+          explanation: notification.params.explanation,
+          steps: notification.params.plan,
+        } satisfies TurnProgress;
+        this.progress.set(key, progress);
+        this.publish({
+          type: "turn.progressed",
+          threadId: notification.params.threadId,
+          turnId: notification.params.turnId,
+          progress,
+        });
+        break;
+      }
+      case "turn/diff/updated": {
+        const key = turnKey(notification.params.threadId, notification.params.turnId);
+        const progress = {
+          ...(this.progress.get(key) ?? emptyProgress(null)),
+          ...diffStats(notification.params.diff),
+        } satisfies TurnProgress;
+        this.progress.set(key, progress);
+        this.publish({
+          type: "turn.progressed",
+          threadId: notification.params.threadId,
+          turnId: notification.params.turnId,
+          progress,
+        });
         break;
       }
       case "item/started":
@@ -455,6 +515,7 @@ export class AppProjection extends EventEmitter {
                 type: "command",
                 id: notification.params.itemId,
                 status: "inProgress",
+                kind: "command",
                 command: "",
                 cwd: null,
                 output: notification.params.delta,
@@ -515,6 +576,7 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
+      queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
       settings: sessionSettings(meta.settings),
     };
   }
@@ -580,7 +642,7 @@ function normalizeModel(model: Model): ModelOption {
   };
 }
 
-function normalizeTurn(turn: Turn): TurnView {
+function normalizeTurn(turn: Turn, liveProgress?: TurnProgress): TurnView {
   const items = turn.items.map(normalizeActivity);
   if (turn.error) {
     items.push({
@@ -593,6 +655,7 @@ function normalizeTurn(turn: Turn): TurnView {
   return {
     id: turn.id,
     status: turn.status === "inProgress" ? "inProgress" : normalizeOutcome(turn.status),
+    progress: liveProgress ?? emptyProgress(turn.startedAt),
     items,
   };
 }
@@ -620,6 +683,7 @@ function normalizeActivity(item: Turn["items"][number]): ActivityItem {
         type: "command",
         id: item.id,
         status: normalizeItemStatus(item.status),
+        kind: commandKind(item.commandActions),
         command: item.command,
         cwd: item.cwd,
         output: item.aggregatedOutput ?? "",
@@ -660,6 +724,47 @@ function normalizeActivity(item: Turn["items"][number]): ActivityItem {
   }
 }
 
+function commandKind(actions: Array<{ type: string }>): "read" | "search" | "command" {
+  if (actions.length && actions.every((action) => action.type === "read")) return "read";
+  if (
+    actions.length &&
+    actions.every((action) => ["read", "listFiles", "search"].includes(action.type))
+  ) {
+    return "search";
+  }
+  return "command";
+}
+
+function emptyProgress(startedAt: number | null): TurnProgress {
+  return {
+    startedAt: startedAt === null ? null : startedAt * 1_000,
+    explanation: null,
+    steps: [],
+    filesChanged: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+export function diffStats(
+  diff: string,
+): Pick<TurnProgress, "filesChanged" | "additions" | "deletions"> {
+  const files = new Set<string>();
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const match = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+      if (match?.[2]) files.add(match[2]);
+    } else if (line.startsWith("+++") && !line.endsWith("/dev/null")) {
+      files.add(line.replace(/^\+\+\+\s+(?:b\/)?/, ""));
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+  }
+  return { filesChanged: files.size, additions, deletions };
+}
+
 function normalizeItemStatus(status: string): "inProgress" | "completed" | "failed" {
   const normalized = status.toLowerCase();
   if (normalized.includes("progress") || normalized.includes("running")) return "inProgress";
@@ -684,6 +789,10 @@ function activeTurnId(thread: Thread): string | null {
 
 function activityKey(threadId: string, turnId: string, itemId: string): string {
   return `${threadId}:${turnId}:${itemId}`;
+}
+
+function turnKey(threadId: string, turnId: string): string {
+  return `${threadId}:${turnId}`;
 }
 
 function isTerminal(state: ThreadState): state is ThreadOutcome {

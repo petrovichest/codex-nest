@@ -47,7 +47,7 @@ export function Composer({
   const canSubmit = Boolean(input.trim()) && !busy && (!creating || Boolean(projectId));
 
   function keyboardSubmit(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
@@ -96,9 +96,7 @@ export function Composer({
               value={settings}
               onChange={onSettingsChange}
             />
-            {running && (
-              <span className="composer-hint">Сообщение будет добавлено в текущий ход</span>
-            )}
+            {running && <span className="composer-hint">Сообщение будет добавлено в очередь</span>}
           </div>
           <div className="composer-actions">
             {running && onStop && (
@@ -112,7 +110,7 @@ export function Composer({
               </button>
             )}
             <button
-              aria-label={running ? "Направить" : "Отправить"}
+              aria-label={running ? "Добавить в очередь" : "Отправить"}
               className="composer-action send"
               disabled={!canSubmit}
             >

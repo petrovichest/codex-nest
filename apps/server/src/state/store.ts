@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { Project, SessionSettings, ThreadOutcome } from "@codexnest/protocol";
+import type { Project, QueuedMessage, SessionSettings, ThreadOutcome } from "@codexnest/protocol";
 
 export interface ThreadMetaState {
   pinned: boolean;
@@ -25,6 +25,7 @@ export interface CodexNestState {
   projects: Project[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
+  messageQueues?: Record<string, QueuedMessage[]>;
 }
 
 export function emptyState(): CodexNestState {
@@ -34,6 +35,7 @@ export function emptyState(): CodexNestState {
     projects: [],
     threadMeta: {},
     devices: {},
+    messageQueues: {},
   };
 }
 
@@ -145,6 +147,9 @@ function validateState(value: unknown): CodexNestState {
   if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
     throw new Error("Corrupt CodexNest state");
   }
+  if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
+    throw new Error("Corrupt message queues in CodexNest state");
+  }
   for (const project of value.projects) {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");
   }
@@ -171,6 +176,14 @@ function validateState(value: unknown): CodexNestState {
       throw new Error("Corrupt device registration in CodexNest state");
     }
   }
+  for (const [threadId, messages] of Object.entries(value.messageQueues ?? {})) {
+    if (
+      !Array.isArray(messages) ||
+      messages.some((message) => !isQueuedMessage(message, threadId))
+    ) {
+      throw new Error("Corrupt queued message in CodexNest state");
+    }
+  }
   const verifier = value.auth.tokenSha256;
   if (
     verifier !== undefined &&
@@ -179,6 +192,18 @@ function validateState(value: unknown): CodexNestState {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
   return value as unknown as CodexNestState;
+}
+
+function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessage {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.threadId === threadId &&
+    typeof value.text === "string" &&
+    Boolean(value.text.trim()) &&
+    typeof value.createdAt === "number" &&
+    ["queued", "dispatching"].includes(String(value.status))
+  );
 }
 
 function isSessionSettings(value: unknown): value is SessionSettings {

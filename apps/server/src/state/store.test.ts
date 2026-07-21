@@ -73,6 +73,25 @@ describe("StateStore", () => {
     });
   });
 
+  it("treats a legacy state without message queues as an empty queue", async () => {
+    const { path } = await temporaryState();
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        auth: {},
+        projects: [],
+        threadMeta: {},
+        devices: {},
+      }),
+      "utf8",
+    );
+
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.snapshot().messageQueues).toBeUndefined();
+  });
+
   it("reloads an externally rotated verifier and emits revocation", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

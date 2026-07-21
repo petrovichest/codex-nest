@@ -9,7 +9,7 @@ import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Thread } from "./codex/generated/v2/index";
-import { AppProjection } from "./projection";
+import { AppProjection, diffStats } from "./projection";
 import { StateStore } from "./state/store";
 
 class FakeBridge extends EventEmitter {
@@ -72,6 +72,14 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("counts files and changed lines in an aggregated turn diff", () => {
+    expect(
+      diffStats(
+        "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n-old\n+new\ndiff --git a/b.ts b/b.ts\n+++ b/b.ts\n+added",
+      ),
+    ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
+  });
+
   it("paginates exact thread count, reconciles outcomes once, and updates live terminal state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -125,6 +133,8 @@ describe("AppProjection", () => {
       bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),
     ).toHaveLength(2);
 
+    const events: Array<{ type: string; [key: string]: unknown }> = [];
+    projection.on("event", (_sequence, event) => events.push(event));
     bridge.emit("notification", {
       method: "turn/started",
       params: {
@@ -135,13 +145,48 @@ describe("AppProjection", () => {
           itemsView: "summary",
           status: "inProgress",
           error: null,
-          startedAt: null,
+          startedAt: 123,
           completedAt: null,
           durationMs: null,
         },
       },
     } satisfies ServerNotification);
     expect(projection.summary("one")?.state).toBe("running");
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        explanation: "Проверяем",
+        plan: [
+          { step: "Первый", status: "completed" },
+          { step: "Второй", status: "inProgress" },
+        ],
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/diff/updated",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        diff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n-old\n+new",
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === "turn.progressed").at(-1)).toMatchObject({
+        progress: {
+          startedAt: 123_000,
+          explanation: "Проверяем",
+          steps: [
+            { step: "Первый", status: "completed" },
+            { step: "Второй", status: "inProgress" },
+          ],
+          filesChanged: 1,
+          additions: 1,
+          deletions: 1,
+        },
+      }),
+    );
     projection.setCurrentTurn("one", "steered");
     bridge.emit("notification", {
       method: "turn/completed",

@@ -62,6 +62,7 @@ projection.on("event", (_sequence, event) => {
   }
   if (
     event.type === "thread.upserted" &&
+    event.thread.queuedMessageCount === 0 &&
     (event.thread.state === "completed" || event.thread.state === "failed")
   ) {
     const pushKey = `${event.thread.state}:${event.thread.updatedAt}`;
