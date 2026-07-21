@@ -345,6 +345,15 @@ describe("thread settings", () => {
     });
     expect(missingGitChanges.statusCode).toBe(404);
     expect(missingGitChanges.json()).toMatchObject({ error: { code: "not_found" } });
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: "/api/v1/threads/missing",
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
 
     const turnsBeforeEmptyThread = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/start",
@@ -708,6 +717,15 @@ describe("thread settings", () => {
     expect(failedActivation.statusCode).toBe(201);
     expect(failedActivation.json().goalWarning).toMatch(/осталась на паузе/i);
     expect(bridge.goal).toMatchObject({ status: "paused" });
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/threads/thread",
+      headers,
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(bridge.request).toHaveBeenCalledWith("thread/delete", { threadId: "thread" });
+    expect(store.snapshot().threadMeta.thread).toBeUndefined();
     await app.close();
   });
 
@@ -927,6 +945,7 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/start") return { thread: testThread("created") };
     if (method === "thread/resume") return {};
     if (method === "thread/name/set") return {};
+    if (method === "thread/delete") return {};
     if (method === "turn/start") {
       if (this.failNextTurnStart) {
         this.failNextTurnStart = false;

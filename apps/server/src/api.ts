@@ -587,6 +587,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
+  app.delete<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
+    if (!projection.summary(request.params.id)) {
+      return apiError(reply, 404, "not_found", "Thread not found");
+    }
+    await bridge.request("thread/delete", { threadId: request.params.id });
+    await queue.removeThread(request.params.id);
+    await store.update((state) => {
+      delete state.threadMeta[request.params.id];
+    });
+    return reply.code(204).send();
+  });
+
   app.patch<{ Params: { id: string }; Body: UpdateThreadSettingsRequest }>(
     "/api/v1/threads/:id/settings",
     async (request, reply) => {

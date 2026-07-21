@@ -977,9 +977,11 @@ function isTerminal(state: ThreadState): state is ThreadOutcome {
 }
 
 function rank(thread: ThreadSummary): number {
-  if (thread.state === "needsAttention") return 0;
-  if (thread.state === "running") return 1;
-  if (thread.unread && isTerminal(thread.state)) return 2;
-  if (thread.pinned) return 3;
-  return 4;
+  if (thread.state === "idle" && thread.title === "Без названия" && !thread.preview.trim())
+    return 0;
+  if (thread.state === "needsAttention") return 1;
+  if (thread.state === "running") return 2;
+  if (thread.unread && isTerminal(thread.state)) return 3;
+  if (thread.pinned) return 4;
+  return 5;
 }

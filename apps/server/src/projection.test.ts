@@ -137,6 +137,28 @@ describe("AppProjection", () => {
     expect(events).toEqual([]);
   });
 
+  it("places a newly created empty session before prioritized threads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("running", "/work", 20, { type: "active", activeFlags: [] }));
+    projection.upsertThread({
+      ...thread("blank", "/work", 10),
+      preview: "",
+      name: null,
+    });
+
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["blank", "running"]);
+  });
+
   it("paginates exact thread count, reconciles outcomes once, and updates live terminal state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

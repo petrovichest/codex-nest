@@ -1216,8 +1216,11 @@ pre {
   height: 15px;
 }
 
-.message-footer time {
+.message-footer > :last-child {
   margin-left: auto;
+}
+
+.message-footer time {
   white-space: nowrap;
 }
 

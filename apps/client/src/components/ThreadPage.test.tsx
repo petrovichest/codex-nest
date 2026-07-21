@@ -174,6 +174,8 @@ describe("Activity", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("Текст ответа"));
     expect(screen.getByRole("status")).toHaveTextContent("Скопировано");
     expect(screen.getByText(formatMessageTime(timestamp))).toBeInTheDocument();
+    const copyButton = screen.getByRole("button", { name: "Копировать сообщение" });
+    expect(copyButton.closest(".message-footer")?.lastElementChild).toBe(copyButton);
     expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
   });
 
@@ -239,6 +241,20 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
     expect(api.archive).toHaveBeenCalledWith("thread", true);
+  });
+
+  it("deletes an empty unnamed session after confirmation", async () => {
+    const api = threadApi();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockThreadConnection(api, { ...summary, title: "Без названия", preview: "" });
+    renderThread();
+
+    fireEvent.click(screen.getByLabelText("Действия с задачей"));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+
+    expect(confirm).toHaveBeenCalledWith("Удалить эту сессию? Это действие нельзя отменить.");
+    await waitFor(() => expect(api.deleteThread).toHaveBeenCalledWith("thread"));
+    confirm.mockRestore();
   });
 
   it("loads Git changes when the inspector opens and refreshes after a turn completes", async () => {
@@ -668,6 +684,7 @@ function threadRoute() {
           path="/threads/:threadId"
           element={<ThreadPage onOpenNavigation={() => undefined} />}
         />
+        <Route path="/new" element={<div>Новая сессия</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -681,6 +698,7 @@ function threadApi() {
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
+    deleteThread: vi.fn().mockResolvedValue(undefined),
     updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>
       Promise.resolve({
         ...summary,

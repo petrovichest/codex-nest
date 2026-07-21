@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import ReactMarkdown from "react-markdown";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import type {
   ActivityItem,
@@ -36,6 +36,7 @@ import {
   PinIcon,
   TerminalIcon,
   ToolIcon,
+  TrashIcon,
   XIcon,
 } from "./Icons";
 import { SessionInspector, type GitChangesView } from "./SessionInspector";
@@ -44,6 +45,7 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const { threadId = "" } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const { api, state, dispatch, refreshDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
@@ -55,6 +57,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
@@ -242,6 +245,19 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const togglePin = () => void api.updateThread(threadId, { pinned: !summary.pinned });
   const toggleArchive = () => void api.archive(threadId, !summary.archived);
 
+  async function deleteThread() {
+    if (!window.confirm("Удалить эту сессию? Это действие нельзя отменить.")) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteThread(threadId);
+      navigate("/new", { replace: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось удалить сессию");
+      setDeleting(false);
+    }
+  }
+
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
     setSettingsBusy(true);
     setError(null);
@@ -309,6 +325,9 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
                 </button>
                 <button onClick={toggleArchive}>
                   <ArchiveIcon /> {summary.archived ? "Вернуть из архива" : "Архивировать"}
+                </button>
+                <button className="danger" disabled={deleting} onClick={() => void deleteThread()}>
+                  <TrashIcon /> {deleting ? "Удаляем…" : "Удалить"}
                 </button>
               </div>
             </details>
@@ -605,15 +624,15 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
 
   return (
     <footer className="message-footer">
-      {canCopy && (
-        <button type="button" aria-label="Копировать сообщение" onClick={() => void copy()}>
-          <CopyIcon />
-        </button>
-      )}
       {copyState === "copied" && <span role="status">Скопировано</span>}
       {copyState === "failed" && <span role="alert">Не удалось скопировать</span>}
       {timestamp !== null && (
         <time dateTime={new Date(timestamp).toISOString()}>{formatMessageTime(timestamp)}</time>
+      )}
+      {canCopy && (
+        <button type="button" aria-label="Копировать сообщение" onClick={() => void copy()}>
+          <CopyIcon />
+        </button>
       )}
     </footer>
   );

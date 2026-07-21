@@ -144,6 +144,10 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}`, { method: "PATCH", body });
   }
 
+  deleteThread(id: string): Promise<void> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
   updateThreadSettings(id: string, body: UpdateThreadSettingsRequest): Promise<ThreadSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/settings`, {
       method: "PATCH",

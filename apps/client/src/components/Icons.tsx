@@ -185,6 +185,12 @@ export const ArchiveIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const TrashIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+  </Icon>
+);
+
 export const PencilIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m14.5 5.5 4 4M4 20l4.5-1 10-10a2.8 2.8 0 0 0-4-4l-10 10Z" />

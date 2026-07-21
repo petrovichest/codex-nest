@@ -258,6 +258,14 @@ describe("clientReducer", () => {
 
   it("sorts attention, running, terminal unread, pinned, then recency", () => {
     const threads = [
+      {
+        ...baseThread,
+        id: "blank",
+        title: "Без названия",
+        state: "idle" as const,
+        currentTurnId: null,
+        updatedAt: 1,
+      },
       { ...baseThread, id: "normal", state: "idle" as const, currentTurnId: null, updatedAt: 100 },
       { ...baseThread, id: "pinned", state: "idle" as const, currentTurnId: null, pinned: true },
       {
@@ -271,6 +279,7 @@ describe("clientReducer", () => {
       { ...baseThread, id: "attention", state: "needsAttention" as const },
     ];
     expect(sortThreads(threads).map((thread) => thread.id)).toEqual([
+      "blank",
       "attention",
       "running",
       "unread",
