@@ -310,41 +310,18 @@ pre {
   border-right: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
 }
 
-.sidebar-history {
-  height: 54px;
+.sidebar-toolbar {
+  height: 52px;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 10px 14px 4px;
+  justify-content: flex-end;
+  padding: 8px 14px 4px;
   color: var(--muted-strong);
 }
 
 .close-drawer {
   display: none;
-}
-
-.sidebar-brand-row {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px 14px 4px 20px;
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-strong);
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.035em;
-}
-
-.brand svg {
-  width: 15px;
-  height: 15px;
-  color: var(--muted);
 }
 
 .sidebar-search {
@@ -367,28 +344,6 @@ pre {
   padding: 7px 10px 7px 34px;
   border-color: transparent;
   background: color-mix(in srgb, var(--surface) 58%, transparent);
-}
-
-.new-task-link {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  margin: 2px 10px 8px;
-  padding: 0 12px;
-  border-radius: 9px;
-  color: var(--text-strong);
-  font-weight: 520;
-}
-
-.new-task-link:hover,
-.new-task-link.active {
-  background: var(--sidebar-hover);
-}
-
-.new-task-link svg {
-  width: 17px;
-  height: 17px;
 }
 
 .thread-nav {
@@ -510,7 +465,7 @@ pre {
   box-shadow: 0 0 0 3px color-mix(in srgb, #e5a62b 18%, transparent);
 }
 
-.status-completed,
+.status-completed-unread,
 .connection-dot.connected {
   background: var(--success);
 }
@@ -522,14 +477,6 @@ pre {
 
 .status-interrupted {
   background: #9974db;
-}
-
-.unread {
-  width: 5px;
-  height: 5px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--text);
 }
 
 .show-more {
@@ -627,6 +574,13 @@ pre {
   height: 15px;
 }
 
+.codex-limits > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .server-card {
   display: flex;
   align-items: center;
@@ -690,12 +644,11 @@ pre {
 
 .sidebar-preferences {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 6px;
   padding: 3px 8px 0;
 }
 
-.sidebar-preferences select,
 .sidebar-preferences button {
   height: 30px;
   min-height: 30px;
@@ -783,16 +736,34 @@ pre {
   padding: 42px 24px;
 }
 
-.settings-card {
+.settings-stack {
   width: min(680px, 100%);
   display: grid;
-  gap: 20px;
+  gap: 18px;
   margin: 0 auto;
+}
+
+.settings-card {
+  width: 100%;
+  display: grid;
+  gap: 20px;
+  margin: 0;
   padding: 26px;
   border: 1px solid var(--line);
   border-radius: 18px;
   background: var(--surface);
   box-shadow: 0 8px 28px rgb(28 30 27 / 5%);
+}
+
+.theme-setting {
+  display: grid;
+  gap: 7px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.theme-setting select {
+  max-width: 260px;
 }
 
 .settings-card-heading {
@@ -2338,14 +2309,12 @@ pre {
     transform: translateX(0);
   }
 
-  .sidebar-history {
-    justify-content: flex-start;
+  .sidebar-toolbar {
     padding-top: 6px;
   }
 
-  .sidebar-history .close-drawer {
+  .sidebar-toolbar .close-drawer {
     display: inline-grid;
-    margin-left: auto;
   }
 
   .drawer-backdrop {

@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ApiErrorCode,
   AttentionResponse,
+  CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadResponse,
@@ -28,7 +29,13 @@ import { AttentionValidationError, type AttentionManager } from "./attention";
 import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ThreadResumeResponse } from "./codex/generated/v2/index";
-import { parseThreadRead, parseThreadStart, parseTurnStart, parseTurnSteer } from "./codex/guards";
+import {
+  parseAccountRateLimits,
+  parseThreadRead,
+  parseThreadStart,
+  parseTurnStart,
+  parseTurnSteer,
+} from "./codex/guards";
 import { RpcError } from "./codex/transport";
 import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
 import {
@@ -171,6 +178,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
   }));
+
+  app.get("/api/v1/codex/rate-limits", async (): Promise<CodexRateLimitsResponse> => {
+    return parseAccountRateLimits(
+      await bridge.request<unknown>("account/rateLimits/read", undefined),
+    );
+  });
 
   app.get("/api/v1/settings/permissions", async () => readPermissionSettings(bridge));
 

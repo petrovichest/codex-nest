@@ -528,6 +528,19 @@ describe("thread settings", () => {
       message: null,
     });
 
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
+    ).toHaveLength(0);
+    const rateLimits = await app.inject({ url: "/api/v1/codex/rate-limits", headers });
+    expect(rateLimits.statusCode).toBe(200);
+    expect(rateLimits.json()).toEqual({
+      primary: { usedPercent: 25, windowDurationMins: 300 },
+      secondary: { usedPercent: 40, windowDurationMins: 10_080 },
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
+    ).toEqual([["account/rateLimits/read", undefined]]);
+
     const updated = await app.inject({
       method: "PUT",
       url: "/api/v1/settings/permissions",
@@ -605,7 +618,7 @@ class SettingsBridge extends EventEmitter {
   writeStatus: "ok" | "okOverridden" = "ok";
   writeMessage: string | null = null;
   conflictingVersion: string | null = null;
-  request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+  request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
         ? { data: [], nextCursor: null, backwardsCursor: null }
@@ -624,6 +637,32 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/resume") return {};
     if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
     if (method === "turn/steer") return { turnId: "steered" };
+    if (method === "account/rateLimits/read") {
+      const common = {
+        limitName: null,
+        credits: null,
+        individualLimit: null,
+        planType: null,
+        rateLimitReachedType: null,
+      };
+      return {
+        rateLimits: {
+          ...common,
+          limitId: null,
+          primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: null },
+          secondary: null,
+        },
+        rateLimitsByLimitId: {
+          codex: {
+            ...common,
+            limitId: "codex",
+            primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+            secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: null },
+          },
+        },
+        rateLimitResetCredits: null,
+      };
+    }
     if (method === "config/read") {
       return {
         config: this.permissionConfig,

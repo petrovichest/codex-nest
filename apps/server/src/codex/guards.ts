@@ -1,4 +1,5 @@
 import type {
+  GetAccountRateLimitsResponse,
   Model,
   ModelListResponse,
   Thread,
@@ -9,6 +10,16 @@ import type {
   Turn,
   TurnStartResponse,
 } from "./generated/v2/index";
+
+type RateLimitWindowView = {
+  usedPercent: number;
+  windowDurationMins: number | null;
+};
+
+export type AccountRateLimitsView = {
+  primary: RateLimitWindowView | null;
+  secondary: RateLimitWindowView | null;
+};
 
 export class ProtocolShapeError extends Error {
   constructor(context: string) {
@@ -59,6 +70,22 @@ export function parseTurnSteer(value: unknown): { turnId: string } {
   if (!isRecord(value) || typeof value.turnId !== "string")
     throw new ProtocolShapeError("turn/steer");
   return { turnId: value.turnId };
+}
+
+export function parseAccountRateLimits(value: unknown): AccountRateLimitsView {
+  if (!isRecord(value) || !isRateLimitSnapshot(value.rateLimits)) {
+    throw new ProtocolShapeError("account/rateLimits/read");
+  }
+  const typed = value as unknown as GetAccountRateLimitsResponse;
+  const codex = typed.rateLimitsByLimitId?.codex;
+  const snapshot = codex ?? typed.rateLimits;
+  if (!isRateLimitSnapshot(snapshot)) {
+    throw new ProtocolShapeError("account/rateLimits/read codex bucket");
+  }
+  return {
+    primary: rateLimitWindow(snapshot.primary),
+    secondary: rateLimitWindow(snapshot.secondary),
+  };
 }
 
 function pageShape(
@@ -135,6 +162,35 @@ function isModel(value: unknown): value is Model {
       (tier) => isRecord(tier) && typeof tier.id === "string" && typeof tier.name === "string",
     )
   );
+}
+
+function isRateLimitSnapshot(value: unknown): value is GetAccountRateLimitsResponse["rateLimits"] {
+  return (
+    isRecord(value) &&
+    isOptionalRateLimitWindow(value.primary) &&
+    isOptionalRateLimitWindow(value.secondary)
+  );
+}
+
+function isOptionalRateLimitWindow(value: unknown): boolean {
+  return value === null || isRateLimitWindow(value);
+}
+
+function isRateLimitWindow(value: unknown): value is RateLimitWindowView {
+  return (
+    isRecord(value) &&
+    typeof value.usedPercent === "number" &&
+    Number.isFinite(value.usedPercent) &&
+    (value.windowDurationMins === null || typeof value.windowDurationMins === "number")
+  );
+}
+
+function rateLimitWindow(value: unknown): RateLimitWindowView | null {
+  if (!isRateLimitWindow(value)) return null;
+  return {
+    usedPercent: value.usedPercent,
+    windowDurationMins: value.windowDurationMins,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
