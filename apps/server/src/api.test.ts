@@ -242,13 +242,6 @@ describe("thread settings", () => {
     const attention = new AttentionManager();
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
-    await projection.setSettings("thread", {
-      collaborationMode: "default",
-      model: "gpt-a",
-      reasoningEffort: "high",
-      serviceTier: "fast",
-      personality: "friendly",
-    });
     const config = loadConfig({
       statePath: store.path,
       clientDist: join(directory, "missing"),
@@ -265,6 +258,32 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers,
+      payload: { projectId: "project", input: "Начни работу" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().thread.settings).toEqual({
+      collaborationMode: "default",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+    });
+    const threadStartCall = bridge.request.mock.calls.find(([method]) => method === "thread/start");
+    expect(threadStartCall?.[1]).toMatchObject({
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+    });
+
+    await projection.setSettings("thread", {
+      collaborationMode: "default",
+      model: "gpt-a",
+      reasoningEffort: "high",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+
     const updated = await app.inject({
       method: "PATCH",
       url: "/api/v1/threads/thread/settings",
@@ -276,6 +295,8 @@ describe("thread settings", () => {
       collaborationMode: "plan",
       model: "gpt-b",
       reasoningEffort: "low",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
     });
     expect(store.snapshot().threadMeta.thread?.settings).toEqual(updated.json().settings);
 
@@ -297,11 +318,19 @@ describe("thread settings", () => {
       payload: { input: "Составь план" },
     });
     expect(started.statusCode).toBe(201);
+    const resumeCall = bridge.request.mock.calls
+      .filter(([method]) => method === "thread/resume")
+      .at(-1);
+    expect(resumeCall?.[1]).toMatchObject({
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+    });
     const startCall = bridge.request.mock.calls
       .filter(([method]) => method === "turn/start")
       .at(-1);
     expect(startCall?.[1]).toMatchObject({
       threadId: "thread",
+      approvalPolicy: "on-request",
       collaborationMode: {
         mode: "plan",
         settings: {
@@ -353,6 +382,7 @@ class SettingsBridge extends EventEmitter {
         nextCursor: null,
       };
     }
+    if (method === "thread/start") return { thread: testThread("created") };
     if (method === "thread/resume") return {};
     if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
     throw new Error(`Unexpected ${method}`);
@@ -382,11 +412,11 @@ function testModel(
   };
 }
 
-function testThread(): Thread {
+function testThread(id = "thread"): Thread {
   return {
-    id: "thread",
+    id,
     extra: null,
-    sessionId: "thread",
+    sessionId: id,
     forkedFromId: null,
     parentThreadId: null,
     preview: "Thread",

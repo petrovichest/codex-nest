@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ApiErrorCode,
   AttentionResponse,
@@ -180,7 +181,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const project = store.snapshot().projects.find((candidate) => candidate.id === body.projectId);
     if (!project) return apiError(reply, 404, "not_found", "Project not found");
     const settings = mergeSettings(
-      { collaborationMode: "default" },
+      DEFAULT_SESSION_SETTINGS,
       body.settings ?? {},
       projection.availableModels,
     );
@@ -479,7 +480,7 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
 function validateSettings(value: unknown): SessionSettings | undefined {
   if (value === undefined) return undefined;
   const patch = validateSettingsPatch(value);
-  return { ...applySettingsPatch({ collaborationMode: "default" }, patch) };
+  return applySettingsPatch(DEFAULT_SESSION_SETTINGS, patch);
 }
 
 function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {

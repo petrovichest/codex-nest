@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ActivityItem,
   AppSnapshot,
@@ -488,7 +489,7 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
-      settings: meta.settings ?? { collaborationMode: "default" },
+      settings: { ...DEFAULT_SESSION_SETTINGS, ...meta.settings },
     };
   }
 
