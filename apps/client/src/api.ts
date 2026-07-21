@@ -8,6 +8,7 @@ import type {
   CreateThreadRequest,
   DeviceRegistrationRequest,
   DirectoryListing,
+  GlobalPermissionSettings,
   HealthResponse,
   MarkReadRequest,
   Project,
@@ -16,6 +17,7 @@ import type {
   SummaryResponse,
   ThreadDetail,
   ThreadSummary,
+  UpdateGlobalPermissionSettingsRequest,
   UpdateProjectRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
@@ -32,6 +34,16 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  readPermissionSettings(): Promise<GlobalPermissionSettings> {
+    return this.request("/api/v1/settings/permissions");
+  }
+
+  updatePermissionSettings(
+    body: UpdateGlobalPermissionSettingsRequest,
+  ): Promise<GlobalPermissionSettings> {
+    return this.request("/api/v1/settings/permissions", { method: "PUT", body });
   }
 
   listDirectories(path?: string): Promise<DirectoryListing> {

@@ -70,9 +70,6 @@ describe("NewSession", () => {
         input: "Обнови интерфейс",
         settings: {
           collaborationMode: "default",
-          sandboxMode: "read-only",
-          approvalPolicy: "on-request",
-          approvalsReviewer: "auto_review",
         },
       }),
     );

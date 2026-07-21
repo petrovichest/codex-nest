@@ -14,10 +14,12 @@ import {
   PlusIcon,
   SearchIcon,
   ServerIcon,
+  SlidersIcon,
   XIcon,
 } from "./components/Icons";
 import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
+import { SettingsPage } from "./components/SettingsPage";
 import { ThreadPage } from "./components/ThreadPage";
 import { useConnection } from "./connection";
 import { usePushNotifications } from "./push";
@@ -97,6 +99,10 @@ export function App({
             <Route
               path="/threads/:threadId"
               element={<ThreadPage onOpenNavigation={() => setDrawer(true)} />}
+            />
+            <Route
+              path="/settings"
+              element={<SettingsPage onOpenNavigation={() => setDrawer(true)} />}
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -301,6 +307,10 @@ function Sidebar({
         )}
       </nav>
       <div className="sidebar-footer">
+        <NavLink className="sidebar-footer-action" to="/settings" onClick={onClose}>
+          <SlidersIcon />
+          Настройки
+        </NavLink>
         <button className="sidebar-footer-action" onClick={onNewProject}>
           <PlusIcon />
           Добавить проект

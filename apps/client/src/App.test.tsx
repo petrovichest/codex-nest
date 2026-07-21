@@ -105,6 +105,16 @@ describe("App routing and navigation", () => {
       screen.getByRole("heading", { level: 1, name: "Новая задача в истории" }),
     ).toBeInTheDocument();
   });
+
+  it("opens global Codex settings from the sidebar", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    renderApp("/threads/newer");
+
+    fireEvent.click(screen.getByRole("link", { name: "Настройки" }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
+    expect(api.readPermissionSettings).toHaveBeenCalledOnce();
+  });
 });
 
 function renderApp(path: string) {
@@ -148,6 +158,13 @@ function mockConnection(appSnapshot: AppSnapshot) {
     interrupt: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
     createProjectThread: vi.fn(),
+    readPermissionSettings: vi.fn().mockResolvedValue({
+      preset: "auto",
+      version: "version-1",
+      overridden: false,
+      message: null,
+    }),
+    updatePermissionSettings: vi.fn(),
   };
   connection.mockReturnValue({
     api,

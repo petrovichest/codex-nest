@@ -85,6 +85,16 @@ describe("AppProjection", () => {
         createdAt: "x",
         updatedAt: "x",
       });
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 5_000,
+        settings: {
+          collaborationMode: "default",
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          approvalsReviewer: "auto_review",
+        } as never,
+      };
       state.projects.push({
         id: "nested",
         displayName: "Nested",
@@ -105,9 +115,6 @@ describe("AppProjection", () => {
     expect(projection.summary("two")?.projectId).toBe("nested");
     expect(projection.summary("one")?.settings).toEqual({
       collaborationMode: "default",
-      sandboxMode: "read-only",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
     });
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: false });
     expect(

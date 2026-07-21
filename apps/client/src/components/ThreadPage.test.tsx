@@ -131,15 +131,19 @@ describe("Activity", () => {
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeDisabled();
   });
 
-  it("shows primary settings and persists plan mode through the server API", async () => {
+  it("keeps task settings in the composer without permission controls", async () => {
     const api = threadApi();
     mockThreadConnection(api, summary);
     renderThread();
 
-    expect(screen.getByRole("combobox", { name: "Уровень подтверждений" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Уровень подтверждений" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Проверка подтверждений" })).toHaveValue("");
+    expect(
+      screen.queryByRole("combobox", { name: "Проверка подтверждений" }),
+    ).not.toBeInTheDocument();
     const plan = screen.getByRole("button", { name: "Включить режим планирования" });
     expect(plan).toHaveAttribute("aria-pressed", "false");
 
