@@ -3,126 +3,207 @@ import type {
   ModelOption,
   SandboxMode,
   SessionSettings,
+  UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { ChevronDownIcon, SlidersIcon } from "./Icons";
+import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, ShieldIcon, SlidersIcon } from "./Icons";
 
 export function SettingsPicker({
   models,
   value,
+  disabled,
   onChange,
 }: {
   models: ModelOption[];
   value: SessionSettings;
-  onChange(value: SessionSettings): void;
+  disabled: boolean;
+  onChange(value: UpdateThreadSettingsRequest): void;
 }) {
-  const model = models.find((candidate) => candidate.id === value.model);
-  const summary = [model?.displayName ?? "Модель по умолчанию", value.reasoningEffort]
-    .filter(Boolean)
-    .join(" · ");
+  const model = effectiveModel(models, value.model);
+
   return (
-    <details className="settings-picker">
-      <summary>
-        <SlidersIcon />
-        <span>{summary}</span>
-        <ChevronDownIcon className="settings-chevron" />
-      </summary>
-      <div className="settings-grid">
-        <label>
-          Модель
-          <select
-            value={value.model ?? ""}
-            onChange={(event) => patch("model", event.target.value || undefined)}
-          >
-            <option value="">По умолчанию сервера</option>
-            {models.map((option) => (
-              <option value={option.id} key={option.id}>
-                {option.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Reasoning
-          <select
-            value={value.reasoningEffort ?? ""}
-            onChange={(event) => patch("reasoningEffort", event.target.value || undefined)}
-          >
-            <option value="">По умолчанию</option>
-            {model?.reasoningEfforts.map((option) => (
-              <option value={option.value} key={option.value}>
-                {option.value}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Service tier
-          <select
-            value={value.serviceTier ?? ""}
-            onChange={(event) => patch("serviceTier", event.target.value || undefined)}
-          >
-            <option value="">По умолчанию</option>
-            {model?.serviceTiers.map((tier) => (
-              <option value={tier.id} key={tier.id}>
-                {tier.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Sandbox
-          <select
-            value={value.sandboxMode ?? ""}
-            onChange={(event) =>
-              patch("sandboxMode", (event.target.value || undefined) as SandboxMode | undefined)
-            }
-          >
-            <option value="">По умолчанию</option>
-            <option value="read-only">Только чтение</option>
-            <option value="workspace-write">Запись в workspace</option>
-            <option value="danger-full-access">Полный доступ</option>
-          </select>
-        </label>
-        <label>
-          Approvals
-          <select
-            value={value.approvalPolicy ?? ""}
-            onChange={(event) =>
-              patch(
-                "approvalPolicy",
-                (event.target.value || undefined) as ApprovalPolicy | undefined,
-              )
-            }
-          >
-            <option value="">По умолчанию</option>
-            <option value="untrusted">Для недоверенных команд</option>
-            <option value="on-request">По запросу</option>
-            <option value="granular">Все типы запросов отдельно</option>
-            <option value="never">Не запрашивать</option>
-          </select>
-        </label>
-        {model?.supportsPersonality && (
+    <>
+      <SettingSelect
+        ariaLabel="Уровень подтверждений"
+        disabled={disabled}
+        icon={<ShieldIcon />}
+        value={value.approvalPolicy ?? ""}
+        onChange={(selected) =>
+          onChange({ approvalPolicy: (selected || null) as ApprovalPolicy | null })
+        }
+      >
+        <option value="">Подтверждения</option>
+        <option value="untrusted">Недоверенные</option>
+        <option value="on-request">По запросу</option>
+        <option value="granular">Подробно</option>
+        <option value="never">Не запрашивать</option>
+      </SettingSelect>
+
+      <SettingSelect
+        ariaLabel="Модель"
+        disabled={disabled || models.length === 0}
+        icon={<ModelIcon />}
+        value={value.model ?? ""}
+        onChange={(selected) => changeModel(selected || null)}
+      >
+        <option value="">{model?.displayName ?? "Модель"}</option>
+        {models.map((option) => (
+          <option value={option.id} key={option.id}>
+            {option.displayName}
+          </option>
+        ))}
+      </SettingSelect>
+
+      <SettingSelect
+        ariaLabel="Уровень рассуждений"
+        disabled={disabled || !model}
+        icon={<BrainIcon />}
+        value={value.reasoningEffort ?? ""}
+        onChange={(selected) => onChange({ reasoningEffort: selected || null })}
+      >
+        <option value="">Reasoning</option>
+        {model?.reasoningEfforts.map((option) => (
+          <option value={option.value} key={option.value}>
+            {option.value}
+          </option>
+        ))}
+      </SettingSelect>
+
+      <button
+        aria-label={
+          value.collaborationMode === "plan"
+            ? "Выключить режим планирования"
+            : "Включить режим планирования"
+        }
+        aria-pressed={value.collaborationMode === "plan"}
+        className={`setting-control plan-toggle${value.collaborationMode === "plan" ? " active" : ""}`}
+        disabled={disabled || !model}
+        type="button"
+        onClick={() =>
+          onChange({
+            collaborationMode: value.collaborationMode === "plan" ? "default" : "plan",
+          })
+        }
+      >
+        <PlanIcon />
+        <span>План</span>
+      </button>
+
+      <details className="settings-picker">
+        <summary
+          aria-disabled={disabled}
+          aria-label="Дополнительные настройки"
+          className="setting-control"
+          onClick={(event) => {
+            if (disabled) event.preventDefault();
+          }}
+        >
+          <SlidersIcon />
+          <span>Ещё</span>
+          <ChevronDownIcon className="settings-chevron" />
+        </summary>
+        <div className="settings-grid">
           <label>
-            Personality
+            Service tier
             <select
-              value={value.personality ?? ""}
-              onChange={(event) => patch("personality", event.target.value || undefined)}
+              disabled={disabled || !model}
+              value={value.serviceTier ?? ""}
+              onChange={(event) => onChange({ serviceTier: event.target.value || null })}
             >
               <option value="">По умолчанию</option>
-              <option value="friendly">Дружелюбная</option>
-              <option value="pragmatic">Прагматичная</option>
-              <option value="none">Без personality</option>
+              {model?.serviceTiers.map((tier) => (
+                <option value={tier.id} key={tier.id}>
+                  {tier.displayName}
+                </option>
+              ))}
             </select>
           </label>
-        )}
-      </div>
-    </details>
+          <label>
+            Sandbox
+            <select
+              disabled={disabled}
+              value={value.sandboxMode ?? ""}
+              onChange={(event) =>
+                onChange({ sandboxMode: (event.target.value || null) as SandboxMode | null })
+              }
+            >
+              <option value="">По умолчанию</option>
+              <option value="read-only">Только чтение</option>
+              <option value="workspace-write">Запись в workspace</option>
+              <option value="danger-full-access">Полный доступ</option>
+            </select>
+          </label>
+          {model?.supportsPersonality && (
+            <label>
+              Personality
+              <select
+                disabled={disabled}
+                value={value.personality ?? ""}
+                onChange={(event) => onChange({ personality: event.target.value || null })}
+              >
+                <option value="">По умолчанию</option>
+                <option value="friendly">Дружелюбная</option>
+                <option value="pragmatic">Прагматичная</option>
+                <option value="none">Без personality</option>
+              </select>
+            </label>
+          )}
+        </div>
+      </details>
+    </>
   );
 
-  function patch<K extends keyof SessionSettings>(key: K, child: SessionSettings[K]) {
-    const next = { ...value, [key]: child };
-    if (child === undefined) delete next[key];
-    onChange(next);
+  function changeModel(modelId: string | null) {
+    const nextModel = effectiveModel(models, modelId ?? undefined);
+    const patch: UpdateThreadSettingsRequest = { model: modelId };
+    if (
+      value.reasoningEffort &&
+      !nextModel?.reasoningEfforts.some((option) => option.value === value.reasoningEffort)
+    ) {
+      patch.reasoningEffort =
+        nextModel?.reasoningEfforts.find((option) => option.isDefault)?.value ?? null;
+    }
+    if (
+      value.serviceTier &&
+      !nextModel?.serviceTiers.some((option) => option.id === value.serviceTier)
+    ) {
+      patch.serviceTier = null;
+    }
+    if (value.personality && !nextModel?.supportsPersonality) patch.personality = null;
+    onChange(patch);
   }
+}
+
+function SettingSelect({
+  ariaLabel,
+  icon,
+  children,
+  ...props
+}: {
+  ariaLabel: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  disabled: boolean;
+  value: string;
+  onChange(value: string): void;
+}) {
+  return (
+    <label className="setting-control setting-select">
+      {icon}
+      <select
+        aria-label={ariaLabel}
+        disabled={props.disabled}
+        value={props.value}
+        onChange={(event) => props.onChange(event.target.value)}
+      >
+        {children}
+      </select>
+      <ChevronDownIcon className="setting-select-chevron" />
+    </label>
+  );
+}
+
+function effectiveModel(models: ModelOption[], modelId?: string): ModelOption | undefined {
+  if (modelId) return models.find((model) => model.id === modelId);
+  return models.find((model) => model.isDefault) ?? models[0];
 }

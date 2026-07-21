@@ -75,6 +75,7 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   currentTurnId: string | null;
+  settings: SessionSettings;
 };
 
 export type ActivityItem =
@@ -144,8 +145,10 @@ export type ModelOption = {
 
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "untrusted" | "on-request" | "granular" | "never";
+export type CollaborationMode = "default" | "plan";
 
 export type SessionSettings = {
+  collaborationMode: CollaborationMode;
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
@@ -348,8 +351,17 @@ export type CreateThreadRequest = {
 
 export type StartTurnRequest = {
   input: string;
-  settings?: SessionSettings;
   clientMessageId?: string;
+};
+
+export type UpdateThreadSettingsRequest = {
+  collaborationMode?: CollaborationMode;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
+  personality?: string | null;
+  sandboxMode?: SandboxMode | null;
+  approvalPolicy?: ApprovalPolicy | null;
 };
 
 export type SteerTurnRequest = {

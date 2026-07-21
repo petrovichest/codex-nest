@@ -4,6 +4,7 @@ import type {
   ActivityItem,
   AppSnapshot,
   ModelOption,
+  SessionSettings,
   ServerEvent,
   ThreadDetail,
   ThreadOutcome,
@@ -93,6 +94,10 @@ export class AppProjection extends EventEmitter {
     return this.syncedAt;
   }
 
+  get availableModels(): ModelOption[] {
+    return structuredClone(this.models);
+  }
+
   summary(id: string): ThreadSummary | undefined {
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
@@ -147,6 +152,17 @@ export class AppProjection extends EventEmitter {
       state.threadMeta[threadId] = meta;
     });
     this.publishThread(threadId);
+  }
+
+  async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
+    if (!this.threads.has(threadId)) throw new Error("Thread not found");
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.settings = settings;
+      state.threadMeta[threadId] = meta;
+    });
+    this.publishThread(threadId);
+    return this.summary(threadId)!;
   }
 
   publishProject(projectId: string): void {
@@ -472,6 +488,7 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
+      settings: meta.settings ?? { collaborationMode: "default" },
     };
   }
 

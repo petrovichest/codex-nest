@@ -1,7 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import type { Project, SessionSettings } from "@codexnest/protocol";
+import type { Project, SessionSettings, UpdateThreadSettingsRequest } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { Composer } from "./Composer";
@@ -22,7 +22,7 @@ export function NewSession({
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
-  const [settings, setSettings] = useState<SessionSettings>({});
+  const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
@@ -75,7 +75,7 @@ export function NewSession({
           onSubmit={submit}
           busy={busy}
           settings={settings}
-          onSettingsChange={setSettings}
+          onSettingsChange={(patch) => setSettings((current) => applySettingsPatch(current, patch))}
           models={state.snapshot?.models ?? []}
           projects={projects}
           projectId={projectId}
@@ -99,6 +99,18 @@ export function NewSession({
       )}
     </div>
   );
+}
+
+function applySettingsPatch(
+  current: SessionSettings,
+  patch: UpdateThreadSettingsRequest,
+): SessionSettings {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete next[key as keyof SessionSettings];
+    else if (value !== undefined) Object.assign(next, { [key]: value });
+  }
+  return next;
 }
 
 function connectionLabel(network: string, appServer?: string): string {

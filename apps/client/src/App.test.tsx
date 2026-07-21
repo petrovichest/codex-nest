@@ -24,6 +24,7 @@ const baseThread: ThreadSummary = {
   createdAt: 1,
   updatedAt: 20,
   currentTurnId: null,
+  settings: { collaborationMode: "default" },
 };
 
 beforeEach(() => {

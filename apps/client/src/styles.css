@@ -1066,6 +1066,21 @@ pre {
   gap: 7px;
 }
 
+.composer-options {
+  flex: 1;
+  overflow: visible;
+  padding: 2px 0;
+  scrollbar-width: none;
+}
+
+.composer-options::-webkit-scrollbar {
+  display: none;
+}
+
+.composer-actions {
+  flex: 0 0 auto;
+}
+
 .project-picker {
   display: block;
 }
@@ -1081,32 +1096,85 @@ pre {
   font-size: 12px;
 }
 
+.setting-control,
 .settings-picker > summary {
   height: 32px;
-  max-width: 240px;
+  min-height: 32px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 0 7px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
   color: var(--muted-strong);
   font-size: 12px;
+  font-weight: 500;
 }
 
+.setting-control:hover:not(:disabled),
 .settings-picker > summary:hover {
   background: var(--surface-muted);
+  border-color: transparent;
 }
 
+.setting-control svg,
 .settings-picker > summary svg {
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
 }
 
+.setting-control span,
 .settings-picker > summary span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.setting-control:disabled,
+.settings-picker > summary[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.setting-select {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  padding-right: 3px;
+}
+
+.setting-select select {
+  width: auto;
+  max-width: 145px;
+  height: 30px;
+  appearance: none;
+  padding: 0 20px 0 2px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.setting-select select:disabled {
+  cursor: default;
+}
+
+.setting-select-chevron {
+  position: absolute;
+  right: 5px;
+  pointer-events: none;
+}
+
+.plan-toggle.active {
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface-muted));
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 .settings-picker .settings-chevron {
@@ -1123,9 +1191,9 @@ pre {
   bottom: calc(100% + 12px);
   left: 0;
   z-index: 65;
-  width: min(660px, calc(100vw - var(--sidebar-width) - 60px));
+  width: min(510px, calc(100vw - var(--sidebar-width) - 60px));
   display: grid;
-  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
   gap: 13px;
   padding: 15px;
   border: 1px solid var(--line);
@@ -1909,11 +1977,15 @@ pre {
   }
 
   .settings-picker > summary {
-    max-width: 160px;
+    max-width: none;
   }
 
   .settings-picker > summary span {
-    max-width: 110px;
+    max-width: 52px;
+  }
+
+  .setting-select select {
+    max-width: 116px;
   }
 
   .settings-grid {
@@ -2030,7 +2102,7 @@ pre {
 
   .composer-options {
     max-width: calc(100vw - 116px);
-    overflow: hidden;
+    overflow-x: auto;
   }
 
   .composer-empty-projects {

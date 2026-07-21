@@ -23,6 +23,7 @@ const summary: ThreadSummary = {
   createdAt: 1,
   updatedAt: 2,
   currentTurnId: null,
+  settings: { collaborationMode: "default" },
 };
 
 beforeEach(() => {
@@ -88,7 +89,7 @@ describe("Activity", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
     await waitFor(() =>
-      expect(api.startTurn).toHaveBeenCalledWith("thread", { input: "Продолжай", settings: {} }),
+      expect(api.startTurn).toHaveBeenCalledWith("thread", { input: "Продолжай" }),
     );
 
     fireEvent.click(screen.getByLabelText("Действия с задачей"));
@@ -126,6 +127,27 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
     expect(api.interrupt).toHaveBeenCalledWith("thread", "turn");
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Модель" })).toBeDisabled();
+  });
+
+  it("shows primary settings and persists plan mode through the server API", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary);
+    renderThread();
+
+    expect(screen.getByRole("combobox", { name: "Уровень подтверждений" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Модель" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toBeInTheDocument();
+    const plan = screen.getByRole("button", { name: "Включить режим планирования" });
+    expect(plan).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(plan);
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
+        collaborationMode: "plan",
+      }),
+    );
   });
 });
 
@@ -148,6 +170,12 @@ function threadApi() {
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
+    updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>
+      Promise.resolve({
+        ...summary,
+        settings: { ...summary.settings, ...patch },
+      }),
+    ),
     archive: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
   };
@@ -169,7 +197,17 @@ function mockThreadConnection(api: ReturnType<typeof threadApi>, thread: ThreadS
         ],
         threads: [thread],
         attention: [],
-        models: [],
+        models: [
+          {
+            id: "gpt",
+            displayName: "GPT",
+            description: "",
+            isDefault: true,
+            reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+            serviceTiers: [],
+            supportsPersonality: true,
+          },
+        ],
         connection: { state: "ready" },
       },
       details: { thread: { summary: thread, turns: [] } },
@@ -177,5 +215,6 @@ function mockThreadConnection(api: ReturnType<typeof threadApi>, thread: ThreadS
       snapshotEpoch: 1,
     },
     refreshDetail: vi.fn().mockResolvedValue({ summary: thread, turns: [] }),
+    dispatch: vi.fn(),
   });
 }

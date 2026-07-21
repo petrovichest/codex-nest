@@ -1,13 +1,16 @@
+import { EventEmitter } from "node:events";
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
+import type { ServerNotification } from "./codex/generated/index";
+import type { Thread, Turn } from "./codex/generated/v2/index";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
@@ -218,3 +221,204 @@ describe("HTTP authentication", () => {
     await app.close();
   });
 });
+
+describe("thread settings", () => {
+  it("persists settings on the server and maps plan mode into turn/start", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.projects.push({
+        id: "project",
+        displayName: "Project",
+        path: "/work",
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      });
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    await projection.setSettings("thread", {
+      collaborationMode: "default",
+      model: "gpt-a",
+      reasoningEffort: "high",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    const config = loadConfig({
+      statePath: store.path,
+      clientDist: join(directory, "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+      websocketAuthTimeoutMs: 25,
+    });
+    const app = await buildApp(config, {
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      push: new PushNotifier(store),
+      projectRoot: directory,
+    });
+    const headers = { authorization: "Bearer correct" };
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { model: "gpt-b", collaborationMode: "plan" },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().settings).toEqual({
+      collaborationMode: "plan",
+      model: "gpt-b",
+      reasoningEffort: "low",
+    });
+    expect(store.snapshot().threadMeta.thread?.settings).toEqual(updated.json().settings);
+
+    const clientOverride = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: {
+        input: "Не используй это",
+        settings: { collaborationMode: "default", model: "gpt-a" },
+      },
+    });
+    expect(clientOverride.statusCode).toBe(400);
+
+    const started = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Составь план" },
+    });
+    expect(started.statusCode).toBe(201);
+    const startCall = bridge.request.mock.calls
+      .filter(([method]) => method === "turn/start")
+      .at(-1);
+    expect(startCall?.[1]).toMatchObject({
+      threadId: "thread",
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-b",
+          reasoning_effort: "low",
+          developer_instructions: null,
+        },
+      },
+    });
+
+    const invalid = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { collaborationMode: "automatic" },
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "thread", turn: testTurn("running", "inProgress") },
+    } satisfies ServerNotification);
+    const conflict = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { collaborationMode: "default" },
+    });
+    expect(conflict.statusCode).toBe(409);
+    await app.close();
+  });
+});
+
+class SettingsBridge extends EventEmitter {
+  state = "ready" as const;
+  actualVersion = "0.144.6";
+  request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+    if (method === "thread/list") {
+      return params.archived
+        ? { data: [], nextCursor: null, backwardsCursor: null }
+        : { data: [testThread()], nextCursor: null, backwardsCursor: null };
+    }
+    if (method === "model/list") {
+      return {
+        data: [
+          testModel("gpt-a", "high", true, [{ id: "fast", name: "Fast" }]),
+          testModel("gpt-b", "low", false, []),
+        ],
+        nextCursor: null,
+      };
+    }
+    if (method === "thread/resume") return {};
+    if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
+    throw new Error(`Unexpected ${method}`);
+  });
+}
+
+function testModel(
+  id: string,
+  effort: string,
+  supportsPersonality: boolean,
+  serviceTiers: Array<{ id: string; name: string }>,
+) {
+  return {
+    id,
+    model: id,
+    displayName: id,
+    description: "",
+    hidden: false,
+    supportedReasoningEfforts: [{ reasoningEffort: effort, description: "" }],
+    defaultReasoningEffort: effort,
+    inputModalities: ["text"],
+    supportsPersonality,
+    additionalSpeedTiers: [],
+    serviceTiers,
+    defaultServiceTier: null,
+    isDefault: id === "gpt-a",
+  };
+}
+
+function testThread(): Thread {
+  return {
+    id: "thread",
+    extra: null,
+    sessionId: "thread",
+    forkedFromId: null,
+    parentThreadId: null,
+    preview: "Thread",
+    ephemeral: false,
+    historyMode: "full",
+    modelProvider: "openai",
+    createdAt: 1,
+    updatedAt: 2,
+    recencyAt: 2,
+    status: { type: "notLoaded" },
+    path: null,
+    cwd: "/work",
+    cliVersion: "0.144.6",
+    source: "appServer",
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: null,
+    turns: [],
+  };
+}
+
+function testTurn(id: string, status: Turn["status"]): Turn {
+  return {
+    id,
+    items: [],
+    itemsView: "summary",
+    status,
+    error: null,
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+  };
+}

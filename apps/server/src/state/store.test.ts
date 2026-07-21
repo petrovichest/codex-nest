@@ -42,6 +42,35 @@ describe("StateStore", () => {
     await expect(new StateStore(path).load()).rejects.toThrow("Unsupported or corrupt");
   });
 
+  it("accepts legacy thread metadata and round-trips server-owned settings", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.legacy = { pinned: false, lastReadUpdatedAt: 1 };
+      state.threadMeta.configured = {
+        pinned: false,
+        lastReadUpdatedAt: 2,
+        settings: {
+          collaborationMode: "plan",
+          model: "gpt",
+          reasoningEffort: "high",
+          approvalPolicy: "on-request",
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.legacy?.settings).toBeUndefined();
+    expect(reloaded.snapshot().threadMeta.configured?.settings).toEqual({
+      collaborationMode: "plan",
+      model: "gpt",
+      reasoningEffort: "high",
+      approvalPolicy: "on-request",
+    });
+  });
+
   it("reloads an externally rotated verifier and emits revocation", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

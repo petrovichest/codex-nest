@@ -2,7 +2,7 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useParams } from "react-router-dom";
 
-import type { ActivityItem, SessionSettings } from "@codexnest/protocol";
+import type { ActivityItem, UpdateThreadSettingsRequest } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { AttentionPanel } from "./AttentionPanel";
@@ -22,14 +22,14 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const { threadId = "" } = useParams();
-  const { api, state, refreshDetail } = useConnection();
+  const { api, state, dispatch, refreshDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const detail = state.details[threadId];
   const [input, setInput] = useState("");
-  const [settings, setSettings] = useState<SessionSettings>({});
   const [busy, setBusy] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
@@ -67,10 +67,10 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     setBusy(true);
     setError(null);
     try {
-      if (summary!.state === "running" && summary!.currentTurnId) {
+      if (summary!.currentTurnId) {
         await api.steer(threadId, { turnId: summary!.currentTurnId, input });
       } else {
-        await api.startTurn(threadId, { input, settings });
+        await api.startTurn(threadId, { input });
       }
       setInput("");
     } catch (caught) {
@@ -82,6 +82,19 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
 
   const togglePin = () => void api.updateThread(threadId, { pinned: !summary.pinned });
   const toggleArchive = () => void api.archive(threadId, !summary.archived);
+
+  async function updateSettings(patch: UpdateThreadSettingsRequest) {
+    setSettingsBusy(true);
+    setError(null);
+    try {
+      const thread = await api.updateThreadSettings(threadId, patch);
+      dispatch({ type: "thread", thread });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось изменить настройки");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
 
   return (
     <div className="thread-workspace">
@@ -138,9 +151,10 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
           onInput={setInput}
           onSubmit={submit}
           busy={busy}
-          running={summary.state === "running"}
-          settings={settings}
-          onSettingsChange={setSettings}
+          running={Boolean(summary.currentTurnId)}
+          settings={summary.settings}
+          onSettingsChange={(patch) => void updateSettings(patch)}
+          settingsBusy={settingsBusy}
           models={state.snapshot?.models ?? []}
           onStop={
             summary.currentTurnId

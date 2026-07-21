@@ -16,6 +16,7 @@ import type {
   ThreadDetail,
   ThreadSummary,
   UpdateProjectRequest,
+  UpdateThreadSettingsRequest,
   UpdateThreadRequest,
 } from "@codexnest/protocol";
 
@@ -63,6 +64,13 @@ export class ApiClient {
 
   updateThread(id: string, body: UpdateThreadRequest): Promise<ThreadSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}`, { method: "PATCH", body });
+  }
+
+  updateThreadSettings(id: string, body: UpdateThreadSettingsRequest): Promise<ThreadSummary> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/settings`, {
+      method: "PATCH",
+      body,
+    });
   }
 
   startTurn(id: string, body: StartTurnRequest): Promise<{ turnId: string }> {
