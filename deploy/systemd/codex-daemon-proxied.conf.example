@@ -1,0 +1,5 @@
+[Service]
+# Use the fail-closed wrapper instead of exporting proxy credentials to the
+# CodexNest Node.js service. The wrapper passes the proxy only to Codex and its
+# managed app-server/update processes.
+ExecStartPre=%h/bin/codex app-server daemon start

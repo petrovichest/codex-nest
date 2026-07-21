@@ -112,9 +112,13 @@ cp deploy/systemd/codex-daemon.conf.example \
   "$HOME/.config/systemd/user/codexnest.service.d/codex-daemon.conf"
 ```
 
-Если доступ к ChatGPT требует HTTP proxy, скопируйте отдельный пример окружения,
-впишите адрес и учётные данные, затем ограничьте права. Не добавляйте реальный
-файл с proxy-паролем в Git:
+Если доступ к ChatGPT требует HTTP proxy, используйте fail-closed wrapper. Он
+передаёт proxy только внутреннему клиенту Codex и отказывается запускать Codex,
+если proxy-окружение отсутствует или противоречиво. Остальные процессы сервера
+не получают эти переменные.
+
+Скопируйте отдельный пример окружения, впишите адрес и учётные данные, затем
+ограничьте права. Не добавляйте реальный файл с proxy-паролем в Git:
 
 ```bash
 mkdir -p "$HOME/.config/codex"
@@ -122,16 +126,65 @@ cp deploy/systemd/codex-app-server.env.example "$HOME/.config/codex/app-server.e
 chmod 600 "$HOME/.config/codex/app-server.env"
 ```
 
-Перезапустите daemon один раз с этим окружением, чтобы и app-server, и его
-процесс обновления унаследовали proxy:
+В пользовательском `~/.codex/config.toml` включите поддержку системного proxy и
+удаление proxy-переменных из окружения команд, запускаемых агентом. Если таблицы
+уже существуют, добавьте ключи в существующие таблицы вместо создания дублей:
+
+```toml
+[features]
+respect_system_proxy = true
+
+[shell_environment_policy]
+exclude = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
+```
+
+Имена в `shell_environment_policy.exclude` сравниваются без учёта регистра,
+поэтому правило также удаляет lowercase-варианты. `git`, `npm`, `curl` и другие
+команды агента продолжат использовать прямое подключение.
+
+Разместите wrapper раньше standalone-команды Codex в интерактивном `PATH`. Не
+заменяйте `~/.local/bin/codex`: этот symlink принадлежит standalone-updater.
 
 ```bash
-codex app-server daemon stop
-set -a
-. "$HOME/.config/codex/app-server.env"
-set +a
-codex app-server daemon bootstrap
+mkdir -p "$HOME/bin"
+ln -sfn "$HOME/codex-nest/deploy/systemd/codex-proxied" "$HOME/bin/codex"
 ```
+
+Добавьте `export PATH="$HOME/bin:$PATH"` в конец `~/.profile` и `~/.bashrc`, если
+`$HOME/bin` ещё не стоит первым. Убедитесь, что новая интерактивная shell видит
+wrapper:
+
+```bash
+command -v codex
+```
+
+Для CodexNest установите proxy-вариант systemd drop-in. В отличие от обычного
+примера он не добавляет `EnvironmentFile` к Node.js-сервису:
+
+```bash
+cp deploy/systemd/codex-daemon-proxied.conf.example \
+  "$HOME/.config/systemd/user/codexnest.service.d/codex-daemon.conf"
+systemctl --user daemon-reload
+```
+
+Один раз остановите ранее запущенный daemon настоящим standalone-бинарником и
+поднимите его через wrapper, чтобы app-server и updater унаследовали proxy:
+
+```bash
+"$HOME/.local/bin/codex" app-server daemon stop
+"$HOME/bin/codex" app-server daemon bootstrap
+"$HOME/bin/codex" app-server daemon version
+```
+
+Проверьте конфигурацию и сетевой WebSocket перед запуском CodexNest:
+
+```bash
+"$HOME/bin/codex" --strict-config doctor --json
+```
+
+В секции `network.websocket_reachability` ожидается успешный handshake `101
+Switching Protocols`. Если proxy недоступен, Codex завершает соединение ошибкой
+и не переключается на прямой маршрут.
 
 CodexNest будет подключаться к нему по WebSocket через локальный Unix-сокет. При
 перезапуске `codexnest.service` соединение закроется, а выполняющийся turn

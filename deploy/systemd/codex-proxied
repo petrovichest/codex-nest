@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+proxy_env_file="${CODEXNEST_CODEX_PROXY_ENV_FILE:-$HOME/.config/codex/app-server.env}"
+real_codex_bin="${CODEXNEST_CODEX_REAL_BIN:-$HOME/.local/bin/codex}"
+
+fail() {
+  printf 'codex-proxied: %s\n' "$1" >&2
+  exit 1
+}
+
+[[ -r "$proxy_env_file" ]] || fail "proxy environment file is not readable: $proxy_env_file"
+if proxy_env_mode="$(stat -c '%a' "$proxy_env_file" 2>/dev/null)"; then
+  :
+elif proxy_env_mode="$(stat -f '%Lp' "$proxy_env_file" 2>/dev/null)"; then
+  :
+else
+  fail "unable to read proxy environment file permissions"
+fi
+(( (8#$proxy_env_mode & 077) == 0 )) || fail "proxy environment file must not be accessible by group or others"
+
+set -a
+# shellcheck disable=SC1090
+. "$proxy_env_file"
+set +a
+
+required_proxy_variables=(
+  HTTPS_PROXY HTTP_PROXY ALL_PROXY
+  https_proxy http_proxy all_proxy
+  NO_PROXY no_proxy
+)
+for variable_name in "${required_proxy_variables[@]}"; do
+  [[ -n "${!variable_name:-}" ]] || fail "$variable_name is missing from the proxy environment"
+done
+
+proxy_url="$HTTPS_PROXY"
+for variable_name in HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy; do
+  [[ "${!variable_name}" == "$proxy_url" ]] || fail "$variable_name does not match HTTPS_PROXY"
+done
+[[ "$no_proxy" == "$NO_PROXY" ]] || fail "no_proxy does not match NO_PROXY"
+
+case "$proxy_url" in
+  http://?*) ;;
+  *) fail "HTTPS_PROXY must be a non-empty http:// URL" ;;
+esac
+
+previous_argument=""
+for argument in "$@"; do
+  if [[ "$previous_argument" == "--disable" && "$argument" == "respect_system_proxy" ]]; then
+    fail "respect_system_proxy cannot be disabled through the proxied wrapper"
+  fi
+  if [[ "$argument" == "--disable=respect_system_proxy" ||
+        "$argument" == *features.respect_system_proxy*false* ]]; then
+    fail "respect_system_proxy cannot be disabled through the proxied wrapper"
+  fi
+  previous_argument="$argument"
+done
+
+[[ -x "$real_codex_bin" ]] || fail "Codex executable is not available: $real_codex_bin"
+
+wrapper_path="$(readlink -f "$0")"
+real_codex_path="$(readlink -f "$real_codex_bin")"
+[[ "$wrapper_path" != "$real_codex_path" ]] || fail "Codex executable resolves back to this wrapper"
+
+exec "$real_codex_bin" --enable respect_system_proxy "$@"
