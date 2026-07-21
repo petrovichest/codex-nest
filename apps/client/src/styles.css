@@ -381,10 +381,6 @@ pre {
   height: 13px;
 }
 
-.project-toggle .project-chevron-up {
-  transform: rotate(180deg);
-}
-
 .project-toggle > span {
   flex: 1;
   min-width: 0;

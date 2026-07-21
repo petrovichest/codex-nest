@@ -71,7 +71,7 @@ export function SettingsPicker({
         <span>План</span>
       </button>
 
-      <details className="settings-picker">
+      <details className="settings-picker" data-dismiss-on-outside-click>
         <summary
           aria-disabled={disabled}
           aria-label="Дополнительные настройки"

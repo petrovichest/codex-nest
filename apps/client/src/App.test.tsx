@@ -269,7 +269,7 @@ describe("App routing and navigation", () => {
     expect(navigation.scrollTop).toBe(480);
   });
 
-  it("renders bottom-up sessions oldest to newest and reveals older sessions upward", () => {
+  it("reverses only project order while sessions still expand top-down", () => {
     const threads: ThreadSummary[] = [
       { ...baseThread, id: "fresh", title: "Свежая", updatedAt: 60 },
       { ...baseThread, id: "second", title: "Вторая", updatedAt: 50 },
@@ -278,24 +278,38 @@ describe("App routing and navigation", () => {
       { ...baseThread, id: "fifth", title: "Пятая", updatedAt: 20 },
       { ...baseThread, id: "old", title: "Старая", updatedAt: 10 },
     ];
-    mockConnection(snapshot(threads));
+    const secondProject: Project = {
+      id: "second-project",
+      displayName: "Второй",
+      path: "/work/second",
+      createdAt: "2026-01-02",
+      updatedAt: "2026-01-02",
+    };
+    mockConnection(snapshot(threads, [defaultProject(), secondProject]));
 
     const view = renderApp("/threads/fresh");
-    const projectGroup = view.container.querySelector(".project-group") as HTMLElement;
+    expect(
+      Array.from(view.container.querySelectorAll(".project-toggle")).map(
+        (item) => item.textContent,
+      ),
+    ).toEqual(["Второй", "Проект"]);
+    const projectGroup = screen
+      .getByRole("button", { name: "Проект" })
+      .closest(".project-group") as HTMLElement;
     const sessions = projectGroup.querySelector(".project-sessions") as HTMLElement;
     const sessionTitles = () =>
       Array.from(sessions.querySelectorAll(".thread-link-title")).map((item) => item.textContent);
 
     expect(Array.from(projectGroup.children).map((item) => item.className)).toEqual([
-      "project-sessions",
       "project-title",
+      "project-sessions",
     ]);
-    expect(sessionTitles()).toEqual(["Пятая", "Четвёртая", "Третья", "Вторая", "Свежая"]);
-    expect(sessions.firstElementChild).toHaveClass("show-more");
+    expect(sessionTitles()).toEqual(["Свежая", "Вторая", "Третья", "Четвёртая", "Пятая"]);
+    expect(sessions.lastElementChild).toHaveClass("show-more");
 
     fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 1" }));
-    expect(sessionTitles()).toEqual(["Старая", "Пятая", "Четвёртая", "Третья", "Вторая", "Свежая"]);
-    expect(sessions.firstElementChild).toHaveTextContent("Показать меньше");
+    expect(sessionTitles()).toEqual(["Свежая", "Вторая", "Третья", "Четвёртая", "Пятая", "Старая"]);
+    expect(sessions.lastElementChild).toHaveTextContent("Показать меньше");
   });
 
   it("collapses project sessions without toggling from project actions", () => {
@@ -319,6 +333,28 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("link", { name: "Новая задача в истории" })).not.toBeInTheDocument();
     fireEvent.click(toggle);
     expect(screen.getByRole("link", { name: "Новая задача в истории" })).toBeInTheDocument();
+  });
+
+  it("closes popups when clicking anywhere outside them", () => {
+    mockConnection(snapshot([baseThread]));
+
+    renderApp("/threads/newer");
+    const projectMenu = screen
+      .getByLabelText("Действия с проектом Проект")
+      .closest("details") as HTMLDetailsElement;
+    const threadMenu = screen
+      .getByLabelText("Действия с задачей")
+      .closest("details") as HTMLDetailsElement;
+
+    fireEvent.click(projectMenu.querySelector("summary")!);
+    expect(projectMenu.open).toBe(true);
+
+    fireEvent.click(threadMenu.querySelector("summary")!);
+    expect(projectMenu.open).toBe(false);
+    expect(threadMenu.open).toBe(true);
+
+    fireEvent.click(screen.getByRole("heading", { level: 1, name: "Новая задача в истории" }));
+    expect(threadMenu.open).toBe(false);
   });
 
   it("copies a project path and reports clipboard fallback failures", async () => {
@@ -361,10 +397,10 @@ describe("App routing and navigation", () => {
     const projectGroup = actions.closest(".project-group") as HTMLElement | null;
     expect(projectGroup).not.toBeNull();
     fireEvent.click(actions);
-    expect(within(projectGroup!).getByRole("button", { name: "Переместить выше" })).toBeDisabled();
-    const moveDown = within(projectGroup!).getByRole("button", { name: "Переместить ниже" });
-    expect(moveDown).toBeEnabled();
-    fireEvent.click(moveDown);
+    const moveUp = within(projectGroup!).getByRole("button", { name: "Переместить выше" });
+    expect(moveUp).toBeEnabled();
+    expect(within(projectGroup!).getByRole("button", { name: "Переместить ниже" })).toBeDisabled();
+    fireEvent.click(moveUp);
 
     await waitFor(() =>
       expect(api.moveProject).toHaveBeenCalledWith("project", { direction: "down" }),
@@ -387,7 +423,7 @@ describe("App routing and navigation", () => {
       .getByLabelText("Действия с проектом Проект")
       .closest(".project-group") as HTMLElement;
     fireEvent.click(within(projectGroup).getByLabelText("Действия с проектом Проект"));
-    fireEvent.click(within(projectGroup).getByRole("button", { name: "Переместить ниже" }));
+    fireEvent.click(within(projectGroup).getByRole("button", { name: "Переместить выше" }));
 
     expect(await within(projectGroup).findByRole("alert")).toHaveTextContent("Сервер недоступен");
   });

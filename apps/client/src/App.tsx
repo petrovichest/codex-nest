@@ -83,6 +83,20 @@ export function App({
     localStorage.setItem(PROJECT_LIST_DIRECTION_KEY, projectListDirection);
   }, [projectListDirection]);
 
+  useEffect(() => {
+    function closePopupsOutside(event: MouseEvent) {
+      if (!(event.target instanceof Node)) return;
+      document
+        .querySelectorAll<HTMLDetailsElement>("details[data-dismiss-on-outside-click][open]")
+        .forEach((popup) => {
+          if (!popup.contains(event.target as Node)) popup.open = false;
+        });
+    }
+
+    document.addEventListener("click", closePopupsOutside);
+    return () => document.removeEventListener("click", closePopupsOutside);
+  }, []);
+
   const snapshot = state.snapshot;
   const attention = snapshot?.attention ?? [];
   return (
@@ -215,6 +229,7 @@ function Sidebar({
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
+  const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
 
   useEffect(() => {
@@ -371,18 +386,21 @@ function Sidebar({
       <nav className={`thread-nav ${projectListDirection}`} aria-label="Задачи" ref={threadNavRef}>
         <div className="project-list">
           {projectListDirection === "bottom-up" && archive}
-          {groups.map((group) => {
+          {orderedGroups.map((group) => {
             const key = group.project?.id ?? "ungrouped";
             const groupCollapsed = collapsed.has(key);
             const groupShowsAll = showAll.has(key);
             const isBottomUp = projectListDirection === "bottom-up";
             const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
-            const orderedThreads = isBottomUp ? [...visible].reverse() : visible;
             const sessionsId = `project-sessions-${key}`;
             const projectIndex = group.project
               ? (snapshot?.projects.findIndex((project) => project.id === group.project!.id) ?? -1)
               : -1;
             const lastProjectIndex = (snapshot?.projects.length ?? 0) - 1;
+            const moveAboveDirection = isBottomUp ? "down" : "up";
+            const moveBelowDirection = isBottomUp ? "up" : "down";
+            const cannotMoveAbove = projectIndex === (isBottomUp ? lastProjectIndex : 0);
+            const cannotMoveBelow = projectIndex === (isBottomUp ? 0 : lastProjectIndex);
             const projectHeader = (
               <div className="project-title">
                 <button
@@ -392,17 +410,13 @@ function Sidebar({
                   type="button"
                   onClick={() => toggleCollapsed(key)}
                 >
-                  {groupCollapsed ? (
-                    <ChevronRightIcon />
-                  ) : (
-                    <ChevronDownIcon className={isBottomUp ? "project-chevron-up" : undefined} />
-                  )}
+                  {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
                   <FolderIcon />
                   <span>{group.project?.displayName ?? "Без проекта"}</span>
                 </button>
                 {group.project && (
                   <>
-                    <details className="project-action-menu">
+                    <details className="project-action-menu" data-dismiss-on-outside-click>
                       <summary
                         aria-label={`Действия с проектом ${group.project.displayName}`}
                         className="project-icon-action"
@@ -423,12 +437,12 @@ function Sidebar({
                           <CopyIcon /> Копировать путь
                         </button>
                         <button
-                          disabled={projectIndex === 0 || movingProjectId !== null}
+                          disabled={cannotMoveAbove || movingProjectId !== null}
                           type="button"
                           onClick={(event) =>
                             void moveProject(
                               group.project!.id,
-                              "up",
+                              moveAboveDirection,
                               event.currentTarget.closest("details"),
                             )
                           }
@@ -436,12 +450,12 @@ function Sidebar({
                           <ArrowUpIcon /> Переместить выше
                         </button>
                         <button
-                          disabled={projectIndex === lastProjectIndex || movingProjectId !== null}
+                          disabled={cannotMoveBelow || movingProjectId !== null}
                           type="button"
                           onClick={(event) =>
                             void moveProject(
                               group.project!.id,
-                              "down",
+                              moveBelowDirection,
                               event.currentTarget.closest("details"),
                             )
                           }
@@ -485,36 +499,24 @@ function Sidebar({
                 )}
               </>
             );
-            const showMoreButton = group.threads.length > 5 && (
-              <button className="show-more" onClick={() => toggleShowAll(key)}>
-                {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
-              </button>
-            );
             const sessions = (
               <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
-                {isBottomUp && showMoreButton}
-                {orderedThreads.map((thread) => (
+                {visible.map((thread) => (
                   <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
                 ))}
+                {group.threads.length > 5 && (
+                  <button className="show-more" onClick={() => toggleShowAll(key)}>
+                    {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
+                  </button>
+                )}
                 {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
-                {!isBottomUp && showMoreButton}
               </div>
             );
             return (
               <section className="project-group" key={key}>
-                {isBottomUp ? (
-                  <>
-                    {sessions}
-                    {feedback}
-                    {projectHeader}
-                  </>
-                ) : (
-                  <>
-                    {projectHeader}
-                    {feedback}
-                    {sessions}
-                  </>
-                )}
+                {projectHeader}
+                {feedback}
+                {sessions}
               </section>
             );
           })}

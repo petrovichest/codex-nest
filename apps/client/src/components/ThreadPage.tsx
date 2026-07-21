@@ -236,7 +236,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
-            <details className="thread-action-menu">
+            <details className="thread-action-menu" data-dismiss-on-outside-click>
               <summary className="icon-button" aria-label="Действия с задачей">
                 <MoreIcon />
               </summary>
@@ -511,7 +511,7 @@ function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
     progress && (progress.filesChanged || progress.additions || progress.deletions),
   );
   return (
-    <details className="turn-progress">
+    <details className="turn-progress" data-dismiss-on-outside-click>
       <summary>
         <span className="spinner small" />
         <span>{steps.length ? `Шаг ${stepNumber} / ${steps.length}` : "Codex работает…"}</span>
