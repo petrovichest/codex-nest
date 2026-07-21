@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 
-import type { ThreadSummary } from "@codexnest/protocol";
+import type {
+  CodexRateLimitWindow,
+  CodexRateLimitsResponse,
+  ThreadSummary,
+} from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
 import { AttentionPanel } from "./components/AttentionPanel";
 import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  ChevronDownIcon,
   FolderIcon,
-  NewTaskIcon,
+  GaugeIcon,
   PlusIcon,
   SearchIcon,
   ServerIcon,
@@ -61,8 +62,6 @@ export function App({
         onDisconnected={onDisconnected}
         reconnect={reconnect}
         settings={settings}
-        theme={theme}
-        onThemeChange={setTheme}
       />
       {drawer && (
         <button
@@ -102,7 +101,13 @@ export function App({
             />
             <Route
               path="/settings"
-              element={<SettingsPage onOpenNavigation={() => setDrawer(true)} />}
+              element={
+                <SettingsPage
+                  onOpenNavigation={() => setDrawer(true)}
+                  theme={theme}
+                  onThemeChange={setTheme}
+                />
+              }
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -136,8 +141,6 @@ function Sidebar({
   onDisconnected,
   reconnect,
   settings,
-  theme,
-  onThemeChange,
 }: {
   drawer: boolean;
   onClose(): void;
@@ -145,8 +148,6 @@ function Sidebar({
   onDisconnected(): void;
   reconnect(): void;
   settings: ConnectionSettings;
-  theme: string;
-  onThemeChange(theme: string): void;
 }) {
   const { api, state } = useConnection();
   const navigate = useNavigate();
@@ -154,6 +155,9 @@ function Sidebar({
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
+  const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
+  const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
+  const [rateLimitsError, setRateLimitsError] = useState(false);
   const [createError, setCreateError] = useState<{ projectId: string; message: string } | null>(
     null,
   );
@@ -200,24 +204,25 @@ function Sidebar({
     }
   }
 
+  async function refreshRateLimits() {
+    if (rateLimitsLoading) return;
+    setRateLimitsLoading(true);
+    setRateLimitsError(false);
+    try {
+      setRateLimits(await api.readCodexRateLimits());
+    } catch {
+      setRateLimits(null);
+      setRateLimitsError(true);
+    } finally {
+      setRateLimitsLoading(false);
+    }
+  }
+
+  const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError);
+
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`}>
-      <div className="sidebar-history">
-        <button className="icon-button" aria-label="Назад" onClick={() => navigate(-1)}>
-          <ArrowLeftIcon />
-        </button>
-        <button className="icon-button" aria-label="Вперёд" onClick={() => navigate(1)}>
-          <ArrowRightIcon />
-        </button>
-        <button className="icon-button close-drawer" aria-label="Закрыть меню" onClick={onClose}>
-          <XIcon />
-        </button>
-      </div>
-      <div className="sidebar-brand-row">
-        <Link to="/" className="brand" onClick={onClose}>
-          CodexNest
-          <ChevronDownIcon />
-        </Link>
+      <div className="sidebar-toolbar">
         <button
           className={`icon-button ${searchOpen ? "active" : ""}`}
           aria-label="Поиск по задачам"
@@ -227,6 +232,9 @@ function Sidebar({
           }}
         >
           <SearchIcon />
+        </button>
+        <button className="icon-button close-drawer" aria-label="Закрыть меню" onClick={onClose}>
+          <XIcon />
         </button>
       </div>
       {searchOpen && (
@@ -241,10 +249,6 @@ function Sidebar({
           />
         </div>
       )}
-      <NavLink className="new-task-link" to="/new" onClick={onClose}>
-        <NewTaskIcon />
-        Новая задача
-      </NavLink>
       <nav className="thread-nav" aria-label="Задачи">
         {groups.map((group) => {
           const key = group.project?.id ?? "ungrouped";
@@ -315,6 +319,16 @@ function Sidebar({
           <PlusIcon />
           Добавить проект
         </button>
+        <button
+          aria-busy={rateLimitsLoading}
+          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
+          className="sidebar-footer-action codex-limits"
+          disabled={rateLimitsLoading}
+          onClick={() => void refreshRateLimits()}
+        >
+          {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
+          <span>{rateLimitsText}</span>
+        </button>
         <div className="server-card">
           <div className="server-avatar">
             <ServerIcon />
@@ -333,15 +347,6 @@ function Sidebar({
           )}
         </div>
         <div className="sidebar-preferences">
-          <select
-            aria-label="Тема"
-            value={theme}
-            onChange={(event) => onThemeChange(event.target.value)}
-          >
-            <option value="system">Системная тема</option>
-            <option value="light">Светлая тема</option>
-            <option value="dark">Тёмная тема</option>
-          </select>
           <button onClick={() => void clearConnectionSettings().then(onDisconnected)}>
             Сменить сервер
           </button>
@@ -352,6 +357,10 @@ function Sidebar({
 }
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
+  const statusClass =
+    thread.state === "completed" && thread.unread
+      ? "status-completed-unread"
+      : `status-${thread.state}`;
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
@@ -359,10 +368,36 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
       onClick={onNavigate}
     >
       <span className="thread-link-title">{thread.title}</span>
-      {thread.unread && <span className="unread" aria-label="Не прочитано" />}
-      <span className={`status status-${thread.state}`} title={thread.state} />
+      <span className={`status ${statusClass}`} title={thread.state} />
     </NavLink>
   );
+}
+
+function rateLimitsLabel(limits: CodexRateLimitsResponse | null, error: boolean): string {
+  if (error) return "Повторить лимиты";
+  if (!limits) return "Лимиты Codex";
+  const windows = [limits.primary, limits.secondary]
+    .filter((window): window is CodexRateLimitWindow => window !== null)
+    .map(formatRateLimitWindow);
+  return windows.length ? windows.join(" · ") : "Лимиты недоступны";
+}
+
+function formatRateLimitWindow(window: CodexRateLimitWindow): string {
+  const remaining = Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)));
+  return `${rateLimitDuration(window.windowDurationMins)} ${remaining}%`;
+}
+
+function rateLimitDuration(minutes: number | null): string {
+  if (minutes === null) return "Лимит";
+  if (minutes >= 1_440 && minutes % 1_440 === 0) return `${minutes / 1_440} д`;
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} ч`;
+  return `${minutes} мин`;
+}
+
+function rateLimitsAriaLabel(text: string, loading: boolean, error: boolean): string {
+  if (loading) return "Обновляем лимиты Codex";
+  if (error) return "Повторить обновление лимитов Codex";
+  return text === "Лимиты Codex" ? "Показать лимиты Codex" : `Обновить лимиты Codex: ${text}`;
 }
 
 function filterThreads(threads: ThreadSummary[], search: string): ThreadSummary[] {

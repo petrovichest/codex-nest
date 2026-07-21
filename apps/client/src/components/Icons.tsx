@@ -175,6 +175,13 @@ export const ServerIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const GaugeIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M5.6 19a9 9 0 1 1 12.8 0" />
+    <path d="m12 12 5-2-3 4Z" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 export const ClockIcon = (props: IconProps) => (
   <Icon {...props}>
     <circle cx="12" cy="12" r="9" />

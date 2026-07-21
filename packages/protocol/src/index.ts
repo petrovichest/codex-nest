@@ -21,6 +21,16 @@ export type SummaryResponse = {
   syncedAt: string | null;
 };
 
+export type CodexRateLimitWindow = {
+  usedPercent: number;
+  windowDurationMins: number | null;
+};
+
+export type CodexRateLimitsResponse = {
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+};
+
 export type ApiErrorCode =
   | "unauthorized"
   | "forbidden"

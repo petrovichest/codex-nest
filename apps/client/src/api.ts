@@ -2,6 +2,7 @@ import type {
   ApiError,
   AppSnapshot,
   AttentionResponse,
+  CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadResponse,
@@ -35,6 +36,10 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  readCodexRateLimits(): Promise<CodexRateLimitsResponse> {
+    return this.request("/api/v1/codex/rate-limits");
   }
 
   readPermissionSettings(): Promise<GlobalPermissionSettings> {

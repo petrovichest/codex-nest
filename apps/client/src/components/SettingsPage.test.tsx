@@ -90,12 +90,38 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("Managed by policy")).toBeInTheDocument();
   });
+
+  it("changes the local appearance theme immediately", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+    const onThemeChange = vi.fn();
+
+    renderPage("system", onThemeChange);
+    fireEvent.change(screen.getByRole("combobox", { name: "Тема" }), {
+      target: { value: "dark" },
+    });
+
+    expect(onThemeChange).toHaveBeenCalledWith("dark");
+  });
 });
 
-function renderPage() {
+function renderPage(theme = "system", onThemeChange = vi.fn()) {
   return render(
     <MemoryRouter>
-      <SettingsPage onOpenNavigation={() => undefined} />
+      <SettingsPage
+        onOpenNavigation={() => undefined}
+        theme={theme}
+        onThemeChange={onThemeChange}
+      />
     </MemoryRouter>,
   );
 }

@@ -4,7 +4,7 @@ import type { GlobalPermissionSettings, PermissionPreset } from "@codexnest/prot
 
 import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
-import { ShieldIcon } from "./Icons";
+import { ShieldIcon, SlidersIcon } from "./Icons";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 const PRESETS: Array<{
@@ -29,7 +29,15 @@ const PRESETS: Array<{
   },
 ];
 
-export function SettingsPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
+export function SettingsPage({
+  onOpenNavigation,
+  theme,
+  onThemeChange,
+}: {
+  onOpenNavigation(): void;
+  theme: string;
+  onThemeChange(theme: string): void;
+}) {
   const { api } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
   const [selected, setSelected] = useState<PermissionPreset>("auto");
@@ -88,73 +96,95 @@ export function SettingsPage({ onOpenNavigation }: { onOpenNavigation(): void })
         onOpenNavigation={onOpenNavigation}
       />
       <main className="settings-scroll">
-        <form className="settings-card" onSubmit={save}>
-          <div className="settings-card-heading">
-            <span className="settings-card-icon">
-              <ShieldIcon />
-            </span>
-            <div>
-              <h2>Разрешения Codex</h2>
-              <p>Выбранный режим применяется ко всем задачам со следующего хода.</p>
+        <div className="settings-stack">
+          <section className="settings-card">
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <SlidersIcon />
+              </span>
+              <div>
+                <h2>Оформление</h2>
+                <p>Тема применяется только на этом устройстве.</p>
+              </div>
             </div>
-          </div>
+            <label className="theme-setting">
+              <span>Тема</span>
+              <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
+                <option value="system">Системная тема</option>
+                <option value="light">Светлая тема</option>
+                <option value="dark">Тёмная тема</option>
+              </select>
+            </label>
+          </section>
 
-          {loading ? (
-            <div className="settings-loading">
-              <span className="spinner small" /> Загружаем конфигурацию…
+          <form className="settings-card" onSubmit={save}>
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <ShieldIcon />
+              </span>
+              <div>
+                <h2>Разрешения Codex</h2>
+                <p>Выбранный режим применяется ко всем задачам со следующего хода.</p>
+              </div>
             </div>
-          ) : (
-            <fieldset className="permission-presets" disabled={saving}>
-              <legend className="sr-only">Режим разрешений</legend>
-              {PRESETS.map((preset) => (
-                <label
-                  className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
-                  key={preset.id}
-                >
-                  <input
-                    type="radio"
-                    name="permission-preset"
-                    value={preset.id}
-                    checked={selected === preset.id}
-                    onChange={() => setSelected(preset.id)}
-                  />
-                  <span>
-                    <strong>{preset.title}</strong>
-                    <small>{preset.description}</small>
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-          )}
 
-          {!loading && settings?.preset === null && (
-            <div className="settings-notice warning" role="status">
-              Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.
-            </div>
-          )}
-          {settings?.overridden && (
-            <div className="settings-notice warning" role="status">
-              {settings.message ?? "Настройка переопределена управляемой политикой Codex."}
-            </div>
-          )}
-          {selected === "full-access" && !loading && (
-            <div className="settings-notice danger" role="alert">
-              Полный доступ снимает ограничения на файлы и сеть. Используйте его только на
-              доверенном сервере.
-            </div>
-          )}
-          {error && (
-            <div className="settings-notice danger" role="alert">
-              {error}
-            </div>
-          )}
+            {loading ? (
+              <div className="settings-loading">
+                <span className="spinner small" /> Загружаем конфигурацию…
+              </div>
+            ) : (
+              <fieldset className="permission-presets" disabled={saving}>
+                <legend className="sr-only">Режим разрешений</legend>
+                {PRESETS.map((preset) => (
+                  <label
+                    className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
+                    key={preset.id}
+                  >
+                    <input
+                      type="radio"
+                      name="permission-preset"
+                      value={preset.id}
+                      checked={selected === preset.id}
+                      onChange={() => setSelected(preset.id)}
+                    />
+                    <span>
+                      <strong>{preset.title}</strong>
+                      <small>{preset.description}</small>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            )}
 
-          <div className="settings-actions">
-            <button className="primary" disabled={loading || saving || !changed} type="submit">
-              {saving ? "Сохраняем…" : "Сохранить"}
-            </button>
-          </div>
-        </form>
+            {!loading && settings?.preset === null && (
+              <div className="settings-notice warning" role="status">
+                Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.
+              </div>
+            )}
+            {settings?.overridden && (
+              <div className="settings-notice warning" role="status">
+                {settings.message ?? "Настройка переопределена управляемой политикой Codex."}
+              </div>
+            )}
+            {selected === "full-access" && !loading && (
+              <div className="settings-notice danger" role="alert">
+                Полный доступ снимает ограничения на файлы и сеть. Используйте его только на
+                доверенном сервере.
+              </div>
+            )}
+            {error && (
+              <div className="settings-notice danger" role="alert">
+                {error}
+              </div>
+            )}
+
+            <div className="settings-actions">
+              <button className="primary" disabled={loading || saving || !changed} type="submit">
+                {saving ? "Сохраняем…" : "Сохранить"}
+              </button>
+            </div>
+          </form>
+        </div>
       </main>
     </div>
   );

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { parseThreadList, parseThreadRead, parseThreadResume, ProtocolShapeError } from "./guards";
+import {
+  parseAccountRateLimits,
+  parseThreadList,
+  parseThreadRead,
+  parseThreadResume,
+  ProtocolShapeError,
+} from "./guards";
 
 const thread = {
   id: "thread-1",
@@ -43,5 +49,51 @@ describe("app-server response guards", () => {
     expect(() => parseThreadList({ data: [thread], nextCursor: 42 })).toThrow(
       "Invalid app-server response shape for thread/list",
     );
+  });
+
+  it("selects the Codex rate-limit bucket and falls back to the compatible bucket", () => {
+    const window = { usedPercent: 20, windowDurationMins: 300, resetsAt: null };
+    const fallback = {
+      limitId: null,
+      limitName: null,
+      primary: window,
+      secondary: null,
+      credits: null,
+      individualLimit: null,
+      planType: null,
+      rateLimitReachedType: null,
+    };
+    const codex = {
+      ...fallback,
+      limitId: "codex",
+      primary: { ...window, usedPercent: 35 },
+      secondary: { ...window, usedPercent: 45, windowDurationMins: 10_080 },
+    };
+
+    expect(
+      parseAccountRateLimits({
+        rateLimits: fallback,
+        rateLimitsByLimitId: { codex },
+        rateLimitResetCredits: null,
+      }),
+    ).toEqual({
+      primary: { usedPercent: 35, windowDurationMins: 300 },
+      secondary: { usedPercent: 45, windowDurationMins: 10_080 },
+    });
+    expect(
+      parseAccountRateLimits({
+        rateLimits: fallback,
+        rateLimitsByLimitId: null,
+        rateLimitResetCredits: null,
+      }).primary,
+    ).toEqual({ usedPercent: 20, windowDurationMins: 300 });
+  });
+
+  it("rejects malformed rate-limit windows", () => {
+    expect(() =>
+      parseAccountRateLimits({
+        rateLimits: { primary: { usedPercent: "20", windowDurationMins: 300 }, secondary: null },
+      }),
+    ).toThrow("Invalid app-server response shape for account/rateLimits/read");
   });
 });
