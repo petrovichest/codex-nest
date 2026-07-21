@@ -62,7 +62,10 @@ RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
 The server binds to loopback by default. Set `CODEXNEST_HOST=0.0.0.0` only for
 intentional direct LAN HTTP access, or keep loopback and use the reverse-proxy
 examples under `deploy/`. Never expose CodexNest directly to the public
-internet.
+internet. LAN HTTP remains available for simple trusted-home-network setups, but
+it provides no transport encryption: anyone able to observe or alter that network
+traffic can steal the bearer token and take over the owner's CodexNest access.
+Read the HTTP threat model in the deployment guide before enabling it.
 
 See the step-by-step [deployment and launch guide](./deploy/DEPLOYMENT.md) and
 [Android build instructions](./apps/client/android/README.md). No commit, push,

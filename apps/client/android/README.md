@@ -5,6 +5,12 @@ Capacitor origin. Network Security Configuration permits the user-selected LAN H
 deployment and trusts both system and user-installed CA certificates without disabling
 normal TLS hostname/IP verification.
 
+LAN HTTP does not encrypt the bearer token, session contents, command output, or approval
+decisions. Use it only on a fully trusted private network; do not expose port `4310` to the
+internet or use it on guest/public Wi-Fi. A captured token grants owner-level CodexNest
+access until it is rotated. See the complete HTTP threat model in
+[`deploy/DEPLOYMENT.md`](../../../deploy/DEPLOYMENT.md#вариант-a-http-внутри-доверенной-lan).
+
 Run from the repository root:
 
 ```bash
