@@ -1786,6 +1786,12 @@ pre {
   gap: 6px;
 }
 
+.git-changes-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .inspector-path {
   display: grid;
   gap: 7px;

@@ -1,9 +1,18 @@
-import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import { useParams } from "react-router-dom";
 
 import type {
   ActivityItem,
+  GitChangesSummary,
   QueuedMessage,
   ThreadDetail,
   TurnProgress,
@@ -25,7 +34,7 @@ import {
   ToolIcon,
   XIcon,
 } from "./Icons";
-import { SessionInspector } from "./SessionInspector";
+import { SessionInspector, type GitChangesView } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
@@ -49,10 +58,51 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
   );
+  const [gitChangesState, setGitChangesState] = useState<{
+    threadId: string;
+    value: GitChangesView;
+  } | null>(null);
+  const gitChangesRequest = useRef(0);
+  const previousTurn = useRef({ threadId, turnId: summary?.currentTurnId ?? null });
   const attention = useMemo(
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
+
+  const loadGitChanges = useCallback(async () => {
+    const requestId = ++gitChangesRequest.current;
+    setGitChangesState({ threadId, value: null });
+    try {
+      const value: GitChangesSummary = await api.readGitChanges(threadId);
+      if (gitChangesRequest.current === requestId) setGitChangesState({ threadId, value });
+    } catch {
+      if (gitChangesRequest.current === requestId) {
+        setGitChangesState({ threadId, value: "error" });
+      }
+    }
+  }, [api, threadId]);
+
+  useEffect(() => {
+    if (!inspectorOpen || !threadId) return;
+    void loadGitChanges();
+    return () => {
+      gitChangesRequest.current += 1;
+    };
+  }, [inspectorOpen, loadGitChanges, threadId]);
+
+  useEffect(() => {
+    const current = { threadId, turnId: summary?.currentTurnId ?? null };
+    const previous = previousTurn.current;
+    previousTurn.current = current;
+    if (
+      inspectorOpen &&
+      previous.threadId === threadId &&
+      previous.turnId !== null &&
+      current.turnId === null
+    ) {
+      void loadGitChanges();
+    }
+  }, [inspectorOpen, loadGitChanges, summary?.currentTurnId, threadId]);
 
   useEffect(() => {
     if (threadId) void refreshDetail(threadId).catch((caught: Error) => setError(caught.message));
@@ -286,7 +336,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
         open={inspectorOpen}
         summary={summary}
         project={project}
-        connection={connectionLabel(state.network, state.snapshot?.connection.state)}
+        gitChanges={gitChangesState?.threadId === threadId ? gitChangesState.value : null}
         onClose={() => setInspectorOpen(false)}
         onPin={togglePin}
         onArchive={toggleArchive}
@@ -633,11 +683,6 @@ function RenameDialog({
       </form>
     </div>
   );
-}
-
-function connectionLabel(network: string, appServer?: string): string {
-  if (network !== "connected") return "Нет связи";
-  return appServer === "ready" ? "Локальный сервер готов" : "Codex недоступен";
 }
 
 function statusLabel(status: string): string {
