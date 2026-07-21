@@ -38,6 +38,7 @@ import {
 } from "./codex/guards";
 import { RpcError } from "./codex/transport";
 import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
+import { readGitChanges } from "./git-changes";
 import {
   assertUniqueProjectPath,
   canonicalProjectPath,
@@ -327,6 +328,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!projection.summary(request.params.id))
       return apiError(reply, 404, "not_found", "Thread not found");
     return projection.readThread(request.params.id);
+  });
+
+  app.get<{ Params: { id: string } }>("/api/v1/threads/:id/git-changes", async (request, reply) => {
+    const summary = projection.summary(request.params.id);
+    if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+    return readGitChanges(summary.cwd);
   });
 
   app.post<{ Body: CreateThreadRequest }>("/api/v1/threads", async (request, reply) => {

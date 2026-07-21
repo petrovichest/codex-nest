@@ -60,6 +60,15 @@ export const FolderIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const GitBranchIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx="6" cy="5" r="2" />
+    <circle cx="18" cy="7" r="2" />
+    <circle cx="6" cy="19" r="2" />
+    <path d="M6 7v10M8 12h3a7 7 0 0 0 7-3" />
+  </Icon>
+);
+
 export const MoreIcon = (props: IconProps) => (
   <Icon {...props}>
     <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />

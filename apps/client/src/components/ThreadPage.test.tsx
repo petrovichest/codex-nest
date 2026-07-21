@@ -119,6 +119,28 @@ describe("Activity", () => {
     expect(api.archive).toHaveBeenCalledWith("thread", true);
   });
 
+  it("loads Git changes when the inspector opens and refreshes after a turn completes", async () => {
+    const api = threadApi();
+    api.readGitChanges
+      .mockResolvedValueOnce({ state: "dirty", filesChanged: 1, additions: 2, deletions: 1 })
+      .mockResolvedValueOnce({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 });
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    const view = renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    await waitFor(() => expect(api.readGitChanges).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("1 файл")).toBeInTheDocument();
+
+    const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+    context.state.snapshot.threads = [completed];
+    context.state.details.thread.summary = completed;
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.readGitChanges).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Нет изменений")).toBeInTheDocument();
+  });
+
   it("queues and interrupts a running task", async () => {
     const api = threadApi();
     mockThreadConnection(api, { ...summary, state: "running", currentTurnId: "turn" });
@@ -315,7 +337,11 @@ describe("Activity", () => {
 });
 
 function renderThread() {
-  return render(
+  return render(threadRoute());
+}
+
+function threadRoute() {
+  return (
     <MemoryRouter initialEntries={["/threads/thread"]}>
       <Routes>
         <Route
@@ -323,7 +349,7 @@ function renderThread() {
           element={<ThreadPage onOpenNavigation={() => undefined} />}
         />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -343,6 +369,9 @@ function threadApi() {
     ),
     archive: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
+    readGitChanges: vi
+      .fn()
+      .mockResolvedValue({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }),
   };
 }
 
@@ -371,7 +400,7 @@ function mockThreadConnection(
     turns: detailPatch.turns ?? [],
     queuedMessages: detailPatch.queuedMessages ?? [],
   };
-  connection.mockReturnValue({
+  const value = {
     api,
     state: {
       snapshot: {
@@ -384,7 +413,7 @@ function mockThreadConnection(
             updatedAt: "2026-01-01",
           },
         ],
-        threads: [thread],
+        threads: [thread] as ThreadSummary[],
         attention: detailPatch.attention ?? [],
         models: [
           {
@@ -405,7 +434,9 @@ function mockThreadConnection(
     },
     refreshDetail: vi.fn().mockResolvedValue(detail),
     dispatch: vi.fn(),
-  });
+  };
+  connection.mockReturnValue(value);
+  return value;
 }
 
 function progress(): TurnProgress {

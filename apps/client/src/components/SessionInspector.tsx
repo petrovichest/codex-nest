@@ -1,12 +1,22 @@
-import type { Project, ThreadSummary } from "@codexnest/protocol";
+import type { GitChangesSummary, Project, ThreadSummary } from "@codexnest/protocol";
 
-import { ArchiveIcon, ClockIcon, FolderIcon, PinIcon, ServerIcon, XIcon } from "./Icons";
+import {
+  ArchiveIcon,
+  ClockIcon,
+  FolderIcon,
+  GitBranchIcon,
+  PinIcon,
+  ServerIcon,
+  XIcon,
+} from "./Icons";
+
+export type GitChangesView = GitChangesSummary | "error" | null;
 
 export function SessionInspector({
   open,
   summary,
   project,
-  connection,
+  gitChanges,
   onClose,
   onPin,
   onArchive,
@@ -14,7 +24,7 @@ export function SessionInspector({
   open: boolean;
   summary: ThreadSummary;
   project: Project | null;
-  connection: string;
+  gitChanges: GitChangesView;
   onClose(): void;
   onPin(): void;
   onArchive(): void;
@@ -38,8 +48,8 @@ export function SessionInspector({
         <InspectorRow icon={<FolderIcon />} label="Проект">
           {project?.displayName ?? "Без проекта"}
         </InspectorRow>
-        <InspectorRow icon={<ServerIcon />} label="Среда">
-          {connection}
+        <InspectorRow icon={<GitBranchIcon />} label="Git changes">
+          <GitChangesValue value={gitChanges} />
         </InspectorRow>
         <InspectorRow icon={<ClockIcon />} label="Создана">
           {formatDate(summary.createdAt)}
@@ -67,12 +77,10 @@ export function SessionInspector({
 export function NewSessionInspector({
   open,
   project,
-  connection,
   onClose,
 }: {
   open: boolean;
   project: Project | null;
-  connection: string;
   onClose(): void;
 }) {
   if (!open) return null;
@@ -88,9 +96,6 @@ export function NewSessionInspector({
         <InspectorRow icon={<FolderIcon />} label="Проект">
           {project?.displayName ?? "Не выбран"}
         </InspectorRow>
-        <InspectorRow icon={<ServerIcon />} label="Среда">
-          {connection}
-        </InspectorRow>
       </dl>
       {project && (
         <div className="inspector-path">
@@ -100,6 +105,20 @@ export function NewSessionInspector({
       )}
       <p className="inspector-note">Задача будет создана после отправки первого сообщения.</p>
     </aside>
+  );
+}
+
+function GitChangesValue({ value }: { value: GitChangesView }) {
+  if (value === null) return <>Загрузка…</>;
+  if (value === "error") return <>Недоступно</>;
+  if (value.state === "notRepository") return <>Не Git-репозиторий</>;
+  if (value.state === "clean") return <>Нет изменений</>;
+  return (
+    <span className="git-changes-summary">
+      <span>{formatFileCount(value.filesChanged)}</span>
+      <b className="diff-add">+{value.additions}</b>
+      <b className="diff-delete">−{value.deletions}</b>
+    </span>
   );
 }
 
@@ -130,6 +149,20 @@ function formatDate(value: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatFileCount(count: number): string {
+  const modulo100 = count % 100;
+  const modulo10 = count % 10;
+  const suffix =
+    modulo100 >= 11 && modulo100 <= 14
+      ? "файлов"
+      : modulo10 === 1
+        ? "файл"
+        : modulo10 >= 2 && modulo10 <= 4
+          ? "файла"
+          : "файлов";
+  return `${count} ${suffix}`;
 }
 
 function stateLabel(state: string): string {

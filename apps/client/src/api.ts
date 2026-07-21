@@ -9,6 +9,7 @@ import type {
   CreateThreadRequest,
   DeviceRegistrationRequest,
   DirectoryListing,
+  GitChangesSummary,
   GlobalPermissionSettings,
   HealthResponse,
   MarkReadRequest,
@@ -81,6 +82,10 @@ export class ApiClient {
 
   readThread(id: string): Promise<ThreadDetail> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}`);
+  }
+
+  readGitChanges(id: string): Promise<GitChangesSummary> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
   }
 
   createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary; turnId: string }> {

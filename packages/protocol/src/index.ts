@@ -21,6 +21,13 @@ export type SummaryResponse = {
   syncedAt: string | null;
 };
 
+export type GitChangesSummary = {
+  state: "clean" | "dirty" | "notRepository";
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+};
+
 export type CodexRateLimitWindow = {
   usedPercent: number;
   windowDurationMins: number | null;

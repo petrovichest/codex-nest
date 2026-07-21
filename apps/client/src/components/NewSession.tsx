@@ -104,7 +104,6 @@ export function NewSession({
       <NewSessionInspector
         open={inspectorOpen}
         project={project}
-        connection={connectionLabel(state.network, state.snapshot?.connection.state)}
         onClose={() => setInspectorOpen(false)}
       />
       {inspectorOpen && (
@@ -143,9 +142,4 @@ function applySettingsPatch(
     else if (value !== undefined) Object.assign(next, { [key]: value });
   }
   return next;
-}
-
-function connectionLabel(network: string, appServer?: string): string {
-  if (network !== "connected") return "Нет связи";
-  return appServer === "ready" ? "Локальный сервер готов" : "Codex недоступен";
 }

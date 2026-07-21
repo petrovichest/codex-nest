@@ -259,6 +259,13 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    const missingGitChanges = await app.inject({
+      url: "/api/v1/threads/missing/git-changes",
+      headers,
+    });
+    expect(missingGitChanges.statusCode).toBe(404);
+    expect(missingGitChanges.json()).toMatchObject({ error: { code: "not_found" } });
+
     const turnsBeforeEmptyThread = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/start",
     ).length;
