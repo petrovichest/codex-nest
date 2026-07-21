@@ -93,4 +93,62 @@ describe("NewSession", () => {
     expect(onNewProject).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
   });
+
+  it("restores the last reasoning effort for a new session", async () => {
+    const createThread = vi.fn().mockResolvedValue({
+      thread: { id: "created" },
+      turnId: "turn",
+    });
+    connection.mockReturnValue({
+      api: { createThread },
+      state: {
+        snapshot: {
+          connection: { state: "ready" },
+          defaultReasoningEffort: "high",
+          models: [
+            {
+              id: "gpt",
+              displayName: "GPT",
+              description: "",
+              isDefault: true,
+              reasoningEfforts: [
+                { value: "medium", description: null, isDefault: true },
+                { value: "high", description: null, isDefault: false },
+              ],
+              serviceTiers: [],
+              supportsPersonality: false,
+            },
+          ],
+        },
+        network: "connected",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toHaveValue("high");
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Продолжай глубоко рассуждать" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith({
+        projectId: "project",
+        input: "Продолжай глубоко рассуждать",
+        settings: {
+          collaborationMode: "default",
+          reasoningEffort: "high",
+        },
+      }),
+    );
+  });
 });

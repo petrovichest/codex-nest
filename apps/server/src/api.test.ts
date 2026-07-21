@@ -320,6 +320,40 @@ describe("thread settings", () => {
       personality: "friendly",
     });
 
+    const preferredEffort = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { reasoningEffort: "high" },
+    });
+    expect(preferredEffort.statusCode).toBe(200);
+    expect(store.snapshot().defaultReasoningEffort).toBe("high");
+
+    const inherited = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(inherited.statusCode).toBe(201);
+    expect(inherited.json().thread.settings).toEqual({
+      collaborationMode: "default",
+      reasoningEffort: "high",
+    });
+
+    const resetPreference = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers,
+      payload: {
+        projectId: "project",
+        input: "Верни стандартные рассуждения",
+        settings: { collaborationMode: "default", reasoningEffort: null },
+      },
+    });
+    expect(resetPreference.statusCode).toBe(201);
+    expect(resetPreference.json().thread.settings).toEqual({ collaborationMode: "default" });
+    expect(store.snapshot().defaultReasoningEffort).toBeUndefined();
+
     const updated = await app.inject({
       method: "PATCH",
       url: "/api/v1/threads/thread/settings",

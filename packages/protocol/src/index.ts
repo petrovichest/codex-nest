@@ -345,6 +345,7 @@ export type AppSnapshot = {
   threads: ThreadSummary[];
   attention: AttentionRequest[];
   models: ModelOption[];
+  defaultReasoningEffort?: string;
   pushConfigured: boolean;
 };
 
@@ -360,6 +361,7 @@ export type ServerEvent =
   | { type: "attention.upserted"; attention: AttentionRequest }
   | { type: "attention.removed"; attentionId: string }
   | { type: "models.changed"; models: ModelOption[] }
+  | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
   | { type: "resync.required" };
 
 export type ClientFrame = { type: "authenticate"; token: string } | { type: "ping" };
@@ -387,7 +389,7 @@ export type CreateDirectoryRequest = {
 export type CreateThreadRequest = {
   projectId: string;
   input: string;
-  settings?: SessionSettings;
+  settings?: UpdateThreadSettingsRequest;
   clientMessageId?: string;
 };
 

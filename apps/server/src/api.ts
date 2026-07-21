@@ -1,6 +1,5 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 
-import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ApiErrorCode,
   AttentionResponse,
@@ -298,14 +297,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .snapshot()
       .projects.find((candidate) => candidate.id === request.params.id);
     if (!project) return apiError(reply, 404, "not_found", "Project not found");
+    const settings = projection.newSessionSettings;
     const started = parseThreadStart(
-      await bridge.request<unknown>("thread/start", { cwd: project.path }),
+      await bridge.request<unknown>("thread/start", {
+        cwd: project.path,
+        ...threadSettings(settings),
+      }),
     );
     projection.upsertThread(started.thread);
     projection.markUnmaterialized(started.thread.id);
-    const thread = await projection.setSettings(started.thread.id, {
-      collaborationMode: "default",
-    });
+    const thread = await projection.setSettings(started.thread.id, settings);
     return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
   });
 
@@ -321,7 +322,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const project = store.snapshot().projects.find((candidate) => candidate.id === body.projectId);
     if (!project) return apiError(reply, 404, "not_found", "Project not found");
     const settings = mergeSettings(
-      DEFAULT_SESSION_SETTINGS,
+      projection.newSessionSettings,
       body.settings ?? {},
       projection.availableModels,
     );
@@ -341,6 +342,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         ...turnSettings(settings, projection.availableModels),
       }),
     );
+    if (body.settings?.reasoningEffort !== undefined) {
+      await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+    }
     return reply
       .code(201)
       .send({ thread: projection.summary(started.thread.id), turnId: turn.turn.id });
@@ -387,7 +391,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         );
       }
       const settings = mergeSettings(summary.settings, patch, projection.availableModels);
-      return projection.setSettings(request.params.id, settings);
+      const thread = await projection.setSettings(request.params.id, settings);
+      if (patch.reasoningEffort !== undefined) {
+        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+      }
+      return thread;
     },
   );
 
@@ -616,10 +624,9 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
   return value;
 }
 
-function validateSettings(value: unknown): SessionSettings | undefined {
+function validateSettings(value: unknown): UpdateThreadSettingsRequest | undefined {
   if (value === undefined) return undefined;
-  const patch = validateSettingsPatch(value);
-  return applySettingsPatch(DEFAULT_SESSION_SETTINGS, patch);
+  return validateSettingsPatch(value);
 }
 
 function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {

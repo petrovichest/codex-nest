@@ -86,6 +86,9 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "models.changed":
       snapshot.models = event.models;
       break;
+    case "defaultReasoningEffort.changed":
+      snapshot.defaultReasoningEffort = event.reasoningEffort ?? undefined;
+      break;
     case "activity.upserted":
       return applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item);
     case "turn.progressed":

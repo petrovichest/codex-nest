@@ -95,6 +95,7 @@ export class AppProjection extends EventEmitter {
       threads: this.sortedThreads(),
       attention: this.attention.list(),
       models: this.models,
+      defaultReasoningEffort: this.store.snapshot().defaultReasoningEffort,
       pushConfigured: this.pushConfigured,
     };
   }
@@ -109,6 +110,19 @@ export class AppProjection extends EventEmitter {
 
   get availableModels(): ModelOption[] {
     return structuredClone(this.models);
+  }
+
+  get newSessionSettings(): SessionSettings {
+    const settings = { ...DEFAULT_SESSION_SETTINGS };
+    const reasoningEffort = this.store.snapshot().defaultReasoningEffort;
+    const model = this.models.find((candidate) => candidate.isDefault) ?? this.models[0];
+    if (
+      reasoningEffort &&
+      (!model || model.reasoningEfforts.some((option) => option.value === reasoningEffort))
+    ) {
+      settings.reasoningEffort = reasoningEffort;
+    }
+    return settings;
   }
 
   summary(id: string): ThreadSummary | undefined {
@@ -187,6 +201,17 @@ export class AppProjection extends EventEmitter {
     });
     this.publishThread(threadId);
     return this.summary(threadId)!;
+  }
+
+  async setDefaultReasoningEffort(reasoningEffort?: string): Promise<void> {
+    await this.store.update((state) => {
+      if (reasoningEffort) state.defaultReasoningEffort = reasoningEffort;
+      else delete state.defaultReasoningEffort;
+    });
+    this.publish({
+      type: "defaultReasoningEffort.changed",
+      reasoningEffort: reasoningEffort ?? null,
+    });
   }
 
   publishProject(projectId: string): void {

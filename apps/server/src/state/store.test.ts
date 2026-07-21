@@ -47,6 +47,7 @@ describe("StateStore", () => {
     const store = new StateStore(path);
     await store.load();
     await store.update((state) => {
+      state.defaultReasoningEffort = "high";
       state.threadMeta.legacy = { pinned: false, lastReadUpdatedAt: 1 };
       state.threadMeta.configured = {
         pinned: false,
@@ -63,6 +64,7 @@ describe("StateStore", () => {
 
     const reloaded = new StateStore(path);
     await reloaded.load();
+    expect(reloaded.snapshot().defaultReasoningEffort).toBe("high");
     expect(reloaded.snapshot().threadMeta.legacy?.settings).toBeUndefined();
     expect(reloaded.snapshot().threadMeta.configured?.settings).toEqual({
       collaborationMode: "plan",

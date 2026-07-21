@@ -43,6 +43,23 @@ describe("clientReducer", () => {
     expect(next.details.old).toBeDefined();
   });
 
+  it("tracks the reasoning effort used for new sessions", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "defaultReasoningEffort.changed", reasoningEffort: "high" },
+    });
+    expect(state.snapshot?.defaultReasoningEffort).toBe("high");
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: { type: "defaultReasoningEffort.changed", reasoningEffort: null },
+    });
+    expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
+  });
+
   it("replaces an item completion after ordered streaming deltas", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
