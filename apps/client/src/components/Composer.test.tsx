@@ -19,6 +19,25 @@ const models = [
 ];
 
 describe("Composer", () => {
+  it("renders reasoning, plan, and goal as compact icon-only controls", () => {
+    const view = render(<Harness />);
+    const settings = view.container.querySelector(".settings-picker");
+    const reasoning = screen.getByRole("combobox", { name: "Уровень рассуждений" });
+    const plan = screen.getByRole("button", { name: "Включить режим планирования" });
+    const goal = screen.getByRole("button", { name: "Включить режим цели" });
+
+    expect(settings).toBeInTheDocument();
+    expect(reasoning.closest("label")).toHaveClass("icon-only");
+    expect(reasoning.closest("label")?.querySelectorAll("svg")).toHaveLength(1);
+    expect(plan.querySelector("span")).toBeNull();
+    expect(plan.querySelectorAll("svg")).toHaveLength(1);
+    expect(goal.querySelector("span")).toBeNull();
+    expect(goal.querySelectorAll("svg")).toHaveLength(1);
+
+    fireEvent.change(reasoning, { target: { value: "high" } });
+    expect(reasoning).toHaveValue("high");
+  });
+
   it("starts at two rows, grows to its cap, and then enables internal scrolling", () => {
     render(<Harness />);
     const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });

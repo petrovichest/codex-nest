@@ -361,7 +361,10 @@ describe("Activity", () => {
     });
     renderThread();
 
-    fireEvent.click(screen.getByLabelText("Управление целью"));
+    const goalControl = screen.getByLabelText("Управление целью");
+    expect(goalControl.querySelector("span")).toBeNull();
+    expect(goalControl.querySelectorAll("svg")).toHaveLength(1);
+    fireEvent.click(goalControl);
     expect(screen.getByText("Завершить интерфейс")).toBeInTheDocument();
     expect(screen.getByText(/120 токенов/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();

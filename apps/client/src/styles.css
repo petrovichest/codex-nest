@@ -1594,6 +1594,13 @@ pre {
   font-size: 12px;
 }
 
+.settings-picker {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .setting-control {
   height: 32px;
   min-height: 32px;
@@ -1664,6 +1671,26 @@ pre {
   pointer-events: none;
 }
 
+.setting-control.icon-only,
+.plan-toggle,
+.goal-toggle {
+  width: 32px;
+  min-width: 32px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+}
+
+.setting-select.icon-only select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  padding: 0;
+  opacity: 0;
+}
+
 .plan-toggle.active,
 .goal-toggle.active {
   background: color-mix(in srgb, var(--accent) 13%, var(--surface-muted));
@@ -1683,15 +1710,6 @@ pre {
 
 .goal-picker > summary::-webkit-details-marker {
   display: none;
-}
-
-.goal-picker .settings-chevron {
-  width: 13px;
-  transition: transform 120ms ease;
-}
-
-.goal-picker[open] .settings-chevron {
-  transform: rotate(180deg);
 }
 
 .goal-popover {

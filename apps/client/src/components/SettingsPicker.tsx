@@ -34,7 +34,7 @@ export function SettingsPicker({
   const model = effectiveModel(models, value.model);
 
   return (
-    <>
+    <div className="settings-picker">
       <SettingSelect
         ariaLabel="Модель"
         disabled={disabled || models.length === 0}
@@ -54,6 +54,7 @@ export function SettingsPicker({
         ariaLabel="Уровень рассуждений"
         disabled={disabled || !model}
         icon={<BrainIcon />}
+        iconOnly
         value={value.reasoningEffort ?? ""}
         onChange={(selected) => onChange({ reasoningEffort: selected || null })}
       >
@@ -83,15 +84,12 @@ export function SettingsPicker({
         }}
       >
         <PlanIcon />
-        <span>План</span>
       </button>
 
       {goal ? (
         <details className="goal-picker" data-dismiss-on-outside-click>
           <summary className="setting-control goal-toggle active" aria-label="Управление целью">
             <TargetIcon />
-            <span>Цель</span>
-            <ChevronDownIcon className="settings-chevron" />
           </summary>
           <div className="goal-popover">
             <div className="goal-popover-heading">
@@ -140,10 +138,9 @@ export function SettingsPicker({
           }}
         >
           <TargetIcon />
-          <span>Цель</span>
         </button>
       )}
-    </>
+    </div>
   );
 
   function changeModel(modelId: string | null) {
@@ -189,18 +186,20 @@ function formatGoalUsage(goal: ThreadGoal): string {
 function SettingSelect({
   ariaLabel,
   icon,
+  iconOnly = false,
   children,
   ...props
 }: {
   ariaLabel: string;
   icon: React.ReactNode;
+  iconOnly?: boolean;
   children: React.ReactNode;
   disabled: boolean;
   value: string;
   onChange(value: string): void;
 }) {
   return (
-    <label className="setting-control setting-select">
+    <label className={`setting-control setting-select${iconOnly ? " icon-only" : ""}`}>
       {icon}
       <select
         aria-label={ariaLabel}
@@ -210,7 +209,7 @@ function SettingSelect({
       >
         {children}
       </select>
-      <ChevronDownIcon className="setting-select-chevron" />
+      {!iconOnly && <ChevronDownIcon className="setting-select-chevron" />}
     </label>
   );
 }
