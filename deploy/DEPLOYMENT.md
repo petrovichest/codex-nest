@@ -103,9 +103,9 @@ codex app-server daemon bootstrap
 codex app-server daemon version
 ```
 
-CodexNest будет подключаться к нему через `codex app-server proxy`. При
-перезапуске `codexnest.service` завершится только proxy-процесс, а выполняющийся
-turn останется в daemon; после старта CodexNest переподключится и заново откроет
+CodexNest будет подключаться к нему по WebSocket через локальный Unix-сокет. При
+перезапуске `codexnest.service` соединение закроется, а выполняющийся turn
+останется в daemon; после старта CodexNest переподключится и заново откроет
 активную задачу. Для локальной разработки без daemon оставьте
 `CODEXNEST_CODEX_TRANSPORT=stdio` или не задавайте переменную.
 

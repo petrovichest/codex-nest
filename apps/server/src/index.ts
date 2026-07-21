@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { watch } from "node:fs";
-import { basename, dirname } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, resolve } from "node:path";
 
 import { buildApp } from "./app";
 import { AttentionManager } from "./attention";
 import { CodexBridge } from "./codex/bridge";
-import type { JsonlProcess } from "./codex/transport";
+import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
@@ -28,16 +29,17 @@ const attention = new AttentionManager();
 const bridge = new CodexBridge({
   codexBin: config.codexBin,
   spawnProcess: () =>
-    spawn(
-      config.codexBin,
-      config.codexTransport === "daemon"
-        ? ["app-server", "proxy"]
-        : ["app-server", "--listen", "stdio://"],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: process.env,
-      },
-    ) as unknown as JsonlProcess,
+    config.codexTransport === "daemon"
+      ? connectUnixWebSocket(
+          resolve(
+            process.env.CODEX_HOME?.trim() || resolve(homedir(), ".codex"),
+            "app-server-control/app-server-control.sock",
+          ),
+        )
+      : (spawn(config.codexBin, ["app-server", "--listen", "stdio://"], {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: process.env,
+        }) as unknown as JsonlProcess),
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);

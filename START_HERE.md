@@ -99,18 +99,18 @@ runtime code. Prefer the smallest dependency set that solves the current task.
 - Run as a persistent system service.
 - Bind to loopback by default and place the service behind the user's existing
   HTTPS reverse proxy.
-- In production, connect through `codex app-server proxy` to the managed,
-  long-lived app-server daemon so CodexNest restarts do not stop active turns.
+- In production, connect over WebSocket through the managed daemon's local Unix
+  socket so CodexNest restarts do not stop active turns.
 - Keep direct `codex app-server --listen stdio://` as the zero-setup development
-  fallback. Both modes expose newline-delimited JSON over stdin/stdout to the
-  CodexNest bridge.
+  fallback. The bridge uses JSONL for direct stdio and WebSocket frames for the
+  daemon's Unix socket.
 - Expose a small authenticated HTTP API and a WebSocket event stream to clients.
 - Keep Codex as the source of truth for threads, turns, and history.
 - Store only CodexNest-owned state: configured project paths, display names,
   pins, read markers, device registrations, and notification preferences.
 - Be event-driven. Do not poll Codex or add network requests on the hot path when
   an app-server notification already provides the state change.
-- Reconnect the proxy or restart the direct app-server child with bounded
+- Reconnect the socket or restart the direct app-server child with bounded
   exponential backoff. Rejoin active threads after reconnect and surface a
   clear unavailable state to clients rather than silently losing requests.
 
@@ -135,9 +135,8 @@ Reference: <https://developers.openai.com/codex/app-server/>
 
 Important rules:
 
-- Keep the CodexNest bridge on the stdio JSONL transport, either directly or
-  through `codex app-server proxy`. Do not expose an app-server WebSocket
-  listener to the network.
+- Keep the daemon WebSocket on its local Unix socket and use stdio JSONL only in
+  direct mode. Do not expose an app-server WebSocket listener to the network.
 - The CodexNest server is the only process that talks directly to app-server.
 - Initialize once per app-server connection with a distinct client identity,
   then send the `initialized` notification.

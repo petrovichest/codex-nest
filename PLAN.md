@@ -9,7 +9,7 @@ This document is the implementation authority when it differs from
 - LAN-only access. The client accepts HTTP with a persistent warning and HTTPS
   with normal hostname verification plus Android system/user CAs.
 - Production uses the managed Codex app-server daemon through
-  `codex app-server proxy`, allowing active turns to survive CodexNest restarts.
+  the daemon's local Unix socket, allowing active turns to survive CodexNest restarts.
   Direct stdio remains the local-development fallback; raw app-server messages
   never cross the public API boundary.
 - Codex CLI `0.144.6` and the generated experimental TypeScript protocol are
