@@ -1,0 +1,8 @@
+[Service]
+# Optional private environment for the managed Codex daemon. Keep this file at
+# mode 0600; never commit the real credentials.
+EnvironmentFile=-%h/.config/codex/app-server.env
+
+# The official command is idempotent. If the daemon is already running, it is
+# left untouched; after a host reboot it starts before CodexNest connects.
+ExecStartPre=%h/.local/bin/codex app-server daemon start

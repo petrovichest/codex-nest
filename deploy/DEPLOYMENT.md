@@ -103,6 +103,36 @@ codex app-server daemon bootstrap
 codex app-server daemon version
 ```
 
+Чтобы daemon автоматически запускался перед CodexNest после перезагрузки хоста,
+установите systemd drop-in:
+
+```bash
+mkdir -p "$HOME/.config/systemd/user/codexnest.service.d"
+cp deploy/systemd/codex-daemon.conf.example \
+  "$HOME/.config/systemd/user/codexnest.service.d/codex-daemon.conf"
+```
+
+Если доступ к ChatGPT требует HTTP proxy, скопируйте отдельный пример окружения,
+впишите адрес и учётные данные, затем ограничьте права. Не добавляйте реальный
+файл с proxy-паролем в Git:
+
+```bash
+mkdir -p "$HOME/.config/codex"
+cp deploy/systemd/codex-app-server.env.example "$HOME/.config/codex/app-server.env"
+chmod 600 "$HOME/.config/codex/app-server.env"
+```
+
+Перезапустите daemon один раз с этим окружением, чтобы и app-server, и его
+процесс обновления унаследовали proxy:
+
+```bash
+codex app-server daemon stop
+set -a
+. "$HOME/.config/codex/app-server.env"
+set +a
+codex app-server daemon bootstrap
+```
+
 CodexNest будет подключаться к нему по WebSocket через локальный Unix-сокет. При
 перезапуске `codexnest.service` соединение закроется, а выполняющийся turn
 останется в daemon; после старта CodexNest переподключится и заново откроет
