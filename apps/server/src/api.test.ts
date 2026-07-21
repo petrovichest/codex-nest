@@ -258,6 +258,23 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    const turnsBeforeEmptyThread = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/start",
+    ).length;
+    const emptyCreated = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(emptyCreated.statusCode).toBe(201);
+    expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "default" });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
+    ).toEqual({ cwd: "/work" });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+      turnsBeforeEmptyThread,
+    );
+
     const created = await app.inject({
       method: "POST",
       url: "/api/v1/threads",
@@ -271,7 +288,9 @@ describe("thread settings", () => {
       approvalPolicy: "on-request",
       approvalsReviewer: "auto_review",
     });
-    const threadStartCall = bridge.request.mock.calls.find(([method]) => method === "thread/start");
+    const threadStartCall = bridge.request.mock.calls
+      .filter(([method]) => method === "thread/start")
+      .at(-1);
     expect(threadStartCall?.[1]).toMatchObject({
       sandbox: "read-only",
       approvalPolicy: "on-request",

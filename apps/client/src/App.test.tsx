@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -73,6 +73,38 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("link", { name: /Исправить Beta/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Новая задача в истории/ })).not.toBeInTheDocument();
   });
+  it("creates an empty session from a project and opens it", async () => {
+    const created = {
+      ...baseThread,
+      id: "created",
+      title: "Без названия",
+      updatedAt: 30,
+      settings: { collaborationMode: "default" as const },
+    };
+    const api = mockConnection(snapshot([baseThread, created]));
+    api.createProjectThread.mockResolvedValue({ thread: created });
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("project"));
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Без названия" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a project-scoped error when session creation fails", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockRejectedValue(new Error("Codex недоступен"));
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Codex недоступен");
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Новая задача в истории" }),
+    ).toBeInTheDocument();
+  });
 });
 
 function renderApp(path: string) {
@@ -115,6 +147,7 @@ function mockConnection(appSnapshot: AppSnapshot) {
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
+    createProjectThread: vi.fn(),
   };
   connection.mockReturnValue({
     api,
@@ -133,4 +166,5 @@ function mockConnection(appSnapshot: AppSnapshot) {
       turns: [],
     })),
   });
+  return api;
 }

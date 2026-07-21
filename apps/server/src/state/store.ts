@@ -11,6 +11,7 @@ export interface ThreadMetaState {
   lastOutcome?: ThreadOutcome;
   outcomeUpdatedAt?: number;
   settings?: SessionSettings;
+  inheritCodexSettings?: boolean;
 }
 
 export interface DeviceState {
@@ -155,7 +156,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.lastOutcome !== undefined &&
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
       (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||
-      (meta.settings !== undefined && !isSessionSettings(meta.settings))
+      (meta.settings !== undefined && !isSessionSettings(meta.settings)) ||
+      (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean")
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }

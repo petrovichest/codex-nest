@@ -421,10 +421,44 @@ pre {
 }
 
 .project-title span {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-new-session {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-strong);
+}
+
+.project-new-session:hover:not(:disabled),
+.project-new-session:focus-visible {
+  border-color: transparent;
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+
+.project-new-session .spinner.small {
+  width: 14px;
+  height: 14px;
+}
+
+.project-create-error {
+  margin: 0 10px 5px 32px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .thread-link {

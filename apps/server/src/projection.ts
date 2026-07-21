@@ -155,11 +155,18 @@ export class AppProjection extends EventEmitter {
     this.publishThread(threadId);
   }
 
-  async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
+  async setSettings(
+    threadId: string,
+    settings: SessionSettings,
+    inheritCodexSettings?: boolean,
+  ): Promise<ThreadSummary> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.settings = settings;
+      if (inheritCodexSettings !== undefined) {
+        meta.inheritCodexSettings = inheritCodexSettings;
+      }
       state.threadMeta[threadId] = meta;
     });
     this.publishThread(threadId);
@@ -489,7 +496,10 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
-      settings: { ...DEFAULT_SESSION_SETTINGS, ...meta.settings },
+      settings:
+        meta.inheritCodexSettings && meta.settings
+          ? { ...meta.settings }
+          : { ...DEFAULT_SESSION_SETTINGS, ...meta.settings },
     };
   }
 
