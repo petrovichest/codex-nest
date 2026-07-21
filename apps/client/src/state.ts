@@ -20,6 +20,7 @@ export type ClientAction =
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
   | { type: "detail"; detail: ThreadDetail }
+  | { type: "thread"; thread: ThreadSummary }
   | { type: "clear" };
 
 export const initialState: ClientState = {
@@ -49,6 +50,8 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
         ...state,
         details: { ...state.details, [action.detail.summary.id]: action.detail },
       };
+    case "thread":
+      return applyThreadSummary(state, action.thread);
     case "event":
       if (!state.snapshot) return state;
       return applyEvent(state, action.sequence, action.event);
@@ -69,7 +72,7 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       break;
     case "thread.upserted":
       snapshot.threads = sortThreads(upsert(snapshot.threads, event.thread));
-      break;
+      return applyThreadSummary({ ...state, snapshot }, event.thread);
     case "thread.removed":
       snapshot.threads = snapshot.threads.filter((thread) => thread.id !== event.threadId);
       break;
@@ -88,6 +91,21 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       break;
   }
   return { ...state, snapshot };
+}
+
+function applyThreadSummary(state: ClientState, thread: ThreadSummary): ClientState {
+  if (!state.snapshot) return state;
+  const detail = state.details[thread.id];
+  return {
+    ...state,
+    snapshot: {
+      ...state.snapshot,
+      threads: sortThreads(upsert(state.snapshot.threads, thread)),
+    },
+    details: detail
+      ? { ...state.details, [thread.id]: { ...detail, summary: thread } }
+      : state.details,
+  };
 }
 
 function applyActivity(

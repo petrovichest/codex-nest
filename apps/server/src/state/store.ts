@@ -3,13 +3,14 @@ import { EventEmitter } from "node:events";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { Project, ThreadOutcome } from "@codexnest/protocol";
+import type { Project, SessionSettings, ThreadOutcome } from "@codexnest/protocol";
 
 export interface ThreadMetaState {
   pinned: boolean;
   lastReadUpdatedAt: number;
   lastOutcome?: ThreadOutcome;
   outcomeUpdatedAt?: number;
+  settings?: SessionSettings;
 }
 
 export interface DeviceState {
@@ -153,7 +154,8 @@ function validateState(value: unknown): CodexNestState {
       typeof meta.lastReadUpdatedAt !== "number" ||
       (meta.lastOutcome !== undefined &&
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
-      (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number")
+      (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||
+      (meta.settings !== undefined && !isSessionSettings(meta.settings))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
@@ -175,6 +177,25 @@ function validateState(value: unknown): CodexNestState {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
   return value as unknown as CodexNestState;
+}
+
+function isSessionSettings(value: unknown): value is SessionSettings {
+  if (!isRecord(value) || !["default", "plan"].includes(String(value.collaborationMode))) {
+    return false;
+  }
+  for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
+    if (value[key] !== undefined && typeof value[key] !== "string") return false;
+  }
+  if (
+    value.sandboxMode !== undefined &&
+    !["read-only", "workspace-write", "danger-full-access"].includes(String(value.sandboxMode))
+  ) {
+    return false;
+  }
+  return (
+    value.approvalPolicy === undefined ||
+    ["untrusted", "on-request", "granular", "never"].includes(String(value.approvalPolicy))
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

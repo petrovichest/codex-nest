@@ -90,6 +90,33 @@ export const SlidersIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const ShieldIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6Z" />
+    <path d="M9 12h6M12 9v6" />
+  </Icon>
+);
+
+export const ModelIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect width="15" height="15" x="4.5" y="4.5" rx="3" />
+    <path d="M9 1.5v3M15 1.5v3M9 19.5v3M15 19.5v3M1.5 9h3M19.5 9h3M1.5 15h3M19.5 15h3" />
+    <circle cx="12" cy="12" r="3" />
+  </Icon>
+);
+
+export const BrainIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M9.5 4.5A3 3 0 0 0 4 6.2a3.5 3.5 0 0 0 .5 6.6A3.5 3.5 0 0 0 9.5 18M14.5 4.5A3 3 0 0 1 20 6.2a3.5 3.5 0 0 1-.5 6.6 3.5 3.5 0 0 1-5 5.2M9.5 4.5v13.7M14.5 4.5v13.7M7 9h2.5M14.5 9H17M7 14h2.5M14.5 14H17" />
+  </Icon>
+);
+
+export const PlanIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m4 6 1.5 1.5L8 5M11 6h9M4 12l1.5 1.5L8 11M11 12h9M4 18l1.5 1.5L8 17M11 18h9" />
+  </Icon>
+);
+
 export const SendIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m5 12 7-7 7 7" />

@@ -1,6 +1,11 @@
 import type { FormEvent, KeyboardEvent } from "react";
 
-import type { ModelOption, Project, SessionSettings } from "@codexnest/protocol";
+import type {
+  ModelOption,
+  Project,
+  SessionSettings,
+  UpdateThreadSettingsRequest,
+} from "@codexnest/protocol";
 
 import { PlusIcon, SendIcon, StopIcon } from "./Icons";
 import { SettingsPicker } from "./SettingsPicker";
@@ -13,6 +18,7 @@ export function Composer({
   running = false,
   settings,
   onSettingsChange,
+  settingsBusy = false,
   models,
   projects,
   projectId,
@@ -27,7 +33,8 @@ export function Composer({
   busy: boolean;
   running?: boolean;
   settings: SessionSettings;
-  onSettingsChange(value: SessionSettings): void;
+  onSettingsChange(value: UpdateThreadSettingsRequest): void;
+  settingsBusy?: boolean;
   models: ModelOption[];
   projects?: Project[];
   projectId?: string;
@@ -83,9 +90,12 @@ export function Composer({
                 </select>
               </label>
             )}
-            {!running && (
-              <SettingsPicker models={models} value={settings} onChange={onSettingsChange} />
-            )}
+            <SettingsPicker
+              disabled={running || busy || settingsBusy}
+              models={models}
+              value={settings}
+              onChange={onSettingsChange}
+            />
             {running && (
               <span className="composer-hint">Сообщение будет добавлено в текущий ход</span>
             )}

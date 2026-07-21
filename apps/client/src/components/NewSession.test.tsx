@@ -68,7 +68,7 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Обнови интерфейс",
-        settings: {},
+        settings: { collaborationMode: "default" },
       }),
     );
     expect(await screen.findByText("Созданная задача")).toBeInTheDocument();

@@ -9,10 +9,12 @@ import type {
   DeviceRegistrationRequest,
   InterruptTurnRequest,
   MarkReadRequest,
+  ModelOption,
   SessionSettings,
   StartTurnRequest,
   SteerTurnRequest,
   UpdateProjectRequest,
+  UpdateThreadSettingsRequest,
   UpdateThreadRequest,
 } from "@codexnest/protocol";
 
@@ -177,19 +179,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!body) return;
     const project = store.snapshot().projects.find((candidate) => candidate.id === body.projectId);
     if (!project) return apiError(reply, 404, "not_found", "Project not found");
+    const settings = mergeSettings(
+      { collaborationMode: "default" },
+      body.settings ?? {},
+      projection.availableModels,
+    );
     const started = parseThreadStart(
       await bridge.request<unknown>("thread/start", {
         cwd: project.path,
-        ...threadSettings(body.settings),
+        ...threadSettings(settings),
       }),
     );
     projection.upsertThread(started.thread);
+    await projection.setSettings(started.thread.id, settings);
     const turn = parseTurnStart(
       await bridge.request<unknown>("turn/start", {
         threadId: started.thread.id,
         clientUserMessageId: body.clientMessageId ?? null,
         input: textInput(body.input),
-        ...turnSettings(body.settings),
+        ...turnSettings(settings, projection.availableModels),
       }),
     );
     return reply
@@ -220,6 +228,28 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
+  app.patch<{ Params: { id: string }; Body: UpdateThreadSettingsRequest }>(
+    "/api/v1/threads/:id/settings",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      if (summary.currentTurnId) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "Settings cannot be changed while a turn is running",
+        );
+      }
+      const patch = validateSettingsPatch(request.body);
+      if (Object.keys(patch).length === 0) {
+        return apiError(reply, 400, "validation_failed", "At least one setting is required");
+      }
+      const settings = mergeSettings(summary.settings, patch, projection.availableModels);
+      return projection.setSettings(request.params.id, settings);
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: StartTurnRequest }>(
     "/api/v1/threads/:id/turns",
     async (request, reply) => {
@@ -233,7 +263,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId: request.params.id,
           cwd: summary.cwd,
           excludeTurns: true,
-          ...threadSettings(body.settings),
+          ...threadSettings(summary.settings),
         },
         30_000,
       );
@@ -242,7 +272,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId: request.params.id,
           clientUserMessageId: body.clientMessageId ?? null,
           input: textInput(body.input),
-          ...turnSettings(body.settings),
+          ...turnSettings(summary.settings, projection.availableModels),
         }),
       );
       return reply.code(201).send({ turnId: turn.turn.id });
@@ -389,14 +419,27 @@ function threadSettings(settings?: SessionSettings): Record<string, unknown> {
   });
 }
 
-function turnSettings(settings?: SessionSettings): Record<string, unknown> {
-  if (!settings) return {};
+function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<string, unknown> {
+  const model = effectiveModel(settings, models);
+  if (!model) throw new ProjectValidationError("No model is available for collaboration mode");
+  const reasoningEffort =
+    settings.reasoningEffort ??
+    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
+    null;
   return compact({
     model: settings.model,
     serviceTier: settings.serviceTier,
     effort: settings.reasoningEffort,
     personality: settings.personality,
     approvalPolicy: approvalPolicy(settings.approvalPolicy),
+    collaborationMode: {
+      mode: settings.collaborationMode,
+      settings: {
+        model: model.id,
+        reasoning_effort: reasoningEffort,
+        developer_instructions: null,
+      },
+    },
   });
 }
 
@@ -423,37 +466,126 @@ function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadReq
 
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {
   const value = requireRecord<StartTurnRequest>(body);
+  if (Object.keys(value).some((key) => !["input", "clientMessageId"].includes(key))) {
+    throw new ProjectValidationError("Unknown turn field");
+  }
   if (typeof value.input !== "string" || !value.input.trim()) {
     apiError(reply, 400, "validation_failed", "input is required");
     return undefined;
   }
-  return { ...value, settings: validateSettings(value.settings) };
+  return value;
 }
 
 function validateSettings(value: unknown): SessionSettings | undefined {
   if (value === undefined) return undefined;
+  const patch = validateSettingsPatch(value);
+  return { ...applySettingsPatch({ collaborationMode: "default" }, patch) };
+}
+
+function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ProjectValidationError("settings must be an object");
   }
   const settings = value as Record<string, unknown>;
+  const known = new Set([
+    "collaborationMode",
+    "model",
+    "reasoningEffort",
+    "serviceTier",
+    "personality",
+    "sandboxMode",
+    "approvalPolicy",
+  ]);
+  if (Object.keys(settings).some((key) => !known.has(key))) {
+    throw new ProjectValidationError("Unknown session setting");
+  }
+  if (
+    settings.collaborationMode !== undefined &&
+    !["default", "plan"].includes(String(settings.collaborationMode))
+  ) {
+    throw new ProjectValidationError("Invalid collaborationMode");
+  }
   for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
-    if (settings[key] !== undefined && typeof settings[key] !== "string") {
-      throw new ProjectValidationError(`${key} must be a string`);
+    if (
+      settings[key] !== undefined &&
+      settings[key] !== null &&
+      (typeof settings[key] !== "string" || !settings[key].trim())
+    ) {
+      throw new ProjectValidationError(`${key} must be a non-empty string or null`);
     }
   }
   if (
     settings.sandboxMode !== undefined &&
+    settings.sandboxMode !== null &&
     !["read-only", "workspace-write", "danger-full-access"].includes(String(settings.sandboxMode))
   ) {
     throw new ProjectValidationError("Invalid sandboxMode");
   }
   if (
     settings.approvalPolicy !== undefined &&
+    settings.approvalPolicy !== null &&
     !["untrusted", "on-request", "granular", "never"].includes(String(settings.approvalPolicy))
   ) {
     throw new ProjectValidationError("Invalid approvalPolicy");
   }
-  return settings as SessionSettings;
+  return settings as UpdateThreadSettingsRequest;
+}
+
+function mergeSettings(
+  current: SessionSettings,
+  patch: UpdateThreadSettingsRequest,
+  models: ModelOption[],
+): SessionSettings {
+  const next = applySettingsPatch(current, patch);
+  const model = effectiveModel(next, models);
+  if (!model) throw new ProjectValidationError("Unknown model");
+
+  if (
+    next.reasoningEffort &&
+    !model.reasoningEfforts.some(({ value }) => value === next.reasoningEffort)
+  ) {
+    if (patch.reasoningEffort !== undefined) {
+      throw new ProjectValidationError("Reasoning effort is not supported by the selected model");
+    }
+    const fallback = model.reasoningEfforts.find((option) => option.isDefault)?.value;
+    if (fallback) next.reasoningEffort = fallback;
+    else delete next.reasoningEffort;
+  }
+  if (next.serviceTier && !model.serviceTiers.some(({ id }) => id === next.serviceTier)) {
+    if (patch.serviceTier !== undefined) {
+      throw new ProjectValidationError("Service tier is not supported by the selected model");
+    }
+    delete next.serviceTier;
+  }
+  if (next.personality && !model.supportsPersonality) {
+    if (patch.personality !== undefined) {
+      throw new ProjectValidationError("Personality is not supported by the selected model");
+    }
+    delete next.personality;
+  }
+  return next;
+}
+
+function applySettingsPatch(
+  current: SessionSettings,
+  patch: UpdateThreadSettingsRequest,
+): SessionSettings {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch) as Array<
+    [
+      keyof UpdateThreadSettingsRequest,
+      UpdateThreadSettingsRequest[keyof UpdateThreadSettingsRequest],
+    ]
+  >) {
+    if (value === null) delete next[key as keyof SessionSettings];
+    else if (value !== undefined) Object.assign(next, { [key]: value });
+  }
+  return next;
+}
+
+function effectiveModel(settings: SessionSettings, models: ModelOption[]): ModelOption | undefined {
+  if (settings.model) return models.find((model) => model.id === settings.model);
+  return models.find((model) => model.isDefault) ?? models[0];
 }
 
 function approvalPolicy(value: SessionSettings["approvalPolicy"]): unknown {

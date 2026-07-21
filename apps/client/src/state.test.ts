@@ -17,6 +17,7 @@ const baseThread: ThreadSummary = {
   createdAt: 1,
   updatedAt: 2,
   currentTurnId: "turn",
+  settings: { collaborationMode: "default" },
 };
 
 const snapshot: AppSnapshot = {
@@ -67,6 +68,25 @@ describe("clientReducer", () => {
     expect(state.details.one?.turns[0]?.items).toEqual([
       { type: "agentMessage", id: "item", status: "completed", text: "Привет" },
     ]);
+  });
+
+  it("applies server-owned settings to the list and loaded detail", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: { summary: baseThread, turns: [] },
+    });
+    const updated = {
+      ...baseThread,
+      settings: { collaborationMode: "plan" as const, model: "gpt" },
+    };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "thread.upserted", thread: updated },
+    });
+    expect(state.snapshot?.threads[0]?.settings).toEqual(updated.settings);
+    expect(state.details.one?.summary.settings).toEqual(updated.settings);
   });
 
   it("sorts attention, running, terminal unread, pinned, then recency", () => {
