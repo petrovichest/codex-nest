@@ -23,6 +23,7 @@ export type SummaryResponse = {
 
 export type ApiErrorCode =
   | "unauthorized"
+  | "forbidden"
   | "validation_failed"
   | "not_found"
   | "conflict"
@@ -43,6 +44,18 @@ export type Project = {
   path: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type DirectoryEntry = {
+  name: string;
+  path: string;
+};
+
+export type DirectoryListing = {
+  rootPath: string;
+  path: string;
+  parentPath: string | null;
+  directories: DirectoryEntry[];
 };
 
 export type ThreadOutcome = "completed" | "failed" | "interrupted";
@@ -313,11 +326,18 @@ export type ServerFrame =
   | { type: "error"; error: ApiError["error"] };
 
 export type CreateProjectRequest = {
-  displayName: string;
   path: string;
 };
 
-export type UpdateProjectRequest = Partial<CreateProjectRequest>;
+export type UpdateProjectRequest = {
+  displayName?: string;
+  path?: string;
+};
+
+export type CreateDirectoryRequest = {
+  parentPath: string;
+  name: string;
+};
 
 export type CreateThreadRequest = {
   projectId: string;

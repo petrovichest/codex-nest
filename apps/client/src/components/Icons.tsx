@@ -134,6 +134,12 @@ export const ChevronDownIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const ChevronRightIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m10 7 5 5-5 5" />
+  </Icon>
+);
+
 export const ServerIcon = (props: IconProps) => (
   <Icon {...props}>
     <rect width="18" height="7" x="3" y="3" rx="2" />

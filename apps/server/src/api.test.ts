@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,7 +45,14 @@ describe("HTTP authentication", () => {
       allowedOrigins: new Set(["http://localhost"]),
       websocketAuthTimeoutMs: 25,
     });
-    const app = await buildApp(config, { bridge, store, projection, attention, push });
+    const app = await buildApp(config, {
+      bridge,
+      store,
+      projection,
+      attention,
+      push,
+      projectRoot: directory,
+    });
 
     expect((await app.inject({ url: "/api/v1/health" })).statusCode).toBe(200);
     expect((await app.inject({ url: "/api/v1/summary" })).json()).toMatchObject({
@@ -71,6 +78,92 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(403);
+
+    const authorization = { authorization: "Bearer correct" };
+    const workspace = join(directory, "workspace");
+    await mkdir(workspace);
+    const listing = await app.inject({ url: "/api/v1/directories", headers: authorization });
+    expect(listing.statusCode).toBe(200);
+    expect(listing.json()).toMatchObject({
+      rootPath: directory,
+      path: directory,
+      parentPath: null,
+      directories: [{ name: "workspace", path: workspace }],
+    });
+
+    const createdDirectory = await app.inject({
+      method: "POST",
+      url: "/api/v1/directories",
+      headers: authorization,
+      payload: { parentPath: workspace, name: "new-project" },
+    });
+    expect(createdDirectory.statusCode).toBe(201);
+    const createdPath = join(workspace, "new-project");
+    expect(createdDirectory.json()).toEqual({
+      rootPath: directory,
+      path: createdPath,
+      parentPath: workspace,
+      directories: [],
+    });
+    const duplicateDirectory = await app.inject({
+      method: "POST",
+      url: "/api/v1/directories",
+      headers: authorization,
+      payload: { parentPath: workspace, name: "new-project" },
+    });
+    expect(duplicateDirectory.statusCode).toBe(409);
+    expect(duplicateDirectory.json()).toMatchObject({ error: { code: "conflict" } });
+
+    const createdProject = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: authorization,
+      payload: { path: createdPath },
+    });
+    expect(createdProject.statusCode).toBe(201);
+    expect(createdProject.json()).toMatchObject({
+      displayName: "new-project",
+      path: await realpath(createdPath),
+    });
+
+    const legacyPath = join(workspace, "legacy-project");
+    await mkdir(legacyPath);
+    const legacyProject = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: authorization,
+      payload: { path: legacyPath, displayName: "Ignored manual name" },
+    });
+    expect(legacyProject.statusCode).toBe(201);
+    expect(legacyProject.json()).toMatchObject({ displayName: "legacy-project" });
+
+    const outside = await app.inject({
+      url: `/api/v1/directories?path=${encodeURIComponent(join(directory, ".."))}`,
+      headers: authorization,
+    });
+    expect(outside.statusCode).toBe(400);
+    expect(outside.json()).toMatchObject({ error: { code: "validation_failed" } });
+
+    const missing = await app.inject({
+      url: `/api/v1/directories?path=${encodeURIComponent(join(directory, "missing"))}`,
+      headers: authorization,
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ error: { code: "not_found" } });
+
+    const locked = join(directory, "locked");
+    await mkdir(locked);
+    await chmod(locked, 0o000);
+    try {
+      const forbidden = await app.inject({
+        url: `/api/v1/directories?path=${encodeURIComponent(locked)}`,
+        headers: authorization,
+      });
+      expect(forbidden.statusCode).toBe(403);
+      expect(forbidden.json()).toMatchObject({ error: { code: "forbidden" } });
+    } finally {
+      await chmod(locked, 0o700);
+    }
 
     await app.ready();
     const authorized = await app.injectWS("/api/v1/events", {
