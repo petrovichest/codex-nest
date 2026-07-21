@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type { Project, SessionSettings, UpdateThreadSettingsRequest } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
@@ -22,7 +23,9 @@ export function NewSession({
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
-  const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
+  const [settings, setSettings] = useState<SessionSettings>(() => ({
+    ...DEFAULT_SESSION_SETTINGS,
+  }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() =>

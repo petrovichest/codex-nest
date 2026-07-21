@@ -103,7 +103,11 @@ describe("AppProjection", () => {
     await projection.sync();
     expect(projection.threadCount).toBe(2);
     expect(projection.summary("two")?.projectId).toBe("nested");
-    expect(projection.summary("one")?.settings).toEqual({ collaborationMode: "default" });
+    expect(projection.summary("one")?.settings).toEqual({
+      collaborationMode: "default",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+    });
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: false });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),

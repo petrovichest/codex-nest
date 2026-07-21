@@ -157,6 +157,12 @@ export type SessionSettings = {
   approvalPolicy?: ApprovalPolicy;
 };
 
+export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
+  collaborationMode: "default",
+  sandboxMode: "workspace-write",
+  approvalPolicy: "on-request",
+};
+
 export type AttentionBase = {
   id: string;
   threadId: string | null;
