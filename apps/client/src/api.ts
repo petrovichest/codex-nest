@@ -2,9 +2,11 @@ import type {
   ApiError,
   AppSnapshot,
   AttentionResponse,
+  CreateDirectoryRequest,
   CreateProjectRequest,
   CreateThreadRequest,
   DeviceRegistrationRequest,
+  DirectoryListing,
   HealthResponse,
   MarkReadRequest,
   Project,
@@ -28,6 +30,15 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  listDirectories(path?: string): Promise<DirectoryListing> {
+    const query = path === undefined ? "" : `?${new URLSearchParams({ path })}`;
+    return this.request(`/api/v1/directories${query}`);
+  }
+
+  createDirectory(body: CreateDirectoryRequest): Promise<DirectoryListing> {
+    return this.request("/api/v1/directories", { method: "POST", body });
   }
 
   createProject(body: CreateProjectRequest): Promise<Project> {

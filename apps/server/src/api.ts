@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ApiErrorCode,
   AttentionResponse,
+  CreateDirectoryRequest,
   CreateProjectRequest,
   CreateThreadRequest,
   DeviceRegistrationRequest,
@@ -24,8 +25,12 @@ import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
 import {
   assertUniqueProjectPath,
   canonicalProjectPath,
+  createDirectory,
   createProject,
+  listDirectories,
   ProjectConflictError,
+  ProjectForbiddenError,
+  ProjectNotFoundError,
   ProjectValidationError,
 } from "./projects";
 import type { AppProjection } from "./projection";
@@ -38,6 +43,7 @@ export interface ApiServices {
   projection: AppProjection;
   attention: AttentionManager;
   push: PushNotifier;
+  projectRoot?: string;
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
@@ -84,15 +90,32 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     syncedAt: projection.lastSyncedAt,
   }));
 
+  app.get<{ Querystring: { path?: string } }>("/api/v1/directories", async (request) => {
+    if (request.query.path !== undefined && typeof request.query.path !== "string") {
+      throw new ProjectValidationError("path must be a string");
+    }
+    return listDirectories(request.query.path, services.projectRoot);
+  });
+
+  app.post<{ Body: CreateDirectoryRequest }>("/api/v1/directories", async (request, reply) => {
+    const body = requireRecord<CreateDirectoryRequest>(request.body);
+    if (typeof body.parentPath !== "string" || typeof body.name !== "string") {
+      return apiError(reply, 400, "validation_failed", "parentPath and name are required");
+    }
+    return reply
+      .code(201)
+      .send(await createDirectory(body.parentPath, body.name, services.projectRoot));
+  });
+
   app.post<{ Body: CreateProjectRequest }>("/api/v1/projects", async (request, reply) => {
     const body = requireRecord<CreateProjectRequest>(request.body);
-    if (typeof body.displayName !== "string" || typeof body.path !== "string") {
-      return apiError(reply, 400, "validation_failed", "displayName and path are required");
+    if (typeof body.path !== "string") {
+      return apiError(reply, 400, "validation_failed", "path is required");
     }
-    const canonical = await canonicalProjectPath(body.path);
+    const canonical = await canonicalProjectPath(body.path, services.projectRoot);
     const existing = store.snapshot().projects;
     assertUniqueProjectPath(existing, canonical);
-    const project = createProject(body.displayName, canonical);
+    const project = createProject(body.path, canonical);
     await store.update((state) => {
       state.projects.push(project);
     });
@@ -113,7 +136,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (body.displayName !== undefined && typeof body.displayName !== "string") {
         return apiError(reply, 400, "validation_failed", "displayName must be a string");
       }
-      const path = body.path === undefined ? current.path : await canonicalProjectPath(body.path);
+      const path =
+        body.path === undefined
+          ? current.path
+          : await canonicalProjectPath(body.path, services.projectRoot);
       assertUniqueProjectPath(state.projects, path, current.id);
       const displayName =
         body.displayName === undefined ? current.displayName : body.displayName.trim();
@@ -342,6 +368,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (error instanceof ProjectValidationError || error instanceof AttentionValidationError) {
       return apiError(reply, 400, "validation_failed", error.message);
     }
+    if (error instanceof ProjectForbiddenError)
+      return apiError(reply, 403, "forbidden", error.message);
+    if (error instanceof ProjectNotFoundError)
+      return apiError(reply, 404, "not_found", error.message);
     if (error instanceof ProjectConflictError)
       return apiError(reply, 409, "conflict", error.message);
     return apiError(reply, 500, "internal_error", "Internal server error");
