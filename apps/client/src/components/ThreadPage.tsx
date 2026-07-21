@@ -6,17 +6,35 @@ import type { ActivityItem, SessionSettings } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { AttentionPanel } from "./AttentionPanel";
-import { SettingsPicker } from "./SettingsPicker";
+import { Composer } from "./Composer";
+import {
+  ArchiveIcon,
+  FileIcon,
+  MoreIcon,
+  PencilIcon,
+  PinIcon,
+  TerminalIcon,
+  ToolIcon,
+  XIcon,
+} from "./Icons";
+import { SessionInspector } from "./SessionInspector";
+import { WorkspaceHeader } from "./WorkspaceHeader";
 
-export function ThreadPage() {
+export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const { threadId = "" } = useParams();
   const { api, state, refreshDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
+  const project =
+    state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const detail = state.details[threadId];
   const [input, setInput] = useState("");
   const [settings, setSettings] = useState<SessionSettings>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
+  );
   const attention = useMemo(
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
@@ -39,7 +57,7 @@ export function ThreadPage() {
   if (!summary)
     return (
       <div className="center-state">
-        <h2>Сессия не найдена</h2>
+        <h2>Задача не найдена</h2>
       </div>
     );
 
@@ -62,147 +80,156 @@ export function ThreadPage() {
     }
   }
 
-  async function rename() {
-    const value = window.prompt("Новое название", summary!.title)?.trim();
-    if (value) await api.updateThread(threadId, { name: value });
-  }
+  const togglePin = () => void api.updateThread(threadId, { pinned: !summary.pinned });
+  const toggleArchive = () => void api.archive(threadId, !summary.archived);
 
   return (
-    <div className="thread-page">
-      <header className="thread-header">
-        <div>
-          <div className="eyebrow">
-            <span className={`status status-${summary.state}`} />
-            {stateLabel(summary.state)}
-          </div>
-          <h1>{summary.title}</h1>
-          <div className="path">{summary.cwd}</div>
-        </div>
-        <div className="header-actions">
-          <button onClick={() => void api.updateThread(threadId, { pinned: !summary.pinned })}>
-            {summary.pinned ? "Открепить" : "Закрепить"}
-          </button>
-          <button onClick={() => void rename()}>Переименовать</button>
-          <button onClick={() => void api.archive(threadId, !summary.archived)}>
-            {summary.archived ? "Вернуть из архива" : "Архивировать"}
-          </button>
-        </div>
-      </header>
-      <AttentionPanel requests={attention} />
-      <section className="timeline" aria-live="polite">
-        {!detail && (
-          <div className="center-state">
-            <div className="spinner" />
-          </div>
-        )}
-        {detail?.turns.map((turn) => (
-          <div className="turn" key={turn.id}>
-            {turn.items.map((item) => (
-              <Activity item={item} key={item.id} />
-            ))}
-            {turn.status === "inProgress" && (
-              <div className="working">
-                <div className="spinner small" />
-                Codex работает…
+    <div className="thread-workspace">
+      <div className="conversation-pane">
+        <WorkspaceHeader
+          title={summary.title}
+          subtitle={project?.displayName ?? summary.cwd}
+          onOpenNavigation={onOpenNavigation}
+          onToggleInspector={() => setInspectorOpen((value) => !value)}
+          actions={
+            <details className="thread-action-menu">
+              <summary className="icon-button" aria-label="Действия с задачей">
+                <MoreIcon />
+              </summary>
+              <div className="action-menu-popover">
+                <button onClick={togglePin}>
+                  <PinIcon /> {summary.pinned ? "Открепить" : "Закрепить"}
+                </button>
+                <button onClick={() => setRenaming(true)}>
+                  <PencilIcon /> Переименовать
+                </button>
+                <button onClick={toggleArchive}>
+                  <ArchiveIcon /> {summary.archived ? "Вернуть из архива" : "Архивировать"}
+                </button>
+              </div>
+            </details>
+          }
+        />
+        <div className="conversation-scroll">
+          <AttentionPanel requests={attention} />
+          <section className="timeline" aria-live="polite">
+            {!detail && (
+              <div className="center-state compact">
+                <div className="spinner" />
               </div>
             )}
-          </div>
-        ))}
-      </section>
-      <form className="composer" onSubmit={submit}>
-        {summary.state !== "running" && (
-          <SettingsPicker
-            models={state.snapshot?.models ?? []}
-            value={settings}
-            onChange={setSettings}
-          />
-        )}
-        <div className="composer-row">
-          <textarea
-            rows={2}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder={
-              summary.state === "running" ? "Направить текущий turn…" : "Сообщение для Codex…"
-            }
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter")
-                event.currentTarget.form?.requestSubmit();
-            }}
-          />
-          <button className="primary" disabled={busy || !input.trim()}>
-            {summary.state === "running" ? "Steer" : "Отправить"}
-          </button>
-          {summary.state === "running" && summary.currentTurnId && (
-            <button
-              type="button"
-              className="danger"
-              onClick={() => void api.interrupt(threadId, summary.currentTurnId!)}
-            >
-              Стоп
-            </button>
-          )}
+            {detail?.turns.map((turn) => (
+              <div className="turn" key={turn.id}>
+                {turn.items.map((item) => (
+                  <Activity item={item} key={item.id} />
+                ))}
+                {turn.status === "inProgress" && (
+                  <div className="working">
+                    <div className="spinner small" />
+                    Codex работает…
+                  </div>
+                )}
+              </div>
+            ))}
+          </section>
         </div>
-        {error && <div className="error-banner">{error}</div>}
-      </form>
+        <Composer
+          input={input}
+          onInput={setInput}
+          onSubmit={submit}
+          busy={busy}
+          running={summary.state === "running"}
+          settings={settings}
+          onSettingsChange={setSettings}
+          models={state.snapshot?.models ?? []}
+          onStop={
+            summary.currentTurnId
+              ? () => void api.interrupt(threadId, summary.currentTurnId!)
+              : undefined
+          }
+          error={error}
+        />
+      </div>
+      <SessionInspector
+        open={inspectorOpen}
+        summary={summary}
+        project={project}
+        connection={connectionLabel(state.network, state.snapshot?.connection.state)}
+        onClose={() => setInspectorOpen(false)}
+        onPin={togglePin}
+        onArchive={toggleArchive}
+      />
+      {inspectorOpen && (
+        <button
+          className="inspector-backdrop"
+          aria-label="Закрыть сведения"
+          onClick={() => setInspectorOpen(false)}
+        />
+      )}
+      {renaming && (
+        <RenameDialog
+          initialValue={summary.title}
+          onClose={() => setRenaming(false)}
+          onRename={async (name) => {
+            await api.updateThread(threadId, { name });
+            setRenaming(false);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function Activity({ item }: { item: ActivityItem }) {
-  if (
-    item.type === "userMessage" ||
-    item.type === "agentMessage" ||
-    item.type === "reasoning" ||
-    item.type === "plan"
-  ) {
+export function Activity({ item }: { item: ActivityItem }) {
+  if (item.type === "userMessage" || item.type === "agentMessage") {
     return (
       <article className={`message ${item.type}`}>
-        <div className="activity-label">
-          {item.type === "userMessage"
-            ? "Вы"
-            : item.type === "agentMessage"
-              ? "Codex"
-              : item.type === "reasoning"
-                ? "Reasoning"
-                : "План"}
-        </div>
+        <ReactMarkdown>{item.text}</ReactMarkdown>
+      </article>
+    );
+  }
+  if (item.type === "reasoning" || item.type === "plan") {
+    return (
+      <article className={`message ${item.type}`}>
+        <div className="activity-label">{item.type === "reasoning" ? "Ход работы" : "План"}</div>
         <ReactMarkdown>{item.text}</ReactMarkdown>
       </article>
     );
   }
   if (item.type === "command") {
     return (
-      <article className="activity-card">
-        <div className="activity-label">Команда · {statusLabel(item.status)}</div>
-        <pre>
-          $ {item.command}\n{item.output}
-        </pre>
+      <ActivityDetails
+        icon={<TerminalIcon />}
+        title={item.command || "Выполнена команда"}
+        status={item.status}
+      >
+        {item.cwd && <div className="path">{item.cwd}</div>}
+        <pre>{item.output || `$ ${item.command}`}</pre>
         {item.exitCode !== null && <small>exit {item.exitCode}</small>}
-      </article>
+      </ActivityDetails>
     );
   }
   if (item.type === "fileChange") {
     return (
-      <article className="activity-card">
-        <div className="activity-label">Изменения файлов · {statusLabel(item.status)}</div>
-        {item.path && <div className="path">{item.path}</div>}
+      <ActivityDetails
+        icon={<FileIcon />}
+        title={item.path ? `Изменён ${item.path}` : "Изменены файлы"}
+        status={item.status}
+      >
         <pre>{item.patch}</pre>
-      </article>
+      </ActivityDetails>
     );
   }
   if (item.type === "tool") {
     return (
-      <article className="activity-card">
-        <div className="activity-label">Инструмент · {statusLabel(item.status)}</div>
-        <strong>{item.title}</strong>
-        <p>{item.detail}</p>
-      </article>
+      <ActivityDetails icon={<ToolIcon />} title={item.title} status={item.status}>
+        {item.detail && <p>{item.detail}</p>}
+      </ActivityDetails>
     );
   }
   if (item.type === "error" || item.type === "unsupported") {
     return (
-      <article className="error-banner">
+      <article className="error-banner activity-error">
         <strong>{item.type === "unsupported" ? "Несовместимое событие" : "Ошибка"}</strong>
         <p>{item.message}</p>
       </article>
@@ -211,20 +238,86 @@ function Activity({ item }: { item: ActivityItem }) {
   return null;
 }
 
-function stateLabel(state: string): string {
+function ActivityDetails({
+  icon,
+  title,
+  status,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  status: string;
+  children: React.ReactNode;
+}) {
   return (
-    (
-      {
-        needsAttention: "Требуется решение",
-        running: "Выполняется",
-        completed: "Завершено",
-        failed: "Ошибка",
-        interrupted: "Прервано",
-        idle: "Готово",
-        unavailable: "Недоступно",
-      } as Record<string, string>
-    )[state] ?? state
+    <details className="activity-card">
+      <summary>
+        <span className="activity-icon">{icon}</span>
+        <span className="activity-title">{title}</span>
+        <span className={`activity-status activity-status-${status}`}>{statusLabel(status)}</span>
+      </summary>
+      <div className="activity-content">{children}</div>
+    </details>
   );
+}
+
+function RenameDialog({
+  initialValue,
+  onClose,
+  onRename,
+}: {
+  initialValue: string;
+  onClose(): void;
+  onRename(value: string): Promise<void>;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <form
+        className="modal compact"
+        onMouseDown={(event) => event.stopPropagation()}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!value.trim()) return;
+          setBusy(true);
+          setError(null);
+          void onRename(value.trim())
+            .catch((caught: Error) => setError(caught.message))
+            .finally(() => setBusy(false));
+        }}
+      >
+        <div className="row-between">
+          <div>
+            <span className="dialog-eyebrow">Задача</span>
+            <h2>Переименовать</h2>
+          </div>
+          <button type="button" className="icon-button" aria-label="Закрыть" onClick={onClose}>
+            <XIcon />
+          </button>
+        </div>
+        <label>
+          Название
+          <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} />
+        </label>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="dialog-actions">
+          <button type="button" onClick={onClose}>
+            Отмена
+          </button>
+          <button className="primary" disabled={busy || !value.trim()}>
+            {busy ? "Сохраняем…" : "Сохранить"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function connectionLabel(network: string, appServer?: string): string {
+  if (network !== "connected") return "Нет связи";
+  return appServer === "ready" ? "Локальный сервер готов" : "Codex недоступен";
 }
 
 function statusLabel(status: string): string {

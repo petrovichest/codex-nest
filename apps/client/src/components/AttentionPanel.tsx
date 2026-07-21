@@ -9,6 +9,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { AlertIcon } from "./Icons";
 
 export function AttentionPanel({ requests }: { requests: AttentionRequest[] }) {
   if (!requests.length) return null;
@@ -40,6 +41,10 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
 
   return (
     <article className="attention-card">
+      <div className="attention-heading">
+        <AlertIcon />
+        Требуется внимание
+      </div>
       {request.kind === "commandApproval" && (
         <>
           <h3>Разрешить команду?</h3>

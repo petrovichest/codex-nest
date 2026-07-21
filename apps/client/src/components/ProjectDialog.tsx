@@ -1,6 +1,7 @@
 import { type FormEvent, useState } from "react";
 
 import { useConnection } from "../connection";
+import { FolderIcon, XIcon } from "./Icons";
 
 export function ProjectDialog({ onClose }: { onClose(): void }) {
   const { api } = useConnection();
@@ -29,9 +30,12 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="row-between">
-          <h2>Добавить проект</h2>
-          <button type="button" className="icon-button" onClick={onClose}>
-            ×
+          <div>
+            <span className="dialog-eyebrow">Рабочая папка</span>
+            <h2>Добавить проект</h2>
+          </div>
+          <button type="button" className="icon-button" aria-label="Закрыть" onClick={onClose}>
+            <XIcon />
           </button>
         </div>
         <label>
@@ -52,9 +56,14 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
           />
         </label>
         {error && <div className="error-banner">{error}</div>}
-        <button className="primary" disabled={busy}>
-          {busy ? "Проверяем…" : "Добавить"}
-        </button>
+        <div className="dialog-actions">
+          <button type="button" onClick={onClose}>
+            Отмена
+          </button>
+          <button className="primary" disabled={busy}>
+            <FolderIcon /> {busy ? "Проверяем…" : "Добавить"}
+          </button>
+        </div>
       </form>
     </div>
   );
