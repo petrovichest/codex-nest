@@ -142,11 +142,15 @@ function Sidebar({
   theme: string;
   onThemeChange(theme: string): void;
 }) {
-  const { state } = useConnection();
+  const { api, state } = useConnection();
   const navigate = useNavigate();
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<{ projectId: string; message: string } | null>(
+    null,
+  );
   const snapshot = state.snapshot;
   const normalizedSearch = search.trim().toLocaleLowerCase("ru");
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
@@ -170,6 +174,24 @@ function Sidebar({
       else next.add(key);
       return next;
     });
+  }
+
+  async function createProjectThread(projectId: string) {
+    if (creatingProjectId) return;
+    setCreatingProjectId(projectId);
+    setCreateError(null);
+    try {
+      const result = await api.createProjectThread(projectId);
+      onClose();
+      navigate(`/threads/${encodeURIComponent(result.thread.id)}`);
+    } catch (caught) {
+      setCreateError({
+        projectId,
+        message: caught instanceof Error ? caught.message : "Не удалось создать сессию",
+      });
+    } finally {
+      setCreatingProjectId(null);
+    }
   }
 
   return (
@@ -227,7 +249,28 @@ function Sidebar({
               <div className="project-title">
                 <FolderIcon />
                 <span>{group.project?.displayName ?? "Без проекта"}</span>
+                {group.project && (
+                  <button
+                    aria-busy={creatingProjectId === group.project.id}
+                    aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                    className="project-new-session"
+                    disabled={creatingProjectId !== null}
+                    type="button"
+                    onClick={() => void createProjectThread(group.project!.id)}
+                  >
+                    {creatingProjectId === group.project.id ? (
+                      <span className="spinner small" />
+                    ) : (
+                      <PlusIcon />
+                    )}
+                  </button>
+                )}
               </div>
+              {createError && createError.projectId === group.project?.id && (
+                <div className="project-create-error" role="alert">
+                  {createError.message}
+                </div>
+              )}
               {visible.map((thread) => (
                 <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
               ))}

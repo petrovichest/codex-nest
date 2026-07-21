@@ -355,7 +355,12 @@ export type CreateThreadRequest = {
   projectId: string;
   input: string;
   settings?: SessionSettings;
+  inheritCodexSettings?: boolean;
   clientMessageId?: string;
+};
+
+export type CreateProjectThreadResponse = {
+  thread: ThreadSummary;
 };
 
 export type StartTurnRequest = {

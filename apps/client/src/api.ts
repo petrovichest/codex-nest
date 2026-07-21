@@ -4,6 +4,7 @@ import type {
   AttentionResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
+  CreateProjectThreadResponse,
   CreateThreadRequest,
   DeviceRegistrationRequest,
   DirectoryListing,
@@ -52,6 +53,12 @@ export class ApiClient {
 
   deleteProject(id: string): Promise<void> {
     return this.request(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  createProjectThread(projectId: string): Promise<CreateProjectThreadResponse> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
+      method: "POST",
+    });
   }
 
   readThread(id: string): Promise<ThreadDetail> {

@@ -6,6 +6,7 @@ import type {
   AttentionResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
+  CreateProjectThreadResponse,
   CreateThreadRequest,
   DeviceRegistrationRequest,
   InterruptTurnRequest,
@@ -167,6 +168,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     });
     projection.removeProject(request.params.id);
     return reply.code(204).send();
+  });
+
+  app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
+    const project = store
+      .snapshot()
+      .projects.find((candidate) => candidate.id === request.params.id);
+    if (!project) return apiError(reply, 404, "not_found", "Project not found");
+    const started = parseThreadStart(
+      await bridge.request<unknown>("thread/start", { cwd: project.path }),
+    );
+    projection.upsertThread(started.thread);
+    const thread = await projection.setSettings(
+      started.thread.id,
+      {
+        collaborationMode: "default",
+      },
+      true,
+    );
+    return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
   });
 
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
