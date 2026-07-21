@@ -14,13 +14,29 @@ import { StateStore } from "./state/store";
 
 class FakeBridge extends EventEmitter {
   state = "ready" as const;
+  constructor(private readonly active = false) {
+    super();
+  }
   request = vi.fn(async (method: string, params: Record<string, unknown>) => {
     if (method === "thread/list") {
       if (params.archived) return { data: [], nextCursor: null, backwardsCursor: null };
       if (!params.cursor)
-        return { data: [thread("one", "/work", 5)], nextCursor: "next", backwardsCursor: null };
+        return {
+          data: [
+            thread(
+              "one",
+              "/work",
+              5,
+              this.active ? { type: "active", activeFlags: [] } : { type: "idle" },
+            ),
+          ],
+          nextCursor: "next",
+          backwardsCursor: null,
+        };
       return { data: [thread("two", "/work/nested", 4)], nextCursor: null, backwardsCursor: null };
     }
+    if (method === "thread/resume") return { thread: liveThread() };
+    if (method === "thread/read") return { thread: liveThread() };
     if (method === "model/list") {
       return {
         data: [
@@ -229,9 +245,56 @@ describe("AppProjection", () => {
     );
     await store.flushed();
   });
+
+  it("rejoins and restores an active turn once per app-server connection", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge(true);
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+    });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      1,
+    );
+    expect((await projection.readThread("one")).turns[0]).toMatchObject({
+      id: "live",
+      status: "inProgress",
+      progress: { startedAt: 3_000 },
+      items: [{ id: "answer", type: "agentMessage", text: "В процессе" }],
+    });
+
+    await projection.sync();
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      1,
+    );
+
+    bridge.emit("state", "unavailable");
+    bridge.emit("state", "ready");
+    await projection.sync();
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      2,
+    );
+  });
 });
 
-function thread(id: string, cwd: string, updatedAt: number): Thread {
+function thread(
+  id: string,
+  cwd: string,
+  updatedAt: number,
+  status: Thread["status"] = { type: "idle" },
+  turns: Thread["turns"] = [],
+): Thread {
   return {
     id,
     extra: null,
@@ -245,7 +308,7 @@ function thread(id: string, cwd: string, updatedAt: number): Thread {
     createdAt: 1,
     updatedAt,
     recencyAt: updatedAt,
-    status: { type: "idle" },
+    status,
     path: null,
     cwd,
     cliVersion: "0.144.6",
@@ -255,6 +318,28 @@ function thread(id: string, cwd: string, updatedAt: number): Thread {
     agentRole: null,
     gitInfo: null,
     name: null,
-    turns: [],
+    turns,
   };
+}
+
+function liveThread(): Thread {
+  return thread("one", "/work", 5, { type: "active", activeFlags: [] }, [
+    {
+      id: "live",
+      items: [
+        {
+          type: "agentMessage",
+          id: "answer",
+          text: "В процессе",
+          phase: null,
+        },
+      ],
+      itemsView: "full",
+      status: "inProgress",
+      error: null,
+      startedAt: 3,
+      completedAt: null,
+      durationMs: null,
+    },
+  ]);
 }

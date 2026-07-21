@@ -8,8 +8,10 @@ This document is the implementation authority when it differs from
 - One owner, one high-entropy bearer token, no accounts or roles.
 - LAN-only access. The client accepts HTTP with a persistent warning and HTTPS
   with normal hostname verification plus Android system/user CAs.
-- One long-lived `codex app-server --listen stdio://` child; raw app-server
-  messages never cross the public API boundary.
+- Production uses the managed Codex app-server daemon through
+  `codex app-server proxy`, allowing active turns to survive CodexNest restarts.
+  Direct stdio remains the local-development fallback; raw app-server messages
+  never cross the public API boundary.
 - Codex CLI `0.144.6` and the generated experimental TypeScript protocol are
   version-pinned. Experimental methods are isolated to user-input and cold
   last-turn reconciliation.
@@ -21,6 +23,8 @@ This document is the implementation authority when it differs from
   client message IDs and removes text after Codex accepts it.
 - No polling loop. Full pagination runs at startup and explicit foreground/manual
   sync; notifications drive the live projection.
+- On a fresh app-server connection, only threads reported as active are rejoined
+  to restore their current turn and notification subscription.
 - Live execution progress is projected from `turn/plan/updated` and
   `turn/diff/updated`; it is not duplicated into persistent history.
 - React/Vite is shared by browser and Capacitor Android. Russian is the first

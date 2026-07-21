@@ -94,6 +94,21 @@ command -v codex
 В `CODEXNEST_CODEX_BIN` укажите результат `command -v codex`. Используйте полные
 пути: `systemd` не подставляет `$HOME` и `~` в `EnvironmentFile`.
 
+Production-пример включает `CODEXNEST_CODEX_TRANSPORT=daemon`. Один раз
+установите и запустите штатный пользовательский daemon Codex от того же
+пользователя, который запускает CodexNest:
+
+```bash
+codex app-server daemon bootstrap
+codex app-server daemon version
+```
+
+CodexNest будет подключаться к нему через `codex app-server proxy`. При
+перезапуске `codexnest.service` завершится только proxy-процесс, а выполняющийся
+turn останется в daemon; после старта CodexNest переподключится и заново откроет
+активную задачу. Для локальной разработки без daemon оставьте
+`CODEXNEST_CODEX_TRANSPORT=stdio` или не задавайте переменную.
+
 Затем откройте `~/.config/systemd/user/codexnest.service`. Если репозиторий лежит
 не в `~/codex-nest` или Node.js установлен не в `~/.local/node-v24`, исправьте
 `WorkingDirectory` и `ExecStart` в соответствии с результатом `command -v node`.
@@ -144,6 +159,7 @@ accept-all certificate handler).
 | `CODEXNEST_ALLOWED_ORIGINS`          | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
 | `CODEXNEST_STATE_PATH`               | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
 | `CODEXNEST_CODEX_BIN`                | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
+| `CODEXNEST_CODEX_TRANSPORT`          | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
 | `CODEXNEST_CLIENT_DIST`              | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
 | `CODEXNEST_LOG_LEVEL`                | Уровень логов Fastify                             | `info`                                        |
 | `CODEXNEST_FIREBASE_CREDENTIAL_PATH` | Необязательный service account JSON для FCM       | выключено                                     |
@@ -187,6 +203,12 @@ sudo loginctl enable-linger "$(id -un)"
 systemctl --user daemon-reload
 systemctl --user enable --now codexnest.service
 systemctl --user status codexnest.service
+```
+
+В daemon-режиме также проверьте отдельный app-server:
+
+```bash
+codex app-server daemon version
 ```
 
 Посмотреть текущие логи:
@@ -276,6 +298,9 @@ systemctl --user start codexnest.service
 
 - **`status: degraded` / `incompatible`.** Проверьте `codex --version` именно от
   пользователя сервиса и значение `CODEXNEST_CODEX_BIN`. Требуется `0.144.6`.
+- **`status: degraded` в daemon-режиме.** Выполните
+  `codex app-server daemon version`. Если control socket отсутствует, повторите
+  `codex app-server daemon bootstrap` от пользователя сервиса.
 - **Сервис завершается с `203/EXEC`.** Путь к Node.js в `ExecStart` неверен.
   Подставьте абсолютный результат `command -v node`.
 - **`403 Origin not allowed`.** Добавьте точный origin клиента, включая схему и

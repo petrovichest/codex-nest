@@ -99,16 +99,20 @@ runtime code. Prefer the smallest dependency set that solves the current task.
 - Run as a persistent system service.
 - Bind to loopback by default and place the service behind the user's existing
   HTTPS reverse proxy.
-- Spawn one long-lived `codex app-server --listen stdio://` child process.
-- Communicate with the child using newline-delimited JSON over stdin/stdout.
+- In production, connect through `codex app-server proxy` to the managed,
+  long-lived app-server daemon so CodexNest restarts do not stop active turns.
+- Keep direct `codex app-server --listen stdio://` as the zero-setup development
+  fallback. Both modes expose newline-delimited JSON over stdin/stdout to the
+  CodexNest bridge.
 - Expose a small authenticated HTTP API and a WebSocket event stream to clients.
 - Keep Codex as the source of truth for threads, turns, and history.
 - Store only CodexNest-owned state: configured project paths, display names,
   pins, read markers, device registrations, and notification preferences.
 - Be event-driven. Do not poll Codex or add network requests on the hot path when
   an app-server notification already provides the state change.
-- Restart the app-server child with bounded exponential backoff. Surface a clear
-  unavailable state to clients rather than silently losing requests.
+- Reconnect the proxy or restart the direct app-server child with bounded
+  exponential backoff. Rejoin active threads after reconnect and surface a
+  clear unavailable state to clients rather than silently losing requests.
 
 ### Android client
 
@@ -131,8 +135,9 @@ Reference: <https://developers.openai.com/codex/app-server/>
 
 Important rules:
 
-- Run app-server over its stable stdio JSONL transport. Do not expose its
-  experimental WebSocket listener to the network.
+- Keep the CodexNest bridge on the stdio JSONL transport, either directly or
+  through `codex app-server proxy`. Do not expose an app-server WebSocket
+  listener to the network.
 - The CodexNest server is the only process that talks directly to app-server.
 - Initialize once per app-server connection with a distinct client identity,
   then send the `initialized` notification.

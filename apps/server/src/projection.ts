@@ -20,7 +20,13 @@ import type { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
-import { parseModelList, parseThreadList, parseThreadRead, parseTurnsList } from "./codex/guards";
+import {
+  parseModelList,
+  parseThreadList,
+  parseThreadRead,
+  parseThreadResume,
+  parseTurnsList,
+} from "./codex/guards";
 import { projectForCwd } from "./projects";
 import type { StateStore } from "./state/store";
 
@@ -36,6 +42,7 @@ export class AppProjection extends EventEmitter {
   private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
+  private readonly subscribedThreads = new Set<string>();
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -48,9 +55,10 @@ export class AppProjection extends EventEmitter {
     private readonly pushConfigured: boolean,
   ) {
     super();
-    bridge.on("state", () =>
-      this.publish({ type: "connection.changed", connection: this.connection }),
-    );
+    bridge.on("state", (state) => {
+      if (state !== "ready") this.subscribedThreads.clear();
+      this.publish({ type: "connection.changed", connection: this.connection });
+    });
     bridge.on("notification", (notification: ServerNotification) => {
       void this.onNotification(notification).catch((error: unknown) => {
         this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
@@ -234,26 +242,28 @@ export class AppProjection extends EventEmitter {
   }
 
   private async performSync(): Promise<void> {
-    const [active, archived, models] = await Promise.all([
+    const [listedActive, archived, models] = await Promise.all([
       this.listAllThreads(false),
       this.listAllThreads(true),
       this.listAllModels(),
     ]);
+    const active = await Promise.all(listedActive.map((thread) => this.rejoinActiveThread(thread)));
     const incoming = new Set<string>();
     for (const thread of active) {
       incoming.add(thread.id);
       this.threads.set(thread.id, {
         thread,
         archived: false,
-        currentTurnId: this.threads.get(thread.id)?.currentTurnId ?? activeTurnId(thread),
+        currentTurnId: reconciledTurnId(thread, this.threads.get(thread.id)?.currentTurnId),
       });
+      this.hydrateLiveTurn(thread);
     }
     for (const thread of archived) {
       incoming.add(thread.id);
       this.threads.set(thread.id, {
         thread,
         archived: true,
-        currentTurnId: this.threads.get(thread.id)?.currentTurnId ?? activeTurnId(thread),
+        currentTurnId: reconciledTurnId(thread, this.threads.get(thread.id)?.currentTurnId),
       });
     }
     for (const id of this.threads.keys()) {
@@ -273,6 +283,34 @@ export class AppProjection extends EventEmitter {
     this.syncedAt = new Date().toISOString();
     this.publish({ type: "models.changed", models });
     this.publish({ type: "resync.required" });
+  }
+
+  private async rejoinActiveThread(thread: Thread): Promise<Thread> {
+    if (thread.status.type !== "active" || this.subscribedThreads.has(thread.id)) return thread;
+    try {
+      const resumed = parseThreadResume(
+        await this.bridge.request<unknown>("thread/resume", { threadId: thread.id }, 30_000),
+      );
+      this.subscribedThreads.add(thread.id);
+      return resumed.thread;
+    } catch (error) {
+      this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+      return thread;
+    }
+  }
+
+  private hydrateLiveTurn(thread: Thread): void {
+    for (const turn of thread.turns) {
+      if (turn.status === "inProgress") {
+        const key = turnKey(thread.id, turn.id);
+        if (!this.progress.has(key)) this.progress.set(key, emptyProgress(turn.startedAt));
+      }
+      for (const rawItem of turn.items) {
+        const item = normalizeActivity(rawItem);
+        const key = activityKey(thread.id, turn.id, item.id);
+        if (!this.activity.has(key)) this.activity.set(key, item);
+      }
+    }
   }
 
   private async listAllThreads(archived: boolean): Promise<Thread[]> {
@@ -392,6 +430,7 @@ export class AppProjection extends EventEmitter {
       case "thread/deleted":
       case "thread/closed":
         this.threads.delete(notification.params.threadId);
+        this.subscribedThreads.delete(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
         for (const key of this.progress.keys()) {
           if (key.startsWith(`${notification.params.threadId}:`)) this.progress.delete(key);
@@ -399,6 +438,7 @@ export class AppProjection extends EventEmitter {
         this.publish({ type: "thread.removed", threadId: notification.params.threadId });
         break;
       case "turn/started": {
+        this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
         const progress = emptyProgress(notification.params.turn.startedAt);
         this.progress.set(
@@ -785,6 +825,10 @@ function activeTurnId(thread: Thread): string | null {
     if (turn?.status === "inProgress") return turn.id;
   }
   return null;
+}
+
+function reconciledTurnId(thread: Thread, previous?: string | null): string | null {
+  return activeTurnId(thread) ?? (thread.status.type === "active" ? (previous ?? null) : null);
 }
 
 function activityKey(threadId: string, turnId: string, itemId: string): string {

@@ -9,6 +9,7 @@ export interface AppConfig {
   port: number;
   statePath: string;
   codexBin: string;
+  codexTransport: "stdio" | "daemon";
   allowedOrigins: Set<string>;
   clientDist: string;
   websocketAuthTimeoutMs: number;
@@ -27,12 +28,17 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("CODEXNEST_PORT must be an integer from 1 to 65535");
   }
+  const codexTransport = env("CODEXNEST_CODEX_TRANSPORT") ?? "stdio";
+  if (codexTransport !== "stdio" && codexTransport !== "daemon") {
+    throw new Error("CODEXNEST_CODEX_TRANSPORT must be stdio or daemon");
+  }
 
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
     port,
     statePath: env("CODEXNEST_STATE_PATH") ?? resolve(stateRoot, "codexnest/state.json"),
     codexBin: env("CODEXNEST_CODEX_BIN") ?? "codex",
+    codexTransport,
     allowedOrigins: new Set(
       (
         env("CODEXNEST_ALLOWED_ORIGINS") ??

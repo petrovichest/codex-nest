@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseThreadList, parseThreadRead, ProtocolShapeError } from "./guards";
+import { parseThreadList, parseThreadRead, parseThreadResume, ProtocolShapeError } from "./guards";
 
 const thread = {
   id: "thread-1",
@@ -33,6 +33,10 @@ describe("app-server response guards", () => {
         },
       }),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("accepts a resumed thread without depending on unrelated response fields", () => {
+    expect(parseThreadResume({ thread, futureResumeField: true }).thread.id).toBe("thread-1");
   });
 
   it("rejects malformed pagination envelopes", () => {
