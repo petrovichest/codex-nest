@@ -250,13 +250,64 @@ describe("App routing and navigation", () => {
     expect(frame).toHaveAttribute("data-sidebar-side", "left");
   });
 
+  it("restores the project flow and scrolls to the bottom when bottom-up is selected", async () => {
+    localStorage.setItem("codexnest.projectListDirection", "top-down");
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/settings");
+    const navigation = view.container.querySelector(".thread-nav") as HTMLElement;
+    Object.defineProperty(navigation, "scrollHeight", { configurable: true, value: 480 });
+    const direction = await screen.findByRole("combobox", { name: "Порядок проектов" });
+    expect(direction).toHaveValue("top-down");
+    expect(navigation).toHaveClass("top-down");
+
+    fireEvent.change(direction, { target: { value: "bottom-up" } });
+    await waitFor(() =>
+      expect(localStorage.getItem("codexnest.projectListDirection")).toBe("bottom-up"),
+    );
+    expect(navigation).toHaveClass("bottom-up");
+    expect(navigation.scrollTop).toBe(480);
+  });
+
+  it("renders bottom-up sessions oldest to newest and reveals older sessions upward", () => {
+    const threads: ThreadSummary[] = [
+      { ...baseThread, id: "fresh", title: "Свежая", updatedAt: 60 },
+      { ...baseThread, id: "second", title: "Вторая", updatedAt: 50 },
+      { ...baseThread, id: "third", title: "Третья", updatedAt: 40 },
+      { ...baseThread, id: "fourth", title: "Четвёртая", updatedAt: 30 },
+      { ...baseThread, id: "fifth", title: "Пятая", updatedAt: 20 },
+      { ...baseThread, id: "old", title: "Старая", updatedAt: 10 },
+    ];
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/fresh");
+    const projectGroup = view.container.querySelector(".project-group") as HTMLElement;
+    const sessions = projectGroup.querySelector(".project-sessions") as HTMLElement;
+    const sessionTitles = () =>
+      Array.from(sessions.querySelectorAll(".thread-link-title")).map((item) => item.textContent);
+
+    expect(Array.from(projectGroup.children).map((item) => item.className)).toEqual([
+      "project-sessions",
+      "project-title",
+    ]);
+    expect(sessionTitles()).toEqual(["Пятая", "Четвёртая", "Третья", "Вторая", "Свежая"]);
+    expect(sessions.firstElementChild).toHaveClass("show-more");
+
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 1" }));
+    expect(sessionTitles()).toEqual(["Старая", "Пятая", "Четвёртая", "Третья", "Вторая", "Свежая"]);
+    expect(sessions.firstElementChild).toHaveTextContent("Показать меньше");
+  });
+
   it("collapses project sessions without toggling from project actions", () => {
     const api = mockConnection(snapshot([baseThread]));
     api.createProjectThread.mockImplementation(() => new Promise(() => undefined));
 
     renderApp("/threads/newer");
     const toggle = screen.getByRole("button", { name: "Проект" });
+    const projectTitle = toggle.closest(".project-title") as HTMLElement;
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(projectTitle.children[1]).toHaveClass("project-action-menu");
+    expect(projectTitle.children[2]).toHaveAccessibleName("Создать новую сессию в проекте Проект");
 
     fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
     expect(toggle).toHaveAttribute("aria-expanded", "true");

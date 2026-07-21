@@ -23,7 +23,11 @@ import {
 } from "./components/Icons";
 import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
-import { SettingsPage, type SidebarSide } from "./components/SettingsPage";
+import {
+  SettingsPage,
+  type ProjectListDirection,
+  type SidebarSide,
+} from "./components/SettingsPage";
 import { ThreadPage } from "./components/ThreadPage";
 import { useConnection } from "./connection";
 import { usePushNotifications } from "./push";
@@ -32,6 +36,7 @@ import { clearConnectionSettings } from "./storage";
 import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
+const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 
 export function App({
   settings,
@@ -48,6 +53,9 @@ export function App({
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
   const [sidebarSide, setSidebarSide] = useState<SidebarSide>(() =>
     localStorage.getItem(SIDEBAR_SIDE_KEY) === "right" ? "right" : "left",
+  );
+  const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(() =>
+    localStorage.getItem(PROJECT_LIST_DIRECTION_KEY) === "top-down" ? "top-down" : "bottom-up",
   );
   const {
     dragging: drawerDragging,
@@ -71,6 +79,10 @@ export function App({
     localStorage.setItem(SIDEBAR_SIDE_KEY, sidebarSide);
   }, [sidebarSide]);
 
+  useEffect(() => {
+    localStorage.setItem(PROJECT_LIST_DIRECTION_KEY, projectListDirection);
+  }, [projectListDirection]);
+
   const snapshot = state.snapshot;
   const attention = snapshot?.attention ?? [];
   return (
@@ -89,6 +101,7 @@ export function App({
         drawer={drawer}
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
+        projectListDirection={projectListDirection}
       />
       {(drawer || drawerDragging) && (
         <button
@@ -136,6 +149,8 @@ export function App({
                   onThemeChange={setTheme}
                   sidebarSide={sidebarSide}
                   onSidebarSideChange={setSidebarSide}
+                  projectListDirection={projectListDirection}
+                  onProjectListDirectionChange={setProjectListDirection}
                 />
               }
             />
@@ -169,11 +184,13 @@ function Sidebar({
   drawer,
   onClose,
   onNewProject,
+  projectListDirection,
 }: {
   containerRef: RefObject<HTMLElement | null>;
   drawer: boolean;
   onClose(): void;
   onNewProject(): void;
+  projectListDirection: ProjectListDirection;
 }) {
   const { api, state } = useConnection();
   const navigate = useNavigate();
@@ -187,6 +204,7 @@ function Sidebar({
     message: string;
   } | null>(null);
   const noticeTimerRef = useRef<number | undefined>(undefined);
+  const threadNavRef = useRef<HTMLElement>(null);
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
@@ -197,6 +215,13 @@ function Sidebar({
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
+  const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
+
+  useEffect(() => {
+    const navigation = threadNavRef.current;
+    if (!navigation) return;
+    navigation.scrollTop = projectListDirection === "bottom-up" ? navigation.scrollHeight : 0;
+  }, [projectListDirection, projectOrderKey, state.snapshotEpoch]);
 
   useEffect(
     () => () => {
@@ -301,6 +326,17 @@ function Sidebar({
   }
 
   const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError);
+  const archive = archivedThreads.length > 0 && (
+    <details className="archive-group">
+      <summary>
+        Архив
+        <span>{archivedThreads.length}</span>
+      </summary>
+      {archivedThreads.map((thread) => (
+        <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+      ))}
+    </details>
+  );
 
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
@@ -332,15 +368,22 @@ function Sidebar({
           Добавить проект
         </button>
       </div>
-      <nav className="thread-nav" aria-label="Задачи">
-        {groups.map((group, projectIndex) => {
-          const key = group.project?.id ?? "ungrouped";
-          const groupCollapsed = collapsed.has(key);
-          const groupShowsAll = showAll.has(key);
-          const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
-          const sessionsId = `project-sessions-${key}`;
-          return (
-            <section className="project-group" key={key}>
+      <nav className={`thread-nav ${projectListDirection}`} aria-label="Задачи" ref={threadNavRef}>
+        <div className="project-list">
+          {projectListDirection === "bottom-up" && archive}
+          {groups.map((group) => {
+            const key = group.project?.id ?? "ungrouped";
+            const groupCollapsed = collapsed.has(key);
+            const groupShowsAll = showAll.has(key);
+            const isBottomUp = projectListDirection === "bottom-up";
+            const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
+            const orderedThreads = isBottomUp ? [...visible].reverse() : visible;
+            const sessionsId = `project-sessions-${key}`;
+            const projectIndex = group.project
+              ? (snapshot?.projects.findIndex((project) => project.id === group.project!.id) ?? -1)
+              : -1;
+            const lastProjectIndex = (snapshot?.projects.length ?? 0) - 1;
+            const projectHeader = (
               <div className="project-title">
                 <button
                   aria-controls={sessionsId}
@@ -349,26 +392,16 @@ function Sidebar({
                   type="button"
                   onClick={() => toggleCollapsed(key)}
                 >
-                  {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                  {groupCollapsed ? (
+                    <ChevronRightIcon />
+                  ) : (
+                    <ChevronDownIcon className={isBottomUp ? "project-chevron-up" : undefined} />
+                  )}
                   <FolderIcon />
                   <span>{group.project?.displayName ?? "Без проекта"}</span>
                 </button>
                 {group.project && (
                   <>
-                    <button
-                      aria-busy={creatingProjectId === group.project.id}
-                      aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
-                      className="project-icon-action"
-                      disabled={creatingProjectId !== null}
-                      type="button"
-                      onClick={() => void createProjectThread(group.project!.id)}
-                    >
-                      {creatingProjectId === group.project.id ? (
-                        <span className="spinner small" />
-                      ) : (
-                        <PlusIcon />
-                      )}
-                    </button>
                     <details className="project-action-menu">
                       <summary
                         aria-label={`Действия с проектом ${group.project.displayName}`}
@@ -403,10 +436,7 @@ function Sidebar({
                           <ArrowUpIcon /> Переместить выше
                         </button>
                         <button
-                          disabled={
-                            projectIndex === (snapshot?.projects.length ?? 0) - 1 ||
-                            movingProjectId !== null
-                          }
+                          disabled={projectIndex === lastProjectIndex || movingProjectId !== null}
                           type="button"
                           onClick={(event) =>
                             void moveProject(
@@ -420,47 +450,76 @@ function Sidebar({
                         </button>
                       </div>
                     </details>
+                    <button
+                      aria-busy={creatingProjectId === group.project.id}
+                      aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                      className="project-icon-action"
+                      disabled={creatingProjectId !== null}
+                      type="button"
+                      onClick={() => void createProjectThread(group.project!.id)}
+                    >
+                      {creatingProjectId === group.project.id ? (
+                        <span className="spinner small" />
+                      ) : (
+                        <PlusIcon />
+                      )}
+                    </button>
                   </>
                 )}
               </div>
-              {projectNotice && projectNotice.projectId === group.project?.id && (
-                <div
-                  className={`project-action-notice ${projectNotice.kind}`}
-                  role={projectNotice.kind === "error" ? "alert" : "status"}
-                >
-                  {projectNotice.message}
-                </div>
-              )}
-              {createError && createError.projectId === group.project?.id && (
-                <div className="project-create-error" role="alert">
-                  {createError.message}
-                </div>
-              )}
-              <div hidden={groupCollapsed} id={sessionsId}>
-                {visible.map((thread) => (
+            );
+            const feedback = (
+              <>
+                {projectNotice && projectNotice.projectId === group.project?.id && (
+                  <div
+                    className={`project-action-notice ${projectNotice.kind}`}
+                    role={projectNotice.kind === "error" ? "alert" : "status"}
+                  >
+                    {projectNotice.message}
+                  </div>
+                )}
+                {createError && createError.projectId === group.project?.id && (
+                  <div className="project-create-error" role="alert">
+                    {createError.message}
+                  </div>
+                )}
+              </>
+            );
+            const showMoreButton = group.threads.length > 5 && (
+              <button className="show-more" onClick={() => toggleShowAll(key)}>
+                {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
+              </button>
+            );
+            const sessions = (
+              <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
+                {isBottomUp && showMoreButton}
+                {orderedThreads.map((thread) => (
                   <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
                 ))}
-                {group.threads.length > 5 && (
-                  <button className="show-more" onClick={() => toggleShowAll(key)}>
-                    {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
-                  </button>
-                )}
                 {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
+                {!isBottomUp && showMoreButton}
               </div>
-            </section>
-          );
-        })}
-        {archivedThreads.length > 0 && (
-          <details className="archive-group">
-            <summary>
-              Архив
-              <span>{archivedThreads.length}</span>
-            </summary>
-            {archivedThreads.map((thread) => (
-              <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
-            ))}
-          </details>
-        )}
+            );
+            return (
+              <section className="project-group" key={key}>
+                {isBottomUp ? (
+                  <>
+                    {sessions}
+                    {feedback}
+                    {projectHeader}
+                  </>
+                ) : (
+                  <>
+                    {projectHeader}
+                    {feedback}
+                    {sessions}
+                  </>
+                )}
+              </section>
+            );
+          })}
+          {projectListDirection === "top-down" && archive}
+        </div>
       </nav>
     </aside>
   );

@@ -8,6 +8,7 @@ import { ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export type SidebarSide = "left" | "right";
+export type ProjectListDirection = "bottom-up" | "top-down";
 
 const PRESETS: Array<{
   id: PermissionPreset;
@@ -38,6 +39,8 @@ export function SettingsPage({
   onThemeChange,
   sidebarSide,
   onSidebarSideChange,
+  projectListDirection,
+  onProjectListDirectionChange,
 }: {
   onOpenNavigation(): void;
   onSwitchServer(): void;
@@ -45,6 +48,8 @@ export function SettingsPage({
   onThemeChange(theme: string): void;
   sidebarSide: SidebarSide;
   onSidebarSideChange(side: SidebarSide): void;
+  projectListDirection: ProjectListDirection;
+  onProjectListDirectionChange(direction: ProjectListDirection): void;
 }) {
   const { api } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
@@ -112,7 +117,7 @@ export function SettingsPage({
               </span>
               <div>
                 <h2>Оформление</h2>
-                <p>Тема применяется только на этом устройстве.</p>
+                <p>Настройки интерфейса применяются только на этом устройстве.</p>
               </div>
             </div>
             <label className="theme-setting">
@@ -131,6 +136,18 @@ export function SettingsPage({
               >
                 <option value="left">Слева</option>
                 <option value="right">Справа</option>
+              </select>
+            </label>
+            <label className="theme-setting">
+              <span>Порядок проектов</span>
+              <select
+                value={projectListDirection}
+                onChange={(event) =>
+                  onProjectListDirectionChange(event.target.value as ProjectListDirection)
+                }
+              >
+                <option value="bottom-up">Снизу вверх</option>
+                <option value="top-down">Сверху вниз</option>
               </select>
             </label>
           </section>

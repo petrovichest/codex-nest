@@ -135,6 +135,36 @@ describe("SettingsPage", () => {
     expect(onSidebarSideChange).toHaveBeenCalledWith("right");
   });
 
+  it("changes the local project list direction immediately", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+    const onProjectListDirectionChange = vi.fn();
+
+    renderPage(
+      "system",
+      vi.fn(),
+      vi.fn(),
+      "left",
+      vi.fn(),
+      "bottom-up",
+      onProjectListDirectionChange,
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Порядок проектов" }), {
+      target: { value: "top-down" },
+    });
+
+    expect(onProjectListDirectionChange).toHaveBeenCalledWith("top-down");
+  });
+
   it("exposes the server switch action in settings", () => {
     connection.mockReturnValue({
       api: {
@@ -162,6 +192,8 @@ function renderPage(
   onSwitchServer = vi.fn(),
   sidebarSide: "left" | "right" = "left",
   onSidebarSideChange = vi.fn(),
+  projectListDirection: "bottom-up" | "top-down" = "bottom-up",
+  onProjectListDirectionChange = vi.fn(),
 ) {
   return render(
     <MemoryRouter>
@@ -172,6 +204,8 @@ function renderPage(
         onThemeChange={onThemeChange}
         sidebarSide={sidebarSide}
         onSidebarSideChange={onSidebarSideChange}
+        projectListDirection={projectListDirection}
+        onProjectListDirectionChange={onProjectListDirectionChange}
       />
     </MemoryRouter>,
   );
