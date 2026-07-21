@@ -28,10 +28,16 @@ const attention = new AttentionManager();
 const bridge = new CodexBridge({
   codexBin: config.codexBin,
   spawnProcess: () =>
-    spawn(config.codexBin, ["app-server", "--listen", "stdio://"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
-    }) as unknown as JsonlProcess,
+    spawn(
+      config.codexBin,
+      config.codexTransport === "daemon"
+        ? ["app-server", "proxy"]
+        : ["app-server", "--listen", "stdio://"],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: process.env,
+      },
+    ) as unknown as JsonlProcess,
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);

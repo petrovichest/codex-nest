@@ -4,6 +4,7 @@ import type {
   Thread,
   ThreadListResponse,
   ThreadReadResponse,
+  ThreadResumeResponse,
   ThreadTurnsListResponse,
   Turn,
   TurnStartResponse,
@@ -37,6 +38,11 @@ export function parseTurnsList(value: unknown): ThreadTurnsListResponse {
 export function parseThreadRead(value: unknown): ThreadReadResponse {
   if (!isRecord(value) || !isThread(value.thread)) throw new ProtocolShapeError("thread/read");
   return value as unknown as ThreadReadResponse;
+}
+
+export function parseThreadResume(value: unknown): ThreadResumeResponse {
+  if (!isRecord(value) || !isThread(value.thread)) throw new ProtocolShapeError("thread/resume");
+  return value as unknown as ThreadResumeResponse;
 }
 
 export function parseThreadStart(value: unknown): { thread: Thread } {

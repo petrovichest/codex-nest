@@ -4,6 +4,10 @@ CodexNest is an unofficial, self-hosted Android and browser client for managing
 Codex CLI sessions on a private Linux machine. It is not affiliated with or
 endorsed by OpenAI.
 
+Production can connect through Codex's managed app-server daemon so active turns
+survive a CodexNest server restart. Direct stdio remains the zero-setup default
+for local development.
+
 Read [START_HERE.md](./START_HERE.md) for the product brief and
 [PLAN.md](./PLAN.md) for the implementation decisions.
 
