@@ -143,10 +143,21 @@ export type ModelOption = {
   supportsPersonality: boolean;
 };
 
-export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
-export type ApprovalPolicy = "untrusted" | "on-request" | "granular" | "never";
-export type ApprovalsReviewer = "user" | "auto_review";
 export type CollaborationMode = "default" | "plan";
+
+export type PermissionPreset = "ask" | "auto" | "full-access";
+
+export type GlobalPermissionSettings = {
+  preset: PermissionPreset | null;
+  version: string | null;
+  overridden: boolean;
+  message: string | null;
+};
+
+export type UpdateGlobalPermissionSettingsRequest = {
+  preset: PermissionPreset;
+  expectedVersion?: string | null;
+};
 
 export type SessionSettings = {
   collaborationMode: CollaborationMode;
@@ -154,16 +165,10 @@ export type SessionSettings = {
   reasoningEffort?: string;
   serviceTier?: string;
   personality?: string;
-  sandboxMode?: SandboxMode;
-  approvalPolicy?: ApprovalPolicy;
-  approvalsReviewer?: ApprovalsReviewer;
 };
 
 export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
   collaborationMode: "default",
-  sandboxMode: "read-only",
-  approvalPolicy: "on-request",
-  approvalsReviewer: "auto_review",
 };
 
 export type AttentionBase = {
@@ -355,7 +360,6 @@ export type CreateThreadRequest = {
   projectId: string;
   input: string;
   settings?: SessionSettings;
-  inheritCodexSettings?: boolean;
   clientMessageId?: string;
 };
 
@@ -374,9 +378,6 @@ export type UpdateThreadSettingsRequest = {
   reasoningEffort?: string | null;
   serviceTier?: string | null;
   personality?: string | null;
-  sandboxMode?: SandboxMode | null;
-  approvalPolicy?: ApprovalPolicy | null;
-  approvalsReviewer?: ApprovalsReviewer | null;
 };
 
 export type SteerTurnRequest = {

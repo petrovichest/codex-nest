@@ -1,13 +1,10 @@
 import type {
-  ApprovalPolicy,
-  ApprovalsReviewer,
   ModelOption,
-  SandboxMode,
   SessionSettings,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, SlidersIcon } from "./Icons";
 
 export function SettingsPicker({
   models,
@@ -24,22 +21,6 @@ export function SettingsPicker({
 
   return (
     <>
-      <SettingSelect
-        ariaLabel="Уровень подтверждений"
-        disabled={disabled}
-        icon={<ShieldIcon />}
-        value={value.approvalPolicy ?? ""}
-        onChange={(selected) =>
-          onChange({ approvalPolicy: (selected || null) as ApprovalPolicy | null })
-        }
-      >
-        <option value="">Подтверждения</option>
-        <option value="untrusted">Недоверенные</option>
-        <option value="on-request">По запросу</option>
-        <option value="granular">Подробно</option>
-        <option value="never">Не запрашивать</option>
-      </SettingSelect>
-
       <SettingSelect
         ariaLabel="Модель"
         disabled={disabled || models.length === 0}
@@ -117,37 +98,6 @@ export function SettingsPicker({
                   {tier.displayName}
                 </option>
               ))}
-            </select>
-          </label>
-          <label>
-            Sandbox
-            <select
-              disabled={disabled}
-              value={value.sandboxMode ?? ""}
-              onChange={(event) =>
-                onChange({ sandboxMode: (event.target.value || null) as SandboxMode | null })
-              }
-            >
-              <option value="">По умолчанию</option>
-              <option value="read-only">Только чтение</option>
-              <option value="workspace-write">Запись в workspace</option>
-              <option value="danger-full-access">Полный доступ</option>
-            </select>
-          </label>
-          <label>
-            Проверка подтверждений
-            <select
-              disabled={disabled}
-              value={value.approvalsReviewer ?? ""}
-              onChange={(event) =>
-                onChange({
-                  approvalsReviewer: (event.target.value || null) as ApprovalsReviewer | null,
-                })
-              }
-            >
-              <option value="">По умолчанию</option>
-              <option value="user">Вручную</option>
-              <option value="auto_review">Автоматически</option>
             </select>
           </label>
           {model?.supportsPersonality && (

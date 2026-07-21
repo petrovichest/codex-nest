@@ -12,7 +12,7 @@ export function WorkspaceHeader({
   title: string;
   subtitle?: string;
   onOpenNavigation(): void;
-  onToggleInspector(): void;
+  onToggleInspector?(): void;
   actions?: ReactNode;
 }) {
   return (
@@ -35,9 +35,15 @@ export function WorkspaceHeader({
       </div>
       <div className="workspace-actions">
         {actions}
-        <button className="icon-button" aria-label="Показать сведения" onClick={onToggleInspector}>
-          <InfoIcon />
-        </button>
+        {onToggleInspector && (
+          <button
+            className="icon-button"
+            aria-label="Показать сведения"
+            onClick={onToggleInspector}
+          >
+            <InfoIcon />
+          </button>
+        )}
       </div>
     </header>
   );

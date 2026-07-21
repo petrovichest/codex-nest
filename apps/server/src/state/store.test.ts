@@ -42,7 +42,7 @@ describe("StateStore", () => {
     await expect(new StateStore(path).load()).rejects.toThrow("Unsupported or corrupt");
   });
 
-  it("accepts legacy thread metadata and round-trips server-owned settings", async () => {
+  it("accepts legacy permission fields for backward-compatible state loading", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();

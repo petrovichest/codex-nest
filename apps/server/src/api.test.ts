@@ -11,6 +11,7 @@ import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Thread, Turn } from "./codex/generated/v2/index";
+import { RpcError } from "./codex/transport";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
@@ -303,18 +304,13 @@ describe("thread settings", () => {
     expect(created.statusCode).toBe(201);
     expect(created.json().thread.settings).toEqual({
       collaborationMode: "default",
-      sandboxMode: "read-only",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
     });
     const threadStartCall = bridge.request.mock.calls
       .filter(([method]) => method === "thread/start")
       .at(-1);
-    expect(threadStartCall?.[1]).toMatchObject({
-      sandbox: "read-only",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
-    });
+    expect(threadStartCall?.[1]).not.toHaveProperty("sandbox");
+    expect(threadStartCall?.[1]).not.toHaveProperty("approvalPolicy");
+    expect(threadStartCall?.[1]).not.toHaveProperty("approvalsReviewer");
 
     await projection.setSettings("thread", {
       collaborationMode: "default",
@@ -335,9 +331,6 @@ describe("thread settings", () => {
       collaborationMode: "plan",
       model: "gpt-b",
       reasoningEffort: "low",
-      sandboxMode: "read-only",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
     });
     expect(store.snapshot().threadMeta.thread?.settings).toEqual(updated.json().settings);
 
@@ -362,18 +355,14 @@ describe("thread settings", () => {
     const resumeCall = bridge.request.mock.calls
       .filter(([method]) => method === "thread/resume")
       .at(-1);
-    expect(resumeCall?.[1]).toMatchObject({
-      sandbox: "read-only",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
-    });
+    expect(resumeCall?.[1]).not.toHaveProperty("sandbox");
+    expect(resumeCall?.[1]).not.toHaveProperty("approvalPolicy");
+    expect(resumeCall?.[1]).not.toHaveProperty("approvalsReviewer");
     const startCall = bridge.request.mock.calls
       .filter(([method]) => method === "turn/start")
       .at(-1);
     expect(startCall?.[1]).toMatchObject({
       threadId: "thread",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
       collaborationMode: {
         mode: "plan",
         settings: {
@@ -383,6 +372,8 @@ describe("thread settings", () => {
         },
       },
     });
+    expect(startCall?.[1]).not.toHaveProperty("approvalPolicy");
+    expect(startCall?.[1]).not.toHaveProperty("approvalsReviewer");
 
     const invalid = await app.inject({
       method: "PATCH",
@@ -414,11 +405,123 @@ describe("thread settings", () => {
     expect(conflict.statusCode).toBe(409);
     await app.close();
   });
+
+  it("reads and atomically updates global Codex permission presets", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-permissions-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+        websocketAuthTimeoutMs: 25,
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        projectRoot: directory,
+      },
+    );
+    const headers = { authorization: "Bearer correct" };
+
+    const read = await app.inject({ url: "/api/v1/settings/permissions", headers });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toEqual({
+      preset: "auto",
+      version: "version-1",
+      overridden: false,
+      message: null,
+    });
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/permissions",
+      headers,
+      payload: { preset: "full-access", expectedVersion: "version-1" },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ preset: "full-access", version: "version-2" });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "config/batchWrite").at(-1)?.[1],
+    ).toEqual({
+      edits: [
+        { keyPath: "sandbox_mode", value: "danger-full-access", mergeStrategy: "replace" },
+        { keyPath: "approval_policy", value: "never", mergeStrategy: "replace" },
+        { keyPath: "approvals_reviewer", value: "user", mergeStrategy: "replace" },
+      ],
+      expectedVersion: "version-1",
+      reloadUserConfig: true,
+    });
+
+    bridge.permissionConfig = {
+      sandbox_mode: "read-only",
+      approval_policy: "never",
+      approvals_reviewer: "user",
+    };
+    expect(
+      (await app.inject({ url: "/api/v1/settings/permissions", headers })).json().preset,
+    ).toBeNull();
+
+    bridge.writeStatus = "okOverridden";
+    bridge.writeMessage = "Managed by policy";
+    const overridden = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/permissions",
+      headers,
+      payload: { preset: "ask", expectedVersion: "version-2" },
+    });
+    expect(overridden.json()).toMatchObject({
+      preset: "ask",
+      overridden: true,
+      message: "Managed by policy",
+    });
+
+    const invalid = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/permissions",
+      headers,
+      payload: { preset: "unsafe" },
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    bridge.conflictingVersion = "stale";
+    const conflict = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/permissions",
+      headers,
+      payload: { preset: "auto", expectedVersion: "stale" },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({ error: { code: "conflict" } });
+
+    await app.close();
+  });
 });
 
 class SettingsBridge extends EventEmitter {
   state = "ready" as const;
   actualVersion = "0.144.6";
+  permissionConfig: Record<string, unknown> = {
+    sandbox_mode: "workspace-write",
+    approval_policy: "on-request",
+    approvals_reviewer: "auto_review",
+  };
+  configVersion = 1;
+  writeStatus: "ok" | "okOverridden" = "ok";
+  writeMessage: string | null = null;
+  conflictingVersion: string | null = null;
   request = vi.fn(async (method: string, params: Record<string, unknown>) => {
     if (method === "thread/list") {
       return params.archived
@@ -438,6 +541,42 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/resume") return {};
     if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
     if (method === "turn/steer") return { turnId: "steered" };
+    if (method === "config/read") {
+      return {
+        config: this.permissionConfig,
+        origins: {},
+        layers: [
+          {
+            name: { type: "user", file: "/home/hon/.codex/config.toml", profile: null },
+            version: `version-${this.configVersion}`,
+            config: this.permissionConfig,
+            disabledReason: null,
+          },
+        ],
+      };
+    }
+    if (method === "config/batchWrite") {
+      if (params.expectedVersion === this.conflictingVersion) {
+        throw new RpcError(-32_000, "Config version changed");
+      }
+      for (const edit of params.edits as Array<{ keyPath: string; value: unknown }>) {
+        this.permissionConfig[edit.keyPath] = edit.value;
+      }
+      this.configVersion += 1;
+      return {
+        status: this.writeStatus,
+        version: `version-${this.configVersion}`,
+        filePath: "/home/hon/.codex/config.toml",
+        overriddenMetadata:
+          this.writeStatus === "okOverridden"
+            ? {
+                message: this.writeMessage,
+                overridingLayer: { name: { type: "system", file: "/etc/codex/config.toml" } },
+                effectiveValue: null,
+              }
+            : null,
+      };
+    }
     throw new Error(`Unexpected ${method}`);
   });
 }

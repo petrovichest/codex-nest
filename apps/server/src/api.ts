@@ -9,12 +9,15 @@ import type {
   CreateProjectThreadResponse,
   CreateThreadRequest,
   DeviceRegistrationRequest,
+  GlobalPermissionSettings,
   InterruptTurnRequest,
   MarkReadRequest,
   ModelOption,
+  PermissionPreset,
   SessionSettings,
   StartTurnRequest,
   SteerTurnRequest,
+  UpdateGlobalPermissionSettingsRequest,
   UpdateProjectRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
@@ -25,6 +28,7 @@ import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ThreadResumeResponse } from "./codex/generated/v2/index";
 import { parseThreadStart, parseTurnStart, parseTurnSteer } from "./codex/guards";
+import { RpcError } from "./codex/transport";
 import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
 import {
   assertUniqueProjectPath,
@@ -93,6 +97,50 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
   }));
+
+  app.get("/api/v1/settings/permissions", async () => readPermissionSettings(bridge));
+
+  app.put<{ Body: UpdateGlobalPermissionSettingsRequest }>(
+    "/api/v1/settings/permissions",
+    async (request, reply) => {
+      const body = validatePermissionSettings(request.body);
+      const values = PERMISSION_PRESETS[body.preset];
+      let writeResult: ConfigWriteResult;
+      try {
+        writeResult = parseConfigWriteResult(
+          await bridge.request<unknown>(
+            "config/batchWrite",
+            compact({
+              edits: [
+                configEdit("sandbox_mode", values.sandboxMode),
+                configEdit("approval_policy", values.approvalPolicy),
+                configEdit("approvals_reviewer", values.approvalsReviewer),
+              ],
+              expectedVersion: body.expectedVersion ?? undefined,
+              reloadUserConfig: true,
+            }),
+          ),
+        );
+      } catch (error) {
+        if (isConfigVersionConflict(error)) {
+          return apiError(
+            reply,
+            409,
+            "conflict",
+            "Codex configuration changed; reload settings and try again",
+          );
+        }
+        throw error;
+      }
+      const effective = await readPermissionSettings(bridge);
+      if (writeResult.status === "okOverridden") {
+        effective.overridden = true;
+        effective.message =
+          writeResult.message ?? "A managed Codex configuration overrides this setting";
+      }
+      return effective;
+    },
+  );
 
   app.get<{ Querystring: { path?: string } }>("/api/v1/directories", async (request) => {
     if (request.query.path !== undefined && typeof request.query.path !== "string") {
@@ -180,13 +228,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     );
     projection.upsertThread(started.thread);
     projection.markUnmaterialized(started.thread.id);
-    const thread = await projection.setSettings(
-      started.thread.id,
-      {
-        collaborationMode: "default",
-      },
-      true,
-    );
+    const thread = await projection.setSettings(started.thread.id, {
+      collaborationMode: "default",
+    });
     return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
   });
 
@@ -442,9 +486,6 @@ function threadSettings(settings?: SessionSettings): Record<string, unknown> {
     model: settings.model,
     serviceTier: settings.serviceTier,
     personality: settings.personality,
-    sandbox: settings.sandboxMode,
-    approvalPolicy: approvalPolicy(settings.approvalPolicy),
-    approvalsReviewer: settings.approvalsReviewer,
   });
 }
 
@@ -460,8 +501,6 @@ function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<
     serviceTier: settings.serviceTier,
     effort: settings.reasoningEffort,
     personality: settings.personality,
-    approvalPolicy: approvalPolicy(settings.approvalPolicy),
-    approvalsReviewer: settings.approvalsReviewer,
     collaborationMode: {
       mode: settings.collaborationMode,
       settings: {
@@ -523,9 +562,6 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     "reasoningEffort",
     "serviceTier",
     "personality",
-    "sandboxMode",
-    "approvalPolicy",
-    "approvalsReviewer",
   ]);
   if (Object.keys(settings).some((key) => !known.has(key))) {
     throw new ProjectValidationError("Unknown session setting");
@@ -544,27 +580,6 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     ) {
       throw new ProjectValidationError(`${key} must be a non-empty string or null`);
     }
-  }
-  if (
-    settings.sandboxMode !== undefined &&
-    settings.sandboxMode !== null &&
-    !["read-only", "workspace-write", "danger-full-access"].includes(String(settings.sandboxMode))
-  ) {
-    throw new ProjectValidationError("Invalid sandboxMode");
-  }
-  if (
-    settings.approvalPolicy !== undefined &&
-    settings.approvalPolicy !== null &&
-    !["untrusted", "on-request", "granular", "never"].includes(String(settings.approvalPolicy))
-  ) {
-    throw new ProjectValidationError("Invalid approvalPolicy");
-  }
-  if (
-    settings.approvalsReviewer !== undefined &&
-    settings.approvalsReviewer !== null &&
-    !["user", "auto_review"].includes(String(settings.approvalsReviewer))
-  ) {
-    throw new ProjectValidationError("Invalid approvalsReviewer");
   }
   return settings as UpdateThreadSettingsRequest;
 }
@@ -626,24 +641,150 @@ function effectiveModel(settings: SessionSettings, models: ModelOption[]): Model
   return models.find((model) => model.isDefault) ?? models[0];
 }
 
-function approvalPolicy(value: SessionSettings["approvalPolicy"]): unknown {
-  if (value !== "granular") return value;
-  return {
-    granular: {
-      sandbox_approval: true,
-      rules: true,
-      skill_approval: true,
-      request_permissions: true,
-      mcp_elicitations: true,
-    },
-  };
-}
-
 function requireRecord<T>(value: unknown): T {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ProjectValidationError("JSON object expected");
   }
   return value as T;
+}
+
+const PERMISSION_PRESETS: Record<
+  PermissionPreset,
+  { sandboxMode: string; approvalPolicy: string; approvalsReviewer: string }
+> = {
+  ask: {
+    sandboxMode: "workspace-write",
+    approvalPolicy: "on-request",
+    approvalsReviewer: "user",
+  },
+  auto: {
+    sandboxMode: "workspace-write",
+    approvalPolicy: "on-request",
+    approvalsReviewer: "auto_review",
+  },
+  "full-access": {
+    sandboxMode: "danger-full-access",
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+  },
+};
+
+type ConfigReadResult = {
+  config: Record<string, unknown>;
+  origins: Record<string, unknown>;
+  layers: unknown[];
+};
+
+type ConfigWriteResult = {
+  status: "ok" | "okOverridden";
+  version: string;
+  message: string | null;
+};
+
+async function readPermissionSettings(bridge: CodexBridge): Promise<GlobalPermissionSettings> {
+  const result = parseConfigReadResult(
+    await bridge.request<unknown>("config/read", { includeLayers: true }),
+  );
+  const preset = permissionPreset(result.config);
+  const overridden = ["sandbox_mode", "approval_policy", "approvals_reviewer"].some((key) => {
+    const origin = result.origins[key];
+    return (
+      isRecord(origin) &&
+      isRecord(origin.name) &&
+      typeof origin.name.type === "string" &&
+      origin.name.type !== "user"
+    );
+  });
+  return {
+    preset,
+    version: userConfigVersion(result.layers),
+    overridden,
+    message: overridden ? "A managed Codex configuration overrides these permissions" : null,
+  };
+}
+
+function validatePermissionSettings(value: unknown): UpdateGlobalPermissionSettingsRequest {
+  const body = requireRecord<Record<string, unknown>>(value);
+  if (Object.keys(body).some((key) => !["preset", "expectedVersion"].includes(key))) {
+    throw new ProjectValidationError("Unknown permission setting");
+  }
+  if (typeof body.preset !== "string" || !Object.hasOwn(PERMISSION_PRESETS, body.preset)) {
+    throw new ProjectValidationError("Invalid permission preset");
+  }
+  if (
+    body.expectedVersion !== undefined &&
+    body.expectedVersion !== null &&
+    (typeof body.expectedVersion !== "string" || !body.expectedVersion)
+  ) {
+    throw new ProjectValidationError("expectedVersion must be a non-empty string or null");
+  }
+  return body as UpdateGlobalPermissionSettingsRequest;
+}
+
+function configEdit(keyPath: string, value: string) {
+  return { keyPath, value, mergeStrategy: "replace" as const };
+}
+
+function parseConfigReadResult(value: unknown): ConfigReadResult {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.config) ||
+    !isRecord(value.origins) ||
+    !Array.isArray(value.layers)
+  ) {
+    throw new Error("Malformed config/read response");
+  }
+  return { config: value.config, origins: value.origins, layers: value.layers };
+}
+
+function parseConfigWriteResult(value: unknown): ConfigWriteResult {
+  if (
+    !isRecord(value) ||
+    !["ok", "okOverridden"].includes(String(value.status)) ||
+    typeof value.version !== "string"
+  ) {
+    throw new Error("Malformed config/batchWrite response");
+  }
+  const metadata = value.overriddenMetadata;
+  const message =
+    isRecord(metadata) && typeof metadata.message === "string" ? metadata.message : null;
+  return {
+    status: value.status as ConfigWriteResult["status"],
+    version: value.version,
+    message,
+  };
+}
+
+function permissionPreset(config: Record<string, unknown>): PermissionPreset | null {
+  const sandboxMode = config.sandbox_mode;
+  const approvalPolicy = config.approval_policy;
+  const reviewer = config.approvals_reviewer;
+  if (sandboxMode === "danger-full-access" && approvalPolicy === "never") {
+    return "full-access";
+  }
+  if (sandboxMode !== "workspace-write" || approvalPolicy !== "on-request") return null;
+  if (reviewer === "user") return "ask";
+  if (reviewer === "auto_review") return "auto";
+  return null;
+}
+
+function userConfigVersion(layers: unknown[]): string | null {
+  const userLayers = layers.filter(
+    (layer) => isRecord(layer) && isRecord(layer.name) && layer.name.type === "user",
+  );
+  const base = userLayers.find(
+    (layer) => isRecord(layer) && isRecord(layer.name) && layer.name.profile === null,
+  );
+  const selected = base ?? userLayers[0];
+  return isRecord(selected) && typeof selected.version === "string" ? selected.version : null;
+}
+
+function isConfigVersionConflict(error: unknown): boolean {
+  return error instanceof RpcError && /version|stale|changed|conflict/i.test(error.message);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function validInstallationId(value: string): boolean {
