@@ -12,8 +12,11 @@ Restart=on-failure
 RestartSec=2
 TimeoutStopSec=20
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
+# Codex provides its own Linux sandbox through bubblewrap. PrivateTmp and
+# ProtectSystem would put this user service in an AppArmor user namespace first,
+# preventing Codex from creating the nested namespace it needs.
+PrivateTmp=false
+ProtectSystem=false
 
 [Install]
 WantedBy=default.target

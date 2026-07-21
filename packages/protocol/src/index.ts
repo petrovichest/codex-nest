@@ -145,6 +145,7 @@ export type ModelOption = {
 
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "untrusted" | "on-request" | "granular" | "never";
+export type ApprovalsReviewer = "user" | "auto_review";
 export type CollaborationMode = "default" | "plan";
 
 export type SessionSettings = {
@@ -155,12 +156,14 @@ export type SessionSettings = {
   personality?: string;
   sandboxMode?: SandboxMode;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
 };
 
 export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
   collaborationMode: "default",
-  sandboxMode: "workspace-write",
+  sandboxMode: "read-only",
   approvalPolicy: "on-request",
+  approvalsReviewer: "auto_review",
 };
 
 export type AttentionBase = {
@@ -368,6 +371,7 @@ export type UpdateThreadSettingsRequest = {
   personality?: string | null;
   sandboxMode?: SandboxMode | null;
   approvalPolicy?: ApprovalPolicy | null;
+  approvalsReviewer?: ApprovalsReviewer | null;
 };
 
 export type SteerTurnRequest = {

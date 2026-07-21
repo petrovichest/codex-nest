@@ -1,5 +1,6 @@
 import type {
   ApprovalPolicy,
+  ApprovalsReviewer,
   ModelOption,
   SandboxMode,
   SessionSettings,
@@ -131,6 +132,22 @@ export function SettingsPicker({
               <option value="read-only">Только чтение</option>
               <option value="workspace-write">Запись в workspace</option>
               <option value="danger-full-access">Полный доступ</option>
+            </select>
+          </label>
+          <label>
+            Проверка подтверждений
+            <select
+              disabled={disabled}
+              value={value.approvalsReviewer ?? ""}
+              onChange={(event) =>
+                onChange({
+                  approvalsReviewer: (event.target.value || null) as ApprovalsReviewer | null,
+                })
+              }
+            >
+              <option value="">По умолчанию</option>
+              <option value="user">Вручную</option>
+              <option value="auto_review">Автоматически</option>
             </select>
           </label>
           {model?.supportsPersonality && (

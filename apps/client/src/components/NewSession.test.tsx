@@ -70,8 +70,9 @@ describe("NewSession", () => {
         input: "Обнови интерфейс",
         settings: {
           collaborationMode: "default",
-          sandboxMode: "workspace-write",
+          sandboxMode: "read-only",
           approvalPolicy: "on-request",
+          approvalsReviewer: "auto_review",
         },
       }),
     );

@@ -192,6 +192,12 @@ function isSessionSettings(value: unknown): value is SessionSettings {
   ) {
     return false;
   }
+  if (
+    value.approvalsReviewer !== undefined &&
+    !["user", "auto_review"].includes(String(value.approvalsReviewer))
+  ) {
+    return false;
+  }
   return (
     value.approvalPolicy === undefined ||
     ["untrusted", "on-request", "granular", "never"].includes(String(value.approvalPolicy))

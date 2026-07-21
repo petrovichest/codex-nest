@@ -139,6 +139,7 @@ describe("Activity", () => {
     expect(screen.getByRole("combobox", { name: "Уровень подтверждений" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Проверка подтверждений" })).toHaveValue("");
     const plan = screen.getByRole("button", { name: "Включить режим планирования" });
     expect(plan).toHaveAttribute("aria-pressed", "false");
 

@@ -56,6 +56,7 @@ describe("StateStore", () => {
           model: "gpt",
           reasoningEffort: "high",
           approvalPolicy: "on-request",
+          approvalsReviewer: "auto_review",
         },
       };
     });
@@ -68,6 +69,7 @@ describe("StateStore", () => {
       model: "gpt",
       reasoningEffort: "high",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
   });
 

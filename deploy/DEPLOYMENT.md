@@ -98,6 +98,11 @@ command -v codex
 не в `~/codex-nest` или Node.js установлен не в `~/.local/node-v24`, исправьте
 `WorkingDirectory` и `ExecStart` в соответствии с результатом `command -v node`.
 
+Не включайте для пользовательского сервиса `PrivateTmp` или `ProtectSystem`.
+На Linux Codex создаёт собственную песочницу через `bubblewrap`; внешний mount/user
+namespace от этих директив может заблокировать создание вложенной песочницы.
+`NoNewPrivileges=true` при этом следует оставить включённым.
+
 ### Вариант A: HTTP внутри доверенной LAN
 
 Это самый короткий путь для первого запуска. В `server.env` задайте:
