@@ -2,6 +2,7 @@ import type {
   ActivityItem,
   AppSnapshot,
   Project,
+  QueuedMessage,
   ServerEvent,
   ThreadDetail,
   ThreadSummary,
@@ -87,6 +88,10 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       break;
     case "activity.upserted":
       return applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item);
+    case "turn.progressed":
+      return applyProgress({ ...state, snapshot }, event.threadId, event.turnId, event.progress);
+    case "queue.changed":
+      return applyQueue({ ...state, snapshot }, event.threadId, event.messages);
     case "resync.required":
       break;
   }
@@ -119,12 +124,62 @@ function applyActivity(
   const turns = [...detail.turns];
   const index = turns.findIndex((turn) => turn.id === turnId);
   if (index < 0) {
-    turns.push({ id: turnId, status: "inProgress", items: [item] });
+    turns.push({
+      id: turnId,
+      status: "inProgress",
+      progress: emptyProgress(),
+      items: [item],
+    });
   } else {
     const turn = turns[index];
     turns[index] = { ...turn, items: upsert(turn.items, item) };
   }
   return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
+function applyProgress(
+  state: ClientState,
+  threadId: string,
+  turnId: string,
+  progress: ThreadDetail["turns"][number]["progress"],
+): ClientState {
+  const detail = state.details[threadId];
+  if (!detail) return state;
+  const turns = [...detail.turns];
+  const index = turns.findIndex((turn) => turn.id === turnId);
+  if (index < 0) {
+    turns.push({ id: turnId, status: "inProgress", progress, items: [] });
+  } else {
+    turns[index] = { ...turns[index], progress };
+  }
+  return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
+function applyQueue(
+  state: ClientState,
+  threadId: string,
+  queuedMessages: QueuedMessage[],
+): ClientState {
+  const detail = state.details[threadId];
+  if (!detail) return state;
+  return {
+    ...state,
+    details: {
+      ...state.details,
+      [threadId]: { ...detail, queuedMessages },
+    },
+  };
+}
+
+function emptyProgress(): ThreadDetail["turns"][number]["progress"] {
+  return {
+    startedAt: null,
+    explanation: null,
+    steps: [],
+    filesChanged: 0,
+    additions: 0,
+    deletions: 0,
+  };
 }
 
 function upsert<T extends { id: string }>(items: T[], item: T): T[] {

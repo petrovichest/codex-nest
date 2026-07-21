@@ -1104,19 +1104,24 @@ pre {
   background: var(--surface-muted);
 }
 
-.message.reasoning,
-.message.plan {
-  padding: 10px 14px;
-  border-left: 2px solid var(--line-strong);
+.message.reasoning {
   color: var(--muted-strong);
   font-size: 14px;
 }
 
 .message.plan {
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-left: 2px solid var(--line-strong);
-  border-radius: 0 10px 10px 0;
+  border-radius: 14px;
   background: color-mix(in srgb, var(--surface-muted) 65%, transparent);
+}
+
+.implement-plan {
+  width: fit-content;
+  margin: 12px 0 0 auto;
+  border-color: transparent;
+  background: var(--surface-muted);
+  color: var(--text);
 }
 
 .activity-label {
@@ -1133,6 +1138,47 @@ pre {
   border: 1px solid var(--line);
   border-radius: 11px;
   background: var(--surface);
+}
+
+.activity-group {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.activity-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.activity-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-group-icon {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+}
+
+.activity-group-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.activity-group-error {
+  color: var(--danger);
+}
+
+.activity-group-content {
+  display: grid;
+  gap: 8px;
+  margin-top: 7px;
+  padding-left: 28px;
 }
 
 .activity-card > summary {
@@ -1231,6 +1277,142 @@ pre {
   margin: 0 auto;
   padding: 0 22px calc(14px + env(safe-area-inset-bottom));
   background: linear-gradient(to bottom, transparent, var(--bg) 20px);
+}
+
+.turn-progress {
+  position: relative;
+  z-index: 24;
+  width: fit-content;
+  max-width: min(760px, calc(100% - 44px));
+  margin: 0 auto 10px;
+}
+
+.turn-progress > summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  box-shadow: 0 5px 18px rgb(28 30 27 / 7%);
+  color: var(--muted-strong);
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+
+.turn-progress > summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-progress > summary > svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease;
+}
+
+.turn-progress[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.turn-progress-diff {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-progress-diff b {
+  font-weight: 550;
+}
+
+.diff-add {
+  color: #159447;
+}
+
+.diff-delete {
+  color: #ca3535;
+}
+
+.turn-progress-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(430px, calc(100vw - var(--sidebar-width) - 32px));
+  max-height: min(52dvh, 460px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.turn-progress-popover p {
+  margin: 9px 0 0;
+  line-height: 1.45;
+}
+
+.turn-progress-time {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.turn-progress-time svg {
+  width: 15px;
+  height: 15px;
+}
+
+.turn-progress-popover ol {
+  display: grid;
+  gap: 9px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.progress-step {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.35;
+}
+
+.progress-step > span {
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+}
+
+.progress-step.completed > span::after {
+  content: "✓";
+  position: relative;
+  top: -5px;
+  left: 2px;
+  color: var(--muted-strong);
+  font-size: 11px;
+}
+
+.progress-step.inProgress > span {
+  border-color: #4b9fe7;
+  border-right-color: transparent;
+}
+
+.progress-step.pending {
+  color: var(--muted);
 }
 
 .composer-box {
@@ -1452,6 +1634,54 @@ pre {
   font-size: 12px;
 }
 
+.queued-messages {
+  display: grid;
+  gap: 9px;
+}
+
+.queued-message {
+  opacity: 0.82;
+  border: 1px dashed var(--line-strong);
+}
+
+.queued-message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.queued-message-footer button {
+  min-height: 27px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  font-size: 11px;
+}
+
+.attention-jump {
+  position: absolute;
+  right: 24px;
+  bottom: 152px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warning-text);
+  border-color: color-mix(in srgb, #d99b28 35%, var(--line));
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+
+.attention-jump svg {
+  width: 14px;
+  height: 14px;
+}
+
 .composer-empty-projects {
   display: flex;
   align-items: center;
@@ -1629,10 +1859,10 @@ pre {
 }
 
 .attention-stack {
-  width: min(840px, calc(100% - 56px));
+  width: 100%;
   display: grid;
   gap: 10px;
-  margin: 18px auto 0;
+  margin: 0;
 }
 
 .attention-card {
@@ -2176,6 +2406,27 @@ pre {
     padding: 0 10px calc(9px + env(safe-area-inset-bottom));
   }
 
+  .turn-progress {
+    max-width: calc(100% - 20px);
+    margin-bottom: 7px;
+  }
+
+  .turn-progress > summary {
+    max-width: 100%;
+  }
+
+  .turn-progress-diff {
+    max-width: 42vw;
+  }
+
+  .turn-progress-popover {
+    position: fixed;
+    right: 10px;
+    bottom: calc(138px + env(safe-area-inset-bottom));
+    left: 10px;
+    width: auto;
+  }
+
   .composer-box {
     border-radius: 16px;
   }
@@ -2217,8 +2468,13 @@ pre {
   }
 
   .attention-stack {
-    width: calc(100% - 28px);
-    margin-top: 14px;
+    width: 100%;
+    margin: 0;
+  }
+
+  .attention-jump {
+    right: 12px;
+    bottom: calc(136px + env(safe-area-inset-bottom));
   }
 
   .session-inspector {

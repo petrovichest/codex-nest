@@ -1,14 +1,22 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useParams } from "react-router-dom";
 
-import type { ActivityItem, UpdateThreadSettingsRequest } from "@codexnest/protocol";
+import type {
+  ActivityItem,
+  QueuedMessage,
+  ThreadDetail,
+  TurnProgress,
+  UpdateThreadSettingsRequest,
+} from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer } from "./Composer";
 import {
   ArchiveIcon,
+  ChevronDownIcon,
+  ClockIcon,
   FileIcon,
   MoreIcon,
   PencilIcon,
@@ -30,8 +38,14 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
+  const [attentionJump, setAttentionJump] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const initialScrollThread = useRef<string | null>(null);
+  const followsTail = useRef(true);
+  const previousAttentionIds = useRef<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
   );
@@ -54,6 +68,31 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     }
   }, [api, detail, summary, threadId]);
 
+  useLayoutEffect(() => {
+    if (!detail || initialScrollThread.current === threadId) return;
+    initialScrollThread.current = threadId;
+    followsTail.current = true;
+    scrollToEnd(scrollRef.current);
+  }, [detail, threadId]);
+
+  useLayoutEffect(() => {
+    if (!detail || initialScrollThread.current !== threadId || !followsTail.current) return;
+    scrollToEnd(scrollRef.current);
+  }, [attention, detail, threadId]);
+
+  useEffect(() => {
+    const ids = attention.map((request) => request.id).join(":");
+    if (
+      previousAttentionIds.current !== null &&
+      ids !== previousAttentionIds.current &&
+      attention.length > 0 &&
+      !followsTail.current
+    ) {
+      setAttentionJump(true);
+    }
+    previousAttentionIds.current = ids;
+  }, [attention]);
+
   if (!summary)
     return (
       <div className="center-state">
@@ -68,7 +107,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     setError(null);
     try {
       if (summary!.currentTurnId) {
-        await api.steer(threadId, { turnId: summary!.currentTurnId, input });
+        await api.enqueue(threadId, input);
       } else {
         await api.startTurn(threadId, { input });
       }
@@ -77,6 +116,40 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function implementPlan() {
+    setBusy(true);
+    setError(null);
+    let changedMode = false;
+    try {
+      const thread = await api.updateThreadSettings(threadId, { collaborationMode: "default" });
+      changedMode = true;
+      dispatch({ type: "thread", thread });
+      await api.startTurn(threadId, { input: "Да, реализуй этот план" });
+    } catch (caught) {
+      if (changedMode) {
+        await api
+          .updateThreadSettings(threadId, { collaborationMode: "plan" })
+          .then((thread) => dispatch({ type: "thread", thread }))
+          .catch(() => undefined);
+      }
+      setError(caught instanceof Error ? caught.message : "Не удалось начать реализацию плана");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendQueuedNow(messageId: string) {
+    setSendingQueuedId(messageId);
+    setError(null);
+    try {
+      await api.sendQueuedNow(threadId, messageId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
+    } finally {
+      setSendingQueuedId(null);
     }
   }
 
@@ -95,6 +168,14 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
       setSettingsBusy(false);
     }
   }
+
+  const latestPlanId =
+    !summary.currentTurnId && summary.settings.collaborationMode === "plan"
+      ? findLatestCompletedPlan(detail)
+      : null;
+  const activeProgress = summary.currentTurnId
+    ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
+    : undefined;
 
   return (
     <div className="thread-workspace">
@@ -123,8 +204,15 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
             </details>
           }
         />
-        <div className="conversation-scroll">
-          <AttentionPanel requests={attention} />
+        <div
+          className="conversation-scroll"
+          ref={scrollRef}
+          onScroll={(event) => {
+            const node = event.currentTarget;
+            followsTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120;
+            if (followsTail.current) setAttentionJump(false);
+          }}
+        >
           <section className="timeline" aria-live="polite">
             {!detail && (
               <div className="center-state compact">
@@ -133,19 +221,49 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
             )}
             {detail?.turns.map((turn) => (
               <div className="turn" key={turn.id}>
-                {turn.items.map((item) => (
-                  <Activity item={item} key={item.id} />
-                ))}
-                {turn.status === "inProgress" && (
-                  <div className="working">
-                    <div className="spinner small" />
-                    Codex работает…
-                  </div>
+                {groupActivities(turn.items).map((entry) =>
+                  Array.isArray(entry) ? (
+                    <ActivityGroup items={entry} key={entry.map((item) => item.id).join(":")} />
+                  ) : (
+                    <div key={entry.id}>
+                      <Activity item={entry} />
+                      {entry.id === latestPlanId && (
+                        <button
+                          className="implement-plan"
+                          disabled={busy}
+                          onClick={() => void implementPlan()}
+                        >
+                          Да, реализуй этот план
+                        </button>
+                      )}
+                    </div>
+                  ),
                 )}
               </div>
             ))}
+            <AttentionPanel requests={attention} />
+            <QueuedMessages
+              messages={detail?.queuedMessages ?? []}
+              sendingId={sendingQueuedId}
+              onSendNow={(messageId) => void sendQueuedNow(messageId)}
+            />
           </section>
         </div>
+        {attentionJump && (
+          <button
+            className="attention-jump"
+            onClick={() => {
+              followsTail.current = true;
+              setAttentionJump(false);
+              scrollToEnd(scrollRef.current, "smooth");
+            }}
+          >
+            Требуется внимание <ChevronDownIcon />
+          </button>
+        )}
+        {summary.currentTurnId && (
+          <TurnProgressIndicator key={summary.currentTurnId} progress={activeProgress} />
+        )}
         <Composer
           input={input}
           onInput={setInput}
@@ -202,10 +320,17 @@ export function Activity({ item }: { item: ActivityItem }) {
       </article>
     );
   }
-  if (item.type === "reasoning" || item.type === "plan") {
+  if (item.type === "reasoning") {
     return (
-      <article className={`message ${item.type}`}>
-        <div className="activity-label">{item.type === "reasoning" ? "Ход работы" : "План"}</div>
+      <article className="message reasoning">
+        <ReactMarkdown>{item.text}</ReactMarkdown>
+      </article>
+    );
+  }
+  if (item.type === "plan") {
+    return (
+      <article className="message plan">
+        <div className="activity-label">План</div>
         <ReactMarkdown>{item.text}</ReactMarkdown>
       </article>
     );
@@ -250,6 +375,187 @@ export function Activity({ item }: { item: ActivityItem }) {
     );
   }
   return null;
+}
+
+function ActivityGroup({ items }: { items: ActivityItem[] }) {
+  const status = items.some((item) => item.status === "failed")
+    ? "failed"
+    : items.some((item) => item.status === "inProgress")
+      ? "inProgress"
+      : "completed";
+  const labels: string[] = [];
+  if (items.some((item) => item.type === "command" && item.kind === "read")) {
+    labels.push("Прочитаны файлы");
+  }
+  if (items.some((item) => item.type === "command" && item.kind === "search")) {
+    labels.push("Выполнен поиск");
+  }
+  if (items.some((item) => item.type === "command" && item.kind === "command")) {
+    labels.push("Выполнены команды");
+  }
+  if (items.some((item) => item.type === "fileChange")) labels.push("Отредактированы файлы");
+  if (items.some((item) => item.type === "tool")) labels.push("Использованы инструменты");
+  return (
+    <details className="activity-group">
+      <summary>
+        <span className="activity-group-icon">
+          <ToolIcon />
+        </span>
+        <span>{labels.join(" · ") || "Выполнены действия"}</span>
+        {status === "inProgress" && <span className="spinner small" />}
+        {status === "failed" && <span className="activity-group-error">Ошибка</span>}
+      </summary>
+      <div className="activity-group-content">
+        {items.map((item) => (
+          <Activity item={item} key={item.id} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function QueuedMessages({
+  messages,
+  sendingId,
+  onSendNow,
+}: {
+  messages: QueuedMessage[];
+  sendingId: string | null;
+  onSendNow(messageId: string): void;
+}) {
+  if (!messages.length) return null;
+  return (
+    <section className="queued-messages" aria-label="Очередь сообщений">
+      {messages.map((message) => (
+        <article className="message userMessage queued-message" key={message.id}>
+          <ReactMarkdown>{message.text}</ReactMarkdown>
+          <div className="queued-message-footer">
+            <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
+            <button
+              disabled={message.status === "dispatching" || sendingId !== null}
+              onClick={() => onSendNow(message.id)}
+            >
+              Отправить сейчас
+            </button>
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
+  const [fallbackStartedAt] = useState(Date.now);
+  const startedAt = progress?.startedAt ?? fallbackStartedAt;
+  const elapsed = useElapsed(startedAt);
+  const steps = progress?.steps ?? [];
+  const currentIndex = steps.findIndex((step) => step.status === "inProgress");
+  const firstPending = steps.findIndex((step) => step.status === "pending");
+  const stepNumber =
+    currentIndex >= 0
+      ? currentIndex + 1
+      : firstPending >= 0
+        ? firstPending + 1
+        : Math.max(steps.length, 1);
+  const hasDiff = Boolean(
+    progress && (progress.filesChanged || progress.additions || progress.deletions),
+  );
+  return (
+    <details className="turn-progress">
+      <summary>
+        <span className="spinner small" />
+        <span>{steps.length ? `Шаг ${stepNumber} / ${steps.length}` : "Codex работает…"}</span>
+        {hasDiff && (
+          <span className="turn-progress-diff">
+            Изменено {formatFileCount(progress!.filesChanged)}
+            <b className="diff-add">+{progress!.additions}</b>
+            <b className="diff-delete">-{progress!.deletions}</b>
+          </span>
+        )}
+        <ChevronDownIcon />
+      </summary>
+      <div className="turn-progress-popover">
+        <div className="turn-progress-time">
+          <ClockIcon /> Работает уже {elapsed}
+        </div>
+        {progress?.explanation && <p>{progress.explanation}</p>}
+        {steps.length ? (
+          <ol>
+            {steps.map((step) => (
+              <li className={`progress-step ${step.status}`} key={step.step}>
+                <span />
+                {step.step}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p>Codex выполняет текущую задачу.</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function useElapsed(startedAt: number): string {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+function formatFileCount(count: number): string {
+  const modulo100 = count % 100;
+  const modulo10 = count % 10;
+  const suffix =
+    modulo100 >= 11 && modulo100 <= 14
+      ? "файлов"
+      : modulo10 === 1
+        ? "файл"
+        : modulo10 >= 2 && modulo10 <= 4
+          ? "файла"
+          : "файлов";
+  return `${count} ${suffix}`;
+}
+
+function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityItem[]> {
+  const result: Array<ActivityItem | ActivityItem[]> = [];
+  let group: ActivityItem[] = [];
+  const flush = () => {
+    if (group.length) result.push(group);
+    group = [];
+  };
+  for (const item of items) {
+    if (["command", "fileChange", "tool"].includes(item.type)) {
+      group.push(item);
+    } else {
+      flush();
+      result.push(item);
+    }
+  }
+  flush();
+  return result;
+}
+
+function findLatestCompletedPlan(detail?: ThreadDetail): string | null {
+  const turn = detail?.turns.at(-1);
+  if (!turn || turn.status === "inProgress") return null;
+  return (
+    [...turn.items].reverse().find((item) => item.type === "plan" && item.status === "completed")
+      ?.id ?? null
+  );
+}
+
+function scrollToEnd(node: HTMLDivElement | null, behavior: ScrollBehavior = "auto") {
+  if (!node) return;
+  if (typeof node.scrollTo === "function") {
+    node.scrollTo({ top: node.scrollHeight, behavior });
+  } else {
+    node.scrollTop = node.scrollHeight;
+  }
 }
 
 function ActivityDetails({

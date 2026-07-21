@@ -375,6 +375,34 @@ describe("thread settings", () => {
     expect(startCall?.[1]).not.toHaveProperty("approvalPolicy");
     expect(startCall?.[1]).not.toHaveProperty("approvalsReviewer");
 
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Поставь в очередь" },
+    });
+    expect(queued.statusCode).toBe(202);
+    expect(store.snapshot().messageQueues?.thread).toEqual([
+      expect.objectContaining({
+        id: queued.json().id,
+        text: "Поставь в очередь",
+        status: "queued",
+      }),
+    ]);
+    const sentNow = await app.inject({
+      method: "POST",
+      url: `/api/v1/threads/thread/queue/${queued.json().id}/send`,
+      headers,
+    });
+    expect(sentNow.statusCode).toBe(200);
+    expect(store.snapshot().messageQueues?.thread).toBeUndefined();
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],
+    ).toMatchObject({
+      clientUserMessageId: queued.json().id,
+      input: [{ type: "text", text: "Поставь в очередь", text_elements: [] }],
+    });
+
     const invalid = await app.inject({
       method: "PATCH",
       url: "/api/v1/threads/thread/settings",
@@ -403,6 +431,27 @@ describe("thread settings", () => {
       payload: { collaborationMode: "default" },
     });
     expect(conflict.statusCode).toBe(409);
+
+    const nextQueued = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Следующий ход" },
+    });
+    expect(nextQueued.statusCode).toBe(202);
+    const startsBeforeCompletion = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/start",
+    ).length;
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "thread", turn: testTurn("steered", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        startsBeforeCompletion + 1,
+      ),
+    );
+    expect(store.snapshot().messageQueues?.thread).toBeUndefined();
     await app.close();
   });
 

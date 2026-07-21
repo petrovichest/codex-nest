@@ -75,7 +75,30 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   currentTurnId: string | null;
+  queuedMessageCount: number;
   settings: SessionSettings;
+};
+
+export type QueuedMessage = {
+  id: string;
+  threadId: string;
+  text: string;
+  createdAt: number;
+  status: "queued" | "dispatching";
+};
+
+export type TurnPlanStep = {
+  step: string;
+  status: "pending" | "inProgress" | "completed";
+};
+
+export type TurnProgress = {
+  startedAt: number | null;
+  explanation: string | null;
+  steps: TurnPlanStep[];
+  filesChanged: number;
+  additions: number;
+  deletions: number;
 };
 
 export type ActivityItem =
@@ -89,6 +112,7 @@ export type ActivityItem =
       type: "command";
       id: string;
       status: "inProgress" | "completed" | "failed";
+      kind: "read" | "search" | "command";
       command: string;
       cwd: string | null;
       output: string;
@@ -118,12 +142,14 @@ export type ActivityItem =
 export type TurnView = {
   id: string;
   status: "inProgress" | ThreadOutcome;
+  progress: TurnProgress;
   items: ActivityItem[];
 };
 
 export type ThreadDetail = {
   summary: ThreadSummary;
   turns: TurnView[];
+  queuedMessages: QueuedMessage[];
 };
 
 export type ModelOption = {
@@ -329,6 +355,8 @@ export type ServerEvent =
   | { type: "thread.upserted"; thread: ThreadSummary }
   | { type: "thread.removed"; threadId: string }
   | { type: "activity.upserted"; threadId: string; turnId: string; item: ActivityItem }
+  | { type: "turn.progressed"; threadId: string; turnId: string; progress: TurnProgress }
+  | { type: "queue.changed"; threadId: string; messages: QueuedMessage[] }
   | { type: "attention.upserted"; attention: AttentionRequest }
   | { type: "attention.removed"; attentionId: string }
   | { type: "models.changed"; models: ModelOption[] }
@@ -370,6 +398,10 @@ export type CreateProjectThreadResponse = {
 export type StartTurnRequest = {
   input: string;
   clientMessageId?: string;
+};
+
+export type QueueMessageRequest = {
+  input: string;
 };
 
 export type UpdateThreadSettingsRequest = {

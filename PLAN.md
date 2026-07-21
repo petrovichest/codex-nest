@@ -16,8 +16,13 @@ This document is the implementation authority when it differs from
 - Codex owns threads, turns, and history. CodexNest stores only projects,
   authentication verifier, read/pin/outcome metadata, and device registrations
   in one atomic JSON file.
+- Messages written during an active turn use a durable server-side FIFO queue.
+  Only pending text is stored in the private state file; delivery uses stable
+  client message IDs and removes text after Codex accepts it.
 - No polling loop. Full pagination runs at startup and explicit foreground/manual
   sync; notifications drive the live projection.
+- Live execution progress is projected from `turn/plan/updated` and
+  `turn/diff/updated`; it is not duplicated into persistent history.
 - React/Vite is shared by browser and Capacitor Android. Russian is the first
   release language; system/light/dark themes are supported.
 - The APK is sideloaded and signed with a user-owned key. Optional background

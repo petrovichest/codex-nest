@@ -24,6 +24,7 @@ const baseThread: ThreadSummary = {
   createdAt: 1,
   updatedAt: 20,
   currentTurnId: null,
+  queuedMessageCount: 0,
   settings: { collaborationMode: "default" },
 };
 
@@ -171,7 +172,10 @@ function mockConnection(appSnapshot: AppSnapshot) {
     state: {
       snapshot: appSnapshot,
       details: Object.fromEntries(
-        appSnapshot.threads.map((thread) => [thread.id, { summary: thread, turns: [] }]),
+        appSnapshot.threads.map((thread) => [
+          thread.id,
+          { summary: thread, turns: [], queuedMessages: [] },
+        ]),
       ),
       network: "connected",
       error: null,
@@ -181,6 +185,7 @@ function mockConnection(appSnapshot: AppSnapshot) {
     refreshDetail: vi.fn().mockImplementation(async (id: string) => ({
       summary: appSnapshot.threads.find((thread) => thread.id === id),
       turns: [],
+      queuedMessages: [],
     })),
   });
   return api;

@@ -14,6 +14,8 @@ import type {
   MarkReadRequest,
   ModelOption,
   PermissionPreset,
+  QueueMessageRequest,
+  QueuedMessage,
   SessionSettings,
   StartTurnRequest,
   SteerTurnRequest,
@@ -27,7 +29,7 @@ import { AttentionValidationError, type AttentionManager } from "./attention";
 import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ThreadResumeResponse } from "./codex/generated/v2/index";
-import { parseThreadStart, parseTurnStart, parseTurnSteer } from "./codex/guards";
+import { parseThreadRead, parseThreadStart, parseTurnStart, parseTurnSteer } from "./codex/guards";
 import { RpcError } from "./codex/transport";
 import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
 import {
@@ -43,6 +45,7 @@ import {
 } from "./projects";
 import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
+import { MessageQueue, MessageQueueNotFoundError } from "./message-queue";
 import type { StateStore } from "./state/store";
 
 export interface ApiServices {
@@ -56,6 +59,78 @@ export interface ApiServices {
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const { bridge, store, projection, attention } = services;
+  const startTurn = async (
+    threadId: string,
+    input: string,
+    clientMessageId: string | null,
+  ): Promise<string> => {
+    const summary = projection.summary(threadId);
+    if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    if (!projection.isUnmaterialized(threadId)) {
+      await bridge.request<ThreadResumeResponse>(
+        "thread/resume",
+        {
+          threadId,
+          cwd: summary.cwd,
+          excludeTurns: true,
+          ...threadSettings(summary.settings),
+        },
+        30_000,
+      );
+    }
+    const turn = parseTurnStart(
+      await bridge.request<unknown>("turn/start", {
+        threadId,
+        clientUserMessageId: clientMessageId,
+        input: textInput(input),
+        ...turnSettings(summary.settings, projection.availableModels),
+      }),
+    );
+    projection.markMaterialized(threadId);
+    projection.setCurrentTurn(threadId, turn.turn.id);
+    return turn.turn.id;
+  };
+  const steerTurn = async (
+    threadId: string,
+    turnId: string,
+    input: string,
+    clientMessageId: string | null,
+  ): Promise<string> => {
+    const result = parseTurnSteer(
+      await bridge.request<unknown>("turn/steer", {
+        threadId,
+        expectedTurnId: turnId,
+        clientUserMessageId: clientMessageId,
+        input: textInput(input),
+      }),
+    );
+    if (projection.summary(threadId)) projection.setCurrentTurn(threadId, result.turnId);
+    return result.turnId;
+  };
+  const queue = new MessageQueue(store, {
+    currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
+    start: (threadId, message) => startTurn(threadId, message.text, message.id),
+    steer: (threadId, turnId, message) => steerTurn(threadId, turnId, message.text, message.id),
+    wasDelivered: async (threadId, messageId) => {
+      const result = parseThreadRead(
+        await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
+      );
+      return result.thread.turns.some((turn) =>
+        turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
+      );
+    },
+    publish: (threadId, messages) => projection.publishQueue(threadId, messages),
+  });
+
+  projection.on("event", (_sequence, event) => {
+    if (event.type === "resync.required") {
+      void queue.recover().catch(() => undefined);
+    } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
+      void queue.drain(event.thread.id).catch(() => undefined);
+    } else if (event.type === "thread.removed") {
+      void queue.removeThread(event.threadId).catch(() => undefined);
+    }
+  });
 
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/v1/")) return;
@@ -297,6 +372,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.patch<{ Params: { id: string }; Body: UpdateThreadSettingsRequest }>(
     "/api/v1/threads/:id/settings",
     async (request, reply) => {
+      const patch = validateSettingsPatch(request.body);
+      if (Object.keys(patch).length === 0) {
+        return apiError(reply, 400, "validation_failed", "At least one setting is required");
+      }
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       if (summary.currentTurnId) {
@@ -306,10 +385,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "conflict",
           "Settings cannot be changed while a turn is running",
         );
-      }
-      const patch = validateSettingsPatch(request.body);
-      if (Object.keys(patch).length === 0) {
-        return apiError(reply, 400, "validation_failed", "At least one setting is required");
       }
       const settings = mergeSettings(summary.settings, patch, projection.availableModels);
       return projection.setSettings(request.params.id, settings);
@@ -323,29 +398,31 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!body) return;
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      if (!projection.isUnmaterialized(request.params.id)) {
-        await bridge.request<ThreadResumeResponse>(
-          "thread/resume",
-          {
-            threadId: request.params.id,
-            cwd: summary.cwd,
-            excludeTurns: true,
-            ...threadSettings(summary.settings),
-          },
-          30_000,
-        );
-      }
-      const turn = parseTurnStart(
-        await bridge.request<unknown>("turn/start", {
-          threadId: request.params.id,
-          clientUserMessageId: body.clientMessageId ?? null,
-          input: textInput(body.input),
-          ...turnSettings(summary.settings, projection.availableModels),
-        }),
-      );
-      projection.markMaterialized(request.params.id);
-      return reply.code(201).send({ turnId: turn.turn.id });
+      const turnId = await startTurn(request.params.id, body.input, body.clientMessageId ?? null);
+      return reply.code(201).send({ turnId });
     },
+  );
+
+  app.post<{ Params: { id: string }; Body: QueueMessageRequest }>(
+    "/api/v1/threads/:id/queue",
+    async (request, reply) => {
+      const body = requireRecord<QueueMessageRequest>(request.body);
+      if (typeof body.input !== "string" || !body.input.trim()) {
+        return apiError(reply, 400, "validation_failed", "input is required");
+      }
+      if (!projection.summary(request.params.id)) {
+        return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      const message = await queue.enqueue(request.params.id, body.input);
+      return reply.code(202).send(message satisfies QueuedMessage);
+    },
+  );
+
+  app.post<{ Params: { id: string; messageId: string } }>(
+    "/api/v1/threads/:id/queue/:messageId/send",
+    async (request) => ({
+      turnId: await queue.sendNow(request.params.id, request.params.messageId),
+    }),
   );
 
   app.post<{ Params: { id: string }; Body: SteerTurnRequest }>(
@@ -355,17 +432,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (typeof body.turnId !== "string" || typeof body.input !== "string" || !body.input.trim()) {
         return apiError(reply, 400, "validation_failed", "turnId and input are required");
       }
-      const result = parseTurnSteer(
-        await bridge.request<unknown>("turn/steer", {
-          threadId: request.params.id,
-          expectedTurnId: body.turnId,
-          input: textInput(body.input),
-        }),
-      );
-      if (projection.summary(request.params.id)) {
-        projection.setCurrentTurn(request.params.id, result.turnId);
-      }
-      return result;
+      return {
+        turnId: await steerTurn(request.params.id, body.turnId, body.input, null),
+      };
     },
   );
 
@@ -473,6 +542,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (error instanceof ProjectForbiddenError)
       return apiError(reply, 403, "forbidden", error.message);
     if (error instanceof ProjectNotFoundError)
+      return apiError(reply, 404, "not_found", error.message);
+    if (error instanceof MessageQueueNotFoundError)
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof ProjectConflictError)
       return apiError(reply, 409, "conflict", error.message);

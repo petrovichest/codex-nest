@@ -59,7 +59,9 @@ The first version needs:
 - user messages;
 - streamed agent messages;
 - compact activity cards for commands, file changes, and tool activity;
-- a composer with send, steer-while-running, and interrupt actions;
+- a composer with Enter-to-send, a persistent queue while running, immediate
+  steer for a selected queued message, and interrupt actions;
+- live plan steps, elapsed time, and turn diff statistics above the composer;
 - clear connection, running, completed, failed, and interrupted states.
 
 Raw terminal emulation is not part of the MVP.

@@ -12,6 +12,7 @@ import type {
   HealthResponse,
   MarkReadRequest,
   Project,
+  QueuedMessage,
   StartTurnRequest,
   SteerTurnRequest,
   SummaryResponse,
@@ -97,6 +98,20 @@ export class ApiClient {
       method: "POST",
       body,
     });
+  }
+
+  enqueue(id: string, input: string): Promise<QueuedMessage> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
+      method: "POST",
+      body: { input },
+    });
+  }
+
+  sendQueuedNow(id: string, messageId: string): Promise<{ turnId: string }> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}/send`,
+      { method: "POST" },
+    );
   }
 
   steer(id: string, body: SteerTurnRequest): Promise<{ turnId: string }> {
