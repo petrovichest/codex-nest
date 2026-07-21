@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { type RefObject, useEffect, useMemo, useState } from "react";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import type {
   CodexRateLimitWindow,
@@ -26,6 +26,7 @@ import { useConnection } from "./connection";
 import { usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
+import { useDrawerNavigation } from "./useDrawerNavigation";
 
 export function App({
   settings,
@@ -35,10 +36,21 @@ export function App({
   onDisconnected(): void;
 }) {
   const { api, state, reconnect } = useConnection();
+  const location = useLocation();
   const navigate = useNavigate();
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
+  const {
+    dragging: drawerDragging,
+    frameRef,
+    sidebarRef,
+  } = useDrawerNavigation({
+    open: drawer,
+    routeKey: location.pathname,
+    threadActive: /^\/threads\/[^/]+\/?$/.test(location.pathname),
+    setOpen: setDrawer,
+  });
   usePushNotifications(api, navigate);
 
   useEffect(() => {
@@ -49,13 +61,14 @@ export function App({
   const snapshot = state.snapshot;
   const attention = snapshot?.attention ?? [];
   return (
-    <div className="app-frame">
+    <div className={`app-frame${drawerDragging ? " drawer-dragging" : ""}`} ref={frameRef}>
       {settings.baseUrl.startsWith("http://") && (
         <div className="http-warning">
           Небезопасное HTTP-подключение: данные доступны перехватчику в LAN.
         </div>
       )}
       <Sidebar
+        containerRef={sidebarRef}
         drawer={drawer}
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
@@ -63,7 +76,7 @@ export function App({
         reconnect={reconnect}
         settings={settings}
       />
-      {drawer && (
+      {(drawer || drawerDragging) && (
         <button
           className="drawer-backdrop"
           aria-label="Закрыть меню"
@@ -135,6 +148,7 @@ function HomeRedirect({ threads }: { threads: ThreadSummary[] }) {
 }
 
 function Sidebar({
+  containerRef,
   drawer,
   onClose,
   onNewProject,
@@ -142,6 +156,7 @@ function Sidebar({
   reconnect,
   settings,
 }: {
+  containerRef: RefObject<HTMLElement | null>;
   drawer: boolean;
   onClose(): void;
   onNewProject(): void;
@@ -221,7 +236,7 @@ function Sidebar({
   const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError);
 
   return (
-    <aside className={`sidebar ${drawer ? "open" : ""}`}>
+    <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
       <div className="sidebar-toolbar">
         <button
           className={`icon-button ${searchOpen ? "active" : ""}`}
