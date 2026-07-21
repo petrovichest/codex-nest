@@ -136,11 +136,14 @@ respect_system_proxy = true
 
 [shell_environment_policy]
 exclude = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
+set = { HTTP_PROXY = "", HTTPS_PROXY = "", ALL_PROXY = "", NO_PROXY = "", http_proxy = "", https_proxy = "", all_proxy = "", no_proxy = "" }
 ```
 
 Имена в `shell_environment_policy.exclude` сравниваются без учёта регистра,
-поэтому правило также удаляет lowercase-варианты. `git`, `npm`, `curl` и другие
-команды агента продолжат использовать прямое подключение.
+поэтому правило также удаляет lowercase-варианты. Пустые значения в `set`
+имеют приоритет и сохраняют прямое подключение для `unified_exec` в версиях,
+которые повторно добавляют исходное окружение после `exclude`. `git`, `npm`,
+`curl` и другие команды агента продолжат использовать прямое подключение.
 
 Разместите wrapper раньше standalone-команды Codex в интерактивном `PATH`. Не
 заменяйте `~/.local/bin/codex`: этот symlink принадлежит standalone-updater.
