@@ -4,7 +4,6 @@ import { promisify } from "node:util";
 
 import type { AppServerState, AttentionRequest, AttentionResponse } from "@codexnest/protocol";
 
-import { EXPECTED_CODEX_VERSION } from "../config";
 import { safeError } from "../logging";
 import type { InitializeResponse, ServerNotification, ServerRequest } from "./generated/index";
 import { JsonlTransport, type JsonlProcess } from "./transport";
@@ -67,10 +66,6 @@ export class CodexBridge extends EventEmitter {
     } catch (error) {
       this.setState("unavailable", safeError(error));
       this.scheduleRestart();
-      return;
-    }
-    if (this._actualVersion !== EXPECTED_CODEX_VERSION) {
-      this.setState("incompatible");
       return;
     }
     await this.launch();
@@ -164,7 +159,7 @@ export class CodexBridge extends EventEmitter {
   }
 
   private scheduleRestart(): void {
-    if (this.stopping || this.restartTimer || this._state === "incompatible") return;
+    if (this.stopping || this.restartTimer) return;
     const index = Math.min(this.restartAttempt, BACKOFF_SECONDS.length - 1);
     const baseMs = (BACKOFF_SECONDS[index] ?? 30) * 1_000;
     this.restartAttempt += 1;
@@ -185,11 +180,7 @@ export class CodexBridge extends EventEmitter {
 
 export class BridgeUnavailableError extends Error {
   constructor(public readonly bridgeState: AppServerState) {
-    super(
-      bridgeState === "incompatible"
-        ? "The installed Codex CLI protocol version is incompatible"
-        : "Codex app-server is unavailable",
-    );
+    super("Codex app-server is unavailable");
     this.name = "BridgeUnavailableError";
   }
 }

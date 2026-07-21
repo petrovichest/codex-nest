@@ -16,7 +16,7 @@ CodexNest рассчитан на одного владельца и прива�
 - 64-битный Linux с `systemd`;
 - Git;
 - Node.js 24 LTS и npm 10 или новее;
-- Codex CLI строго версии `0.144.6`;
+- Codex CLI;
 - учётная запись Linux с доступом к папкам проектов.
 
 Проверьте версии:
@@ -27,9 +27,10 @@ npm --version
 codex --version
 ```
 
-Codex CLI должен вывести `codex-cli 0.144.6`. С другой версией API запустится в
-состоянии `degraded`, но операции с задачами будут недоступны: типы протокола
-сгенерированы именно для `0.144.6`.
+Команда должна вывести установленную версию в формате `codex-cli <версия>`.
+CodexNest записывает её в health endpoint для диагностики, но не блокирует запуск
+из-за несовпадения номера версии. Реальные ошибки запуска или RPC возвращаются
+клиенту как ошибки app-server.
 
 Все дальнейшие команды выполняйте от одного и того же обычного Linux-пользователя.
 От него будут работать Codex CLI и сервис, поэтому не устанавливайте и не
@@ -64,13 +65,12 @@ npm run format:check
 npm run lint
 npm run typecheck
 npm test
-npm run protocol:generate
-git diff --exit-code -- apps/server/src/codex/generated apps/server/src/codex/PROTOCOL_VERSION
 ```
 
-Последние две команды проверяют, что установленная версия Codex CLI соответствует
-зафиксированному протоколу. Обычные тесты не обращаются к OpenAI и не расходуют
-квоту.
+Обычные тесты не обращаются к OpenAI и не расходуют квоту. Команда
+`npm run protocol:generate` нужна только при намеренном обновлении сгенерированных
+TypeScript-типов и требует версию CLI из `apps/server/src/codex/PROTOCOL_VERSION`;
+для обычной сборки и production-запуска она не выполняется.
 
 ## 3. Конфигурация
 
@@ -290,8 +290,8 @@ curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health
   "status": "ok",
   "appServer": {
     "state": "ready",
-    "expectedVersion": "0.144.6",
-    "installedVersion": "0.144.6"
+    "installedVersion": "0.145.0",
+    "message": null
   }
 }
 ```
@@ -348,8 +348,9 @@ systemctl --user start codexnest.service
 
 ## 9. Типовые проблемы
 
-- **`status: degraded` / `incompatible`.** Проверьте `codex --version` именно от
-  пользователя сервиса и значение `CODEXNEST_CODEX_BIN`. Требуется `0.144.6`.
+- **`status: degraded`.** Проверьте `codex --version` именно от пользователя
+  сервиса, значение `CODEXNEST_CODEX_BIN` и журнал сервиса. Номер версии сам по
+  себе запуск не блокирует.
 - **`status: degraded` в daemon-режиме.** Выполните
   `codex app-server daemon version`. Если control socket отсутствует, повторите
   `codex app-server daemon bootstrap` от пользователя сервиса.

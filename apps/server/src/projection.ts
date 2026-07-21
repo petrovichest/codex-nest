@@ -80,12 +80,7 @@ export class AppProjection extends EventEmitter {
   get connection(): AppSnapshot["connection"] {
     return {
       state: this.bridge.state,
-      message:
-        this.bridge.state === "incompatible"
-          ? "Версия Codex CLI не совпадает с protocol contract"
-          : this.bridge.state === "ready"
-            ? null
-            : "Codex app-server недоступен",
+      message: this.bridge.state === "ready" ? null : "Codex app-server недоступен",
       syncedAt: this.syncedAt,
     };
   }

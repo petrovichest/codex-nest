@@ -8,7 +8,7 @@ import type { JsonlProcess } from "./transport";
 const enabled = process.env.RUN_CODEX_INTEGRATION === "1";
 
 describe.skipIf(!enabled)("real Codex CLI smoke", () => {
-  it("initializes 0.144.6 and reads one thread/list page without starting a model turn", async () => {
+  it("initializes the installed CLI and reads one thread/list page without starting a model turn", async () => {
     const bridge = new CodexBridge({
       codexBin: process.env.CODEXNEST_CODEX_BIN ?? "codex",
       spawnProcess: () =>

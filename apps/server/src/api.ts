@@ -43,7 +43,7 @@ import {
   parseTurnSteer,
 } from "./codex/guards";
 import { RpcError } from "./codex/transport";
-import { EXPECTED_CODEX_VERSION, SERVER_VERSION } from "./config";
+import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
 import {
   assertUniqueProjectPath,
@@ -201,14 +201,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     serverVersion: SERVER_VERSION,
     appServer: {
       state: bridge.state,
-      expectedVersion: EXPECTED_CODEX_VERSION,
       installedVersion: bridge.actualVersion ?? null,
-      message:
-        bridge.state === "incompatible"
-          ? `Codex CLI ${EXPECTED_CODEX_VERSION} is required`
-          : bridge.state === "ready"
-            ? null
-            : "Codex app-server is unavailable",
+      message: bridge.state === "ready" ? null : "Codex app-server is unavailable",
     },
   }));
 
@@ -689,12 +683,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.setErrorHandler((error: Error, request, reply) => {
     request.log.error({ errorName: error.name }, "request failed");
     if (error instanceof BridgeUnavailableError) {
-      return apiError(
-        reply,
-        503,
-        error.bridgeState === "incompatible" ? "protocol_incompatible" : "app_server_unavailable",
-        error.message,
-      );
+      return apiError(reply, 503, "app_server_unavailable", error.message);
     }
     if (error instanceof ProjectValidationError || error instanceof AttentionValidationError) {
       return apiError(reply, 400, "validation_failed", error.message);

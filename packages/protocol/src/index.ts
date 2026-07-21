@@ -1,14 +1,13 @@
 export const API_PREFIX = "/api/v1";
 export const EVENTS_PATH = `${API_PREFIX}/events`;
 
-export type AppServerState = "starting" | "ready" | "unavailable" | "incompatible" | "stopped";
+export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
 
 export type HealthResponse = {
   status: "ok" | "degraded";
   serverVersion: string;
   appServer: {
     state: AppServerState;
-    expectedVersion: string;
     installedVersion: string | null;
     message: string | null;
   };
@@ -45,7 +44,6 @@ export type ApiErrorCode =
   | "not_found"
   | "conflict"
   | "app_server_unavailable"
-  | "protocol_incompatible"
   | "internal_error";
 
 export type ApiError = {

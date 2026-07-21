@@ -15,7 +15,7 @@ Read [START_HERE.md](./START_HERE.md) for the product brief and
 
 - Node.js 24 LTS
 - npm 10 or newer
-- Codex CLI `0.144.6`, already signed in on the server host
+- Codex CLI, already signed in on the server host
 - For Android: Android Studio/JDK 21 and Android SDK
 
 ## Development
@@ -56,6 +56,11 @@ The real app-server smoke test is opt-in:
 ```bash
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
 ```
+
+CodexNest records the installed CLI version for diagnostics but does not require
+an exact version at runtime. `npm run protocol:generate` remains pinned to
+`apps/server/src/codex/PROTOCOL_VERSION` so generated TypeScript types stay
+reproducible.
 
 ## Production
 

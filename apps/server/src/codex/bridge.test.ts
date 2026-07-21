@@ -47,18 +47,45 @@ describe("CodexBridge", () => {
     bridge.stop();
   });
 
-  it("does not launch turns with an incompatible CLI", async () => {
-    const spawnProcess = vi.fn();
+  it("launches an installed CLI without requiring an exact version", async () => {
+    const child = new HandshakeChild();
+    const spawnProcess = vi.fn(() => child as unknown as JsonlProcess);
     const bridge = new CodexBridge({
       codexBin: "codex",
       checkVersion: async () => "0.145.0",
       spawnProcess,
     });
     await bridge.start();
-    expect(bridge.state).toBe("incompatible");
-    expect(spawnProcess).not.toHaveBeenCalled();
-    await expect(bridge.request("thread/list", {})).rejects.toMatchObject({
-      bridgeState: "incompatible",
+    expect(bridge.state).toBe("ready");
+    expect(bridge.actualVersion).toBe("0.145.0");
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    bridge.stop();
+  });
+
+  it("stays unavailable when the CLI version cannot be read", async () => {
+    const spawnProcess = vi.fn();
+    const bridge = new CodexBridge({
+      codexBin: "codex",
+      checkVersion: async () => Promise.reject(new Error("version failed")),
+      spawnProcess,
     });
+    await bridge.start();
+    expect(bridge.state).toBe("unavailable");
+    expect(spawnProcess).not.toHaveBeenCalled();
+    bridge.stop();
+  });
+
+  it("stays unavailable when app-server cannot be launched", async () => {
+    const bridge = new CodexBridge({
+      codexBin: "codex",
+      checkVersion: async () => "0.145.0",
+      spawnProcess: () => {
+        throw new Error("spawn failed");
+      },
+    });
+    await bridge.start();
+    expect(bridge.state).toBe("unavailable");
+    expect(bridge.actualVersion).toBe("0.145.0");
+    bridge.stop();
   });
 });

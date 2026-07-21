@@ -59,7 +59,7 @@ bridge.on("state", (state) => {
     void projection.sync().catch((error: Error) => {
       process.stderr.write(`CodexNest initial sync failed (${error.name})\n`);
     });
-  } else if (state === "unavailable" || state === "incompatible") {
+  } else if (state === "unavailable") {
     attention.expireAll();
   }
 });

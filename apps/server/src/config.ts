@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 export const SERVER_VERSION = "0.1.0";
-export const EXPECTED_CODEX_VERSION = "0.144.6";
 
 export interface AppConfig {
   host: string;

@@ -35,11 +35,13 @@ describe("HTTP authentication", () => {
     });
     const bridge = new CodexBridge({
       codexBin: "codex",
-      checkVersion: async () => "0.144.6",
+      checkVersion: async () => "0.145.0",
       spawnProcess: () => {
         throw new Error("not started");
       },
     });
+    await bridge.start();
+    bridge.stop();
     const attention = new AttentionManager();
     const push = new PushNotifier(store);
     const projection = new AppProjection(bridge, store, attention, false);
@@ -58,7 +60,17 @@ describe("HTTP authentication", () => {
       projectRoot: directory,
     });
 
-    expect((await app.inject({ url: "/api/v1/health" })).statusCode).toBe(200);
+    const health = await app.inject({ url: "/api/v1/health" });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toMatchObject({
+      status: "degraded",
+      appServer: {
+        state: "unavailable",
+        installedVersion: "0.145.0",
+        message: "Codex app-server is unavailable",
+      },
+    });
+    expect(health.json().appServer).not.toHaveProperty("expectedVersion");
     expect((await app.inject({ url: "/api/v1/summary" })).json()).toMatchObject({
       error: { code: "unauthorized" },
     });
