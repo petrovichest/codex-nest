@@ -13,6 +13,7 @@ import type {
   GlobalPermissionSettings,
   HealthResponse,
   MarkReadRequest,
+  MoveProjectRequest,
   Project,
   QueuedMessage,
   StartTurnRequest,
@@ -68,6 +69,13 @@ export class ApiClient {
 
   updateProject(id: string, body: UpdateProjectRequest): Promise<Project> {
     return this.request(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "PATCH", body });
+  }
+
+  moveProject(id: string, body: MoveProjectRequest): Promise<Project[]> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/move`, {
+      method: "POST",
+      body,
+    });
   }
 
   deleteProject(id: string): Promise<void> {

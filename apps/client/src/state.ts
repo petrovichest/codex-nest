@@ -68,6 +68,9 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "project.upserted":
       snapshot.projects = upsert(snapshot.projects, event.project);
       break;
+    case "projects.reordered":
+      snapshot.projects = event.projects;
+      break;
     case "project.removed":
       snapshot.projects = snapshot.projects.filter((project) => project.id !== event.projectId);
       break;

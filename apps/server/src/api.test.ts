@@ -141,6 +141,64 @@ describe("HTTP authentication", () => {
     expect(legacyProject.statusCode).toBe(201);
     expect(legacyProject.json()).toMatchObject({ displayName: "legacy-project" });
 
+    const reorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
+      const listener = (_sequence: number, event: Record<string, unknown>) => {
+        if (event.type !== "projects.reordered") return;
+        projection.off("event", listener);
+        resolve(event);
+      };
+      projection.on("event", listener);
+    });
+    const movedProject = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${legacyProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { direction: "up" },
+    });
+    expect(movedProject.statusCode).toBe(200);
+    expect(
+      movedProject.json().map((project: { displayName: string }) => project.displayName),
+    ).toEqual(["legacy-project", "new-project"]);
+    await expect(reorderedEvent).resolves.toMatchObject({
+      type: "projects.reordered",
+      projects: [{ displayName: "legacy-project" }, { displayName: "new-project" }],
+    });
+    expect(store.snapshot().projects.map((project) => project.displayName)).toEqual([
+      "legacy-project",
+      "new-project",
+    ]);
+
+    const boundaryMove = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { direction: "down" },
+    });
+    expect(boundaryMove.statusCode).toBe(200);
+    expect(boundaryMove.json().map((project: { id: string }) => project.id)).toEqual(
+      store.snapshot().projects.map((project) => project.id),
+    );
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/projects/missing/move",
+          headers: authorization,
+          payload: { direction: "up" },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+          headers: authorization,
+          payload: { direction: "sideways" },
+        })
+      ).statusCode,
+    ).toBe(400);
+
     const outside = await app.inject({
       url: `/api/v1/directories?path=${encodeURIComponent(join(directory, ".."))}`,
       headers: authorization,

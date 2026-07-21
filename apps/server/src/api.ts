@@ -13,6 +13,7 @@ import type {
   InterruptTurnRequest,
   MarkReadRequest,
   ModelOption,
+  MoveProjectRequest,
   PermissionPreset,
   QueueMessageRequest,
   QueuedMessage,
@@ -292,6 +293,30 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       });
       projection.publishProject(updated.id);
       return updated;
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: MoveProjectRequest }>(
+    "/api/v1/projects/:id/move",
+    async (request, reply) => {
+      const body = requireRecord<MoveProjectRequest>(request.body);
+      if (body.direction !== "up" && body.direction !== "down") {
+        return apiError(reply, 400, "validation_failed", "direction must be up or down");
+      }
+      const projects = store.snapshot().projects;
+      const index = projects.findIndex((project) => project.id === request.params.id);
+      if (index < 0) return apiError(reply, 404, "not_found", "Project not found");
+      const targetIndex = body.direction === "up" ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= projects.length) return projects;
+
+      const updated = await store.update((state) => {
+        [state.projects[index], state.projects[targetIndex]] = [
+          state.projects[targetIndex]!,
+          state.projects[index]!,
+        ];
+      });
+      projection.publishProjectsReordered(updated.projects);
+      return updated.projects;
     },
   );
 

@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import type {
@@ -9,16 +9,29 @@ import type {
 
 import type { ConnectionSettings } from "./storage";
 import { AttentionPanel } from "./components/AttentionPanel";
-import { FolderIcon, GaugeIcon, PlusIcon, SlidersIcon } from "./components/Icons";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  FolderIcon,
+  GaugeIcon,
+  MoreIcon,
+  PlusIcon,
+  SlidersIcon,
+} from "./components/Icons";
 import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
-import { SettingsPage } from "./components/SettingsPage";
+import { SettingsPage, type SidebarSide } from "./components/SettingsPage";
 import { ThreadPage } from "./components/ThreadPage";
 import { useConnection } from "./connection";
 import { usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
 import { useDrawerNavigation } from "./useDrawerNavigation";
+
+const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 
 export function App({
   settings,
@@ -33,6 +46,9 @@ export function App({
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
+  const [sidebarSide, setSidebarSide] = useState<SidebarSide>(() =>
+    localStorage.getItem(SIDEBAR_SIDE_KEY) === "right" ? "right" : "left",
+  );
   const {
     dragging: drawerDragging,
     frameRef,
@@ -41,6 +57,7 @@ export function App({
     open: drawer,
     routeKey: location.pathname,
     threadActive: /^\/threads\/[^/]+\/?$/.test(location.pathname),
+    side: sidebarSide,
     setOpen: setDrawer,
   });
   usePushNotifications(api, navigate);
@@ -50,10 +67,18 @@ export function App({
     localStorage.setItem("codexnest.theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_SIDE_KEY, sidebarSide);
+  }, [sidebarSide]);
+
   const snapshot = state.snapshot;
   const attention = snapshot?.attention ?? [];
   return (
-    <div className={`app-frame${drawerDragging ? " drawer-dragging" : ""}`} ref={frameRef}>
+    <div
+      className={`app-frame${drawerDragging ? " drawer-dragging" : ""}`}
+      data-sidebar-side={sidebarSide}
+      ref={frameRef}
+    >
       {settings.baseUrl.startsWith("http://") && (
         <div className="http-warning">
           Небезопасное HTTP-подключение: данные доступны перехватчику в LAN.
@@ -109,6 +134,8 @@ export function App({
                   onSwitchServer={() => void clearConnectionSettings().then(onDisconnected)}
                   theme={theme}
                   onThemeChange={setTheme}
+                  sidebarSide={sidebarSide}
+                  onSidebarSideChange={setSidebarSide}
                 />
               }
             />
@@ -150,8 +177,16 @@ function Sidebar({
 }) {
   const { api, state } = useConnection();
   const navigate = useNavigate();
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
+  const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
+  const [projectNotice, setProjectNotice] = useState<{
+    projectId: string;
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
+  const noticeTimerRef = useRef<number | undefined>(undefined);
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
@@ -163,13 +198,74 @@ function Sidebar({
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
 
-  function toggleGroup(key: string) {
-    setExpanded((current) => {
+  useEffect(
+    () => () => {
+      if (noticeTimerRef.current !== undefined) window.clearTimeout(noticeTimerRef.current);
+    },
+    [],
+  );
+
+  function toggleCollapsed(key: string) {
+    setCollapsed((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
+  }
+
+  function toggleShowAll(key: string) {
+    setShowAll((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function showProjectNotice(
+    projectId: string,
+    kind: "success" | "error",
+    message: string,
+    temporary = false,
+  ) {
+    if (noticeTimerRef.current !== undefined) window.clearTimeout(noticeTimerRef.current);
+    setProjectNotice({ projectId, kind, message });
+    if (temporary) {
+      noticeTimerRef.current = window.setTimeout(() => setProjectNotice(null), 2_000);
+    }
+  }
+
+  async function copyProjectPath(projectId: string, path: string, menu: HTMLDetailsElement | null) {
+    try {
+      await copyText(path);
+      menu?.removeAttribute("open");
+      showProjectNotice(projectId, "success", "Путь скопирован", true);
+    } catch {
+      showProjectNotice(projectId, "error", "Не удалось скопировать путь");
+    }
+  }
+
+  async function moveProject(
+    projectId: string,
+    direction: "up" | "down",
+    menu: HTMLDetailsElement | null,
+  ) {
+    if (movingProjectId) return;
+    setMovingProjectId(projectId);
+    setProjectNotice(null);
+    try {
+      await api.moveProject(projectId, { direction });
+      menu?.removeAttribute("open");
+    } catch (caught) {
+      showProjectNotice(
+        projectId,
+        "error",
+        caught instanceof Error ? caught.message : "Не удалось изменить порядок проектов",
+      );
+    } finally {
+      setMovingProjectId(null);
+    }
   }
 
   async function createProjectThread(projectId: string) {
@@ -208,47 +304,149 @@ function Sidebar({
 
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
+      <div className="sidebar-controls">
+        <div
+          aria-label={`Состояние сервера: ${networkLabel(state.network)}`}
+          className="server-status"
+          role="status"
+        >
+          <ConnectionDot state={state.network} />
+          <span>{networkLabel(state.network)}</span>
+        </div>
+        <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
+          <SlidersIcon />
+          Настройки
+        </NavLink>
+        <button
+          aria-busy={rateLimitsLoading}
+          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
+          className="sidebar-control-action codex-limits"
+          disabled={rateLimitsLoading}
+          onClick={() => void refreshRateLimits()}
+        >
+          {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
+          <span>{rateLimitsText}</span>
+        </button>
+        <button className="sidebar-control-action" onClick={onNewProject}>
+          <PlusIcon />
+          Добавить проект
+        </button>
+      </div>
       <nav className="thread-nav" aria-label="Задачи">
-        {groups.map((group) => {
+        {groups.map((group, projectIndex) => {
           const key = group.project?.id ?? "ungrouped";
-          const showAll = expanded.has(key);
-          const visible = showAll ? group.threads : group.threads.slice(0, 5);
+          const groupCollapsed = collapsed.has(key);
+          const groupShowsAll = showAll.has(key);
+          const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
+          const sessionsId = `project-sessions-${key}`;
           return (
             <section className="project-group" key={key}>
               <div className="project-title">
-                <FolderIcon />
-                <span>{group.project?.displayName ?? "Без проекта"}</span>
+                <button
+                  aria-controls={sessionsId}
+                  aria-expanded={!groupCollapsed}
+                  className="project-toggle"
+                  type="button"
+                  onClick={() => toggleCollapsed(key)}
+                >
+                  {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                  <FolderIcon />
+                  <span>{group.project?.displayName ?? "Без проекта"}</span>
+                </button>
                 {group.project && (
-                  <button
-                    aria-busy={creatingProjectId === group.project.id}
-                    aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
-                    className="project-new-session"
-                    disabled={creatingProjectId !== null}
-                    type="button"
-                    onClick={() => void createProjectThread(group.project!.id)}
-                  >
-                    {creatingProjectId === group.project.id ? (
-                      <span className="spinner small" />
-                    ) : (
-                      <PlusIcon />
-                    )}
-                  </button>
+                  <>
+                    <button
+                      aria-busy={creatingProjectId === group.project.id}
+                      aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                      className="project-icon-action"
+                      disabled={creatingProjectId !== null}
+                      type="button"
+                      onClick={() => void createProjectThread(group.project!.id)}
+                    >
+                      {creatingProjectId === group.project.id ? (
+                        <span className="spinner small" />
+                      ) : (
+                        <PlusIcon />
+                      )}
+                    </button>
+                    <details className="project-action-menu">
+                      <summary
+                        aria-label={`Действия с проектом ${group.project.displayName}`}
+                        className="project-icon-action"
+                      >
+                        <MoreIcon />
+                      </summary>
+                      <div className="project-action-popover">
+                        <button
+                          type="button"
+                          onClick={(event) =>
+                            void copyProjectPath(
+                              group.project!.id,
+                              group.project!.path,
+                              event.currentTarget.closest("details"),
+                            )
+                          }
+                        >
+                          <CopyIcon /> Копировать путь
+                        </button>
+                        <button
+                          disabled={projectIndex === 0 || movingProjectId !== null}
+                          type="button"
+                          onClick={(event) =>
+                            void moveProject(
+                              group.project!.id,
+                              "up",
+                              event.currentTarget.closest("details"),
+                            )
+                          }
+                        >
+                          <ArrowUpIcon /> Переместить выше
+                        </button>
+                        <button
+                          disabled={
+                            projectIndex === (snapshot?.projects.length ?? 0) - 1 ||
+                            movingProjectId !== null
+                          }
+                          type="button"
+                          onClick={(event) =>
+                            void moveProject(
+                              group.project!.id,
+                              "down",
+                              event.currentTarget.closest("details"),
+                            )
+                          }
+                        >
+                          <ArrowDownIcon /> Переместить ниже
+                        </button>
+                      </div>
+                    </details>
+                  </>
                 )}
               </div>
+              {projectNotice && projectNotice.projectId === group.project?.id && (
+                <div
+                  className={`project-action-notice ${projectNotice.kind}`}
+                  role={projectNotice.kind === "error" ? "alert" : "status"}
+                >
+                  {projectNotice.message}
+                </div>
+              )}
               {createError && createError.projectId === group.project?.id && (
                 <div className="project-create-error" role="alert">
                   {createError.message}
                 </div>
               )}
-              {visible.map((thread) => (
-                <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
-              ))}
-              {group.threads.length > 5 && (
-                <button className="show-more" onClick={() => toggleGroup(key)}>
-                  {showAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
-                </button>
-              )}
-              {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
+              <div hidden={groupCollapsed} id={sessionsId}>
+                {visible.map((thread) => (
+                  <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+                ))}
+                {group.threads.length > 5 && (
+                  <button className="show-more" onClick={() => toggleShowAll(key)}>
+                    {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
+                  </button>
+                )}
+                {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
+              </div>
             </section>
           );
         })}
@@ -264,36 +462,37 @@ function Sidebar({
           </details>
         )}
       </nav>
-      <div className="sidebar-footer">
-        <button className="sidebar-footer-action" onClick={onNewProject}>
-          <PlusIcon />
-          Добавить проект
-        </button>
-        <button
-          aria-busy={rateLimitsLoading}
-          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
-          className="sidebar-footer-action codex-limits"
-          disabled={rateLimitsLoading}
-          onClick={() => void refreshRateLimits()}
-        >
-          {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
-          <span>{rateLimitsText}</span>
-        </button>
-        <NavLink className="sidebar-footer-action" to="/settings" onClick={onClose}>
-          <SlidersIcon />
-          Настройки
-        </NavLink>
-        <div
-          aria-label={`Состояние сервера: ${networkLabel(state.network)}`}
-          className="server-status"
-          role="status"
-        >
-          <ConnectionDot state={state.network} />
-          <span>{networkLabel(state.network)}</span>
-        </div>
-      </div>
     </aside>
   );
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall through for insecure HTTP origins and restricted WebViews.
+  }
+
+  const textarea = document.createElement("textarea");
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    textarea.remove();
+    activeElement?.focus();
+  }
+  if (!copied) throw new Error("Clipboard is unavailable");
 }
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {

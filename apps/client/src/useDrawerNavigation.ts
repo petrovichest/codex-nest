@@ -19,11 +19,13 @@ export function useDrawerNavigation({
   open,
   routeKey,
   threadActive,
+  side,
   setOpen,
 }: {
   open: boolean;
   routeKey: string;
   threadActive: boolean;
+  side: "left" | "right";
   setOpen: Dispatch<SetStateAction<boolean>>;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
@@ -89,7 +91,8 @@ export function useDrawerNavigation({
       const touch = event.touches[0];
       const deltaX = touch.clientX - gesture.startX;
       const deltaY = touch.clientY - gesture.startY;
-      const directionalDistance = gesture.startedOpen ? -deltaX : deltaX;
+      const sideDirection = side === "left" ? 1 : -1;
+      const directionalDistance = (gesture.startedOpen ? -1 : 1) * deltaX * sideDirection;
 
       if (!gesture.active) {
         if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < DIRECTION_LOCK_DISTANCE) return;
@@ -105,7 +108,8 @@ export function useDrawerNavigation({
       gesture.distance = Math.min(gesture.drawerWidth, Math.max(0, directionalDistance));
       const distanceProgress = gesture.distance / gesture.drawerWidth;
       const visibleProgress = gesture.startedOpen ? 1 - distanceProgress : distanceProgress;
-      const translate = -gesture.drawerWidth * 1.04 * (1 - visibleProgress);
+      const hiddenDirection = side === "left" ? -1 : 1;
+      const translate = hiddenDirection * gesture.drawerWidth * 1.04 * (1 - visibleProgress);
       frame!.style.setProperty("--drawer-drag-translate", `${translate}px`);
       frame!.style.setProperty("--drawer-drag-progress", String(visibleProgress));
     }
@@ -137,7 +141,7 @@ export function useDrawerNavigation({
       frame.style.removeProperty("--drawer-drag-translate");
       frame.style.removeProperty("--drawer-drag-progress");
     };
-  }, [mobile, setOpen]);
+  }, [mobile, setOpen, side]);
 
   useEffect(() => {
     if (mobile) return;

@@ -5,6 +5,7 @@ import type {
   ActivityItem,
   AppSnapshot,
   ModelOption,
+  Project,
   QueuedMessage,
   SessionSettings,
   ServerEvent,
@@ -218,6 +219,10 @@ export class AppProjection extends EventEmitter {
     const project = this.store.snapshot().projects.find((candidate) => candidate.id === projectId);
     if (project) this.publish({ type: "project.upserted", project });
     for (const thread of this.threads.values()) this.publishThread(thread.thread.id);
+  }
+
+  publishProjectsReordered(projects: Project[]): void {
+    this.publish({ type: "projects.reordered", projects });
   }
 
   removeProject(projectId: string): void {

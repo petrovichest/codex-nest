@@ -7,6 +7,8 @@ import { useConnection } from "../connection";
 import { ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
+export type SidebarSide = "left" | "right";
+
 const PRESETS: Array<{
   id: PermissionPreset;
   title: string;
@@ -34,11 +36,15 @@ export function SettingsPage({
   onSwitchServer,
   theme,
   onThemeChange,
+  sidebarSide,
+  onSidebarSideChange,
 }: {
   onOpenNavigation(): void;
   onSwitchServer(): void;
   theme: string;
   onThemeChange(theme: string): void;
+  sidebarSide: SidebarSide;
+  onSidebarSideChange(side: SidebarSide): void;
 }) {
   const { api } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
@@ -115,6 +121,16 @@ export function SettingsPage({
                 <option value="system">Системная тема</option>
                 <option value="light">Светлая тема</option>
                 <option value="dark">Тёмная тема</option>
+              </select>
+            </label>
+            <label className="theme-setting">
+              <span>Боковая панель</span>
+              <select
+                value={sidebarSide}
+                onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
+              >
+                <option value="left">Слева</option>
+                <option value="right">Справа</option>
               </select>
             </label>
           </section>

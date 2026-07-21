@@ -369,6 +369,7 @@ export type AppSnapshot = {
 export type ServerEvent =
   | { type: "connection.changed"; connection: ConnectionView }
   | { type: "project.upserted"; project: Project }
+  | { type: "projects.reordered"; projects: Project[] }
   | { type: "project.removed"; projectId: string }
   | { type: "thread.upserted"; thread: ThreadSummary }
   | { type: "thread.removed"; threadId: string }
@@ -396,6 +397,10 @@ export type CreateProjectRequest = {
 export type UpdateProjectRequest = {
   displayName?: string;
   path?: string;
+};
+
+export type MoveProjectRequest = {
+  direction: "up" | "down";
 };
 
 export type CreateDirectoryRequest = {

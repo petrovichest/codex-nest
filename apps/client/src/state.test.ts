@@ -128,6 +128,29 @@ describe("clientReducer", () => {
     expect(state.details.one?.summary.settings).toEqual(updated.settings);
   });
 
+  it("applies the server-owned project order", () => {
+    const one = {
+      id: "one",
+      displayName: "One",
+      path: "/one",
+      createdAt: "x",
+      updatedAt: "x",
+    };
+    const two = { ...one, id: "two", displayName: "Two", path: "/two" };
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, projects: [one, two] },
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "projects.reordered", projects: [two, one] },
+    });
+
+    expect(state.snapshot?.projects.map((project) => project.id)).toEqual(["two", "one"]);
+  });
+
   it("applies live progress and the server-owned message queue", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

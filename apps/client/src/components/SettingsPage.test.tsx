@@ -113,6 +113,28 @@ describe("SettingsPage", () => {
     expect(onThemeChange).toHaveBeenCalledWith("dark");
   });
 
+  it("changes the local sidebar side immediately", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+    const onSidebarSideChange = vi.fn();
+
+    renderPage("system", vi.fn(), vi.fn(), "left", onSidebarSideChange);
+    fireEvent.change(screen.getByRole("combobox", { name: "Боковая панель" }), {
+      target: { value: "right" },
+    });
+
+    expect(onSidebarSideChange).toHaveBeenCalledWith("right");
+  });
+
   it("exposes the server switch action in settings", () => {
     connection.mockReturnValue({
       api: {
@@ -134,7 +156,13 @@ describe("SettingsPage", () => {
   });
 });
 
-function renderPage(theme = "system", onThemeChange = vi.fn(), onSwitchServer = vi.fn()) {
+function renderPage(
+  theme = "system",
+  onThemeChange = vi.fn(),
+  onSwitchServer = vi.fn(),
+  sidebarSide: "left" | "right" = "left",
+  onSidebarSideChange = vi.fn(),
+) {
   return render(
     <MemoryRouter>
       <SettingsPage
@@ -142,6 +170,8 @@ function renderPage(theme = "system", onThemeChange = vi.fn(), onSwitchServer = 
         onSwitchServer={onSwitchServer}
         theme={theme}
         onThemeChange={onThemeChange}
+        sidebarSide={sidebarSide}
+        onSidebarSideChange={onSidebarSideChange}
       />
     </MemoryRouter>,
   );

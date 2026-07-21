@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
+import type { AppSnapshot, Project, ThreadSummary } from "@codexnest/protocol";
 
 import { App } from "./App";
 
@@ -60,6 +60,14 @@ beforeEach(() => {
     capacitor.backHandler = listener;
     return { remove: capacitor.removeListener };
   });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
+  Object.defineProperty(document, "execCommand", {
+    configurable: true,
+    value: vi.fn(() => false),
+  });
   localStorage.clear();
 });
 
@@ -102,19 +110,20 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("orders footer actions before the compact server status", () => {
+  it("orders the fixed controls above the project list", () => {
     mockConnection(snapshot([baseThread]));
 
     const view = renderApp("/threads/newer");
-    const footer = view.container.querySelector(".sidebar-footer");
+    const controls = view.container.querySelector(".sidebar-controls");
 
-    expect(footer).not.toBeNull();
-    expect(Array.from(footer!.children).map((element) => element.textContent?.trim())).toEqual([
-      "Добавить проект",
-      "Лимиты Codex",
-      "Настройки",
+    expect(controls).not.toBeNull();
+    expect(Array.from(controls!.children).map((element) => element.textContent?.trim())).toEqual([
       "Подключено",
+      "Настройки",
+      "Лимиты Codex",
+      "Добавить проект",
     ]);
+    expect(controls?.nextElementSibling).toHaveClass("thread-nav");
   });
 
   it.each([
@@ -225,6 +234,112 @@ describe("App routing and navigation", () => {
     await waitFor(() => expect(localStorage.getItem("codexnest.theme")).toBe("light"));
     expect(document.documentElement.dataset.theme).toBe("light");
   });
+
+  it("restores and persists the sidebar side from the settings page", async () => {
+    localStorage.setItem("codexnest.sidebarSide", "right");
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/settings");
+    const frame = view.container.querySelector(".app-frame");
+    const side = await screen.findByRole("combobox", { name: "Боковая панель" });
+    expect(side).toHaveValue("right");
+    expect(frame).toHaveAttribute("data-sidebar-side", "right");
+
+    fireEvent.change(side, { target: { value: "left" } });
+    await waitFor(() => expect(localStorage.getItem("codexnest.sidebarSide")).toBe("left"));
+    expect(frame).toHaveAttribute("data-sidebar-side", "left");
+  });
+
+  it("collapses project sessions without toggling from project actions", () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockImplementation(() => new Promise(() => undefined));
+
+    renderApp("/threads/newer");
+    const toggle = screen.getByRole("button", { name: "Проект" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("link", { name: "Новая задача в истории" })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("link", { name: "Новая задача в истории" })).toBeInTheDocument();
+  });
+
+  it("copies a project path and reports clipboard fallback failures", async () => {
+    const writeText = vi.mocked(navigator.clipboard.writeText);
+    mockConnection(snapshot([baseThread]));
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("/work/project"));
+    expect(await screen.findByText("Путь скопирован")).toHaveAttribute("role", "status");
+
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    vi.mocked(document.execCommand).mockReturnValue(true);
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    await waitFor(() => expect(document.execCommand).toHaveBeenCalledWith("copy"));
+
+    vi.mocked(document.execCommand).mockReturnValue(false);
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать путь");
+  });
+
+  it("moves projects with boundary actions disabled", async () => {
+    const secondProject: Project = {
+      id: "second",
+      displayName: "Второй",
+      path: "/work/second",
+      createdAt: "2026-01-02",
+      updatedAt: "2026-01-02",
+    };
+    const appSnapshot = snapshot([baseThread], [defaultProject(), secondProject]);
+    const api = mockConnection(appSnapshot);
+    api.moveProject.mockResolvedValue([secondProject, defaultProject()]);
+
+    renderApp("/threads/newer");
+    const actions = screen.getByLabelText("Действия с проектом Проект");
+    const projectGroup = actions.closest(".project-group") as HTMLElement | null;
+    expect(projectGroup).not.toBeNull();
+    fireEvent.click(actions);
+    expect(within(projectGroup!).getByRole("button", { name: "Переместить выше" })).toBeDisabled();
+    const moveDown = within(projectGroup!).getByRole("button", { name: "Переместить ниже" });
+    expect(moveDown).toBeEnabled();
+    fireEvent.click(moveDown);
+
+    await waitFor(() =>
+      expect(api.moveProject).toHaveBeenCalledWith("project", { direction: "down" }),
+    );
+  });
+
+  it("shows a project-scoped error when reordering fails", async () => {
+    const secondProject: Project = {
+      id: "second",
+      displayName: "Второй",
+      path: "/work/second",
+      createdAt: "2026-01-02",
+      updatedAt: "2026-01-02",
+    };
+    const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+    api.moveProject.mockRejectedValue(new Error("Сервер недоступен"));
+
+    renderApp("/threads/newer");
+    const projectGroup = screen
+      .getByLabelText("Действия с проектом Проект")
+      .closest(".project-group") as HTMLElement;
+    fireEvent.click(within(projectGroup).getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(within(projectGroup).getByRole("button", { name: "Переместить ниже" }));
+
+    expect(await within(projectGroup).findByRole("alert")).toHaveTextContent("Сервер недоступен");
+  });
   it("creates an empty session from a project and opens it", async () => {
     const created = {
       ...baseThread,
@@ -323,6 +438,34 @@ describe("App routing and navigation", () => {
     fireEvent.touchEnd(frame, { touches: [] });
 
     expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
+  });
+
+  it("mirrors mobile drawer gestures when the sidebar is on the right", () => {
+    localStorage.setItem("codexnest.sidebarSide", "right");
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 220, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 120, clientY: 204 }] });
+    expect(frame).toHaveClass("drawer-dragging");
+    expect(
+      Number.parseFloat(frame.style.getPropertyValue("--drawer-drag-translate")),
+    ).toBeGreaterThan(0);
+    fireEvent.touchEnd(frame, { touches: [] });
+    expect(sidebar).toHaveClass("open");
+
+    fireEvent.touchStart(frame, { touches: [{ clientX: 100, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 200, clientY: 204 }] });
+    fireEvent.touchEnd(frame, { touches: [] });
     expect(sidebar).not.toHaveClass("open");
   });
 
@@ -474,19 +617,21 @@ function mockMobileViewport() {
   } as unknown as MediaQueryList);
 }
 
-function snapshot(threads: ThreadSummary[]): AppSnapshot {
+function defaultProject(): Project {
+  return {
+    id: "project",
+    displayName: "Проект",
+    path: "/work/project",
+    createdAt: "2026-01-01",
+    updatedAt: "2026-01-01",
+  };
+}
+
+function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProject()]): AppSnapshot {
   return {
     sequence: 1,
     connection: { state: "ready", message: null, syncedAt: null },
-    projects: [
-      {
-        id: "project",
-        displayName: "Проект",
-        path: "/work/project",
-        createdAt: "2026-01-01",
-        updatedAt: "2026-01-01",
-      },
-    ],
+    projects,
     threads,
     attention: [],
     models: [],
@@ -507,6 +652,7 @@ function mockConnection(
     interrupt: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
     createProjectThread: vi.fn(),
+    moveProject: vi.fn(),
     readCodexRateLimits: vi.fn(),
     readPermissionSettings: vi.fn().mockResolvedValue({
       preset: "auto",

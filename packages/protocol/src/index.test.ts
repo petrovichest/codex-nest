@@ -18,6 +18,13 @@ describe("protocol guards", () => {
     expect(isServerFrame({ type: "event", sequence: 1, event: { type: "resync.required" } })).toBe(
       true,
     );
+    expect(
+      isServerFrame({
+        type: "event",
+        sequence: 2,
+        event: { type: "projects.reordered", projects: [] },
+      }),
+    ).toBe(true);
   });
 
   it("formats bearer credentials without putting them in a URL", () => {
