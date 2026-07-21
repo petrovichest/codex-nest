@@ -60,7 +60,7 @@ intentional direct LAN HTTP access, or keep loopback and use the reverse-proxy
 examples under `deploy/`. Never expose CodexNest directly to the public
 internet.
 
-See [deployment and release checklist](./deploy/DEPLOYMENT.md) and
+See the step-by-step [deployment and launch guide](./deploy/DEPLOYMENT.md) and
 [Android build instructions](./apps/client/android/README.md). No commit, push,
 deployment, signing secret, Firebase credential, or release APK is produced by
 the normal build.
