@@ -179,6 +179,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       await bridge.request<unknown>("thread/start", { cwd: project.path }),
     );
     projection.upsertThread(started.thread);
+    projection.markUnmaterialized(started.thread.id);
     const thread = await projection.setSettings(
       started.thread.id,
       {
@@ -278,16 +279,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!body) return;
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      await bridge.request<ThreadResumeResponse>(
-        "thread/resume",
-        {
-          threadId: request.params.id,
-          cwd: summary.cwd,
-          excludeTurns: true,
-          ...threadSettings(summary.settings),
-        },
-        30_000,
-      );
+      if (!projection.isUnmaterialized(request.params.id)) {
+        await bridge.request<ThreadResumeResponse>(
+          "thread/resume",
+          {
+            threadId: request.params.id,
+            cwd: summary.cwd,
+            excludeTurns: true,
+            ...threadSettings(summary.settings),
+          },
+          30_000,
+        );
+      }
       const turn = parseTurnStart(
         await bridge.request<unknown>("turn/start", {
           threadId: request.params.id,
@@ -296,6 +299,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           ...turnSettings(summary.settings, projection.availableModels),
         }),
       );
+      projection.markMaterialized(request.params.id);
       return reply.code(201).send({ turnId: turn.turn.id });
     },
   );

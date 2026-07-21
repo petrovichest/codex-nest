@@ -31,6 +31,7 @@ interface CachedThread {
 
 export class AppProjection extends EventEmitter {
   private readonly threads = new Map<string, CachedThread>();
+  private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
   private models: ModelOption[] = [];
   private sequence = 0;
@@ -113,6 +114,10 @@ export class AppProjection extends EventEmitter {
   }
 
   async readThread(id: string): Promise<ThreadDetail> {
+    const local = this.threads.get(id);
+    if (local && this.unmaterializedThreads.has(id)) {
+      return { summary: this.toSummary(local), turns: [] };
+    }
     const result = parseThreadRead(
       await this.bridge.request<unknown>(
         "thread/read",
@@ -197,6 +202,19 @@ export class AppProjection extends EventEmitter {
     return this.toSummary(cached);
   }
 
+  markUnmaterialized(threadId: string): void {
+    if (!this.threads.has(threadId)) throw new Error("Thread not found");
+    this.unmaterializedThreads.add(threadId);
+  }
+
+  isUnmaterialized(threadId: string): boolean {
+    return this.unmaterializedThreads.has(threadId);
+  }
+
+  markMaterialized(threadId: string): void {
+    this.unmaterializedThreads.delete(threadId);
+  }
+
   private async performSync(): Promise<void> {
     const [active, archived, models] = await Promise.all([
       this.listAllThreads(false),
@@ -221,7 +239,7 @@ export class AppProjection extends EventEmitter {
       });
     }
     for (const id of this.threads.keys()) {
-      if (!incoming.has(id)) this.threads.delete(id);
+      if (!incoming.has(id) && !this.unmaterializedThreads.has(id)) this.threads.delete(id);
     }
 
     await this.store.update((state) => {
@@ -356,9 +374,11 @@ export class AppProjection extends EventEmitter {
       case "thread/deleted":
       case "thread/closed":
         this.threads.delete(notification.params.threadId);
+        this.unmaterializedThreads.delete(notification.params.threadId);
         this.publish({ type: "thread.removed", threadId: notification.params.threadId });
         break;
       case "turn/started": {
+        this.unmaterializedThreads.delete(notification.params.threadId);
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
           cached.currentTurnId = notification.params.turn.id;

@@ -274,6 +274,25 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
       turnsBeforeEmptyThread,
     );
+    const emptyDetail = await app.inject({
+      url: "/api/v1/threads/created",
+      headers,
+    });
+    expect(emptyDetail.statusCode).toBe(200);
+    expect(emptyDetail.json().turns).toEqual([]);
+    const resumesBeforeFirstTurn = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/resume",
+    ).length;
+    const firstTurn = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/created/turns",
+      headers,
+      payload: { input: "Первое сообщение" },
+    });
+    expect(firstTurn.statusCode).toBe(201);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      resumesBeforeFirstTurn,
+    );
 
     const created = await app.inject({
       method: "POST",
