@@ -25,6 +25,7 @@ export interface CodexNestState {
   projects: Project[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
+  defaultReasoningEffort?: string;
   messageQueues?: Record<string, QueuedMessage[]>;
 }
 
@@ -149,6 +150,12 @@ function validateState(value: unknown): CodexNestState {
   }
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
+  }
+  if (
+    value.defaultReasoningEffort !== undefined &&
+    (typeof value.defaultReasoningEffort !== "string" || !value.defaultReasoningEffort.trim())
+  ) {
+    throw new Error("Corrupt default reasoning effort in CodexNest state");
   }
   for (const project of value.projects) {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");

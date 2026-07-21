@@ -2,7 +2,12 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
-import type { Project, SessionSettings, UpdateThreadSettingsRequest } from "@codexnest/protocol";
+import type {
+  ModelOption,
+  Project,
+  SessionSettings,
+  UpdateThreadSettingsRequest,
+} from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { Composer } from "./Composer";
@@ -23,9 +28,9 @@ export function NewSession({
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
-  const [settings, setSettings] = useState<SessionSettings>(() => ({
-    ...DEFAULT_SESSION_SETTINGS,
-  }));
+  const [settings, setSettings] = useState<SessionSettings>(() =>
+    initialSettings(state.snapshot?.defaultReasoningEffort, state.snapshot?.models ?? []),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
@@ -47,7 +52,16 @@ export function NewSession({
     setBusy(true);
     setError(null);
     try {
-      const result = await api.createThread({ projectId, input, settings });
+      const result = await api.createThread({
+        projectId,
+        input,
+        settings: {
+          ...settings,
+          ...(settings.reasoningEffort === undefined && state.snapshot?.defaultReasoningEffort
+            ? { reasoningEffort: null }
+            : {}),
+        },
+      });
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось создать задачу");
@@ -102,6 +116,21 @@ export function NewSession({
       )}
     </div>
   );
+}
+
+function initialSettings(
+  defaultReasoningEffort: string | undefined,
+  models: ModelOption[],
+): SessionSettings {
+  const settings = { ...DEFAULT_SESSION_SETTINGS };
+  const model = models.find((candidate) => candidate.isDefault) ?? models[0];
+  if (
+    defaultReasoningEffort &&
+    (!model || model.reasoningEfforts.some((option) => option.value === defaultReasoningEffort))
+  ) {
+    settings.reasoningEffort = defaultReasoningEffort;
+  }
+  return settings;
 }
 
 function applySettingsPatch(
