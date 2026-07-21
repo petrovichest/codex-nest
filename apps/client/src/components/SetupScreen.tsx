@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 
 import { ApiClient } from "../api";
 import { normalizeBaseUrl, saveConnectionSettings, type ConnectionSettings } from "../storage";
+import { ServerIcon } from "./Icons";
 
 export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionSettings): void }) {
   const [baseUrl, setBaseUrl] = useState("http://");
@@ -31,9 +32,12 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
   return (
     <main className="setup-page">
       <form className="setup-card" onSubmit={submit}>
-        <div className="brand-mark">CN</div>
+        <div className="brand-mark">
+          <ServerIcon />
+        </div>
+        <span className="dialog-eyebrow">CodexNest</span>
         <h1>Подключение к CodexNest</h1>
-        <p className="muted">Укажите адрес Raspberry Pi в локальной сети и общий token.</p>
+        <p className="muted">Укажите адрес домашнего сервера и bearer token.</p>
         <label>
           Адрес сервера
           <input

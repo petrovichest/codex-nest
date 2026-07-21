@@ -5,6 +5,8 @@ import type {
   SessionSettings,
 } from "@codexnest/protocol";
 
+import { ChevronDownIcon, SlidersIcon } from "./Icons";
+
 export function SettingsPicker({
   models,
   value,
@@ -15,9 +17,16 @@ export function SettingsPicker({
   onChange(value: SessionSettings): void;
 }) {
   const model = models.find((candidate) => candidate.id === value.model);
+  const summary = [model?.displayName ?? "Модель по умолчанию", value.reasoningEffort]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <details className="settings-picker">
-      <summary>Настройки сессии</summary>
+      <summary>
+        <SlidersIcon />
+        <span>{summary}</span>
+        <ChevronDownIcon className="settings-chevron" />
+      </summary>
       <div className="settings-grid">
         <label>
           Модель
