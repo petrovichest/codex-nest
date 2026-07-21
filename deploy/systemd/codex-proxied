@@ -41,8 +41,8 @@ done
 [[ "$no_proxy" == "$NO_PROXY" ]] || fail "no_proxy does not match NO_PROXY"
 
 case "$proxy_url" in
-  http://?*) ;;
-  *) fail "HTTPS_PROXY must be a non-empty http:// URL" ;;
+  http://?*|https://?*) ;;
+  *) fail "HTTPS_PROXY must be a non-empty http:// or https:// URL" ;;
 esac
 
 previous_argument=""

@@ -7,6 +7,7 @@ import { buildApp } from "./app";
 import { AttentionManager } from "./attention";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
+import { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
@@ -43,6 +44,16 @@ const bridge = new CodexBridge({
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);
+const codexManager = new CodexManager({
+  codexBin: config.codexBin,
+  managementBin: config.codexManagementBin,
+  proxyEnvFile: config.codexProxyEnvFile,
+  transport: config.codexTransport,
+  activeTurnCount: () =>
+    projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
+  bridgeState: () => bridge.state,
+  bridgeVersion: () => bridge.actualVersion,
+});
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
@@ -81,7 +92,7 @@ projection.on("event", (_sequence, event) => {
   }
 });
 
-const app = await buildApp(config, { bridge, store, projection, attention, push });
+const app = await buildApp(config, { bridge, store, projection, attention, push, codexManager });
 await app.listen({ host: config.host, port: config.port });
 void bridge.start();
 

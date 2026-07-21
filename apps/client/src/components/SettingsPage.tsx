@@ -5,6 +5,7 @@ import type { GlobalPermissionSettings, PermissionPreset, TaskDefaults } from "@
 import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
 import { ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import { CodexSettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export type SidebarSide = "left" | "right";
@@ -319,6 +320,8 @@ export function SettingsPage({
               </button>
             </div>
           </form>
+
+          <CodexSettingsCard />
 
           <section className="settings-card">
             <div className="settings-card-heading">

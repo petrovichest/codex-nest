@@ -5,6 +5,7 @@ import type { QueuedMessage } from "@codexnest/protocol";
 import type { StateStore } from "./state/store";
 
 export interface MessageQueueDelivery {
+  paused(): boolean;
   currentTurnId(threadId: string): string | null;
   start(threadId: string, message: QueuedMessage): Promise<string>;
   steer(threadId: string, turnId: string, message: QueuedMessage): Promise<string>;
@@ -13,6 +14,7 @@ export interface MessageQueueDelivery {
 }
 
 export class MessageQueueNotFoundError extends Error {}
+export class MessageQueuePausedError extends Error {}
 
 export class MessageQueue {
   private readonly locks = new Map<string, Promise<unknown>>();
@@ -50,6 +52,8 @@ export class MessageQueue {
 
   sendNow(threadId: string, messageId: string): Promise<string> {
     return this.withLock(threadId, async () => {
+      if (this.delivery.paused())
+        throw new MessageQueuePausedError("Codex maintenance is in progress");
       const message = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!message) throw new MessageQueueNotFoundError("Queued message not found");
       return this.dispatch(threadId, message, true);
@@ -58,6 +62,7 @@ export class MessageQueue {
 
   drain(threadId: string): Promise<void> {
     return this.withLock(threadId, async () => {
+      if (this.delivery.paused()) return;
       if (this.delivery.currentTurnId(threadId)) return;
       const message = this.list(threadId)[0];
       if (!message || message.status !== "queued") return;
@@ -85,6 +90,11 @@ export class MessageQueue {
       });
       await this.drain(threadId).catch(() => undefined);
     }
+  }
+
+  async resume(): Promise<void> {
+    const threadIds = Object.keys(this.store.snapshot().messageQueues ?? {});
+    await Promise.all(threadIds.map((threadId) => this.drain(threadId).catch(() => undefined)));
   }
 
   async removeThread(threadId: string): Promise<void> {

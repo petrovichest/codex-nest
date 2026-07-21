@@ -12,6 +12,7 @@ import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Thread, Turn } from "./codex/generated/v2/index";
 import { RpcError } from "./codex/transport";
+import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
@@ -72,6 +73,9 @@ describe("HTTP authentication", () => {
     });
     expect(health.json().appServer).not.toHaveProperty("expectedVersion");
     expect((await app.inject({ url: "/api/v1/summary" })).json()).toMatchObject({
+      error: { code: "unauthorized" },
+    });
+    expect((await app.inject({ url: "/api/v1/settings/codex" })).json()).toMatchObject({
       error: { code: "unauthorized" },
     });
     expect((await app.inject({ url: "/api/v1/summary?token=correct" })).json()).toMatchObject({
@@ -692,6 +696,7 @@ describe("thread settings", () => {
       state.auth.tokenSha256 = hashToken("correct");
     });
     const bridge = new SettingsBridge();
+    const { codexManager, codexStatus } = createCodexManagerMock();
     const attention = new AttentionManager();
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
@@ -708,6 +713,7 @@ describe("thread settings", () => {
         projection,
         attention,
         push: new PushNotifier(store),
+        codexManager,
         projectRoot: directory,
       },
     );
@@ -734,6 +740,21 @@ describe("thread settings", () => {
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
     ).toEqual([["account/rateLimits/read", undefined]]);
+
+    const management = await app.inject({ url: "/api/v1/settings/codex", headers });
+    expect(management.statusCode).toBe(200);
+    expect(management.json()).toEqual(codexStatus);
+    expect(JSON.stringify(management.json())).not.toContain("secret");
+
+    const appliedProxy = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/codex/proxy",
+      headers,
+      payload: { proxy: "proxy.example:8000:user:secret" },
+    });
+    expect(appliedProxy.statusCode).toBe(200);
+    expect(codexManager.applyProxy).toHaveBeenCalledWith("proxy.example:8000:user:secret");
+    expect(JSON.stringify(appliedProxy.json())).not.toContain("secret");
 
     const updated = await app.inject({
       method: "PUT",
@@ -799,6 +820,46 @@ describe("thread settings", () => {
     await app.close();
   });
 });
+
+function createCodexManagerMock() {
+  const codexStatus = {
+    supported: true,
+    unavailableReason: null,
+    operation: "idle" as const,
+    activeTurnCount: 0,
+    daemonStatus: "running",
+    cliVersion: "0.144.6",
+    appServerVersion: "0.144.6",
+    latestVersion: null,
+    updateAvailable: null,
+    networkStatus: "unknown" as const,
+    networkMessage: null,
+    proxy: {
+      configured: true,
+      protocol: "http" as const,
+      host: "proxy.example",
+      port: 8000,
+      username: "user",
+      hasPassword: true,
+      error: null,
+    },
+  };
+  const codexManager = {
+    maintenanceActive: false,
+    assertTurnsAllowed: vi.fn(),
+    status: vi.fn(async () => codexStatus),
+    check: vi.fn(async () => ({
+      ...codexStatus,
+      latestVersion: "0.145.0",
+      updateAvailable: true,
+      networkStatus: "ok" as const,
+    })),
+    applyProxy: vi.fn(async () => codexStatus),
+    update: vi.fn(async () => codexStatus),
+    restart: vi.fn(async () => codexStatus),
+  } as unknown as CodexManager;
+  return { codexManager, codexStatus };
+}
 
 class SettingsBridge extends EventEmitter {
   state = "ready" as const;

@@ -82,6 +82,22 @@ describe("MessageQueue", () => {
 
     expect(queue.list("thread")).toEqual([{ ...pending, status: "queued" }]);
   });
+
+  it("keeps messages queued while delivery is paused and resumes afterwards", async () => {
+    const { queue, delivery, setPaused } = await setup(null);
+    setPaused(true);
+
+    const message = await queue.enqueue("thread", "После обслуживания");
+    await queue.drain("thread");
+
+    expect(delivery.start).not.toHaveBeenCalled();
+    expect(queue.list("thread")).toEqual([message]);
+
+    setPaused(false);
+    await queue.resume();
+    expect(delivery.start).toHaveBeenCalledWith("thread", message);
+    expect(queue.list("thread")).toEqual([]);
+  });
 });
 
 async function setup(initialTurn: string | null) {
@@ -90,7 +106,9 @@ async function setup(initialTurn: string | null) {
   const store = new StateStore(join(directory, "state.json"));
   await store.load();
   let currentTurn = initialTurn;
+  let paused = false;
   const delivery = {
+    paused: vi.fn(() => paused),
     currentTurnId: vi.fn(() => currentTurn),
     start: vi.fn(async () => {
       currentTurn = "started";
@@ -109,6 +127,9 @@ async function setup(initialTurn: string | null) {
     delivery,
     setCurrentTurn(value: string | null) {
       currentTurn = value;
+    },
+    setPaused(value: boolean) {
+      paused = value;
     },
   };
 }

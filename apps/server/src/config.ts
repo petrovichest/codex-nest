@@ -8,6 +8,8 @@ export interface AppConfig {
   port: number;
   statePath: string;
   codexBin: string;
+  codexManagementBin: string;
+  codexProxyEnvFile: string;
   codexTransport: "stdio" | "daemon";
   allowedOrigins: Set<string>;
   clientDist: string;
@@ -37,6 +39,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port,
     statePath: env("CODEXNEST_STATE_PATH") ?? resolve(stateRoot, "codexnest/state.json"),
     codexBin: env("CODEXNEST_CODEX_BIN") ?? "codex",
+    codexManagementBin: env("CODEXNEST_CODEX_MANAGEMENT_BIN") ?? resolve(homedir(), "bin/codex"),
+    codexProxyEnvFile:
+      env("CODEXNEST_CODEX_PROXY_ENV_FILE") ?? resolve(homedir(), ".config/codex/app-server.env"),
     codexTransport,
     allowedOrigins: new Set(
       (

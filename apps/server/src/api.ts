@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ApiErrorCode,
   AttentionResponse,
+  CodexManagementStatus,
   CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
@@ -24,6 +25,7 @@ import type {
   ThreadGoal,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
+  UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadGoalRequest,
@@ -43,6 +45,7 @@ import {
   parseTurnSteer,
 } from "./codex/guards";
 import { RpcError } from "./codex/transport";
+import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
 import {
@@ -58,7 +61,7 @@ import {
 } from "./projects";
 import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
-import { MessageQueue, MessageQueueNotFoundError } from "./message-queue";
+import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
 import type { StateStore } from "./state/store";
 
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
@@ -69,12 +72,13 @@ export interface ApiServices {
   projection: AppProjection;
   attention: AttentionManager;
   push: PushNotifier;
+  codexManager?: CodexManager;
   projectRoot?: string;
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention } = services;
-  const startTurn = async (
+  const { bridge, store, projection, attention, codexManager } = services;
+  const startTurnUnlocked = async (
     threadId: string,
     input: string,
     images: string[],
@@ -131,6 +135,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       };
     }
   };
+  const startTurn = (
+    threadId: string,
+    input: string,
+    images: string[],
+    clientMessageId: string | null,
+    goal = false,
+  ): Promise<TurnStartResult> => {
+    const release = codexManager?.beginTurn();
+    return startTurnUnlocked(threadId, input, images, clientMessageId, goal).finally(() =>
+      release?.(),
+    );
+  };
   const steerTurn = async (
     threadId: string,
     turnId: string,
@@ -138,6 +154,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     images: string[],
     clientMessageId: string | null,
   ): Promise<string> => {
+    codexManager?.assertTurnsAllowed();
     const result = parseTurnSteer(
       await bridge.request<unknown>("turn/steer", {
         threadId,
@@ -150,6 +167,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return result.turnId;
   };
   const queue = new MessageQueue(store, {
+    paused: () => codexManager?.maintenanceActive ?? false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
     start: (threadId, message) =>
       startTurn(threadId, message.text, message.images ?? [], message.id).then(
@@ -285,6 +303,45 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
+  app.get("/api/v1/settings/codex", async (): Promise<CodexManagementStatus> => {
+    return requireCodexManager(codexManager).status();
+  });
+
+  app.post("/api/v1/settings/codex/check", async (): Promise<CodexManagementStatus> => {
+    return requireCodexManager(codexManager).check();
+  });
+
+  app.put<{ Body: UpdateCodexProxyRequest }>(
+    "/api/v1/settings/codex/proxy",
+    async (request): Promise<CodexManagementStatus> => {
+      const body = requireRecord<UpdateCodexProxyRequest>(request.body);
+      if (Object.keys(body).some((key) => key !== "proxy") || typeof body.proxy !== "string") {
+        throw new CodexManagementError("validation", "proxy must be a string");
+      }
+      try {
+        return await requireCodexManager(codexManager).applyProxy(body.proxy);
+      } finally {
+        await queue.resume();
+      }
+    },
+  );
+
+  app.post("/api/v1/settings/codex/update", async (): Promise<CodexManagementStatus> => {
+    try {
+      return await requireCodexManager(codexManager).update();
+    } finally {
+      await queue.resume();
+    }
+  });
+
+  app.post("/api/v1/settings/codex/restart", async (): Promise<CodexManagementStatus> => {
+    try {
+      return await requireCodexManager(codexManager).restart();
+    } finally {
+      await queue.resume();
+    }
+  });
+
   app.get<{ Querystring: { path?: string } }>("/api/v1/directories", async (request) => {
     if (request.query.path !== undefined && typeof request.query.path !== "string") {
       throw new ProjectValidationError("path must be a string");
@@ -386,6 +443,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 
   app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
+    codexManager?.assertTurnsAllowed();
     const project = store
       .snapshot()
       .projects.find((candidate) => candidate.id === request.params.id);
@@ -444,6 +502,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      codexManager?.assertTurnsAllowed();
       const body = validateThreadBody(request.body, reply);
       if (!body) return;
       const project = store
@@ -694,10 +753,26 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof MessageQueueNotFoundError)
       return apiError(reply, 404, "not_found", error.message);
+    if (error instanceof MessageQueuePausedError)
+      return apiError(reply, 409, "conflict", error.message);
+    if (error instanceof CodexManagementError) {
+      if (error.kind === "validation")
+        return apiError(reply, 400, "validation_failed", error.message);
+      if (error.kind === "failed")
+        return apiError(reply, 503, "app_server_unavailable", error.message);
+      return apiError(reply, 409, "conflict", error.message);
+    }
     if (error instanceof ProjectConflictError)
       return apiError(reply, 409, "conflict", error.message);
     return apiError(reply, 500, "internal_error", "Internal server error");
   });
+}
+
+function requireCodexManager(manager: CodexManager | undefined): CodexManager {
+  if (!manager) {
+    throw new CodexManagementError("unsupported", "Codex management is not configured");
+  }
+  return manager;
 }
 
 function threadSettings(settings?: SessionSettings): Record<string, unknown> {

@@ -37,6 +37,38 @@ export type CodexRateLimitsResponse = {
   secondary: CodexRateLimitWindow | null;
 };
 
+export type CodexManagementOperation =
+  "idle" | "checking" | "applying_proxy" | "updating" | "restarting";
+
+export type CodexProxyStatus = {
+  configured: boolean;
+  protocol: "http" | "https" | null;
+  host: string | null;
+  port: number | null;
+  username: string | null;
+  hasPassword: boolean;
+  error: string | null;
+};
+
+export type CodexManagementStatus = {
+  supported: boolean;
+  unavailableReason: string | null;
+  operation: CodexManagementOperation;
+  activeTurnCount: number;
+  daemonStatus: string;
+  cliVersion: string | null;
+  appServerVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean | null;
+  networkStatus: "unknown" | "ok" | "error";
+  networkMessage: string | null;
+  proxy: CodexProxyStatus;
+};
+
+export type UpdateCodexProxyRequest = {
+  proxy: string;
+};
+
 export type ApiErrorCode =
   | "unauthorized"
   | "forbidden"

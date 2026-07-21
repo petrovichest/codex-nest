@@ -189,6 +189,15 @@ systemctl --user daemon-reload
 Switching Protocols`. Если proxy недоступен, Codex завершает соединение ошибкой
 и не переключается на прямой маршрут.
 
+После запуска CodexNest тот же proxy можно безопасно заменить в разделе
+«Настройки → Codex и прокси». Интерфейс принимает `host:port`,
+`host:port:user:password`, `user:password@host:port` и полные `http://` или
+`https://` URL. Перед заменой новый адрес проверяется через `codex doctor`, а
+при неудачном перезапуске предыдущий приватный env-файл восстанавливается.
+Пароль не возвращается браузеру после сохранения. Проверка latest version,
+обновление и перезапуск daemon также доступны в этой карточке; операции,
+прерывающие daemon, блокируются до завершения активных turn.
+
 CodexNest будет подключаться к нему по WebSocket через локальный Unix-сокет. При
 перезапуске `codexnest.service` соединение закроется, а выполняющийся turn
 останется в daemon; после старта CodexNest переподключится и заново откроет
@@ -267,6 +276,8 @@ accept-all certificate handler).
 | `CODEXNEST_ALLOWED_ORIGINS`          | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
 | `CODEXNEST_STATE_PATH`               | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
 | `CODEXNEST_CODEX_BIN`                | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
+| `CODEXNEST_CODEX_MANAGEMENT_BIN`     | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
+| `CODEXNEST_CODEX_PROXY_ENV_FILE`     | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
 | `CODEXNEST_CODEX_TRANSPORT`          | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
 | `CODEXNEST_CLIENT_DIST`              | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
 | `CODEXNEST_LOG_LEVEL`                | Уровень логов Fastify                             | `info`                                        |

@@ -900,6 +900,85 @@ pre {
   background: var(--danger-soft);
 }
 
+.settings-notice.success {
+  color: var(--success-text, #28633b);
+  border-color: color-mix(in srgb, var(--success-text, #28633b) 25%, var(--line));
+  background: color-mix(in srgb, var(--success-text, #28633b) 9%, var(--surface));
+}
+
+.settings-loading.compact {
+  min-height: 84px;
+}
+
+.codex-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.codex-status-grid > div,
+.codex-proxy-summary {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-muted);
+}
+
+.codex-status-grid dt,
+.codex-proxy-summary strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.codex-status-grid dd {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.codex-proxy-summary span {
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.codex-proxy-form,
+.codex-proxy-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.codex-proxy-form label > span:first-child {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.codex-proxy-form > small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.codex-proxy-input {
+  display: flex;
+  gap: 8px;
+}
+
+.codex-proxy-input input {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-actions.codex-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-actions {
   display: flex;
   justify-content: flex-end;
@@ -2712,6 +2791,15 @@ pre {
 }
 
 @media (max-width: 520px) {
+  .codex-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .codex-proxy-input {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .project-browser-backdrop {
     align-items: stretch;
     padding: 0;

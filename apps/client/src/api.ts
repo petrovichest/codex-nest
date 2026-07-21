@@ -3,6 +3,7 @@ import type {
   AppSnapshot,
   AttentionResponse,
   CodexRateLimitsResponse,
+  CodexManagementStatus,
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadResponse,
@@ -25,6 +26,7 @@ import type {
   ThreadSummary,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
+  UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadGoalRequest,
@@ -48,6 +50,30 @@ export class ApiClient {
 
   readCodexRateLimits(): Promise<CodexRateLimitsResponse> {
     return this.request("/api/v1/codex/rate-limits");
+  }
+
+  readCodexSettings(): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex");
+  }
+
+  checkCodex(): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex/check", { method: "POST", timeoutMs: null });
+  }
+
+  updateCodexProxy(body: UpdateCodexProxyRequest): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex/proxy", {
+      method: "PUT",
+      body,
+      timeoutMs: null,
+    });
+  }
+
+  updateCodex(): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex/update", { method: "POST", timeoutMs: null });
+  }
+
+  restartCodex(): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex/restart", { method: "POST", timeoutMs: null });
   }
 
   readPermissionSettings(): Promise<GlobalPermissionSettings> {
