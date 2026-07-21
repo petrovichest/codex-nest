@@ -3,7 +3,14 @@ import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { JsonlTransport, RpcTimeoutError, type JsonlProcess, type RpcError } from "./transport";
+import {
+  connectUnixWebSocket,
+  JsonlTransport,
+  RpcTimeoutError,
+  type JsonlProcess,
+  type RpcError,
+  type WebSocketClient,
+} from "./transport";
 
 class FakeChild extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -13,6 +20,28 @@ class FakeChild extends EventEmitter {
   kill(): boolean {
     this.killed = true;
     return true;
+  }
+}
+
+class FakeWebSocket extends EventEmitter implements WebSocketClient {
+  readyState = 0;
+  readonly frames: string[] = [];
+
+  open(): void {
+    this.readyState = 1;
+    this.emit("open");
+  }
+
+  send(data: string, callback: (error?: Error) => void): void {
+    this.frames.push(data);
+    const request = JSON.parse(data) as { id: number };
+    this.emit("message", Buffer.from(JSON.stringify({ id: request.id, result: { ok: true } })));
+    callback();
+  }
+
+  terminate(): void {
+    this.readyState = 3;
+    this.emit("close", 1000);
   }
 }
 
@@ -27,6 +56,25 @@ function harness() {
 afterEach(() => vi.useRealTimers());
 
 describe("JsonlTransport", () => {
+  it("adapts JSONL envelopes to WebSocket frames over a Unix socket", async () => {
+    const socket = new FakeWebSocket();
+    let url = "";
+    const child = connectUnixWebSocket("/tmp/app-server.sock", (value) => {
+      url = value;
+      return socket;
+    });
+    const transport = new JsonlTransport(child);
+    const response = transport.request("initialize", {});
+    socket.open();
+
+    await expect(response).resolves.toEqual({ ok: true });
+    expect(url).toBe("ws+unix:///tmp/app-server.sock:/");
+    expect(socket.frames).toHaveLength(1);
+    expect(socket.frames[0]).not.toContain("\n");
+    transport.shutdown();
+    child.kill();
+  });
+
   it("correlates successful responses with monotonic ids", async () => {
     const { child, transport, written } = harness();
     const first = transport.request<{ ok: boolean }>("thread/list", {});

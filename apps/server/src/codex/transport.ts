@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { createInterface, type Interface } from "node:readline";
-import type { Readable, Writable } from "node:stream";
+import { PassThrough, type Readable, Writable } from "node:stream";
+
+import WebSocket, { type RawData } from "ws";
 
 import type { ServerNotification, ServerRequest } from "./generated/index";
 
@@ -10,6 +12,83 @@ export interface JsonlProcess {
   stderr?: Readable | null;
   kill(signal?: NodeJS.Signals): boolean;
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+}
+
+export interface WebSocketClient extends EventEmitter {
+  readyState: number;
+  send(data: string, callback: (error?: Error) => void): void;
+  terminate(): void;
+}
+
+export type WebSocketFactory = (url: string) => WebSocketClient;
+
+export function connectUnixWebSocket(
+  socketPath: string,
+  createSocket: WebSocketFactory = (url) =>
+    new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false }),
+): JsonlProcess {
+  return new WebSocketJsonlProcess(createSocket(`ws+unix://${socketPath}:/`));
+}
+
+class WebSocketJsonlProcess extends EventEmitter implements JsonlProcess {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdin: Writable;
+  private bufferedInput = "";
+  private queuedFrames: string[] = [];
+  private exited = false;
+
+  constructor(private readonly socket: WebSocketClient) {
+    super();
+    this.stdin = new Writable({
+      write: (chunk, _encoding, callback) => {
+        this.bufferedInput += chunk.toString();
+        const lines = this.bufferedInput.split("\n");
+        this.bufferedInput = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line) this.sendOrQueue(line);
+        }
+        callback();
+      },
+    });
+    this.socket.on("open", () => {
+      const frames = this.queuedFrames;
+      this.queuedFrames = [];
+      for (const frame of frames) this.send(frame);
+    });
+    this.socket.on("message", (data: RawData) => {
+      this.stdout.write(`${rawDataToString(data)}\n`);
+    });
+    this.socket.on("error", (error: Error) => {
+      this.stderr.write(`${error.message}\n`);
+    });
+    this.socket.on("close", (code: number) => {
+      if (this.exited) return;
+      this.exited = true;
+      this.stdout.end();
+      this.stderr.end();
+      this.emit("exit", code === 1000 ? 0 : 1, null);
+    });
+  }
+
+  kill(): boolean {
+    if (this.exited || this.socket.readyState === 3) return false;
+    this.socket.terminate();
+    return true;
+  }
+
+  private sendOrQueue(frame: string): void {
+    if (this.socket.readyState === 1) this.send(frame);
+    else if (this.socket.readyState === 0) this.queuedFrames.push(frame);
+  }
+
+  private send(frame: string): void {
+    this.socket.send(frame, (error) => {
+      if (!error) return;
+      this.stderr.write(`${error.message}\n`);
+      this.socket.terminate();
+    });
+  }
 }
 
 interface PendingRequest {
@@ -178,4 +257,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isRpcError(value: unknown): value is JsonRpcErrorShape {
   return isRecord(value) && typeof value.code === "number" && typeof value.message === "string";
+}
+
+function rawDataToString(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString();
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString();
+  return data.toString();
 }
