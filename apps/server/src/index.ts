@@ -12,6 +12,7 @@ import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
+import { ThreadTitleGenerator } from "./thread-title";
 
 const config = loadConfig();
 const store = new StateStore(config.statePath);
@@ -44,6 +45,7 @@ const bridge = new CodexBridge({
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);
+const threadTitles = new ThreadTitleGenerator(bridge);
 const codexManager = new CodexManager({
   codexBin: config.codexBin,
   managementBin: config.codexManagementBin,
@@ -92,7 +94,15 @@ projection.on("event", (_sequence, event) => {
   }
 });
 
-const app = await buildApp(config, { bridge, store, projection, attention, push, codexManager });
+const app = await buildApp(config, {
+  bridge,
+  store,
+  projection,
+  attention,
+  push,
+  codexManager,
+  threadTitles,
+});
 await app.listen({ host: config.host, port: config.port });
 void bridge.start();
 

@@ -46,6 +46,7 @@ export class AppProjection extends EventEmitter {
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
   private readonly subscribedThreads = new Set<string>();
+  private readonly hiddenThreads = new Set<string>();
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -59,7 +60,10 @@ export class AppProjection extends EventEmitter {
   ) {
     super();
     bridge.on("state", (state) => {
-      if (state !== "ready") this.subscribedThreads.clear();
+      if (state !== "ready") {
+        this.subscribedThreads.clear();
+        this.hiddenThreads.clear();
+      }
       this.publish({ type: "connection.changed", connection: this.connection });
     });
     bridge.on("notification", (notification: ServerNotification) => {
@@ -128,6 +132,10 @@ export class AppProjection extends EventEmitter {
   summary(id: string): ThreadSummary | undefined {
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
+  }
+
+  hasExplicitName(id: string): boolean {
+    return !!this.threads.get(id)?.thread.name?.trim();
   }
 
   async sync(): Promise<void> {
@@ -422,6 +430,17 @@ export class AppProjection extends EventEmitter {
   }
 
   private async onNotification(notification: ServerNotification): Promise<void> {
+    if (notification.method === "thread/started" && notification.params.thread.ephemeral) {
+      this.hiddenThreads.add(notification.params.thread.id);
+      return;
+    }
+    const threadId = notificationThreadId(notification);
+    if (threadId && this.hiddenThreads.has(threadId)) {
+      if (notification.method === "thread/deleted" || notification.method === "thread/closed") {
+        this.hiddenThreads.delete(threadId);
+      }
+      return;
+    }
     switch (notification.method) {
       case "error": {
         const item: ActivityItem = {
@@ -719,6 +738,13 @@ export class AppProjection extends EventEmitter {
     this.sequence += 1;
     this.emit("event", this.sequence, event);
   }
+}
+
+function notificationThreadId(notification: ServerNotification): string | undefined {
+  const params: unknown = notification.params;
+  if (!params || typeof params !== "object" || !("threadId" in params)) return undefined;
+  const threadId = (params as { threadId?: unknown }).threadId;
+  return typeof threadId === "string" ? threadId : undefined;
 }
 
 function sessionSettings(settings?: SessionSettings): SessionSettings {

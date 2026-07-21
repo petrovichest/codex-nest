@@ -7,6 +7,7 @@ coverage/
 *.log
 .env.local
 .env.*.local
+.deploy-host
 apps/client/android/.gradle/
 apps/client/android/local.properties
 apps/client/android/app/build/

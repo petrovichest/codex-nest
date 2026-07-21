@@ -72,12 +72,22 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     value: GitChangesView;
   } | null>(null);
   const gitChangesRequest = useRef(0);
-  const previousTurn = useRef({ threadId, turnId: summary?.currentTurnId ?? null });
   const attention = useMemo(
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
   const goal = state.goals?.[threadId];
+  const activeProgress = summary?.currentTurnId
+    ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
+    : undefined;
+  const gitChangesRefreshKey = summary?.currentTurnId
+    ? [
+        summary.currentTurnId,
+        activeProgress?.filesChanged ?? 0,
+        activeProgress?.additions ?? 0,
+        activeProgress?.deletions ?? 0,
+      ].join(":")
+    : "idle";
 
   useEffect(() => {
     if (goal) setGoalMode(false);
@@ -118,21 +128,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     return () => {
       gitChangesRequest.current += 1;
     };
-  }, [inspectorOpen, loadGitChanges, threadId]);
-
-  useEffect(() => {
-    const current = { threadId, turnId: summary?.currentTurnId ?? null };
-    const previous = previousTurn.current;
-    previousTurn.current = current;
-    if (
-      inspectorOpen &&
-      previous.threadId === threadId &&
-      previous.turnId !== null &&
-      current.turnId === null
-    ) {
-      void loadGitChanges();
-    }
-  }, [inspectorOpen, loadGitChanges, summary?.currentTurnId, threadId]);
+  }, [gitChangesRefreshKey, inspectorOpen, loadGitChanges, threadId]);
 
   useEffect(() => {
     if (threadId) void refreshDetail(threadId).catch((caught: Error) => setError(caught.message));
@@ -290,9 +286,6 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     !summary.currentTurnId && summary.settings.collaborationMode === "plan"
       ? findLatestCompletedPlan(detail)
       : null;
-  const activeProgress = summary.currentTurnId
-    ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
-    : undefined;
 
   return (
     <div className="thread-workspace">

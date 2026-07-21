@@ -317,6 +317,11 @@ describe("thread settings", () => {
     const attention = new AttentionManager();
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
+    const threadTitles = {
+      generate: vi.fn(async (input: string) =>
+        input === "Первое сообщение" ? "Первая задача" : "Начать работу",
+      ),
+    };
     const config = loadConfig({
       statePath: store.path,
       clientDist: join(directory, "missing"),
@@ -329,6 +334,7 @@ describe("thread settings", () => {
       projection,
       attention,
       push: new PushNotifier(store),
+      threadTitles,
       projectRoot: directory,
     });
     const headers = { authorization: "Bearer correct" };
@@ -375,6 +381,17 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       resumesBeforeFirstTurn,
     );
+    await vi.waitFor(() =>
+      expect(threadTitles.generate).toHaveBeenCalledWith("Первое сообщение", {
+        cwd: "/work",
+        model: "gpt-a",
+        effort: "high",
+      }),
+    );
+    expect(bridge.request).toHaveBeenCalledWith("thread/name/set", {
+      threadId: "created",
+      name: "Первая задача",
+    });
 
     const created = await app.inject({
       method: "POST",
@@ -386,6 +403,13 @@ describe("thread settings", () => {
     expect(created.json().thread.settings).toEqual({
       collaborationMode: "default",
     });
+    await vi.waitFor(() =>
+      expect(threadTitles.generate).toHaveBeenCalledWith("Начни работу", {
+        cwd: "/work",
+        model: "gpt-a",
+        effort: "high",
+      }),
+    );
     const threadStartCall = bridge.request.mock.calls
       .filter(([method]) => method === "thread/start")
       .at(-1);
@@ -902,6 +926,7 @@ class SettingsBridge extends EventEmitter {
     }
     if (method === "thread/start") return { thread: testThread("created") };
     if (method === "thread/resume") return {};
+    if (method === "thread/name/set") return {};
     if (method === "turn/start") {
       if (this.failNextTurnStart) {
         this.failNextTurnStart = false;

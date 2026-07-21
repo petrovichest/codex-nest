@@ -23,6 +23,7 @@ import type {
   SteerTurnRequest,
   TaskDefaults,
   ThreadGoal,
+  ThreadSummary,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
@@ -48,6 +49,7 @@ import { RpcError } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
+import { safeError } from "./logging";
 import {
   assertUniqueProjectPath,
   canonicalProjectPath,
@@ -63,6 +65,7 @@ import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
 import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
 import type { StateStore } from "./state/store";
+import type { ThreadTitleGenerator } from "./thread-title";
 
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 
@@ -73,11 +76,29 @@ export interface ApiServices {
   attention: AttentionManager;
   push: PushNotifier;
   codexManager?: CodexManager;
+  threadTitles?: Pick<ThreadTitleGenerator, "generate">;
   projectRoot?: string;
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention, codexManager } = services;
+  const { bridge, store, projection, attention, codexManager, threadTitles } = services;
+  const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
+    if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
+    const model = effectiveModel(summary.settings, projection.availableModels);
+    void threadTitles
+      .generate(input, {
+        cwd: summary.cwd,
+        model: model?.id,
+        effort: model?.reasoningEfforts[0]?.value,
+      })
+      .then(async (name) => {
+        if (projection.hasExplicitName(threadId)) return;
+        await bridge.request("thread/name/set", { threadId, name });
+      })
+      .catch((error: unknown) => {
+        app.log.warn({ err: safeError(error), threadId }, "Failed to generate thread title");
+      });
+  };
   const startTurnUnlocked = async (
     threadId: string,
     input: string,
@@ -87,6 +108,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   ): Promise<TurnStartResult> => {
     let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    const shouldGenerateTitle =
+      projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (goal) {
       if (summary.settings.collaborationMode === "plan") {
         summary = await projection.setSettings(threadId, {
@@ -124,6 +147,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     projection.markMaterialized(threadId);
     projection.setCurrentTurn(threadId, turn.turn.id);
+    if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
     if (!goal) return { turnId: turn.turn.id };
     try {
       await setThreadGoal(bridge, threadId, { status: "active" });

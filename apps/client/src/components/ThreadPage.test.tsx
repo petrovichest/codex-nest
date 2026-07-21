@@ -263,6 +263,57 @@ describe("Activity", () => {
     expect(await screen.findByText("Нет изменений")).toBeInTheDocument();
   });
 
+  it("refreshes Git changes when the active turn diff changes", async () => {
+    const api = threadApi();
+    api.readGitChanges
+      .mockResolvedValueOnce({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 })
+      .mockResolvedValueOnce({ state: "dirty", filesChanged: 2, additions: 4, deletions: 1 })
+      .mockResolvedValueOnce({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 });
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    await waitFor(() => expect(api.readGitChanges).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Нет изменений")).toBeInTheDocument();
+
+    context.state.details.thread.turns[0]!.progress = {
+      ...progress(),
+      filesChanged: 2,
+      additions: 4,
+      deletions: 1,
+    };
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.readGitChanges).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("2 файла")).toBeInTheDocument();
+
+    context.state.details.thread.turns[0]!.progress = {
+      ...context.state.details.thread.turns[0]!.progress,
+      explanation: "Счётчики не изменились",
+    };
+    view.rerender(threadRoute());
+    expect(api.readGitChanges).toHaveBeenCalledTimes(2);
+
+    context.state.details.thread.turns[0]!.progress = progress();
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.readGitChanges).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText("Нет изменений")).toBeInTheDocument();
+  });
+
   it("queues and interrupts a running task", async () => {
     const api = threadApi();
     mockThreadConnection(api, { ...summary, state: "running", currentTurnId: "turn" });

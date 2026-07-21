@@ -96,6 +96,47 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
+  it("keeps ephemeral helper threads out of the client projection", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const events: Array<{ type: string }> = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const hidden = { ...thread("title", "/work", 1), ephemeral: true };
+
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: hidden },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: {
+        threadId: hidden.id,
+        turn: {
+          id: "title-turn",
+          items: [],
+          itemsView: "summary",
+          status: "inProgress",
+          error: null,
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+        },
+      },
+    } satisfies ServerNotification);
+
+    expect(projection.threadCount).toBe(0);
+    expect(events).toEqual([]);
+  });
+
   it("paginates exact thread count, reconciles outcomes once, and updates live terminal state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
