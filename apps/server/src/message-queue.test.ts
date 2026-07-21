@@ -57,6 +57,16 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([{ ...message, status: "queued" }]);
   });
 
+  it("persists image-only messages without changing queue delivery", async () => {
+    const { queue, delivery } = await setup("active");
+    const image = "data:image/png;base64,aW1hZ2U=";
+    const message = await queue.enqueue("thread", "", [image]);
+
+    expect(queue.list("thread")).toEqual([expect.objectContaining({ text: "", images: [image] })]);
+    await queue.sendNow("thread", message.id);
+    expect(delivery.steer).toHaveBeenCalledWith("thread", "active", message);
+  });
+
   it("reconciles dispatching messages after a restart", async () => {
     const { queue, store, delivery } = await setup("active");
     const delivered = queued("delivered", "Доставлено", "dispatching");

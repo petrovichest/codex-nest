@@ -9,7 +9,9 @@ import type {
   QueuedMessage,
   SessionSettings,
   ServerEvent,
+  TaskDefaults,
   ThreadDetail,
+  ThreadGoal,
   ThreadOutcome,
   ThreadState,
   ThreadSummary,
@@ -97,6 +99,7 @@ export class AppProjection extends EventEmitter {
       attention: this.attention.list(),
       models: this.models,
       defaultReasoningEffort: this.store.snapshot().defaultReasoningEffort,
+      taskDefaults: this.store.snapshot().taskDefaults ?? {},
       pushConfigured: this.pushConfigured,
     };
   }
@@ -114,8 +117,9 @@ export class AppProjection extends EventEmitter {
   }
 
   get newSessionSettings(): SessionSettings {
-    const settings = { ...DEFAULT_SESSION_SETTINGS };
-    const reasoningEffort = this.store.snapshot().defaultReasoningEffort;
+    const state = this.store.snapshot();
+    const settings = { ...DEFAULT_SESSION_SETTINGS, ...(state.taskDefaults ?? {}) };
+    const reasoningEffort = state.defaultReasoningEffort;
     const model = this.models.find((candidate) => candidate.isDefault) ?? this.models[0];
     if (
       reasoningEffort &&
@@ -213,6 +217,14 @@ export class AppProjection extends EventEmitter {
       type: "defaultReasoningEffort.changed",
       reasoningEffort: reasoningEffort ?? null,
     });
+  }
+
+  async setTaskDefaults(taskDefaults: TaskDefaults): Promise<void> {
+    await this.store.update((state) => {
+      if (Object.keys(taskDefaults).length) state.taskDefaults = taskDefaults;
+      else delete state.taskDefaults;
+    });
+    this.publish({ type: "taskDefaults.changed", taskDefaults });
   }
 
   publishProject(projectId: string): void {
@@ -336,7 +348,12 @@ export class AppProjection extends EventEmitter {
         if (!this.progress.has(key)) this.progress.set(key, emptyProgress(turn.startedAt));
       }
       for (const rawItem of turn.items) {
-        const item = normalizeActivity(rawItem);
+        const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
+        const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
+        const item = normalizeActivity(
+          rawItem,
+          rawItem.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+        );
         const key = activityKey(thread.id, turn.id, item.id);
         if (!this.activity.has(key)) this.activity.set(key, item);
       }
@@ -445,6 +462,20 @@ export class AppProjection extends EventEmitter {
         }
         break;
       }
+      case "thread/goal/updated":
+        this.publish({
+          type: "goal.changed",
+          threadId: notification.params.threadId,
+          goal: notification.params.goal satisfies ThreadGoal,
+        });
+        break;
+      case "thread/goal/cleared":
+        this.publish({
+          type: "goal.changed",
+          threadId: notification.params.threadId,
+          goal: null,
+        });
+        break;
       case "thread/archived": {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) cached.archived = true;
@@ -542,11 +573,19 @@ export class AppProjection extends EventEmitter {
       }
       case "item/started":
       case "item/completed": {
-        const item = normalizeActivity(notification.params.item);
-        this.activity.set(
-          activityKey(notification.params.threadId, notification.params.turnId, item.id),
-          item,
+        const key = activityKey(
+          notification.params.threadId,
+          notification.params.turnId,
+          notification.params.item.id,
         );
+        const previous = this.activity.get(key);
+        const eventTimestamp =
+          notification.method === "item/started"
+            ? notification.params.startedAtMs
+            : notification.params.completedAtMs;
+        const timestamp = previous?.type === "userMessage" ? previous.timestamp : eventTimestamp;
+        const item = normalizeActivity(notification.params.item, timestamp);
+        this.activity.set(key, item);
         this.publish({
           type: "activity.upserted",
           threadId: notification.params.threadId,
@@ -622,6 +661,12 @@ export class AppProjection extends EventEmitter {
       id: itemId,
       status: "inProgress",
       text: previous && "text" in previous ? previous.text + delta : delta,
+      images: previous && "images" in previous ? previous.images : [],
+      timestamp:
+        previous && "timestamp" in previous
+          ? previous.timestamp
+          : (this.progress.get(turnKey(threadId, turnId))?.startedAt ?? Date.now()),
+      phase: previous && "phase" in previous ? previous.phase : null,
     };
     this.activity.set(key, item);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
@@ -713,7 +758,11 @@ function normalizeModel(model: Model): ModelOption {
 }
 
 function normalizeTurn(turn: Turn, liveProgress?: TurnProgress): TurnView {
-  const items = turn.items.map(normalizeActivity);
+  const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
+  const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
+  const items = turn.items.map((item) =>
+    normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
+  );
   if (turn.error) {
     items.push({
       type: "error",
@@ -725,12 +774,18 @@ function normalizeTurn(turn: Turn, liveProgress?: TurnProgress): TurnView {
   return {
     id: turn.id,
     status: turn.status === "inProgress" ? "inProgress" : normalizeOutcome(turn.status),
+    startedAt,
+    completedAt,
+    durationMs: turn.durationMs,
     progress: liveProgress ?? emptyProgress(turn.startedAt),
     items,
   };
 }
 
-function normalizeActivity(item: Turn["items"][number]): ActivityItem {
+function normalizeActivity(
+  item: Turn["items"][number],
+  timestamp: number | null = null,
+): ActivityItem {
   switch (item.type) {
     case "userMessage":
       return {
@@ -741,13 +796,40 @@ function normalizeActivity(item: Turn["items"][number]): ActivityItem {
           .filter((part) => part.type === "text")
           .map((part) => part.text)
           .join("\n"),
+        images: item.content.filter((part) => part.type === "image").map((part) => part.url),
+        timestamp,
+        phase: null,
       };
     case "agentMessage":
-      return { type: "agentMessage", id: item.id, status: "completed", text: item.text };
+      return {
+        type: "agentMessage",
+        id: item.id,
+        status: "completed",
+        text: item.text,
+        images: [],
+        timestamp,
+        phase: item.phase,
+      };
     case "plan":
-      return { type: "plan", id: item.id, status: "completed", text: item.text };
+      return {
+        type: "plan",
+        id: item.id,
+        status: "completed",
+        text: item.text,
+        images: [],
+        timestamp,
+        phase: null,
+      };
     case "reasoning":
-      return { type: "reasoning", id: item.id, status: "completed", text: item.summary.join("\n") };
+      return {
+        type: "reasoning",
+        id: item.id,
+        status: "completed",
+        text: item.summary.join("\n"),
+        images: [],
+        timestamp,
+        phase: null,
+      };
     case "commandExecution":
       return {
         type: "command",

@@ -30,11 +30,12 @@ export class MessageQueue {
     return this.list(threadId).length;
   }
 
-  async enqueue(threadId: string, text: string): Promise<QueuedMessage> {
+  async enqueue(threadId: string, text: string, images: string[] = []): Promise<QueuedMessage> {
     const message: QueuedMessage = {
       id: randomUUID(),
       threadId,
       text: text.trim(),
+      ...(images.length ? { images } : {}),
       createdAt: Date.now(),
       status: "queued",
     };

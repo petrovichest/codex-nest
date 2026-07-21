@@ -20,8 +20,13 @@ import type {
   SessionSettings,
   StartTurnRequest,
   SteerTurnRequest,
+  TaskDefaults,
+  ThreadGoal,
+  TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateProjectRequest,
+  UpdateTaskDefaultsRequest,
+  UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
 } from "@codexnest/protocol";
@@ -56,6 +61,8 @@ import type { PushNotifier } from "./push";
 import { MessageQueue, MessageQueueNotFoundError } from "./message-queue";
 import type { StateStore } from "./state/store";
 
+const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
+
 export interface ApiServices {
   bridge: CodexBridge;
   store: StateStore;
@@ -70,38 +77,65 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const startTurn = async (
     threadId: string,
     input: string,
+    images: string[],
     clientMessageId: string | null,
-  ): Promise<string> => {
-    const summary = projection.summary(threadId);
+    goal = false,
+  ): Promise<TurnStartResult> => {
+    let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
-    if (!projection.isUnmaterialized(threadId)) {
-      await bridge.request<ThreadResumeResponse>(
-        "thread/resume",
-        {
-          threadId,
-          cwd: summary.cwd,
-          excludeTurns: true,
-          ...threadSettings(summary.settings),
-        },
-        30_000,
-      );
+    if (goal) {
+      if (summary.settings.collaborationMode === "plan") {
+        summary = await projection.setSettings(threadId, {
+          ...summary.settings,
+          collaborationMode: "default",
+        });
+      }
+      await setThreadGoal(bridge, threadId, { objective: input.trim(), status: "paused" });
     }
-    const turn = parseTurnStart(
-      await bridge.request<unknown>("turn/start", {
-        threadId,
-        clientUserMessageId: clientMessageId,
-        input: textInput(input),
-        ...turnSettings(summary.settings, projection.availableModels),
-      }),
-    );
+    let turn;
+    try {
+      if (!projection.isUnmaterialized(threadId)) {
+        await bridge.request<ThreadResumeResponse>(
+          "thread/resume",
+          {
+            threadId,
+            cwd: summary.cwd,
+            excludeTurns: true,
+            ...threadSettings(summary.settings),
+          },
+          30_000,
+        );
+      }
+      turn = parseTurnStart(
+        await bridge.request<unknown>("turn/start", {
+          threadId,
+          clientUserMessageId: clientMessageId,
+          input: messageInput(input, images),
+          ...turnSettings(summary.settings, projection.availableModels),
+        }),
+      );
+    } catch (error) {
+      if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
+      throw error;
+    }
     projection.markMaterialized(threadId);
     projection.setCurrentTurn(threadId, turn.turn.id);
-    return turn.turn.id;
+    if (!goal) return { turnId: turn.turn.id };
+    try {
+      await setThreadGoal(bridge, threadId, { status: "active" });
+      return { turnId: turn.turn.id };
+    } catch {
+      return {
+        turnId: turn.turn.id,
+        goalWarning: "Первый ход начат, но цель осталась на паузе. Продолжите её вручную.",
+      };
+    }
   };
   const steerTurn = async (
     threadId: string,
     turnId: string,
     input: string,
+    images: string[],
     clientMessageId: string | null,
   ): Promise<string> => {
     const result = parseTurnSteer(
@@ -109,7 +143,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         threadId,
         expectedTurnId: turnId,
         clientUserMessageId: clientMessageId,
-        input: textInput(input),
+        input: messageInput(input, images),
       }),
     );
     if (projection.summary(threadId)) projection.setCurrentTurn(threadId, result.turnId);
@@ -117,8 +151,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   };
   const queue = new MessageQueue(store, {
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
-    start: (threadId, message) => startTurn(threadId, message.text, message.id),
-    steer: (threadId, turnId, message) => steerTurn(threadId, turnId, message.text, message.id),
+    start: (threadId, message) =>
+      startTurn(threadId, message.text, message.images ?? [], message.id).then(
+        (result) => result.turnId,
+      ),
+    steer: (threadId, turnId, message) =>
+      steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
     wasDelivered: async (threadId, messageId) => {
       const result = parseThreadRead(
         await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
@@ -228,6 +266,28 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           writeResult.message ?? "A managed Codex configuration overrides this setting";
       }
       return effective;
+    },
+  );
+
+  app.get("/api/v1/settings/task-defaults", async (): Promise<TaskDefaults> => {
+    return store.snapshot().taskDefaults ?? {};
+  });
+
+  app.put<{ Body: UpdateTaskDefaultsRequest }>(
+    "/api/v1/settings/task-defaults",
+    async (request) => {
+      const patch = validateTaskDefaults(request.body);
+      const merged = mergeSettings(
+        projection.newSessionSettings,
+        patch,
+        projection.availableModels,
+      );
+      const taskDefaults: TaskDefaults = {
+        ...(merged.serviceTier ? { serviceTier: merged.serviceTier } : {}),
+        ...(merged.personality ? { personality: merged.personality } : {}),
+      };
+      await projection.setTaskDefaults(taskDefaults);
+      return taskDefaults;
     },
   );
 
@@ -355,45 +415,77 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return projection.readThread(request.params.id);
   });
 
+  app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
+    if (!projection.summary(request.params.id)) {
+      return apiError(reply, 404, "not_found", "Thread not found");
+    }
+    return readThreadGoal(bridge, request.params.id);
+  });
+
+  app.patch<{ Params: { id: string }; Body: UpdateThreadGoalRequest }>(
+    "/api/v1/threads/:id/goal",
+    async (request, reply) => {
+      if (!projection.summary(request.params.id)) {
+        return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      return setThreadGoal(bridge, request.params.id, validateGoalPatch(request.body));
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
+    if (!projection.summary(request.params.id)) {
+      return apiError(reply, 404, "not_found", "Thread not found");
+    }
+    await clearThreadGoal(bridge, request.params.id);
+    return reply.code(204).send();
+  });
+
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/git-changes", async (request, reply) => {
     const summary = projection.summary(request.params.id);
     if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
     return readGitChanges(summary.cwd);
   });
 
-  app.post<{ Body: CreateThreadRequest }>("/api/v1/threads", async (request, reply) => {
-    const body = validateThreadBody(request.body, reply);
-    if (!body) return;
-    const project = store.snapshot().projects.find((candidate) => candidate.id === body.projectId);
-    if (!project) return apiError(reply, 404, "not_found", "Project not found");
-    const settings = mergeSettings(
-      projection.newSessionSettings,
-      body.settings ?? {},
-      projection.availableModels,
-    );
-    const started = parseThreadStart(
-      await bridge.request<unknown>("thread/start", {
-        cwd: project.path,
-        ...threadSettings(settings),
-      }),
-    );
-    projection.upsertThread(started.thread);
-    await projection.setSettings(started.thread.id, settings);
-    const turn = parseTurnStart(
-      await bridge.request<unknown>("turn/start", {
-        threadId: started.thread.id,
-        clientUserMessageId: body.clientMessageId ?? null,
-        input: textInput(body.input),
-        ...turnSettings(settings, projection.availableModels),
-      }),
-    );
-    if (body.settings?.reasoningEffort !== undefined) {
-      await projection.setDefaultReasoningEffort(settings.reasoningEffort);
-    }
-    return reply
-      .code(201)
-      .send({ thread: projection.summary(started.thread.id), turnId: turn.turn.id });
-  });
+  app.post<{ Body: CreateThreadRequest }>(
+    "/api/v1/threads",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const body = validateThreadBody(request.body, reply);
+      if (!body) return;
+      const project = store
+        .snapshot()
+        .projects.find((candidate) => candidate.id === body.projectId);
+      if (!project) return apiError(reply, 404, "not_found", "Project not found");
+      const settings = mergeSettings(
+        projection.newSessionSettings,
+        body.settings ?? {},
+        projection.availableModels,
+      );
+      const started = parseThreadStart(
+        await bridge.request<unknown>("thread/start", {
+          cwd: project.path,
+          ...threadSettings(settings),
+        }),
+      );
+      projection.upsertThread(started.thread);
+      projection.markUnmaterialized(started.thread.id);
+      await projection.setSettings(started.thread.id, settings);
+      const result = await startTurn(
+        started.thread.id,
+        body.input,
+        body.images ?? [],
+        body.clientMessageId ?? null,
+        body.goal ?? false,
+      );
+      if (body.settings?.reasoningEffort !== undefined) {
+        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+      }
+      return reply.code(201).send({
+        thread: projection.summary(started.thread.id),
+        ...result,
+      });
+    },
+  );
 
   app.patch<{ Params: { id: string }; Body: UpdateThreadRequest }>(
     "/api/v1/threads/:id",
@@ -446,27 +538,36 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.post<{ Params: { id: string }; Body: StartTurnRequest }>(
     "/api/v1/threads/:id/turns",
+    { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
       const body = validateStartTurnBody(request.body, reply);
       if (!body) return;
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      const turnId = await startTurn(request.params.id, body.input, body.clientMessageId ?? null);
-      return reply.code(201).send({ turnId });
+      const result = await startTurn(
+        request.params.id,
+        body.input,
+        body.images ?? [],
+        body.clientMessageId ?? null,
+        body.goal ?? false,
+      );
+      return reply.code(201).send(result);
     },
   );
 
   app.post<{ Params: { id: string }; Body: QueueMessageRequest }>(
     "/api/v1/threads/:id/queue",
+    { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
       const body = requireRecord<QueueMessageRequest>(request.body);
-      if (typeof body.input !== "string" || !body.input.trim()) {
-        return apiError(reply, 400, "validation_failed", "input is required");
+      const images = validateImages(body.images);
+      if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
+        return apiError(reply, 400, "validation_failed", "input or images are required");
       }
       if (!projection.summary(request.params.id)) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
-      const message = await queue.enqueue(request.params.id, body.input);
+      const message = await queue.enqueue(request.params.id, body.input, images);
       return reply.code(202).send(message satisfies QueuedMessage);
     },
   );
@@ -480,13 +581,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.post<{ Params: { id: string }; Body: SteerTurnRequest }>(
     "/api/v1/threads/:id/steer",
+    { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
       const body = requireRecord<SteerTurnRequest>(request.body);
-      if (typeof body.turnId !== "string" || typeof body.input !== "string" || !body.input.trim()) {
-        return apiError(reply, 400, "validation_failed", "turnId and input are required");
+      const images = validateImages(body.images);
+      if (
+        typeof body.turnId !== "string" ||
+        typeof body.input !== "string" ||
+        (!body.input.trim() && !images.length)
+      ) {
+        return apiError(reply, 400, "validation_failed", "turnId and input or images are required");
       }
       return {
-        turnId: await steerTurn(request.params.id, body.turnId, body.input, null),
+        turnId: await steerTurn(request.params.id, body.turnId, body.input, images, null),
       };
     },
   );
@@ -640,33 +747,120 @@ function compact(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
 }
 
-function textInput(text: string): Array<{ type: "text"; text: string; text_elements: [] }> {
-  return [{ type: "text", text: text.trim(), text_elements: [] }];
+function messageInput(
+  text: string,
+  images: string[],
+): Array<{ type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }> {
+  const result: Array<
+    { type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }
+  > = [];
+  if (text.trim()) result.push({ type: "text", text: text.trim(), text_elements: [] });
+  result.push(...images.map((url) => ({ type: "image" as const, url })));
+  return result;
 }
 
 function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadRequest | undefined {
   const value = requireRecord<CreateThreadRequest>(body);
-  if (
-    typeof value.projectId !== "string" ||
-    typeof value.input !== "string" ||
-    !value.input.trim()
-  ) {
+  const images = validateImages(value.images);
+  if (typeof value.projectId !== "string" || typeof value.input !== "string") {
     apiError(reply, 400, "validation_failed", "projectId and input are required");
     return undefined;
   }
-  return { ...value, settings: validateSettings(value.settings) };
+  if (!value.input.trim() && !images.length) {
+    apiError(reply, 400, "validation_failed", "input or images are required");
+    return undefined;
+  }
+  if (value.goal !== undefined && typeof value.goal !== "boolean") {
+    apiError(reply, 400, "validation_failed", "goal must be boolean");
+    return undefined;
+  }
+  if (value.goal && (!value.input.trim() || value.input.trim().length > 4_000)) {
+    apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
+    return undefined;
+  }
+  return { ...value, images, settings: validateSettings(value.settings) };
 }
 
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {
   const value = requireRecord<StartTurnRequest>(body);
-  if (Object.keys(value).some((key) => !["input", "clientMessageId"].includes(key))) {
+  if (
+    Object.keys(value).some((key) => !["input", "images", "goal", "clientMessageId"].includes(key))
+  ) {
     throw new ProjectValidationError("Unknown turn field");
   }
-  if (typeof value.input !== "string" || !value.input.trim()) {
-    apiError(reply, 400, "validation_failed", "input is required");
+  const images = validateImages(value.images);
+  if (typeof value.input !== "string" || (!value.input.trim() && !images.length)) {
+    apiError(reply, 400, "validation_failed", "input or images are required");
     return undefined;
   }
+  if (value.goal !== undefined && typeof value.goal !== "boolean") {
+    apiError(reply, 400, "validation_failed", "goal must be boolean");
+    return undefined;
+  }
+  if (value.goal && (!value.input.trim() || value.input.trim().length > 4_000)) {
+    apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
+    return undefined;
+  }
+  return { ...value, images };
+}
+
+function validateImages(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((image) => !isInlineImage(image))) {
+    throw new ProjectValidationError("images must contain inline image data URLs");
+  }
   return value;
+}
+
+function isInlineImage(value: unknown): value is string {
+  return typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value);
+}
+
+function validateTaskDefaults(value: unknown): UpdateTaskDefaultsRequest {
+  const body = requireRecord<UpdateTaskDefaultsRequest>(value);
+  if (Object.keys(body).some((key) => !["serviceTier", "personality"].includes(key))) {
+    throw new ProjectValidationError("Unknown task default");
+  }
+  for (const key of ["serviceTier", "personality"] as const) {
+    if (
+      body[key] !== undefined &&
+      body[key] !== null &&
+      (typeof body[key] !== "string" || !body[key]?.trim())
+    ) {
+      throw new ProjectValidationError(`${key} must be a non-empty string or null`);
+    }
+  }
+  return body;
+}
+
+function validateGoalPatch(value: unknown): UpdateThreadGoalRequest {
+  const body = requireRecord<UpdateThreadGoalRequest>(value);
+  if (Object.keys(body).some((key) => !["objective", "status"].includes(key))) {
+    throw new ProjectValidationError("Unknown goal field");
+  }
+  if (
+    body.objective !== undefined &&
+    (typeof body.objective !== "string" ||
+      !body.objective.trim() ||
+      body.objective.trim().length > 4_000)
+  ) {
+    throw new ProjectValidationError("goal objective must be 1-4000 characters");
+  }
+  if (
+    body.status !== undefined &&
+    !["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"].includes(
+      body.status,
+    )
+  ) {
+    throw new ProjectValidationError("Invalid goal status");
+  }
+  if (body.objective === undefined && body.status === undefined) {
+    throw new ProjectValidationError("At least one goal field is required");
+  }
+  return {
+    ...(body.objective === undefined ? {} : { objective: body.objective.trim() }),
+    ...(body.status === undefined ? {} : { status: body.status }),
+  };
 }
 
 function validateSettings(value: unknown): UpdateThreadSettingsRequest | undefined {
@@ -769,6 +963,49 @@ function requireRecord<T>(value: unknown): T {
     throw new ProjectValidationError("JSON object expected");
   }
   return value as T;
+}
+
+async function readThreadGoal(bridge: CodexBridge, threadId: string): Promise<ThreadGoal | null> {
+  const response = await bridge.request<unknown>("thread/goal/get", { threadId });
+  if (!isRecord(response) || !(response.goal === null || isThreadGoal(response.goal))) {
+    throw new ProjectValidationError("Invalid thread goal response");
+  }
+  return response.goal;
+}
+
+async function setThreadGoal(
+  bridge: CodexBridge,
+  threadId: string,
+  patch: UpdateThreadGoalRequest,
+): Promise<ThreadGoal> {
+  const response = await bridge.request<unknown>("thread/goal/set", {
+    threadId,
+    ...patch,
+  });
+  if (!isRecord(response) || !isThreadGoal(response.goal)) {
+    throw new ProjectValidationError("Invalid thread goal response");
+  }
+  return response.goal;
+}
+
+async function clearThreadGoal(bridge: CodexBridge, threadId: string): Promise<void> {
+  await bridge.request("thread/goal/clear", { threadId });
+}
+
+function isThreadGoal(value: unknown): value is ThreadGoal {
+  return (
+    isRecord(value) &&
+    typeof value.threadId === "string" &&
+    typeof value.objective === "string" &&
+    ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"].includes(
+      String(value.status),
+    ) &&
+    (value.tokenBudget === null || typeof value.tokenBudget === "number") &&
+    typeof value.tokensUsed === "number" &&
+    typeof value.timeUsedSeconds === "number" &&
+    typeof value.createdAt === "number" &&
+    typeof value.updatedAt === "number"
+  );
 }
 
 const PERMISSION_PRESETS: Record<

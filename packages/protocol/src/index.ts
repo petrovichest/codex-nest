@@ -100,6 +100,7 @@ export type QueuedMessage = {
   id: string;
   threadId: string;
   text: string;
+  images?: string[];
   createdAt: number;
   status: "queued" | "dispatching";
 };
@@ -124,6 +125,9 @@ export type ActivityItem =
       id: string;
       status: "inProgress" | "completed" | "failed";
       text: string;
+      images: string[];
+      timestamp: number | null;
+      phase: "commentary" | "final_answer" | null;
     }
   | {
       type: "command";
@@ -159,6 +163,9 @@ export type ActivityItem =
 export type TurnView = {
   id: string;
   status: "inProgress" | ThreadOutcome;
+  startedAt: number | null;
+  completedAt: number | null;
+  durationMs: number | null;
   progress: TurnProgress;
   items: ActivityItem[];
 };
@@ -208,6 +215,35 @@ export type SessionSettings = {
   reasoningEffort?: string;
   serviceTier?: string;
   personality?: string;
+};
+
+export type TaskDefaults = {
+  serviceTier?: string;
+  personality?: string;
+};
+
+export type UpdateTaskDefaultsRequest = {
+  serviceTier?: string | null;
+  personality?: string | null;
+};
+
+export type ThreadGoalStatus =
+  "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+
+export type ThreadGoal = {
+  threadId: string;
+  objective: string;
+  status: ThreadGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type UpdateThreadGoalRequest = {
+  objective?: string;
+  status?: ThreadGoalStatus;
 };
 
 export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
@@ -363,6 +399,7 @@ export type AppSnapshot = {
   attention: AttentionRequest[];
   models: ModelOption[];
   defaultReasoningEffort?: string;
+  taskDefaults?: TaskDefaults;
   pushConfigured: boolean;
 };
 
@@ -380,6 +417,8 @@ export type ServerEvent =
   | { type: "attention.removed"; attentionId: string }
   | { type: "models.changed"; models: ModelOption[] }
   | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
+  | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
+  | { type: "goal.changed"; threadId: string; goal: ThreadGoal | null }
   | { type: "resync.required" };
 
 export type ClientFrame = { type: "authenticate"; token: string } | { type: "ping" };
@@ -411,6 +450,8 @@ export type CreateDirectoryRequest = {
 export type CreateThreadRequest = {
   projectId: string;
   input: string;
+  images?: string[];
+  goal?: boolean;
   settings?: UpdateThreadSettingsRequest;
   clientMessageId?: string;
 };
@@ -419,13 +460,21 @@ export type CreateProjectThreadResponse = {
   thread: ThreadSummary;
 };
 
+export type TurnStartResult = {
+  turnId: string;
+  goalWarning?: string;
+};
+
 export type StartTurnRequest = {
   input: string;
+  images?: string[];
+  goal?: boolean;
   clientMessageId?: string;
 };
 
 export type QueueMessageRequest = {
   input: string;
+  images?: string[];
 };
 
 export type UpdateThreadSettingsRequest = {
@@ -439,6 +488,7 @@ export type UpdateThreadSettingsRequest = {
 export type SteerTurnRequest = {
   turnId: string;
   input: string;
+  images?: string[];
 };
 
 export type InterruptTurnRequest = {

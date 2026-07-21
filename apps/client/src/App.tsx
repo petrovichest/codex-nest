@@ -8,6 +8,7 @@ import type {
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
+import { copyText } from "./clipboard";
 import { AttentionPanel } from "./components/AttentionPanel";
 import {
   ArrowDownIcon,
@@ -525,35 +526,6 @@ function Sidebar({
       </nav>
     </aside>
   );
-}
-
-async function copyText(text: string): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-  } catch {
-    // Fall through for insecure HTTP origins and restricted WebViews.
-  }
-
-  const textarea = document.createElement("textarea");
-  const activeElement =
-    document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.append(textarea);
-  textarea.select();
-  let copied = false;
-  try {
-    copied = document.execCommand("copy");
-  } finally {
-    textarea.remove();
-    activeElement?.focus();
-  }
-  if (!copied) throw new Error("Clipboard is unavailable");
 }
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {

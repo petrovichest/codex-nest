@@ -1,10 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type { AttentionRequest, ThreadSummary, TurnProgress } from "@codexnest/protocol";
 
-import { Activity, ThreadPage } from "./ThreadPage";
+import { Activity, ThreadPage, TurnTiming, formatMessageTime } from "./ThreadPage";
 
 const connection = vi.hoisted(() => vi.fn());
 
@@ -35,21 +35,47 @@ describe("Activity", () => {
   it("renders user and agent messages without legacy labels", () => {
     const { rerender } = render(
       <Activity
-        item={{ type: "userMessage", id: "user", status: "completed", text: "Сообщение" }}
+        item={{
+          type: "userMessage",
+          id: "user",
+          status: "completed",
+          text: "Сообщение",
+          images: [],
+          timestamp: null,
+          phase: null,
+        }}
       />,
     );
     expect(screen.getByText("Сообщение").closest("article")).toHaveClass("userMessage");
     expect(screen.queryByText("Вы")).not.toBeInTheDocument();
 
     rerender(
-      <Activity item={{ type: "agentMessage", id: "agent", status: "completed", text: "Ответ" }} />,
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Ответ",
+          images: [],
+          timestamp: null,
+          phase: "final_answer",
+        }}
+      />,
     );
     expect(screen.getByText("Ответ").closest("article")).toHaveClass("agentMessage");
     expect(screen.queryByText("Codex")).not.toBeInTheDocument();
 
     rerender(
       <Activity
-        item={{ type: "reasoning", id: "reasoning", status: "completed", text: "Проверяю" }}
+        item={{
+          type: "reasoning",
+          id: "reasoning",
+          status: "completed",
+          text: "Проверяю",
+          images: [],
+          timestamp: null,
+          phase: null,
+        }}
       />,
     );
     expect(screen.getByText("Проверяю")).toBeInTheDocument();
@@ -87,6 +113,68 @@ describe("Activity", () => {
     );
     expect(screen.getByText("Изменён src/App.tsx")).toBeInTheDocument();
     expect(screen.getByText("+new line")).toBeInTheDocument();
+  });
+
+  it("copies message text and formats timestamps for today and older days", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const timestamp = Date.now();
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Текст ответа",
+          images: [],
+          timestamp,
+          phase: "final_answer",
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Копировать сообщение" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Текст ответа"));
+    expect(screen.getByRole("status")).toHaveTextContent("Скопировано");
+    expect(screen.getByText(formatMessageTime(timestamp))).toBeInTheDocument();
+    expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
+  });
+
+  it("shows a live turn timer and a final duration", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-21T12:00:05Z"));
+      const running = {
+        id: "running",
+        status: "inProgress" as const,
+        startedAt: Date.now() - 5_000,
+        completedAt: null,
+        durationMs: null,
+        progress: progress(),
+        items: [],
+      };
+      const view = render(<TurnTiming turn={running} />);
+      expect(screen.getByText("Codex работает 5с")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(screen.getByText("Codex работает 7с")).toBeInTheDocument();
+
+      view.rerender(
+        <TurnTiming
+          turn={{
+            ...running,
+            status: "completed",
+            completedAt: running.startedAt + 8_000,
+            durationMs: 8_000,
+          }}
+        />,
+      );
+      expect(screen.getByText("Работал 8с")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {
@@ -151,13 +239,39 @@ describe("Activity", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
     await waitFor(() =>
-      expect(api.enqueue).toHaveBeenCalledWith("thread", "Сначала проверь тесты"),
+      expect(api.enqueue).toHaveBeenCalledWith("thread", { input: "Сначала проверь тесты" }),
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
     expect(api.interrupt).toHaveBeenCalledWith("thread", "turn");
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeDisabled();
+  });
+
+  it("sends image-only messages, keeps attachments after errors, and clears them after success", async () => {
+    const api = threadApi();
+    api.startTurn
+      .mockRejectedValueOnce(new Error("Сеть недоступна"))
+      .mockResolvedValueOnce({ turnId: "turn" });
+    mockThreadConnection(api, summary);
+    const view = renderThread();
+    const fileInput = view.container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["image"], "screen.png", { type: "image/png" })] },
+    });
+    expect(await screen.findByAltText("screen.png")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByText("Сеть недоступна")).toBeInTheDocument();
+    expect(screen.getByAltText("screen.png")).toBeInTheDocument();
+    expect(api.startTurn.mock.calls[0]?.[1]).toMatchObject({
+      input: "",
+      images: [expect.stringMatching(/^data:image\/png;base64,/)],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(screen.queryByAltText("screen.png")).toBeNull());
   });
 
   it("keeps task settings in the composer without permission controls", async () => {
@@ -182,6 +296,48 @@ describe("Activity", () => {
         collaborationMode: "plan",
       }),
     );
+  });
+
+  it("shows native goal state and exposes pause and clear actions", async () => {
+    const api = threadApi();
+    api.updateGoal.mockResolvedValue({
+      threadId: "thread",
+      objective: "Завершить интерфейс",
+      status: "paused",
+      tokenBudget: null,
+      tokensUsed: 120,
+      timeUsedSeconds: 15,
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const context = mockThreadConnection(api, summary);
+    Object.assign(context.state, {
+      goals: {
+        thread: {
+          threadId: "thread",
+          objective: "Завершить интерфейс",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 120,
+          timeUsedSeconds: 15,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      },
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByLabelText("Управление целью"));
+    expect(screen.getByText("Завершить интерфейс")).toBeInTheDocument();
+    expect(screen.getByText(/120 токенов/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Пауза" }));
+    await waitFor(() =>
+      expect(api.updateGoal).toHaveBeenCalledWith("thread", { status: "paused" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Очистить" }));
+    await waitFor(() => expect(api.clearGoal).toHaveBeenCalledWith("thread"));
   });
 
   it("submits on Enter, keeps Shift+Enter for a newline, and ignores IME composition", async () => {
@@ -212,8 +368,21 @@ describe("Activity", () => {
         {
           id: "plan-turn",
           status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
           progress: progress(),
-          items: [{ type: "plan", id: "plan", status: "completed", text: "# План\n\nСделать" }],
+          items: [
+            {
+              type: "plan",
+              id: "plan",
+              status: "completed",
+              text: "# План\n\nСделать",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
         },
       ],
     });
@@ -259,6 +428,9 @@ describe("Activity", () => {
         {
           id: "turn",
           status: "inProgress",
+          startedAt: Date.now() - 5_000,
+          completedAt: null,
+          durationMs: null,
           progress: {
             startedAt: Date.now() - 5_000,
             explanation: "Проверяем изменения",
@@ -281,6 +453,11 @@ describe("Activity", () => {
     expect(screen.getByText("Изменено 2 файла")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Шаг 2 / 3"));
     expect(screen.getByText("Исправить чат")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Шаг 2 / 3"));
+    expect(screen.queryByText("Исправить чат")).toBeNull();
+    fireEvent.click(screen.getByText("Шаг 2 / 3"));
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByText("Исправить чат")).toBeNull();
   });
 
   it("renders attention requests after the active turn inside the timeline", () => {
@@ -291,9 +468,20 @@ describe("Activity", () => {
         {
           id: "turn",
           status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
           progress: progress(),
           items: [
-            { type: "agentMessage", id: "agent", status: "completed", text: "Перед запросом" },
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: "Перед запросом",
+              images: [],
+              timestamp: 1,
+              phase: "commentary",
+            },
           ],
         },
       ],
@@ -372,6 +560,9 @@ function threadApi() {
     readGitChanges: vi
       .fn()
       .mockResolvedValue({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }),
+    readGoal: vi.fn().mockResolvedValue(null),
+    updateGoal: vi.fn().mockResolvedValue(null),
+    clearGoal: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -382,6 +573,9 @@ function mockThreadConnection(
     turns: Array<{
       id: string;
       status: "inProgress" | "completed" | "failed" | "interrupted";
+      startedAt: number | null;
+      completedAt: number | null;
+      durationMs: number | null;
       progress: ReturnType<typeof progress>;
       items: Array<Parameters<typeof Activity>[0]["item"]>;
     }>;

@@ -145,6 +145,14 @@ export const PlanIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const TargetIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="12" cy="12" r="4.5" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 export const SendIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m5 12 7-7 7 7" />
@@ -233,7 +241,7 @@ export const FileIcon = (props: IconProps) => (
 
 export const ToolIcon = (props: IconProps) => (
   <Icon {...props}>
-    <path d="M14.5 6.5a4 4 0 0 0-5-5l2.2 2.2-2.8 2.8-2.2-2.2a4 4 0 0 0 5 5L20 18l-2 2-8.3-8.3" />
+    <path d="M14.7 6.3a4 4 0 0 0-5.1-5L12 3.7 8.7 7 6.3 4.6a4 4 0 0 0 5 5l7.1 7.1a2 2 0 1 1-2.8 2.8l-7.1-7.1a4 4 0 0 0-5-5.1L5.9 9.7 9.2 6.4" />
   </Icon>
 );
 

@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import ReactMarkdown from "react-markdown";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 
 import type {
   ActivityItem,
@@ -16,16 +16,20 @@ import type {
   QueuedMessage,
   ThreadDetail,
   TurnProgress,
+  TurnView,
+  UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { AttentionPanel } from "./AttentionPanel";
-import { Composer } from "./Composer";
+import { Composer, type ComposerImage } from "./Composer";
 import {
   ArchiveIcon,
   ChevronDownIcon,
   ClockIcon,
+  CopyIcon,
   FileIcon,
   MoreIcon,
   PencilIcon,
@@ -39,12 +43,16 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const { threadId = "" } = useParams();
+  const location = useLocation();
   const { api, state, dispatch, refreshDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const detail = state.details[threadId];
   const [input, setInput] = useState("");
+  const [images, setImages] = useState<ComposerImage[]>([]);
+  const [goalMode, setGoalMode] = useState(false);
+  const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
@@ -55,6 +63,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
   const previousAttentionIds = useRef<string | null>(null);
+  const locationNoticeHandled = useRef<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
   );
@@ -68,6 +77,27 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
+  const goal = state.goals?.[threadId];
+
+  useEffect(() => {
+    if (goal) setGoalMode(false);
+  }, [goal]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    const request = api.readGoal?.(threadId);
+    if (!request) return;
+    void request
+      .then((value) => dispatch({ type: "goal", threadId, goal: value }))
+      .catch((caught: Error) => setError(caught.message));
+  }, [api, dispatch, threadId]);
+
+  useEffect(() => {
+    const notice = (location.state as { notice?: unknown } | null)?.notice;
+    if (typeof notice !== "string" || locationNoticeHandled.current === notice) return;
+    locationNoticeHandled.current = notice;
+    setError(notice);
+  }, [location.state]);
 
   const loadGitChanges = useCallback(async () => {
     const requestId = ++gitChangesRequest.current;
@@ -152,16 +182,26 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!input.trim()) return;
+    if ((!input.trim() && !images.length) || (goalMode && !input.trim())) return;
     setBusy(true);
     setError(null);
     try {
       if (summary!.currentTurnId) {
-        await api.enqueue(threadId, input);
+        await api.enqueue(threadId, {
+          input,
+          ...(images.length ? { images: images.map((image) => image.url) } : {}),
+        });
       } else {
-        await api.startTurn(threadId, { input });
+        const result = await api.startTurn(threadId, {
+          input,
+          ...(images.length ? { images: images.map((image) => image.url) } : {}),
+          ...(goalMode ? { goal: true } : {}),
+        });
+        if (result.goalWarning) setError(result.goalWarning);
       }
       setInput("");
+      setImages([]);
+      setGoalMode(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
     } finally {
@@ -212,10 +252,37 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     try {
       const thread = await api.updateThreadSettings(threadId, patch);
       dispatch({ type: "thread", thread });
+      if (patch.collaborationMode === "plan") setGoalMode(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось изменить настройки");
     } finally {
       setSettingsBusy(false);
+    }
+  }
+
+  async function updateGoal(patch: UpdateThreadGoalRequest) {
+    setGoalBusy(true);
+    setError(null);
+    try {
+      const updated = await api.updateGoal(threadId, patch);
+      dispatch({ type: "goal", threadId, goal: updated });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось изменить цель");
+    } finally {
+      setGoalBusy(false);
+    }
+  }
+
+  async function clearGoal() {
+    setGoalBusy(true);
+    setError(null);
+    try {
+      await api.clearGoal(threadId);
+      dispatch({ type: "goal", threadId, goal: null });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось очистить цель");
+    } finally {
+      setGoalBusy(false);
     }
   }
 
@@ -289,6 +356,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
                     </div>
                   ),
                 )}
+                <TurnTiming turn={turn} />
               </div>
             ))}
             <AttentionPanel requests={attention} />
@@ -317,12 +385,20 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
         <Composer
           input={input}
           onInput={setInput}
+          images={images}
+          onImagesChange={setImages}
           onSubmit={submit}
           busy={busy}
           running={Boolean(summary.currentTurnId)}
           settings={summary.settings}
           onSettingsChange={(patch) => void updateSettings(patch)}
           settingsBusy={settingsBusy}
+          goalMode={goalMode}
+          goal={goal}
+          goalBusy={goalBusy}
+          onGoalModeChange={setGoalMode}
+          onGoalUpdate={(patch) => void updateGoal(patch)}
+          onGoalClear={() => void clearGoal()}
           models={state.snapshot?.models ?? []}
           onStop={
             summary.currentTurnId
@@ -366,7 +442,9 @@ export function Activity({ item }: { item: ActivityItem }) {
   if (item.type === "userMessage" || item.type === "agentMessage") {
     return (
       <article className={`message ${item.type}`}>
-        <ReactMarkdown>{item.text}</ReactMarkdown>
+        {item.text && <ReactMarkdown>{item.text}</ReactMarkdown>}
+        {item.images.length > 0 && <MessageImages images={item.images} />}
+        <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
   }
@@ -374,6 +452,7 @@ export function Activity({ item }: { item: ActivityItem }) {
     return (
       <article className="message reasoning">
         <ReactMarkdown>{item.text}</ReactMarkdown>
+        <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
   }
@@ -382,6 +461,7 @@ export function Activity({ item }: { item: ActivityItem }) {
       <article className="message plan">
         <div className="activity-label">План</div>
         <ReactMarkdown>{item.text}</ReactMarkdown>
+        <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
   }
@@ -478,7 +558,9 @@ function QueuedMessages({
     <section className="queued-messages" aria-label="Очередь сообщений">
       {messages.map((message) => (
         <article className="message userMessage queued-message" key={message.id}>
-          <ReactMarkdown>{message.text}</ReactMarkdown>
+          {message.text && <ReactMarkdown>{message.text}</ReactMarkdown>}
+          {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
+          <MessageFooter text={message.text} timestamp={message.createdAt} />
           <div className="queued-message-footer">
             <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
             <button
@@ -494,8 +576,87 @@ function QueuedMessages({
   );
 }
 
+function MessageImages({ images }: { images: string[] }) {
+  return (
+    <div className="message-images">
+      {images.map((image, index) => (
+        <img src={image} alt={`Изображение ${index + 1}`} key={`${index}:${image.slice(-24)}`} />
+      ))}
+    </div>
+  );
+}
+
+function MessageFooter({ text, timestamp }: { text: string; timestamp: number | null }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  async function copy() {
+    try {
+      await copyText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopyState("idle"), 1_800);
+  }
+
+  return (
+    <footer className="message-footer">
+      <button
+        type="button"
+        aria-label={text ? "Копировать сообщение" : "В сообщении нет текста для копирования"}
+        disabled={!text}
+        onClick={() => void copy()}
+      >
+        <CopyIcon />
+      </button>
+      {copyState === "copied" && <span role="status">Скопировано</span>}
+      {copyState === "failed" && <span role="alert">Не удалось скопировать</span>}
+      {timestamp !== null && (
+        <time dateTime={new Date(timestamp).toISOString()}>{formatMessageTime(timestamp)}</time>
+      )}
+    </footer>
+  );
+}
+
+export function TurnTiming({ turn }: { turn: TurnView }) {
+  const startedAt = turn.startedAt ?? turn.progress.startedAt;
+  const elapsed = useElapsed(startedAt ?? 0, turn.status === "inProgress" && startedAt !== null);
+  if (startedAt === null) return null;
+  if (turn.status === "inProgress") {
+    return <div className="turn-timing">Codex работает {elapsed}</div>;
+  }
+  const duration =
+    turn.durationMs ??
+    (turn.completedAt === null ? null : Math.max(0, turn.completedAt - startedAt));
+  return duration === null ? null : (
+    <div className="turn-timing">Работал {formatDuration(duration)}</div>
+  );
+}
+
+export function formatMessageTime(timestamp: number): string {
+  const value = new Date(timestamp);
+  const today = new Date();
+  const time = new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(value);
+  if (value.toDateString() === today.toDateString()) return time;
+  return `${new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
+}
+
 function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
   const [fallbackStartedAt] = useState(Date.now);
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const startedAt = progress?.startedAt ?? fallbackStartedAt;
   const elapsed = useElapsed(startedAt);
   const steps = progress?.steps ?? [];
@@ -510,9 +671,24 @@ function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
   const hasDiff = Boolean(
     progress && (progress.filesChanged || progress.additions || progress.deletions),
   );
+  useEffect(() => {
+    if (!open) return;
+    function closeOutside(event: PointerEvent) {
+      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
   return (
-    <details className="turn-progress" data-dismiss-on-outside-click>
-      <summary>
+    <div className={`turn-progress${open ? " open" : ""}`} ref={containerRef}>
+      <button
+        type="button"
+        className="turn-progress-summary"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
         <span className="spinner small" />
         <span>{steps.length ? `Шаг ${stepNumber} / ${steps.length}` : "Codex работает…"}</span>
         {hasDiff && (
@@ -523,38 +699,48 @@ function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
           </span>
         )}
         <ChevronDownIcon />
-      </summary>
-      <div className="turn-progress-popover">
-        <div className="turn-progress-time">
-          <ClockIcon /> Работает уже {elapsed}
+      </button>
+      {open && (
+        <div className="turn-progress-popover">
+          <div className="turn-progress-time">
+            <ClockIcon /> Работает уже {elapsed}
+          </div>
+          {progress?.explanation && <p>{progress.explanation}</p>}
+          {steps.length ? (
+            <ol>
+              {steps.map((step) => (
+                <li className={`progress-step ${step.status}`} key={step.step}>
+                  <span />
+                  {step.step}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p>Codex выполняет текущую задачу.</p>
+          )}
         </div>
-        {progress?.explanation && <p>{progress.explanation}</p>}
-        {steps.length ? (
-          <ol>
-            {steps.map((step) => (
-              <li className={`progress-step ${step.status}`} key={step.step}>
-                <span />
-                {step.step}
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p>Codex выполняет текущую задачу.</p>
-        )}
-      </div>
-    </details>
+      )}
+    </div>
   );
 }
 
-function useElapsed(startedAt: number): string {
+function useElapsed(startedAt: number, active = true): string {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, []);
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  }, [active, startedAt]);
+  return formatDuration(Math.max(0, now - startedAt));
+}
+
+function formatDuration(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000));
   const minutes = Math.floor(seconds / 60);
-  return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours) return `${hours}ч ${minutes % 60}м ${seconds % 60}с`;
+  return minutes ? `${minutes}м ${seconds % 60}с` : `${seconds}с`;
 }
 
 function formatFileCount(count: number): string {

@@ -1,21 +1,35 @@
 import type {
   ModelOption,
   SessionSettings,
+  ThreadGoal,
+  UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, SlidersIcon } from "./Icons";
+import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
 
 export function SettingsPicker({
   models,
   value,
   disabled,
   onChange,
+  goalMode,
+  goal,
+  goalBusy = false,
+  onGoalModeChange,
+  onGoalUpdate,
+  onGoalClear,
 }: {
   models: ModelOption[];
   value: SessionSettings;
   disabled: boolean;
   onChange(value: UpdateThreadSettingsRequest): void;
+  goalMode: boolean;
+  goal?: ThreadGoal | null;
+  goalBusy?: boolean;
+  onGoalModeChange?(value: boolean): void;
+  onGoalUpdate?(value: UpdateThreadGoalRequest): void;
+  onGoalClear?(): void;
 }) {
   const model = effectiveModel(models, value.model);
 
@@ -59,64 +73,76 @@ export function SettingsPicker({
         }
         aria-pressed={value.collaborationMode === "plan"}
         className={`setting-control plan-toggle${value.collaborationMode === "plan" ? " active" : ""}`}
-        disabled={disabled || !model}
+        disabled={disabled || !model || Boolean(goal)}
         type="button"
-        onClick={() =>
+        onClick={() => {
+          onGoalModeChange?.(false);
           onChange({
             collaborationMode: value.collaborationMode === "plan" ? "default" : "plan",
-          })
-        }
+          });
+        }}
       >
         <PlanIcon />
         <span>План</span>
       </button>
 
-      <details className="settings-picker" data-dismiss-on-outside-click>
-        <summary
-          aria-disabled={disabled}
-          aria-label="Дополнительные настройки"
-          className="setting-control"
-          onClick={(event) => {
-            if (disabled) event.preventDefault();
+      {goal ? (
+        <details className="goal-picker" data-dismiss-on-outside-click>
+          <summary className="setting-control goal-toggle active" aria-label="Управление целью">
+            <TargetIcon />
+            <span>Цель</span>
+            <ChevronDownIcon className="settings-chevron" />
+          </summary>
+          <div className="goal-popover">
+            <div className="goal-popover-heading">
+              <strong>{goalStatusLabel(goal.status)}</strong>
+              <span>{formatGoalUsage(goal)}</span>
+            </div>
+            <p>{goal.objective}</p>
+            <div className="goal-popover-actions">
+              {goal.status === "active" && (
+                <button
+                  type="button"
+                  disabled={goalBusy}
+                  onClick={() => onGoalUpdate?.({ status: "paused" })}
+                >
+                  Пауза
+                </button>
+              )}
+              {["paused", "blocked"].includes(goal.status) && (
+                <button
+                  type="button"
+                  disabled={goalBusy}
+                  onClick={() => onGoalUpdate?.({ status: "active" })}
+                >
+                  Продолжить
+                </button>
+              )}
+              <button type="button" disabled={goalBusy} onClick={onGoalClear}>
+                Очистить
+              </button>
+            </div>
+          </div>
+        </details>
+      ) : (
+        <button
+          aria-label={goalMode ? "Выключить режим цели" : "Включить режим цели"}
+          aria-pressed={goalMode}
+          className={`setting-control goal-toggle${goalMode ? " active" : ""}`}
+          disabled={disabled || !model}
+          type="button"
+          onClick={() => {
+            const next = !goalMode;
+            if (next && value.collaborationMode === "plan") {
+              onChange({ collaborationMode: "default" });
+            }
+            onGoalModeChange?.(next);
           }}
         >
-          <SlidersIcon />
-          <span>Ещё</span>
-          <ChevronDownIcon className="settings-chevron" />
-        </summary>
-        <div className="settings-grid">
-          <label>
-            Service tier
-            <select
-              disabled={disabled || !model}
-              value={value.serviceTier ?? ""}
-              onChange={(event) => onChange({ serviceTier: event.target.value || null })}
-            >
-              <option value="">По умолчанию</option>
-              {model?.serviceTiers.map((tier) => (
-                <option value={tier.id} key={tier.id}>
-                  {tier.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
-          {model?.supportsPersonality && (
-            <label>
-              Personality
-              <select
-                disabled={disabled}
-                value={value.personality ?? ""}
-                onChange={(event) => onChange({ personality: event.target.value || null })}
-              >
-                <option value="">По умолчанию</option>
-                <option value="friendly">Дружелюбная</option>
-                <option value="pragmatic">Прагматичная</option>
-                <option value="none">Без personality</option>
-              </select>
-            </label>
-          )}
-        </div>
-      </details>
+          <TargetIcon />
+          <span>Цель</span>
+        </button>
+      )}
     </>
   );
 
@@ -139,6 +165,25 @@ export function SettingsPicker({
     if (value.personality && !nextModel?.supportsPersonality) patch.personality = null;
     onChange(patch);
   }
+}
+
+function goalStatusLabel(status: ThreadGoal["status"]): string {
+  const labels: Record<ThreadGoal["status"], string> = {
+    active: "Цель активна",
+    paused: "Цель на паузе",
+    blocked: "Цель заблокирована",
+    usageLimited: "Достигнут лимит использования",
+    budgetLimited: "Достигнут бюджет цели",
+    complete: "Цель выполнена",
+  };
+  return labels[status];
+}
+
+function formatGoalUsage(goal: ThreadGoal): string {
+  const minutes = Math.floor(goal.timeUsedSeconds / 60);
+  const seconds = goal.timeUsedSeconds % 60;
+  const time = minutes ? `${minutes}м ${seconds}с` : `${seconds}с`;
+  return `${goal.tokensUsed.toLocaleString()} токенов · ${time}`;
 }
 
 function SettingSelect({

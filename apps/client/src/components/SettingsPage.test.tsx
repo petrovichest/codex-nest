@@ -184,6 +184,57 @@ describe("SettingsPage", () => {
 
     expect(onSwitchServer).toHaveBeenCalledOnce();
   });
+
+  it("stores Service tier and Personality as server defaults for new tasks", async () => {
+    const updateTaskDefaults = vi.fn().mockResolvedValue({
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+        updateTaskDefaults,
+      },
+      state: {
+        snapshot: {
+          taskDefaults: {},
+          models: [
+            {
+              id: "gpt",
+              displayName: "GPT",
+              description: "",
+              isDefault: true,
+              reasoningEfforts: [],
+              serviceTiers: [{ id: "fast", displayName: "Fast" }],
+              supportsPersonality: true,
+            },
+          ],
+        },
+      },
+    });
+
+    renderPage();
+    fireEvent.change(screen.getByRole("combobox", { name: "Service tier" }), {
+      target: { value: "fast" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Personality" }), {
+      target: { value: "friendly" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки новых задач" }));
+
+    await waitFor(() =>
+      expect(updateTaskDefaults).toHaveBeenCalledWith({
+        serviceTier: "fast",
+        personality: "friendly",
+      }),
+    );
+  });
 });
 
 function renderPage(

@@ -21,6 +21,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
           "token",
           "fcmToken",
           "input",
+          "images",
           "output",
           "prompt",
         ],

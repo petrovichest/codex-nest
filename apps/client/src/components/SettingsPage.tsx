@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import type { GlobalPermissionSettings, PermissionPreset } from "@codexnest/protocol";
+import type { GlobalPermissionSettings, PermissionPreset, TaskDefaults } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
@@ -51,12 +51,19 @@ export function SettingsPage({
   projectListDirection: ProjectListDirection;
   onProjectListDirectionChange(direction: ProjectListDirection): void;
 }) {
-  const { api } = useConnection();
+  const { api, state } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
   const [selected, setSelected] = useState<PermissionPreset>("auto");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const initialTaskDefaults = state?.snapshot?.taskDefaults ?? {};
+  const [taskDefaults, setTaskDefaults] = useState<TaskDefaults>(initialTaskDefaults);
+  const [savedTaskDefaults, setSavedTaskDefaults] = useState<TaskDefaults>(initialTaskDefaults);
+  const [taskDefaultsSaving, setTaskDefaultsSaving] = useState(false);
+  const [taskDefaultsError, setTaskDefaultsError] = useState<string | null>(null);
+  const defaultModel =
+    state?.snapshot?.models.find((model) => model.isDefault) ?? state?.snapshot?.models[0];
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,6 +82,12 @@ export function SettingsPage({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const current = state?.snapshot?.taskDefaults ?? {};
+    setTaskDefaults(current);
+    setSavedTaskDefaults(current);
+  }, [state?.snapshot?.taskDefaults]);
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -96,6 +109,26 @@ export function SettingsPage({
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveTaskDefaults(event: FormEvent) {
+    event.preventDefault();
+    setTaskDefaultsSaving(true);
+    setTaskDefaultsError(null);
+    try {
+      const updated = await api.updateTaskDefaults({
+        serviceTier: taskDefaults.serviceTier ?? null,
+        personality: taskDefaults.personality ?? null,
+      });
+      setTaskDefaults(updated);
+      setSavedTaskDefaults(updated);
+    } catch (caught) {
+      setTaskDefaultsError(
+        caught instanceof Error ? caught.message : "Не удалось сохранить настройки новых задач",
+      );
+    } finally {
+      setTaskDefaultsSaving(false);
     }
   }
 
@@ -151,6 +184,73 @@ export function SettingsPage({
               </select>
             </label>
           </section>
+
+          <form className="settings-card" onSubmit={saveTaskDefaults}>
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <SlidersIcon />
+              </span>
+              <div>
+                <h2>Новые задачи</h2>
+                <p>Эти значения применяются к новым задачам на всех подключённых устройствах.</p>
+              </div>
+            </div>
+            <label className="theme-setting">
+              <span>Service tier</span>
+              <select
+                disabled={!defaultModel || taskDefaultsSaving}
+                value={taskDefaults.serviceTier ?? ""}
+                onChange={(event) =>
+                  setTaskDefaults((current) => ({
+                    ...current,
+                    serviceTier: event.target.value || undefined,
+                  }))
+                }
+              >
+                <option value="">По умолчанию</option>
+                {defaultModel?.serviceTiers.map((tier) => (
+                  <option value={tier.id} key={tier.id}>
+                    {tier.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="theme-setting">
+              <span>Personality</span>
+              <select
+                disabled={!defaultModel?.supportsPersonality || taskDefaultsSaving}
+                value={taskDefaults.personality ?? ""}
+                onChange={(event) =>
+                  setTaskDefaults((current) => ({
+                    ...current,
+                    personality: event.target.value || undefined,
+                  }))
+                }
+              >
+                <option value="">По умолчанию</option>
+                <option value="friendly">Дружелюбная</option>
+                <option value="pragmatic">Прагматичная</option>
+                <option value="none">Без personality</option>
+              </select>
+            </label>
+            {taskDefaultsError && (
+              <div className="settings-notice danger" role="alert">
+                {taskDefaultsError}
+              </div>
+            )}
+            <div className="settings-actions">
+              <button
+                className="primary"
+                disabled={
+                  taskDefaultsSaving ||
+                  JSON.stringify(taskDefaults) === JSON.stringify(savedTaskDefaults)
+                }
+                type="submit"
+              >
+                {taskDefaultsSaving ? "Сохраняем…" : "Сохранить настройки новых задач"}
+              </button>
+            </div>
+          </form>
 
           <form className="settings-card" onSubmit={save}>
             <div className="settings-card-heading">

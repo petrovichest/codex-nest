@@ -5,12 +5,14 @@ import type {
   QueuedMessage,
   ServerEvent,
   ThreadDetail,
+  ThreadGoal,
   ThreadSummary,
 } from "@codexnest/protocol";
 
 export interface ClientState {
   snapshot: AppSnapshot | null;
   details: Record<string, ThreadDetail>;
+  goals: Record<string, ThreadGoal | null>;
   network: "connecting" | "connected" | "offline";
   error: string | null;
   snapshotEpoch: number;
@@ -22,11 +24,13 @@ export type ClientAction =
   | { type: "event"; sequence: number; event: ServerEvent }
   | { type: "detail"; detail: ThreadDetail }
   | { type: "thread"; thread: ThreadSummary }
+  | { type: "goal"; threadId: string; goal: ThreadGoal | null }
   | { type: "clear" };
 
 export const initialState: ClientState = {
   snapshot: null,
   details: {},
+  goals: {},
   network: "connecting",
   error: null,
   snapshotEpoch: 0,
@@ -53,6 +57,8 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       };
     case "thread":
       return applyThreadSummary(state, action.thread);
+    case "goal":
+      return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
     case "event":
       if (!state.snapshot) return state;
       return applyEvent(state, action.sequence, action.event);
@@ -79,7 +85,13 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       return applyThreadSummary({ ...state, snapshot }, event.thread);
     case "thread.removed":
       snapshot.threads = snapshot.threads.filter((thread) => thread.id !== event.threadId);
-      break;
+      return {
+        ...state,
+        snapshot,
+        goals: Object.fromEntries(
+          Object.entries(state.goals).filter(([threadId]) => threadId !== event.threadId),
+        ),
+      };
     case "attention.upserted":
       snapshot.attention = upsert(snapshot.attention, event.attention);
       break;
@@ -92,6 +104,15 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "defaultReasoningEffort.changed":
       snapshot.defaultReasoningEffort = event.reasoningEffort ?? undefined;
       break;
+    case "taskDefaults.changed":
+      snapshot.taskDefaults = event.taskDefaults;
+      break;
+    case "goal.changed":
+      return {
+        ...state,
+        snapshot,
+        goals: { ...state.goals, [event.threadId]: event.goal },
+      };
     case "activity.upserted":
       return applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item);
     case "turn.progressed":
@@ -133,6 +154,9 @@ function applyActivity(
     turns.push({
       id: turnId,
       status: "inProgress",
+      startedAt: item.type === "userMessage" ? item.timestamp : null,
+      completedAt: null,
+      durationMs: null,
       progress: emptyProgress(),
       items: [item],
     });
@@ -154,7 +178,15 @@ function applyProgress(
   const turns = [...detail.turns];
   const index = turns.findIndex((turn) => turn.id === turnId);
   if (index < 0) {
-    turns.push({ id: turnId, status: "inProgress", progress, items: [] });
+    turns.push({
+      id: turnId,
+      status: "inProgress",
+      startedAt: progress.startedAt,
+      completedAt: null,
+      durationMs: null,
+      progress,
+      items: [],
+    });
   } else {
     turns[index] = { ...turns[index], progress };
   }

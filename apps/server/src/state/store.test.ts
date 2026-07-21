@@ -75,7 +75,7 @@ describe("StateStore", () => {
     });
   });
 
-  it("treats a legacy state without message queues as an empty queue", async () => {
+  it("loads legacy state and queued messages without the new optional fields", async () => {
     const { path } = await temporaryState();
     await writeFile(
       path,
@@ -85,13 +85,26 @@ describe("StateStore", () => {
         projects: [],
         threadMeta: {},
         devices: {},
+        messageQueues: {
+          thread: [
+            {
+              id: "queued",
+              threadId: "thread",
+              text: "Старое сообщение",
+              createdAt: 1,
+              status: "queued",
+            },
+          ],
+        },
       }),
       "utf8",
     );
 
     const store = new StateStore(path);
     await store.load();
-    expect(store.snapshot().messageQueues).toBeUndefined();
+    expect(store.snapshot().messageQueues?.thread).toEqual([
+      expect.objectContaining({ id: "queued", text: "Старое сообщение" }),
+    ]);
   });
 
   it("reloads an externally rotated verifier and emits revocation", async () => {

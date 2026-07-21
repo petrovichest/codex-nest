@@ -6,11 +6,12 @@ import type {
   ModelOption,
   Project,
   SessionSettings,
+  TaskDefaults,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
-import { Composer } from "./Composer";
+import { Composer, type ComposerImage } from "./Composer";
 import { NewTaskIcon } from "./Icons";
 import { NewSessionInspector } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
@@ -28,8 +29,14 @@ export function NewSession({
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
+  const [images, setImages] = useState<ComposerImage[]>([]);
+  const [goalMode, setGoalMode] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>(() =>
-    initialSettings(state.snapshot?.defaultReasoningEffort, state.snapshot?.models ?? []),
+    initialSettings(
+      state.snapshot?.defaultReasoningEffort,
+      state.snapshot?.models ?? [],
+      state.snapshot?.taskDefaults,
+    ),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,13 +55,15 @@ export function NewSession({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!projectId || !input.trim()) return;
+    if (!projectId || (!input.trim() && !images.length) || (goalMode && !input.trim())) return;
     setBusy(true);
     setError(null);
     try {
       const result = await api.createThread({
         projectId,
         input,
+        ...(images.length ? { images: images.map((image) => image.url) } : {}),
+        ...(goalMode ? { goal: true } : {}),
         settings: {
           ...settings,
           ...(settings.reasoningEffort === undefined && state.snapshot?.defaultReasoningEffort
@@ -62,7 +71,9 @@ export function NewSession({
             : {}),
         },
       });
-      navigate(`/threads/${encodeURIComponent(result.thread.id)}`);
+      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
+        state: result.goalWarning ? { notice: result.goalWarning } : undefined,
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось создать задачу");
     } finally {
@@ -89,10 +100,17 @@ export function NewSession({
         <Composer
           input={input}
           onInput={setInput}
+          images={images}
+          onImagesChange={setImages}
           onSubmit={submit}
           busy={busy}
           settings={settings}
-          onSettingsChange={(patch) => setSettings((current) => applySettingsPatch(current, patch))}
+          onSettingsChange={(patch) => {
+            if (patch.collaborationMode === "plan") setGoalMode(false);
+            setSettings((current) => applySettingsPatch(current, patch));
+          }}
+          goalMode={goalMode}
+          onGoalModeChange={setGoalMode}
           models={state.snapshot?.models ?? []}
           projects={projects}
           projectId={projectId}
@@ -120,6 +138,7 @@ export function NewSession({
 function initialSettings(
   defaultReasoningEffort: string | undefined,
   models: ModelOption[],
+  taskDefaults?: TaskDefaults,
 ): SessionSettings {
   const settings = { ...DEFAULT_SESSION_SETTINGS };
   const model = models.find((candidate) => candidate.isDefault) ?? models[0];
@@ -128,6 +147,15 @@ function initialSettings(
     (!model || model.reasoningEfforts.some((option) => option.value === defaultReasoningEffort))
   ) {
     settings.reasoningEffort = defaultReasoningEffort;
+  }
+  if (
+    taskDefaults?.serviceTier &&
+    model?.serviceTiers.some((tier) => tier.id === taskDefaults.serviceTier)
+  ) {
+    settings.serviceTier = taskDefaults.serviceTier;
+  }
+  if (taskDefaults?.personality && model?.supportsPersonality) {
+    settings.personality = taskDefaults.personality;
   }
   return settings;
 }

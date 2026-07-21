@@ -981,19 +981,16 @@ pre {
   display: none;
 }
 
-.thread-action-menu,
-.settings-picker {
+.thread-action-menu {
   position: relative;
 }
 
-.thread-action-menu > summary,
-.settings-picker > summary {
+.thread-action-menu > summary {
   list-style: none;
   cursor: pointer;
 }
 
-.thread-action-menu > summary::-webkit-details-marker,
-.settings-picker > summary::-webkit-details-marker {
+.thread-action-menu > summary::-webkit-details-marker {
   display: none;
 }
 
@@ -1093,6 +1090,67 @@ pre {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: color-mix(in srgb, var(--surface-muted) 65%, transparent);
+}
+
+.message-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 9px;
+  width: min(100%, 560px);
+  margin-top: 10px;
+}
+
+.message-images img {
+  width: 100%;
+  max-height: 360px;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  object-fit: contain;
+}
+
+.message-footer {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.message-footer button {
+  width: 25px;
+  min-width: 25px;
+  height: 25px;
+  min-height: 25px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.message-footer button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.message-footer time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.message.userMessage .message-footer {
+  margin-bottom: -5px;
+}
+
+.turn-timing {
+  margin-top: -7px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
 }
 
 .implement-plan {
@@ -1266,7 +1324,8 @@ pre {
   margin: 0 auto 10px;
 }
 
-.turn-progress > summary {
+.turn-progress-summary {
+  width: 100%;
   min-height: 38px;
   display: flex;
   align-items: center;
@@ -1277,22 +1336,16 @@ pre {
   background: var(--surface-raised);
   box-shadow: 0 5px 18px rgb(28 30 27 / 7%);
   color: var(--muted-strong);
-  cursor: pointer;
-  list-style: none;
   font-size: 12px;
 }
 
-.turn-progress > summary::-webkit-details-marker {
-  display: none;
-}
-
-.turn-progress > summary > svg {
+.turn-progress-summary > svg {
   width: 14px;
   height: 14px;
   transition: transform 120ms ease;
 }
 
-.turn-progress[open] > summary > svg {
+.turn-progress.open .turn-progress-summary > svg {
   transform: rotate(180deg);
 }
 
@@ -1403,23 +1456,25 @@ pre {
 }
 
 .composer-box textarea {
-  min-height: 72px;
+  min-height: 52px;
   max-height: 190px;
+  height: auto;
   margin: 0;
-  padding: 15px 16px 7px;
+  padding: 11px 16px 3px;
   border: 0;
   outline: 0;
   background: transparent;
   font-size: 15px;
+  overflow-y: hidden;
 }
 
 .composer-toolbar {
-  min-height: 48px;
+  min-height: 42px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 4px 8px 8px 10px;
+  padding: 3px 8px 6px;
 }
 
 .composer-options,
@@ -1460,8 +1515,7 @@ pre {
   font-size: 12px;
 }
 
-.setting-control,
-.settings-picker > summary {
+.setting-control {
   height: 32px;
   min-height: 32px;
   flex: 0 0 auto;
@@ -1477,28 +1531,24 @@ pre {
   font-weight: 500;
 }
 
-.setting-control:hover:not(:disabled),
-.settings-picker > summary:hover {
+.setting-control:hover:not(:disabled) {
   background: var(--surface-muted);
   border-color: transparent;
 }
 
-.setting-control svg,
-.settings-picker > summary svg {
+.setting-control svg {
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
 }
 
-.setting-control span,
-.settings-picker > summary span {
+.setting-control span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.setting-control:disabled,
-.settings-picker > summary[aria-disabled="true"] {
+.setting-control:disabled {
   cursor: default;
   opacity: 0.42;
 }
@@ -1535,30 +1585,45 @@ pre {
   pointer-events: none;
 }
 
-.plan-toggle.active {
+.plan-toggle.active,
+.goal-toggle.active {
   background: color-mix(in srgb, var(--accent) 13%, var(--surface-muted));
   color: var(--text-strong);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-.settings-picker .settings-chevron {
+.goal-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.goal-picker > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.goal-picker > summary::-webkit-details-marker {
+  display: none;
+}
+
+.goal-picker .settings-chevron {
   width: 13px;
   transition: transform 120ms ease;
 }
 
-.settings-picker[open] .settings-chevron {
+.goal-picker[open] .settings-chevron {
   transform: rotate(180deg);
 }
 
-.settings-grid {
+.goal-popover {
   position: absolute;
-  bottom: calc(100% + 12px);
-  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  left: auto;
   z-index: 65;
-  width: min(510px, calc(100vw - var(--sidebar-width) - 60px));
+  width: min(360px, calc(100vw - var(--sidebar-width) - 60px));
   display: grid;
-  grid-template-columns: repeat(3, minmax(130px, 1fr));
-  gap: 13px;
+  gap: 10px;
   padding: 15px;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1566,14 +1631,122 @@ pre {
   box-shadow: var(--shadow);
 }
 
-.settings-grid label {
-  font-size: 11px;
+.goal-popover-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.settings-grid select {
-  height: 35px;
-  padding: 0 9px;
+.goal-popover-heading strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.goal-popover-heading span {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.goal-popover p {
+  max-height: 150px;
+  overflow: auto;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.goal-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.goal-popover-actions button {
+  min-height: 31px;
+  padding: 0 10px;
   font-size: 12px;
+}
+
+.composer-add-image {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted-strong);
+}
+
+.composer-add-image svg {
+  width: 17px;
+  height: 17px;
+}
+
+.composer-attachments {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  margin: 0 8px 9px;
+  padding: 3px 1px;
+  scrollbar-width: thin;
+}
+
+.composer-attachment {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+}
+
+.composer-attachment-preview {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--surface-muted);
+}
+
+.composer-attachment-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.composer-attachment.selected .composer-attachment-preview {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.composer-attachment-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 23px;
+  min-width: 23px;
+  height: 23px;
+  min-height: 23px;
+  padding: 0;
+  border: 2px solid var(--surface-raised);
+  border-radius: 50%;
+  background: var(--text-strong);
+  color: var(--bg);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+}
+
+.composer-attachment-remove svg {
+  width: 12px;
+  height: 12px;
 }
 
 .composer-action {
@@ -2438,7 +2611,7 @@ pre {
     margin-bottom: 7px;
   }
 
-  .turn-progress > summary {
+  .turn-progress-summary {
     max-width: 100%;
   }
 
@@ -2459,7 +2632,7 @@ pre {
   }
 
   .composer-box textarea {
-    min-height: 62px;
+    min-height: 52px;
     font-size: 16px;
   }
 
@@ -2467,25 +2640,16 @@ pre {
     display: none;
   }
 
-  .settings-picker > summary {
-    max-width: none;
-  }
-
-  .settings-picker > summary span {
-    max-width: 52px;
-  }
-
   .setting-select select {
     max-width: 116px;
   }
 
-  .settings-grid {
+  .goal-popover {
     position: fixed;
     right: 10px;
     bottom: calc(78px + env(safe-area-inset-bottom));
     left: 10px;
     width: auto;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     max-height: 62dvh;
     overflow: auto;
   }
@@ -2604,10 +2768,6 @@ pre {
   .composer-empty-projects {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .settings-grid {
-    grid-template-columns: 1fr;
   }
 
   .button-row button {

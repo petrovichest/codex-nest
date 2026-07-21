@@ -151,6 +151,28 @@ describe("AppProjection", () => {
 
     const events: Array<{ type: string; [key: string]: unknown }> = [];
     projection.on("event", (_sequence, event) => events.push(event));
+    const goal = {
+      threadId: "one",
+      objective: "Довести задачу до конца",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 42,
+      timeUsedSeconds: 7,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    bridge.emit("notification", {
+      method: "thread/goal/updated",
+      params: { threadId: "one", turnId: null, goal },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "thread/goal/cleared",
+      params: { threadId: "one" },
+    } satisfies ServerNotification);
+    expect(events.slice(-2)).toEqual([
+      { type: "goal.changed", threadId: "one", goal },
+      { type: "goal.changed", threadId: "one", goal: null },
+    ]);
     bridge.emit("notification", {
       method: "turn/started",
       params: {
@@ -270,8 +292,28 @@ describe("AppProjection", () => {
     expect((await projection.readThread("one")).turns[0]).toMatchObject({
       id: "live",
       status: "inProgress",
+      startedAt: 3_000,
+      completedAt: null,
+      durationMs: null,
       progress: { startedAt: 3_000 },
-      items: [{ id: "answer", type: "agentMessage", text: "В процессе" }],
+      items: [
+        {
+          id: "user",
+          type: "userMessage",
+          text: "Запрос",
+          images: ["data:image/png;base64,aW1hZ2U="],
+          timestamp: 3_000,
+          phase: null,
+        },
+        {
+          id: "answer",
+          type: "agentMessage",
+          text: "В процессе",
+          timestamp: 3_000,
+          phase: null,
+          images: [],
+        },
+      ],
     });
 
     await projection.sync();
@@ -327,6 +369,14 @@ function liveThread(): Thread {
     {
       id: "live",
       items: [
+        {
+          type: "userMessage",
+          id: "user",
+          content: [
+            { type: "text", text: "Запрос", text_elements: [] },
+            { type: "image", url: "data:image/png;base64,aW1hZ2U=" },
+          ],
+        },
         {
           type: "agentMessage",
           id: "answer",

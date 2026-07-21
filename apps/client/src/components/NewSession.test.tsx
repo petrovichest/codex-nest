@@ -151,4 +151,63 @@ describe("NewSession", () => {
       }),
     );
   });
+
+  it("keeps Plan and Goal mutually exclusive and starts a native goal", async () => {
+    const createThread = vi.fn().mockResolvedValue({ thread: { id: "created" }, turnId: "turn" });
+    connection.mockReturnValue({
+      api: { createThread },
+      state: {
+        snapshot: {
+          connection: { state: "ready" },
+          models: [
+            {
+              id: "gpt",
+              displayName: "GPT",
+              description: "",
+              isDefault: true,
+              reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+              serviceTiers: [],
+              supportsPersonality: true,
+            },
+          ],
+        },
+        network: "connected",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    expect(screen.getByRole("button", { name: "Выключить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим цели" }));
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Доведи проверяемый результат до конца" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Запустить цель" }));
+
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith({
+        projectId: "project",
+        input: "Доведи проверяемый результат до конца",
+        goal: true,
+        settings: { collaborationMode: "default" },
+      }),
+    );
+  });
 });

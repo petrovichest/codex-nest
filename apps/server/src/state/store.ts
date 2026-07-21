@@ -3,7 +3,13 @@ import { EventEmitter } from "node:events";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { Project, QueuedMessage, SessionSettings, ThreadOutcome } from "@codexnest/protocol";
+import type {
+  Project,
+  QueuedMessage,
+  SessionSettings,
+  TaskDefaults,
+  ThreadOutcome,
+} from "@codexnest/protocol";
 
 export interface ThreadMetaState {
   pinned: boolean;
@@ -26,6 +32,7 @@ export interface CodexNestState {
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
   defaultReasoningEffort?: string;
+  taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
 }
 
@@ -157,6 +164,9 @@ function validateState(value: unknown): CodexNestState {
   ) {
     throw new Error("Corrupt default reasoning effort in CodexNest state");
   }
+  if (value.taskDefaults !== undefined && !isTaskDefaults(value.taskDefaults)) {
+    throw new Error("Corrupt task defaults in CodexNest state");
+  }
   for (const project of value.projects) {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");
   }
@@ -207,10 +217,23 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     typeof value.id === "string" &&
     value.threadId === threadId &&
     typeof value.text === "string" &&
-    Boolean(value.text.trim()) &&
+    (value.images === undefined ||
+      (Array.isArray(value.images) && value.images.every(isInlineImage))) &&
+    (Boolean(value.text.trim()) || (Array.isArray(value.images) && value.images.length > 0)) &&
     typeof value.createdAt === "number" &&
     ["queued", "dispatching"].includes(String(value.status))
   );
+}
+
+function isTaskDefaults(value: unknown): value is TaskDefaults {
+  if (!isRecord(value)) return false;
+  return ["serviceTier", "personality"].every(
+    (key) => value[key] === undefined || (typeof value[key] === "string" && value[key].trim()),
+  );
+}
+
+function isInlineImage(value: unknown): value is string {
+  return typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value);
 }
 
 function isSessionSettings(value: unknown): value is SessionSettings {

@@ -60,6 +60,39 @@ describe("clientReducer", () => {
     expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
   });
 
+  it("applies task defaults and native goal events without polling", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "taskDefaults.changed",
+        taskDefaults: { serviceTier: "fast", personality: "friendly" },
+      },
+    });
+    const goal = {
+      threadId: "one",
+      objective: "Завершить задачу",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 10,
+      timeUsedSeconds: 2,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: { type: "goal.changed", threadId: "one", goal },
+    });
+
+    expect(state.snapshot?.taskDefaults).toEqual({
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    expect(state.goals.one).toEqual(goal);
+  });
+
   it("replaces an item completion after ordered streaming deltas", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
@@ -70,6 +103,9 @@ describe("clientReducer", () => {
           {
             id: "turn",
             status: "inProgress",
+            startedAt: null,
+            completedAt: null,
+            durationMs: null,
             progress: {
               startedAt: null,
               explanation: null,
@@ -91,7 +127,15 @@ describe("clientReducer", () => {
         type: "activity.upserted",
         threadId: "one",
         turnId: "turn",
-        item: { type: "agentMessage", id: "item", status: "inProgress", text: "Прив" },
+        item: {
+          type: "agentMessage",
+          id: "item",
+          status: "inProgress",
+          text: "Прив",
+          images: [],
+          timestamp: 1,
+          phase: "commentary",
+        },
       },
     });
     state = clientReducer(state, {
@@ -101,11 +145,27 @@ describe("clientReducer", () => {
         type: "activity.upserted",
         threadId: "one",
         turnId: "turn",
-        item: { type: "agentMessage", id: "item", status: "completed", text: "Привет" },
+        item: {
+          type: "agentMessage",
+          id: "item",
+          status: "completed",
+          text: "Привет",
+          images: [],
+          timestamp: 2,
+          phase: "final_answer",
+        },
       },
     });
     expect(state.details.one?.turns[0]?.items).toEqual([
-      { type: "agentMessage", id: "item", status: "completed", text: "Привет" },
+      {
+        type: "agentMessage",
+        id: "item",
+        status: "completed",
+        text: "Привет",
+        images: [],
+        timestamp: 2,
+        phase: "final_answer",
+      },
     ]);
   });
 

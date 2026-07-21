@@ -16,15 +16,21 @@ import type {
   MoveProjectRequest,
   Project,
   QueuedMessage,
+  QueueMessageRequest,
   StartTurnRequest,
   SteerTurnRequest,
   SummaryResponse,
   ThreadDetail,
+  ThreadGoal,
   ThreadSummary,
+  TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateProjectRequest,
+  UpdateTaskDefaultsRequest,
+  UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
+  TaskDefaults,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
@@ -52,6 +58,14 @@ export class ApiClient {
     body: UpdateGlobalPermissionSettingsRequest,
   ): Promise<GlobalPermissionSettings> {
     return this.request("/api/v1/settings/permissions", { method: "PUT", body });
+  }
+
+  readTaskDefaults(): Promise<TaskDefaults> {
+    return this.request("/api/v1/settings/task-defaults");
+  }
+
+  updateTaskDefaults(body: UpdateTaskDefaultsRequest): Promise<TaskDefaults> {
+    return this.request("/api/v1/settings/task-defaults", { method: "PUT", body });
   }
 
   listDirectories(path?: string): Promise<DirectoryListing> {
@@ -96,8 +110,8 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
   }
 
-  createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary; turnId: string }> {
-    return this.request("/api/v1/threads", { method: "POST", body });
+  createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary } & TurnStartResult> {
+    return this.request("/api/v1/threads", { method: "POST", body, timeoutMs: null });
   }
 
   updateThread(id: string, body: UpdateThreadRequest): Promise<ThreadSummary> {
@@ -111,17 +125,36 @@ export class ApiClient {
     });
   }
 
-  startTurn(id: string, body: StartTurnRequest): Promise<{ turnId: string }> {
+  startTurn(id: string, body: StartTurnRequest): Promise<TurnStartResult> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/turns`, {
       method: "POST",
+      body,
+      timeoutMs: null,
+    });
+  }
+
+  enqueue(id: string, body: QueueMessageRequest): Promise<QueuedMessage> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
+      method: "POST",
+      body,
+      timeoutMs: null,
+    });
+  }
+
+  readGoal(id: string): Promise<ThreadGoal | null> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/goal`);
+  }
+
+  updateGoal(id: string, body: UpdateThreadGoalRequest): Promise<ThreadGoal> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/goal`, {
+      method: "PATCH",
       body,
     });
   }
 
-  enqueue(id: string, input: string): Promise<QueuedMessage> {
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
-      method: "POST",
-      body: { input },
+  clearGoal(id: string): Promise<void> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/goal`, {
+      method: "DELETE",
     });
   }
 
@@ -187,6 +220,7 @@ export class ApiClient {
       method?: string;
       body?: unknown;
       authenticated?: boolean;
+      timeoutMs?: number | null;
     } = {},
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
@@ -195,7 +229,10 @@ export class ApiClient {
     if (options.body !== undefined) headers.set("Content-Type", "application/json");
     let response: Response;
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    const timeout =
+      options.timeoutMs === null
+        ? null
+        : window.setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
     try {
       response = await fetch(new URL(path, `${this.settings.baseUrl}/`), {
         method: options.method ?? "GET",
@@ -206,7 +243,7 @@ export class ApiClient {
     } catch {
       throw new ApiClientError("connection_failed", "Не удалось подключиться к серверу");
     } finally {
-      window.clearTimeout(timeout);
+      if (timeout !== null) window.clearTimeout(timeout);
     }
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as ApiError | null;

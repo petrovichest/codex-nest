@@ -551,6 +551,123 @@ describe("thread settings", () => {
       ),
     );
     expect(store.snapshot().messageQueues?.thread).toBeUndefined();
+
+    const image = `data:image/png;base64,${"a".repeat(1_100_000)}`;
+    const imageTurn = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Проверь изображение", images: [image] },
+    });
+    expect(imageTurn.statusCode).toBe(201);
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({
+      input: [
+        { type: "text", text: "Проверь изображение", text_elements: [] },
+        { type: "image", url: image },
+      ],
+    });
+
+    const defaults = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/task-defaults",
+      headers,
+      payload: { serviceTier: "fast", personality: "friendly" },
+    });
+    expect(defaults.statusCode).toBe(200);
+    expect(store.snapshot().taskDefaults).toEqual({
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    expect(projection.summary("thread")?.settings).not.toMatchObject({ serviceTier: "fast" });
+    const withDefaults = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(withDefaults.json().thread.settings).toMatchObject({
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+
+    const goalCallStart = bridge.request.mock.calls.length;
+    const goalStart = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Доведи задачу до конца", goal: true },
+    });
+    expect(goalStart.statusCode).toBe(201);
+    expect(
+      bridge.request.mock.calls
+        .slice(goalCallStart)
+        .map(([method, params]) => [
+          method,
+          method === "thread/goal/set" ? params.status : undefined,
+        ]),
+    ).toEqual([
+      ["thread/goal/set", "paused"],
+      ["thread/resume", undefined],
+      ["turn/start", undefined],
+      ["thread/goal/set", "active"],
+    ]);
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({ collaborationMode: { mode: "default" } });
+    expect(
+      (await app.inject({ url: "/api/v1/threads/thread/goal", headers })).json(),
+    ).toMatchObject({ objective: "Доведи задачу до конца", status: "active" });
+    expect(
+      (
+        await app.inject({
+          method: "PATCH",
+          url: "/api/v1/threads/thread/goal",
+          headers,
+          payload: { status: "paused" },
+        })
+      ).json(),
+    ).toMatchObject({ status: "paused" });
+    expect(
+      (
+        await app.inject({
+          method: "PATCH",
+          url: "/api/v1/threads/thread/goal",
+          headers,
+          payload: { status: "active" },
+        })
+      ).json(),
+    ).toMatchObject({ status: "active" });
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: "/api/v1/threads/thread/goal",
+          headers,
+        })
+      ).statusCode,
+    ).toBe(204);
+
+    bridge.failNextTurnStart = true;
+    const failedFirstTurn = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Эта цель не запустится", goal: true },
+    });
+    expect(failedFirstTurn.statusCode).toBe(500);
+    expect(bridge.goal).toBeNull();
+
+    bridge.failNextGoalActivation = true;
+    const failedActivation = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Цель останется на паузе", goal: true },
+    });
+    expect(failedActivation.statusCode).toBe(201);
+    expect(failedActivation.json().goalWarning).toMatch(/осталась на паузе/i);
+    expect(bridge.goal).toMatchObject({ status: "paused" });
     await app.close();
   });
 
@@ -683,6 +800,18 @@ class SettingsBridge extends EventEmitter {
   writeStatus: "ok" | "okOverridden" = "ok";
   writeMessage: string | null = null;
   conflictingVersion: string | null = null;
+  goal: {
+    threadId: string;
+    objective: string;
+    status: "active" | "paused";
+    tokenBudget: null;
+    tokensUsed: number;
+    timeUsedSeconds: number;
+    createdAt: number;
+    updatedAt: number;
+  } | null = null;
+  failNextTurnStart = false;
+  failNextGoalActivation = false;
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
@@ -700,8 +829,37 @@ class SettingsBridge extends EventEmitter {
     }
     if (method === "thread/start") return { thread: testThread("created") };
     if (method === "thread/resume") return {};
-    if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
+    if (method === "turn/start") {
+      if (this.failNextTurnStart) {
+        this.failNextTurnStart = false;
+        throw new Error("turn failed");
+      }
+      return { turn: testTurn("turn", "inProgress") };
+    }
     if (method === "turn/steer") return { turnId: "steered" };
+    if (method === "thread/goal/get") return { goal: this.goal };
+    if (method === "thread/goal/clear") {
+      this.goal = null;
+      return { cleared: true };
+    }
+    if (method === "thread/goal/set") {
+      if (params.status === "active" && this.failNextGoalActivation) {
+        this.failNextGoalActivation = false;
+        throw new Error("activation failed");
+      }
+      this.goal = {
+        threadId: String(params.threadId),
+        objective:
+          typeof params.objective === "string" ? params.objective : (this.goal?.objective ?? ""),
+        status: params.status === "active" ? "active" : "paused",
+        tokenBudget: null,
+        tokensUsed: this.goal?.tokensUsed ?? 0,
+        timeUsedSeconds: this.goal?.timeUsedSeconds ?? 0,
+        createdAt: this.goal?.createdAt ?? 1,
+        updatedAt: 2,
+      };
+      return { goal: this.goal };
+    }
     if (method === "account/rateLimits/read") {
       const common = {
         limitName: null,
