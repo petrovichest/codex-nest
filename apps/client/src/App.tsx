@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useMemo, useState } from "react";
+import { type RefObject, useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import type {
@@ -9,15 +9,7 @@ import type {
 
 import type { ConnectionSettings } from "./storage";
 import { AttentionPanel } from "./components/AttentionPanel";
-import {
-  FolderIcon,
-  GaugeIcon,
-  PlusIcon,
-  SearchIcon,
-  ServerIcon,
-  SlidersIcon,
-  XIcon,
-} from "./components/Icons";
+import { FolderIcon, GaugeIcon, PlusIcon, SlidersIcon } from "./components/Icons";
 import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { SettingsPage } from "./components/SettingsPage";
@@ -72,9 +64,6 @@ export function App({
         drawer={drawer}
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
-        onDisconnected={onDisconnected}
-        reconnect={reconnect}
-        settings={settings}
       />
       {(drawer || drawerDragging) && (
         <button
@@ -117,6 +106,7 @@ export function App({
               element={
                 <SettingsPage
                   onOpenNavigation={() => setDrawer(true)}
+                  onSwitchServer={() => void clearConnectionSettings().then(onDisconnected)}
                   theme={theme}
                   onThemeChange={setTheme}
                 />
@@ -152,22 +142,14 @@ function Sidebar({
   drawer,
   onClose,
   onNewProject,
-  onDisconnected,
-  reconnect,
-  settings,
 }: {
   containerRef: RefObject<HTMLElement | null>;
   drawer: boolean;
   onClose(): void;
   onNewProject(): void;
-  onDisconnected(): void;
-  reconnect(): void;
-  settings: ConnectionSettings;
 }) {
   const { api, state } = useConnection();
   const navigate = useNavigate();
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
@@ -177,20 +159,9 @@ function Sidebar({
     null,
   );
   const snapshot = state.snapshot;
-  const normalizedSearch = search.trim().toLocaleLowerCase("ru");
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
-  const groups = useMemo(
-    () =>
-      groupedThreads(snapshot?.projects ?? [], activeThreads)
-        .map((group) => ({
-          ...group,
-          threads: filterThreads(group.threads, normalizedSearch),
-        }))
-        .filter((group) => group.threads.length > 0 || (!normalizedSearch && group.project)),
-    [activeThreads, normalizedSearch, snapshot?.projects],
-  );
-  const filteredArchive = filterThreads(archivedThreads, normalizedSearch);
+  const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
 
   function toggleGroup(key: string) {
     setExpanded((current) => {
@@ -237,37 +208,10 @@ function Sidebar({
 
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
-      <div className="sidebar-toolbar">
-        <button
-          className={`icon-button ${searchOpen ? "active" : ""}`}
-          aria-label="Поиск по задачам"
-          onClick={() => {
-            setSearchOpen((value) => !value);
-            if (searchOpen) setSearch("");
-          }}
-        >
-          <SearchIcon />
-        </button>
-        <button className="icon-button close-drawer" aria-label="Закрыть меню" onClick={onClose}>
-          <XIcon />
-        </button>
-      </div>
-      {searchOpen && (
-        <div className="sidebar-search">
-          <SearchIcon />
-          <input
-            autoFocus
-            aria-label="Поиск по задачам"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Найти задачу"
-          />
-        </div>
-      )}
       <nav className="thread-nav" aria-label="Задачи">
         {groups.map((group) => {
           const key = group.project?.id ?? "ungrouped";
-          const showAll = expanded.has(key) || Boolean(normalizedSearch);
+          const showAll = expanded.has(key);
           const visible = showAll ? group.threads : group.threads.slice(0, 5);
           return (
             <section className="project-group" key={key}>
@@ -299,37 +243,28 @@ function Sidebar({
               {visible.map((thread) => (
                 <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
               ))}
-              {!normalizedSearch && group.threads.length > 5 && (
+              {group.threads.length > 5 && (
                 <button className="show-more" onClick={() => toggleGroup(key)}>
                   {showAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
                 </button>
               )}
-              {!group.threads.length && !normalizedSearch && (
-                <span className="project-empty">Пока нет задач</span>
-              )}
+              {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
             </section>
           );
         })}
-        {filteredArchive.length > 0 && (
-          <details className="archive-group" open={Boolean(normalizedSearch)}>
+        {archivedThreads.length > 0 && (
+          <details className="archive-group">
             <summary>
               Архив
-              <span>{filteredArchive.length}</span>
+              <span>{archivedThreads.length}</span>
             </summary>
-            {filteredArchive.map((thread) => (
+            {archivedThreads.map((thread) => (
               <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
             ))}
           </details>
         )}
-        {normalizedSearch && groups.length === 0 && filteredArchive.length === 0 && (
-          <div className="sidebar-empty-search">Ничего не найдено</div>
-        )}
       </nav>
       <div className="sidebar-footer">
-        <NavLink className="sidebar-footer-action" to="/settings" onClick={onClose}>
-          <SlidersIcon />
-          Настройки
-        </NavLink>
         <button className="sidebar-footer-action" onClick={onNewProject}>
           <PlusIcon />
           Добавить проект
@@ -344,27 +279,17 @@ function Sidebar({
           {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
           <span>{rateLimitsText}</span>
         </button>
-        <div className="server-card">
-          <div className="server-avatar">
-            <ServerIcon />
-          </div>
-          <div className="server-copy">
-            <strong>{serverName(settings.baseUrl)}</strong>
-            <span>
-              <ConnectionDot state={state.network} />
-              {networkLabel(state.network)}
-            </span>
-          </div>
-          {state.network !== "connected" && (
-            <button className="server-retry" onClick={reconnect}>
-              Повторить
-            </button>
-          )}
-        </div>
-        <div className="sidebar-preferences">
-          <button onClick={() => void clearConnectionSettings().then(onDisconnected)}>
-            Сменить сервер
-          </button>
+        <NavLink className="sidebar-footer-action" to="/settings" onClick={onClose}>
+          <SlidersIcon />
+          Настройки
+        </NavLink>
+        <div
+          aria-label={`Состояние сервера: ${networkLabel(state.network)}`}
+          className="server-status"
+          role="status"
+        >
+          <ConnectionDot state={state.network} />
+          <span>{networkLabel(state.network)}</span>
         </div>
       </div>
     </aside>
@@ -415,17 +340,8 @@ function rateLimitsAriaLabel(text: string, loading: boolean, error: boolean): st
   return text === "Лимиты Codex" ? "Показать лимиты Codex" : `Обновить лимиты Codex: ${text}`;
 }
 
-function filterThreads(threads: ThreadSummary[], search: string): ThreadSummary[] {
-  if (!search) return threads;
-  return threads.filter((thread) =>
-    [thread.title, thread.preview, thread.cwd].some((value) =>
-      value.toLocaleLowerCase("ru").includes(search),
-    ),
-  );
-}
-
 function ConnectionDot({ state }: { state: "connecting" | "connected" | "offline" }) {
-  return <span className={`connection-dot ${state}`} title={state} />;
+  return <span aria-hidden="true" className={`connection-dot ${state}`} />;
 }
 
 function networkLabel(state: "connecting" | "connected" | "offline"): string {
@@ -434,12 +350,4 @@ function networkLabel(state: "connecting" | "connected" | "offline"): string {
     : state === "connecting"
       ? "Подключение…"
       : "Нет связи";
-}
-
-function serverName(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).hostname;
-  } catch {
-    return "CodexNest server";
-  }
 }

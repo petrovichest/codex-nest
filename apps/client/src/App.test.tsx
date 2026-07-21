@@ -11,13 +11,17 @@ const capacitor = vi.hoisted(() => ({
   addListener: vi.fn(),
   backHandler: null as (() => void) | null,
   getPlatform: vi.fn(() => "web"),
+  isNativePlatform: vi.fn(() => false),
   removeListener: vi.fn(),
 }));
 
 vi.mock("./connection", () => ({ useConnection: connection }));
 vi.mock("./push", () => ({ usePushNotifications: vi.fn() }));
 vi.mock("@capacitor/core", () => ({
-  Capacitor: { getPlatform: capacitor.getPlatform },
+  Capacitor: {
+    getPlatform: capacitor.getPlatform,
+    isNativePlatform: capacitor.isNativePlatform,
+  },
 }));
 vi.mock("@capacitor/app", () => ({
   App: { addListener: capacitor.addListener },
@@ -50,6 +54,7 @@ beforeEach(() => {
   );
   capacitor.backHandler = null;
   capacitor.getPlatform.mockReturnValue("web");
+  capacitor.isNativePlatform.mockReturnValue(false);
   capacitor.removeListener.mockResolvedValue(undefined);
   capacitor.addListener.mockImplementation(async (_event: string, listener: () => void) => {
     capacitor.backHandler = listener;
@@ -81,21 +86,7 @@ describe("App routing and navigation", () => {
     expect(screen.getByText("Что поручим Codex?")).toBeInTheDocument();
   });
 
-  it("filters sidebar tasks locally", () => {
-    const beta = { ...baseThread, id: "beta", title: "Исправить Beta", updatedAt: 10 };
-    mockConnection(snapshot([baseThread, beta]));
-
-    renderApp("/threads/newer");
-    fireEvent.click(screen.getByRole("button", { name: "Поиск по задачам" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Поиск по задачам" }), {
-      target: { value: "Beta" },
-    });
-
-    expect(screen.getByRole("link", { name: /Исправить Beta/ })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /Новая задача в истории/ })).not.toBeInTheDocument();
-  });
-
-  it("keeps only the compact sidebar toolbar and project session action", () => {
+  it("removes the sidebar toolbar and keeps the project session action", () => {
     mockConnection(snapshot([baseThread]));
 
     renderApp("/threads/newer");
@@ -104,10 +95,45 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("button", { name: "Вперёд" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Новая задача" })).not.toBeInTheDocument();
     expect(screen.queryByText("CodexNest")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Поиск по задачам" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Поиск по задачам" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Закрыть меню" })).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }),
     ).toBeInTheDocument();
+  });
+
+  it("orders footer actions before the compact server status", () => {
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/threads/newer");
+    const footer = view.container.querySelector(".sidebar-footer");
+
+    expect(footer).not.toBeNull();
+    expect(Array.from(footer!.children).map((element) => element.textContent?.trim())).toEqual([
+      "Добавить проект",
+      "Лимиты Codex",
+      "Настройки",
+      "Подключено",
+    ]);
+  });
+
+  it.each([
+    ["connected", "Подключено"],
+    ["connecting", "Подключение…"],
+    ["offline", "Нет связи"],
+  ] as const)("renders the %s server state as only a dot and label", (network, label) => {
+    mockConnection(snapshot([baseThread]), network);
+
+    renderApp("/threads/newer");
+    const status = screen.getByRole("status", { name: `Состояние сервера: ${label}` });
+    const dot = status.querySelector(".connection-dot");
+
+    expect(status).toHaveTextContent(label);
+    expect(status.children).toHaveLength(2);
+    expect(dot).toHaveClass(network);
+    expect(status.querySelector("svg")).toBeNull();
+    expect(screen.queryByText("pi.local")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
   });
 
   it("loads and refreshes both Codex limits only when clicked", async () => {
@@ -232,14 +258,22 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens global Codex settings from the sidebar", async () => {
+  it("opens global Codex settings and switches the saved server there", async () => {
     const api = mockConnection(snapshot([baseThread]));
-    renderApp("/threads/newer");
+    const onDisconnected = vi.fn();
+    localStorage.setItem("codexnest.serverUrl", "https://pi.local");
+    localStorage.setItem("codexnest.token", "secret");
+    renderApp("/threads/newer", onDisconnected);
 
     fireEvent.click(screen.getByRole("link", { name: "Настройки" }));
 
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
     expect(api.readPermissionSettings).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Сменить сервер" }));
+
+    await waitFor(() => expect(onDisconnected).toHaveBeenCalledOnce());
+    expect(localStorage.getItem("codexnest.serverUrl")).toBeNull();
+    expect(localStorage.getItem("codexnest.token")).toBeNull();
   });
 
   it("tracks a mobile swipe and opens the session drawer after the threshold", () => {
@@ -415,12 +449,12 @@ describe("App routing and navigation", () => {
   });
 });
 
-function renderApp(path: string) {
+function renderApp(path: string, onDisconnected = () => undefined) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <App
         settings={{ baseUrl: "https://pi.local", token: "secret" }}
-        onDisconnected={() => undefined}
+        onDisconnected={onDisconnected}
       />
     </MemoryRouter>,
   );
@@ -460,7 +494,10 @@ function snapshot(threads: ThreadSummary[]): AppSnapshot {
   };
 }
 
-function mockConnection(appSnapshot: AppSnapshot) {
+function mockConnection(
+  appSnapshot: AppSnapshot,
+  network: "connecting" | "connected" | "offline" = "connected",
+) {
   const api = {
     markRead: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
@@ -489,7 +526,7 @@ function mockConnection(appSnapshot: AppSnapshot) {
           { summary: thread, turns: [], queuedMessages: [] },
         ]),
       ),
-      network: "connected",
+      network,
       error: null,
       snapshotEpoch: 1,
     },

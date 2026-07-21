@@ -196,7 +196,7 @@ export class ApiClient {
         signal: controller.signal,
       });
     } catch {
-      throw new ApiClientError("connection_failed", "Не удалось подключиться к Raspberry Pi");
+      throw new ApiClientError("connection_failed", "Не удалось подключиться к серверу");
     } finally {
       window.clearTimeout(timeout);
     }

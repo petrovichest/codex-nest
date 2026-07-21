@@ -92,7 +92,7 @@ export function ConnectionProvider({
       socket.addEventListener("close", () => {
         if (stopped) return;
         sequence.current = null;
-        dispatch({ type: "network", network: "offline", error: "Связь с Raspberry Pi потеряна" });
+        dispatch({ type: "network", network: "offline", error: "Связь с сервером потеряна" });
         const delay = delays[Math.min(retry, delays.length - 1)] ?? 15_000;
         retry += 1;
         retryTimer = window.setTimeout(connect, delay);
