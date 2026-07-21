@@ -135,12 +135,33 @@ describe("AppProjection", () => {
       },
     } satisfies ServerNotification);
     expect(projection.summary("one")?.state).toBe("running");
+    projection.setCurrentTurn("one", "steered");
     bridge.emit("notification", {
       method: "turn/completed",
       params: {
         threadId: "one",
         turn: {
           id: "live",
+          items: [],
+          itemsView: "summary",
+          status: "interrupted",
+          error: null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+        },
+      },
+    } satisfies ServerNotification);
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "steered",
+    });
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "one",
+        turn: {
+          id: "steered",
           items: [],
           itemsView: "summary",
           status: "failed",

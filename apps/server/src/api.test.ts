@@ -396,6 +396,15 @@ describe("thread settings", () => {
       method: "turn/started",
       params: { threadId: "thread", turn: testTurn("running", "inProgress") },
     } satisfies ServerNotification);
+    const steered = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/steer",
+      headers,
+      payload: { turnId: "running", input: "Продолжай" },
+    });
+    expect(steered.statusCode).toBe(200);
+    expect(steered.json()).toEqual({ turnId: "steered" });
+    expect(projection.summary("thread")?.currentTurnId).toBe("steered");
     const conflict = await app.inject({
       method: "PATCH",
       url: "/api/v1/threads/thread/settings",
@@ -428,6 +437,7 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/start") return { thread: testThread("created") };
     if (method === "thread/resume") return {};
     if (method === "turn/start") return { turn: testTurn("turn", "inProgress") };
+    if (method === "turn/steer") return { turnId: "steered" };
     throw new Error(`Unexpected ${method}`);
   });
 }

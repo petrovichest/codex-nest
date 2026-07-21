@@ -215,6 +215,16 @@ export class AppProjection extends EventEmitter {
     this.unmaterializedThreads.delete(threadId);
   }
 
+  setCurrentTurn(threadId: string, turnId: string): void {
+    const cached = this.threads.get(threadId);
+    if (!cached) throw new Error("Thread not found");
+    cached.currentTurnId = turnId;
+    cached.liveOutcome = undefined;
+    cached.thread.status = { type: "active", activeFlags: [] };
+    cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+    this.publishThread(threadId);
+  }
+
   private async performSync(): Promise<void> {
     const [active, archived, models] = await Promise.all([
       this.listAllThreads(false),
@@ -379,19 +389,15 @@ export class AppProjection extends EventEmitter {
         break;
       case "turn/started": {
         this.unmaterializedThreads.delete(notification.params.threadId);
-        const cached = this.threads.get(notification.params.threadId);
-        if (cached) {
-          cached.currentTurnId = notification.params.turn.id;
-          cached.liveOutcome = undefined;
-          cached.thread.status = { type: "active", activeFlags: [] };
-          cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
-          this.publishThread(notification.params.threadId);
+        if (this.threads.has(notification.params.threadId)) {
+          this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }
         break;
       }
       case "turn/completed": {
         const cached = this.threads.get(notification.params.threadId);
         const outcome = normalizeOutcome(notification.params.turn.status);
+        if (cached?.currentTurnId && cached.currentTurnId !== notification.params.turn.id) break;
         if (cached) {
           cached.currentTurnId = null;
           cached.liveOutcome = outcome;

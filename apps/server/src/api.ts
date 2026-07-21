@@ -318,6 +318,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           input: textInput(body.input),
         }),
       );
+      if (projection.summary(request.params.id)) {
+        projection.setCurrentTurn(request.params.id, result.turnId);
+      }
       return result;
     },
   );
