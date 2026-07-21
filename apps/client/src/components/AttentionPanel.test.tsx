@@ -40,4 +40,72 @@ describe("AttentionPanel", () => {
       }),
     );
   });
+
+  it("shows user-input questions one at a time and submits all answers at the end", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    connection.mockReturnValue({ api: { respond } });
+    render(
+      <AttentionPanel
+        requests={[
+          {
+            id: "questions",
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "item",
+            createdAt: 1,
+            kind: "userInput",
+            autoResolutionMs: null,
+            questions: [
+              {
+                id: "storage",
+                header: "Хранение",
+                question: "Где хранить вложения?",
+                isOther: true,
+                isSecret: false,
+                options: [
+                  { label: "На сервере", description: "Единое хранилище." },
+                  { label: "В проекте", description: "Только локальные файлы." },
+                ],
+              },
+              {
+                id: "source",
+                header: "Источники",
+                question: "Как выбирать изображение?",
+                isOther: false,
+                isSecret: false,
+                options: [
+                  { label: "Камера", description: "Сделать новый снимок." },
+                  { label: "Галерея", description: "Выбрать готовый файл." },
+                ],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Вопрос 1 из 2")).toBeInTheDocument();
+    expect(screen.getByText("Где хранить вложения?")).toBeInTheDocument();
+    expect(screen.queryByText("Как выбирать изображение?")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Далее" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("radio", { name: /На сервере/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Далее" }));
+
+    expect(screen.getByText("Вопрос 2 из 2")).toBeInTheDocument();
+    expect(screen.queryByText("Где хранить вложения?")).not.toBeInTheDocument();
+    expect(screen.getByText("Как выбирать изображение?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить ответы" })).toBeDisabled();
+    expect(respond).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("radio", { name: /Галерея/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
+
+    await waitFor(() =>
+      expect(respond).toHaveBeenCalledWith("questions", {
+        kind: "userInput",
+        answers: { storage: ["На сервере"], source: ["Галерея"] },
+      }),
+    );
+  });
 });

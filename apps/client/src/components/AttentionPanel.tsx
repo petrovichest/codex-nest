@@ -223,10 +223,24 @@ function UserInputForm({
   respond(response: AttentionResponse): Promise<void>;
 }) {
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const question = request.questions[questionIndex];
+  const isLastQuestion = questionIndex === request.questions.length - 1;
+  const currentAnswer = question ? answers[question.id]?.[0]?.trim() : "";
+
+  function updateAnswer(questionId: string, answer: string) {
+    setAnswers((current) => ({ ...current, [questionId]: [answer] }));
+  }
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (!question || !currentAnswer) return;
+        if (!isLastQuestion) {
+          setQuestionIndex((current) => current + 1);
+          return;
+        }
         void respond({ kind: "userInput", answers });
       }}
     >
@@ -234,39 +248,49 @@ function UserInputForm({
       {request.autoResolutionMs !== null && (
         <Countdown deadline={request.createdAt + request.autoResolutionMs} />
       )}
-      {request.questions.map((question) => (
-        <fieldset key={question.id}>
-          <legend>{question.header}</legend>
-          <p>{question.question}</p>
-          {question.options?.map((option) => (
-            <label className="check" key={option.label}>
+      {question && (
+        <>
+          <div className="user-input-progress">
+            Вопрос {questionIndex + 1} из {request.questions.length}
+          </div>
+          <fieldset key={question.id}>
+            <legend>{question.header}</legend>
+            <p>{question.question}</p>
+            {question.options?.map((option) => (
+              <label className="check" key={option.label}>
+                <input
+                  type="radio"
+                  name={question.id}
+                  value={option.label}
+                  checked={answers[question.id]?.[0] === option.label}
+                  onChange={() => updateAnswer(question.id, option.label)}
+                  required={!question.isOther}
+                />
+                <span>
+                  {option.label}
+                  <small>{option.description}</small>
+                </span>
+              </label>
+            ))}
+            {(question.isOther || !question.options) && (
               <input
-                type="radio"
-                name={question.id}
-                value={option.label}
-                checked={answers[question.id]?.[0] === option.label}
-                onChange={() => setAnswers({ ...answers, [question.id]: [option.label] })}
-                required={!question.isOther}
+                type={question.isSecret ? "password" : "text"}
+                placeholder="Свой ответ"
+                value={
+                  question.options?.some((option) => option.label === answers[question.id]?.[0])
+                    ? ""
+                    : (answers[question.id]?.[0] ?? "")
+                }
+                onChange={(event) => updateAnswer(question.id, event.target.value)}
+                required={!answers[question.id]?.[0]}
               />
-              <span>
-                {option.label}
-                <small>{option.description}</small>
-              </span>
-            </label>
-          ))}
-          {(question.isOther || !question.options) && (
-            <input
-              type={question.isSecret ? "password" : "text"}
-              placeholder="Свой ответ"
-              onChange={(event) => setAnswers({ ...answers, [question.id]: [event.target.value] })}
-              required={!answers[question.id]?.[0]}
-            />
-          )}
-        </fieldset>
-      ))}
-      <button className="primary" disabled={busy}>
-        Отправить ответы
-      </button>
+            )}
+          </fieldset>
+          <button className="primary" disabled={busy || !currentAnswer}>
+            {isLastQuestion ? "Отправить ответы" : "Далее"}
+          </button>
+        </>
+      )}
     </form>
   );
 }
