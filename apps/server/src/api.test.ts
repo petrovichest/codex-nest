@@ -267,13 +267,15 @@ describe("thread settings", () => {
     expect(created.statusCode).toBe(201);
     expect(created.json().thread.settings).toEqual({
       collaborationMode: "default",
-      sandboxMode: "workspace-write",
+      sandboxMode: "read-only",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
     const threadStartCall = bridge.request.mock.calls.find(([method]) => method === "thread/start");
     expect(threadStartCall?.[1]).toMatchObject({
-      sandbox: "workspace-write",
+      sandbox: "read-only",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
 
     await projection.setSettings("thread", {
@@ -295,8 +297,9 @@ describe("thread settings", () => {
       collaborationMode: "plan",
       model: "gpt-b",
       reasoningEffort: "low",
-      sandboxMode: "workspace-write",
+      sandboxMode: "read-only",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
     expect(store.snapshot().threadMeta.thread?.settings).toEqual(updated.json().settings);
 
@@ -322,8 +325,9 @@ describe("thread settings", () => {
       .filter(([method]) => method === "thread/resume")
       .at(-1);
     expect(resumeCall?.[1]).toMatchObject({
-      sandbox: "workspace-write",
+      sandbox: "read-only",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
     const startCall = bridge.request.mock.calls
       .filter(([method]) => method === "turn/start")
@@ -331,6 +335,7 @@ describe("thread settings", () => {
     expect(startCall?.[1]).toMatchObject({
       threadId: "thread",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
       collaborationMode: {
         mode: "plan",
         settings: {

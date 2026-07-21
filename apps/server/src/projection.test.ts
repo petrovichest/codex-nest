@@ -105,8 +105,9 @@ describe("AppProjection", () => {
     expect(projection.summary("two")?.projectId).toBe("nested");
     expect(projection.summary("one")?.settings).toEqual({
       collaborationMode: "default",
-      sandboxMode: "workspace-write",
+      sandboxMode: "read-only",
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
     });
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: false });
     expect(

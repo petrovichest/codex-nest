@@ -417,6 +417,7 @@ function threadSettings(settings?: SessionSettings): Record<string, unknown> {
     personality: settings.personality,
     sandbox: settings.sandboxMode,
     approvalPolicy: approvalPolicy(settings.approvalPolicy),
+    approvalsReviewer: settings.approvalsReviewer,
   });
 }
 
@@ -433,6 +434,7 @@ function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<
     effort: settings.reasoningEffort,
     personality: settings.personality,
     approvalPolicy: approvalPolicy(settings.approvalPolicy),
+    approvalsReviewer: settings.approvalsReviewer,
     collaborationMode: {
       mode: settings.collaborationMode,
       settings: {
@@ -496,6 +498,7 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     "personality",
     "sandboxMode",
     "approvalPolicy",
+    "approvalsReviewer",
   ]);
   if (Object.keys(settings).some((key) => !known.has(key))) {
     throw new ProjectValidationError("Unknown session setting");
@@ -528,6 +531,13 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     !["untrusted", "on-request", "granular", "never"].includes(String(settings.approvalPolicy))
   ) {
     throw new ProjectValidationError("Invalid approvalPolicy");
+  }
+  if (
+    settings.approvalsReviewer !== undefined &&
+    settings.approvalsReviewer !== null &&
+    !["user", "auto_review"].includes(String(settings.approvalsReviewer))
+  ) {
+    throw new ProjectValidationError("Invalid approvalsReviewer");
   }
   return settings as UpdateThreadSettingsRequest;
 }
