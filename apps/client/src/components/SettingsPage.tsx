@@ -4,7 +4,7 @@ import type { GlobalPermissionSettings, PermissionPreset } from "@codexnest/prot
 
 import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
-import { ShieldIcon, SlidersIcon } from "./Icons";
+import { ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 const PRESETS: Array<{
@@ -31,10 +31,12 @@ const PRESETS: Array<{
 
 export function SettingsPage({
   onOpenNavigation,
+  onSwitchServer,
   theme,
   onThemeChange,
 }: {
   onOpenNavigation(): void;
+  onSwitchServer(): void;
   theme: string;
   onThemeChange(theme: string): void;
 }) {
@@ -184,6 +186,23 @@ export function SettingsPage({
               </button>
             </div>
           </form>
+
+          <section className="settings-card">
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <ServerIcon />
+              </span>
+              <div>
+                <h2>Сервер</h2>
+                <p>Подключение к CodexNest на этом устройстве.</p>
+              </div>
+            </div>
+            <div className="settings-actions">
+              <button type="button" onClick={onSwitchServer}>
+                Сменить сервер
+              </button>
+            </div>
+          </section>
         </div>
       </main>
     </div>

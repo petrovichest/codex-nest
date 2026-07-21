@@ -112,13 +112,34 @@ describe("SettingsPage", () => {
 
     expect(onThemeChange).toHaveBeenCalledWith("dark");
   });
+
+  it("exposes the server switch action in settings", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+    const onSwitchServer = vi.fn();
+
+    renderPage("system", vi.fn(), onSwitchServer);
+    fireEvent.click(screen.getByRole("button", { name: "Сменить сервер" }));
+
+    expect(onSwitchServer).toHaveBeenCalledOnce();
+  });
 });
 
-function renderPage(theme = "system", onThemeChange = vi.fn()) {
+function renderPage(theme = "system", onThemeChange = vi.fn(), onSwitchServer = vi.fn()) {
   return render(
     <MemoryRouter>
       <SettingsPage
         onOpenNavigation={() => undefined}
+        onSwitchServer={onSwitchServer}
         theme={theme}
         onThemeChange={onThemeChange}
       />
