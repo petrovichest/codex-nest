@@ -82,6 +82,40 @@ describe("Activity", () => {
     expect(screen.queryByText("Ход работы")).not.toBeInTheDocument();
   });
 
+  it("omits empty text activities and hides copy for image-only messages", () => {
+    const view = render(
+      <Activity
+        item={{
+          type: "userMessage",
+          id: "image",
+          status: "completed",
+          text: "  ",
+          images: ["data:image/png;base64,aW1hZ2U="],
+          timestamp: Date.now(),
+          phase: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByAltText("Изображение 1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
+
+    view.rerender(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "empty",
+          status: "inProgress",
+          text: "\n",
+          images: [],
+          timestamp: Date.now(),
+          phase: "commentary",
+        }}
+      />,
+    );
+    expect(view.container).toBeEmptyDOMElement();
+  });
+
   it("keeps command output and file patches in compact details", () => {
     const { rerender } = render(
       <Activity
@@ -453,11 +487,55 @@ describe("Activity", () => {
     expect(screen.getByText("Изменено 2 файла")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Шаг 2 / 3"));
     expect(screen.getByText("Исправить чат")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Исправить чат"));
+    expect(screen.queryByText("Исправить чат")).toBeNull();
+    fireEvent.click(screen.getByText("Шаг 2 / 3"));
     fireEvent.click(screen.getByText("Шаг 2 / 3"));
     expect(screen.queryByText("Исправить чат")).toBeNull();
     fireEvent.click(screen.getByText("Шаг 2 / 3"));
     fireEvent.pointerDown(document.body);
     expect(screen.queryByText("Исправить чат")).toBeNull();
+  });
+
+  it("does not leave timeline gaps for empty streamed activities", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: Date.now() - 3_000,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "empty-agent",
+              status: "inProgress",
+              text: "",
+              images: [],
+              timestamp: Date.now(),
+              phase: "commentary",
+            },
+            {
+              type: "reasoning",
+              id: "empty-reasoning",
+              status: "inProgress",
+              text: " \n ",
+              images: [],
+              timestamp: Date.now(),
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
+    expect(view.container.querySelector(".turn > div:empty")).toBeNull();
   });
 
   it("renders attention requests after the active turn inside the timeline", () => {

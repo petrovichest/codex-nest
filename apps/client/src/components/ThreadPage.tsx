@@ -439,6 +439,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
 }
 
 export function Activity({ item }: { item: ActivityItem }) {
+  if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
     return (
       <article className={`message ${item.type}`}>
@@ -589,6 +590,7 @@ function MessageImages({ images }: { images: string[] }) {
 function MessageFooter({ text, timestamp }: { text: string; timestamp: number | null }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const timerRef = useRef<number | null>(null);
+  const canCopy = Boolean(text.trim());
 
   useEffect(
     () => () => {
@@ -610,14 +612,11 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
 
   return (
     <footer className="message-footer">
-      <button
-        type="button"
-        aria-label={text ? "Копировать сообщение" : "В сообщении нет текста для копирования"}
-        disabled={!text}
-        onClick={() => void copy()}
-      >
-        <CopyIcon />
-      </button>
+      {canCopy && (
+        <button type="button" aria-label="Копировать сообщение" onClick={() => void copy()}>
+          <CopyIcon />
+        </button>
+      )}
       {copyState === "copied" && <span role="status">Скопировано</span>}
       {copyState === "failed" && <span role="alert">Не удалось скопировать</span>}
       {timestamp !== null && (
@@ -701,7 +700,7 @@ function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
         <ChevronDownIcon />
       </button>
       {open && (
-        <div className="turn-progress-popover">
+        <div className="turn-progress-popover" onClick={() => setOpen(false)}>
           <div className="turn-progress-time">
             <ClockIcon /> Работает уже {elapsed}
           </div>
@@ -765,6 +764,7 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
     group = [];
   };
   for (const item of items) {
+    if (!hasVisibleActivity(item)) continue;
     if (["command", "fileChange", "tool"].includes(item.type)) {
       group.push(item);
     } else {
@@ -774,6 +774,11 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
   }
   flush();
   return result;
+}
+
+function hasVisibleActivity(item: ActivityItem): boolean {
+  if ("text" in item) return Boolean(item.text.trim() || item.images.length);
+  return true;
 }
 
 function findLatestCompletedPlan(detail?: ThreadDetail): string | null {

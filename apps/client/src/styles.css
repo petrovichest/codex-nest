@@ -2699,11 +2699,12 @@ pre {
   }
 
   .turn-progress-popover {
-    position: fixed;
-    right: 10px;
-    bottom: calc(138px + env(safe-area-inset-bottom));
-    left: 10px;
-    width: auto;
+    position: absolute;
+    right: auto;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    width: calc(100vw - 20px);
+    transform: translateX(-50%);
   }
 
   .composer-box {
