@@ -19,4 +19,11 @@ describe("loadConfig", () => {
     vi.stubEnv("CODEXNEST_CODEX_TRANSPORT", "remote");
     expect(() => loadConfig()).toThrow("CODEXNEST_CODEX_TRANSPORT must be stdio or daemon");
   });
+
+  it("always allows the bundled Android client origin", () => {
+    vi.stubEnv("CODEXNEST_ALLOWED_ORIGINS", "https://codex.home.arpa");
+    expect(loadConfig().allowedOrigins).toEqual(
+      new Set(["http://localhost", "https://codex.home.arpa"]),
+    );
+  });
 });

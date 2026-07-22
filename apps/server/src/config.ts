@@ -43,15 +43,16 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     codexProxyEnvFile:
       env("CODEXNEST_CODEX_PROXY_ENV_FILE") ?? resolve(homedir(), ".config/codex/app-server.env"),
     codexTransport,
-    allowedOrigins: new Set(
-      (
+    allowedOrigins: new Set([
+      "http://localhost",
+      ...(
         env("CODEXNEST_ALLOWED_ORIGINS") ??
-        "http://127.0.0.1:4310,http://localhost,http://localhost:5173"
+        "http://127.0.0.1:4310,http://localhost:5173"
       )
         .split(",")
         .map((origin) => origin.trim())
         .filter(Boolean),
-    ),
+    ]),
     clientDist: env("CODEXNEST_CLIENT_DIST") ?? resolve(process.cwd(), "apps/client/dist"),
     websocketAuthTimeoutMs: 5_000,
     firebaseCredentialPath: env("CODEXNEST_FIREBASE_CREDENTIAL_PATH"),
