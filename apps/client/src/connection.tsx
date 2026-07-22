@@ -16,6 +16,7 @@ import {
 import { isServerFrame, type ThreadDetail } from "@codexnest/protocol";
 
 import { ApiClient } from "./api";
+import { BrowserNotificationTracker } from "./browser-notifications";
 import { clientReducer, initialState, type ClientAction, type ClientState } from "./state";
 import type { ConnectionSettings } from "./storage";
 
@@ -39,6 +40,10 @@ export function ConnectionProvider({
   const [generation, setGeneration] = useState(0);
   const sequence = useRef<number | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
+  const browserNotifications = useMemo(
+    () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
+    [],
+  );
 
   const reconnect = useCallback(() => setGeneration((value) => value + 1), []);
   const readDetail = useCallback(
@@ -95,6 +100,7 @@ export function ConnectionProvider({
         if (frame.type === "snapshot") {
           retry = 0;
           sequence.current = frame.snapshot.sequence;
+          browserNotifications?.acceptSnapshot(frame.snapshot);
           dispatch({ type: "snapshot", snapshot: frame.snapshot });
         } else if (frame.type === "event") {
           if (sequence.current === null || frame.sequence !== sequence.current + 1) {
@@ -102,6 +108,7 @@ export function ConnectionProvider({
             return;
           }
           sequence.current = frame.sequence;
+          browserNotifications?.acceptEvent(frame.event);
           dispatch({ type: "event", sequence: frame.sequence, event: frame.event });
         } else if (frame.type === "error") {
           dispatch({ type: "network", network: "offline", error: frame.error.message });
@@ -124,7 +131,7 @@ export function ConnectionProvider({
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       socket?.close();
     };
-  }, [api, generation, settings.token]);
+  }, [api, browserNotifications, generation, settings.token]);
 
   useEffect(() => {
     const foreground = () => {

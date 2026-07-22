@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiClientError } from "../api";
@@ -12,6 +12,10 @@ vi.mock("./CodexSettingsCard", () => ({ CodexSettingsCard: () => null }));
 
 beforeEach(() => {
   connection.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("SettingsPage", () => {
@@ -164,6 +168,29 @@ describe("SettingsPage", () => {
     });
 
     expect(onProjectListDirectionChange).toHaveBeenCalledWith("top-down");
+  });
+
+  it("requests browser notification permission from an explicit action", async () => {
+    const requestPermission = vi.fn().mockResolvedValue("granted");
+    vi.stubGlobal("isSecureContext", true);
+    vi.stubGlobal("Notification", { permission: "default", requestPermission });
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Разрешить уведомления" }));
+
+    await waitFor(() => expect(requestPermission).toHaveBeenCalledOnce());
+    expect(await screen.findByText(/Уведомления включены/)).toBeInTheDocument();
   });
 
   it("exposes the server switch action in settings", () => {

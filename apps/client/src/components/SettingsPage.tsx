@@ -1,10 +1,16 @@
+import { Capacitor } from "@capacitor/core";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import type { GlobalPermissionSettings, PermissionPreset, TaskDefaults } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
+import {
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+  type BrowserNotificationPermission,
+} from "../browser-notifications";
 import { useConnection } from "../connection";
-import { ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import { BellIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { CodexSettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
@@ -63,6 +69,10 @@ export function SettingsPage({
   const [savedTaskDefaults, setSavedTaskDefaults] = useState<TaskDefaults>(initialTaskDefaults);
   const [taskDefaultsSaving, setTaskDefaultsSaving] = useState(false);
   const [taskDefaultsError, setTaskDefaultsError] = useState<string | null>(null);
+  const [notificationPermission, setNotificationPermission] =
+    useState<BrowserNotificationPermission>(getBrowserNotificationPermission);
+  const [notificationRequesting, setNotificationRequesting] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
   const defaultModel =
     state?.snapshot?.models.find((model) => model.isDefault) ?? state?.snapshot?.models[0];
 
@@ -133,6 +143,18 @@ export function SettingsPage({
     }
   }
 
+  async function enableBrowserNotifications() {
+    setNotificationRequesting(true);
+    setNotificationError(null);
+    try {
+      setNotificationPermission(await requestBrowserNotificationPermission());
+    } catch {
+      setNotificationError("Не удалось запросить разрешение у браузера");
+    } finally {
+      setNotificationRequesting(false);
+    }
+  }
+
   const changed = settings !== null && settings.preset !== selected;
 
   return (
@@ -185,6 +207,53 @@ export function SettingsPage({
               </select>
             </label>
           </section>
+
+          {!Capacitor.isNativePlatform() && (
+            <section className="settings-card">
+              <div className="settings-card-heading">
+                <span className="settings-card-icon">
+                  <BellIcon />
+                </span>
+                <div>
+                  <h2>Уведомления браузера</h2>
+                  <p>События приходят напрямую с вашего сервера, без Google и внешнего push.</p>
+                </div>
+              </div>
+              {notificationPermission === "granted" && (
+                <div className="settings-notice success" role="status">
+                  Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.
+                </div>
+              )}
+              {notificationPermission === "denied" && (
+                <div className="settings-notice danger" role="alert">
+                  Уведомления заблокированы. Разрешите их в настройках сайта в браузере.
+                </div>
+              )}
+              {notificationPermission === "unsupported" && (
+                <div className="settings-notice warning" role="status">
+                  Этот браузер или текущее HTTP-подключение не поддерживает системные уведомления.
+                  Откройте CodexNest по HTTPS.
+                </div>
+              )}
+              {notificationError && (
+                <div className="settings-notice danger" role="alert">
+                  {notificationError}
+                </div>
+              )}
+              {notificationPermission === "default" && (
+                <div className="settings-actions">
+                  <button
+                    className="primary"
+                    disabled={notificationRequesting}
+                    type="button"
+                    onClick={() => void enableBrowserNotifications()}
+                  >
+                    {notificationRequesting ? "Запрашиваем…" : "Разрешить уведомления"}
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
 
           <form className="settings-card" onSubmit={saveTaskDefaults}>
             <div className="settings-card-heading">
