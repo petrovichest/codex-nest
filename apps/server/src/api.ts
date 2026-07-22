@@ -29,6 +29,8 @@ import type {
   TaskDefaults,
   ThreadGoal,
   ThreadSummary,
+  TranscriptionConfigResponse,
+  TranscriptionResponse,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
@@ -72,6 +74,12 @@ import type { PushNotifier } from "./push";
 import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
 import type { StateStore } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
+import {
+  MAX_TRANSCRIPTION_BYTES,
+  normalizeAudioType,
+  TranscriptionError,
+  type TranscriptionService,
+} from "./transcription";
 
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
@@ -92,12 +100,16 @@ export interface ApiServices {
   push: PushNotifier;
   codexManager?: CodexManager;
   threadTitles?: Pick<ThreadTitleGenerator, "generate">;
+  transcription?: Pick<TranscriptionService, "configuration" | "transcribe">;
   projectRoot?: string;
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const { bridge, store, projection, attention, codexManager, threadTitles } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
+  app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
+    done(null, body);
+  });
   const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
     if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
     const model = effectiveModel(summary.settings, projection.availableModels);
@@ -270,6 +282,45 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
   }));
+
+  app.get("/api/v1/transcriptions/config", async (): Promise<TranscriptionConfigResponse> => {
+    return (
+      services.transcription?.configuration() ?? {
+        providers: [],
+        maxRecordingSeconds: 300,
+        maxUploadBytes: MAX_TRANSCRIPTION_BYTES,
+      }
+    );
+  });
+
+  app.post<{
+    Querystring: { provider?: string };
+    Body: Buffer;
+  }>(
+    "/api/v1/transcriptions",
+    { bodyLimit: MAX_TRANSCRIPTION_BYTES },
+    async (request, reply): Promise<TranscriptionResponse | undefined> => {
+      const provider = request.query.provider;
+      if (provider !== "local" && provider !== "openai") {
+        return apiError(reply, 400, "validation_failed", "provider must be local or openai");
+      }
+      if (!Buffer.isBuffer(request.body) || request.body.length === 0) {
+        return apiError(reply, 400, "validation_failed", "Audio body is required");
+      }
+      const contentType = request.headers["content-type"] ?? "";
+      if (
+        typeof contentType !== "string" ||
+        !["audio/webm", "audio/mp4"].includes(normalizeAudioType(contentType))
+      ) {
+        return apiError(reply, 400, "validation_failed", "Audio must be WebM or MP4");
+      }
+      if (!services.transcription) {
+        return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
+      }
+      const text = await services.transcription.transcribe(provider, request.body, contentType);
+      return { text };
+    },
+  );
 
   app.get("/api/v1/codex/rate-limits", async (): Promise<CodexRateLimitsResponse> => {
     return parseAccountRateLimits(
@@ -868,6 +919,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     request.log.error({ errorName: error.name }, "request failed");
     if (error instanceof BridgeUnavailableError) {
       return apiError(reply, 503, "app_server_unavailable", error.message);
+    }
+    if (error instanceof TranscriptionError) {
+      return apiError(
+        reply,
+        error.kind === "unavailable" ? 503 : 502,
+        error.kind === "unavailable" ? "transcription_unavailable" : "transcription_failed",
+        error.message,
+      );
+    }
+    if ("statusCode" in error && error.statusCode === 413) {
+      return apiError(reply, 413, "payload_too_large", "Audio recording is too large");
     }
     if (error instanceof ProjectValidationError || error instanceof AttentionValidationError) {
       return apiError(reply, 400, "validation_failed", error.message);

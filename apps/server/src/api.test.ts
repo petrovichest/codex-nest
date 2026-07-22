@@ -17,6 +17,7 @@ import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
+import { TranscriptionError } from "./transcription";
 
 const directories: string[] = [];
 afterEach(async () =>
@@ -323,6 +324,102 @@ describe("HTTP authentication", () => {
       state.auth.tokenSha256 = hashToken("rotated");
     });
     await expect(revoked).resolves.toBe(1008);
+    await app.close();
+  });
+});
+
+describe("audio transcriptions", () => {
+  it("keeps config and audio uploads authenticated and maps provider failures", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-transcription-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    const transcription = {
+      configuration: vi.fn(() => ({
+        providers: ["local" as const, "openai" as const],
+        maxRecordingSeconds: 300,
+        maxUploadBytes: 24 * 1024 * 1024,
+      })),
+      transcribe: vi.fn(async () => "распознанный текст"),
+    };
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        transcription,
+      },
+    );
+    const authorization = { authorization: "Bearer correct" };
+
+    expect((await app.inject({ url: "/api/v1/transcriptions/config" })).statusCode).toBe(401);
+    expect(
+      (await app.inject({ url: "/api/v1/transcriptions/config", headers: authorization })).json(),
+    ).toEqual(transcription.configuration());
+
+    const transcribed = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions?provider=openai",
+      headers: { ...authorization, "content-type": "audio/webm;codecs=opus" },
+      payload: Buffer.from("audio"),
+    });
+    expect(transcribed.statusCode).toBe(200);
+    expect(transcribed.json()).toEqual({ text: "распознанный текст" });
+    expect(transcription.transcribe).toHaveBeenCalledWith(
+      "openai",
+      Buffer.from("audio"),
+      "audio/webm;codecs=opus",
+    );
+
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/transcriptions?provider=other",
+          headers: { ...authorization, "content-type": "audio/webm" },
+          payload: Buffer.from("audio"),
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/transcriptions?provider=local",
+          headers: { ...authorization, "content-type": "audio/mpeg" },
+          payload: Buffer.from("audio"),
+        })
+      ).statusCode,
+    ).toBe(400);
+
+    transcription.transcribe.mockRejectedValueOnce(
+      new TranscriptionError("unavailable", "Local transcription is not configured"),
+    );
+    const unavailable = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions?provider=local",
+      headers: { ...authorization, "content-type": "audio/mp4" },
+      payload: Buffer.from("audio"),
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({
+      error: { code: "transcription_unavailable" },
+    });
+
     await app.close();
   });
 });

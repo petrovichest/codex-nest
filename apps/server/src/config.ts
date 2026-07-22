@@ -14,6 +14,11 @@ export interface AppConfig {
   allowedOrigins: Set<string>;
   clientDist: string;
   websocketAuthTimeoutMs: number;
+  sttLocalUrl?: string;
+  sttOpenAiApiKey?: string;
+  sttOpenAiModel: string;
+  sttLanguage?: string;
+  sttTimeoutMs: number;
   firebaseCredentialPath?: string;
   firebaseProjectId?: string;
 }
@@ -33,6 +38,12 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   if (codexTransport !== "stdio" && codexTransport !== "daemon") {
     throw new Error("CODEXNEST_CODEX_TRANSPORT must be stdio or daemon");
   }
+  const sttTimeoutMs = Number(env("CODEXNEST_STT_TIMEOUT_MS") ?? 600_000);
+  if (!Number.isInteger(sttTimeoutMs) || sttTimeoutMs < 1_000) {
+    throw new Error("CODEXNEST_STT_TIMEOUT_MS must be an integer of at least 1000");
+  }
+  const sttLocalUrl = env("CODEXNEST_STT_LOCAL_URL");
+  if (sttLocalUrl) validateHttpUrl(sttLocalUrl, "CODEXNEST_STT_LOCAL_URL");
 
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
@@ -52,10 +63,33 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ]),
     clientDist: env("CODEXNEST_CLIENT_DIST") ?? resolve(process.cwd(), "apps/client/dist"),
     websocketAuthTimeoutMs: 5_000,
+    sttLocalUrl,
+    sttOpenAiApiKey: env("CODEXNEST_STT_OPENAI_API_KEY"),
+    sttOpenAiModel: env("CODEXNEST_STT_OPENAI_MODEL") ?? "gpt-4o-transcribe",
+    sttLanguage: env("CODEXNEST_STT_LANGUAGE"),
+    sttTimeoutMs,
     firebaseCredentialPath: env("CODEXNEST_FIREBASE_CREDENTIAL_PATH"),
     firebaseProjectId: env("CODEXNEST_FIREBASE_PROJECT_ID"),
     ...overrides,
   };
+}
+
+export function childProcessEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const result = { ...process.env, ...overrides };
+  delete result.CODEXNEST_STT_OPENAI_API_KEY;
+  return result;
+}
+
+function validateHttpUrl(value: string, name: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid URL`);
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
+    throw new Error(`${name} must be an HTTP(S) URL without credentials`);
+  }
 }
 
 export function isLoopback(host: string): boolean {

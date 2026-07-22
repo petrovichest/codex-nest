@@ -20,6 +20,18 @@ export type SummaryResponse = {
   syncedAt: string | null;
 };
 
+export type TranscriptionProvider = "local" | "openai";
+
+export type TranscriptionConfigResponse = {
+  providers: TranscriptionProvider[];
+  maxRecordingSeconds: number;
+  maxUploadBytes: number;
+};
+
+export type TranscriptionResponse = {
+  text: string;
+};
+
 export type GitChangesSummary = {
   state: "clean" | "dirty" | "notRepository";
   filesChanged: number;
@@ -73,6 +85,9 @@ export type ApiErrorCode =
   | "unauthorized"
   | "forbidden"
   | "validation_failed"
+  | "payload_too_large"
+  | "transcription_unavailable"
+  | "transcription_failed"
   | "not_found"
   | "conflict"
   | "app_server_unavailable"

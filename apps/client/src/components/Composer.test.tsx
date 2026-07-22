@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { SessionSettings } from "@codexnest/protocol";
+import type { SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
 
 import { Composer, type ComposerImage } from "./Composer";
 
@@ -17,6 +17,11 @@ const models = [
     supportsPersonality: true,
   },
 ];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+});
 
 describe("Composer", () => {
   it("renders reasoning, plan, and goal as compact icon-only controls", () => {
@@ -40,7 +45,9 @@ describe("Composer", () => {
 
   it("starts at two rows, grows to its cap, and then enables internal scrolling", () => {
     render(<Harness />);
-    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
     expect(textarea).toHaveAttribute("rows", "2");
 
     Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 240 });
@@ -138,10 +145,93 @@ describe("Composer", () => {
     expect(composer).not.toHaveClass("keyboard-open");
     Object.defineProperty(window, "innerHeight", { configurable: true, value: initialHeight });
   });
+
+  it("records on the first click and inserts the transcript at the saved cursor", async () => {
+    const track = { stop: vi.fn() };
+    installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
+    const onTranscribe = vi.fn(async () => "голос");
+    const view = render(
+      <Harness
+        initialInput="Начало конец"
+        transcriptionConfig={transcriptionConfig}
+        onTranscribe={onTranscribe}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(7, 7);
+    fireEvent.select(textarea);
+
+    const start = screen.getByRole("button", { name: "Начать запись" });
+    fireEvent.pointerDown(start);
+    fireEvent.click(start);
+    const stop = await screen.findByRole("button", { name: "Остановить запись" });
+    expect(textarea).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    view.rerender(
+      <Harness
+        busy
+        initialInput="Начало конец"
+        transcriptionConfig={transcriptionConfig}
+        onTranscribe={onTranscribe}
+      />,
+    );
+    expect(stop).toBeEnabled();
+
+    fireEvent.click(stop);
+    await waitFor(() => expect(textarea).toHaveValue("Начало голос конец"));
+    expect(onTranscribe).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "audio/webm;codecs=opus" }),
+    );
+    expect(track.stop).toHaveBeenCalled();
+    expect(textarea).not.toHaveAttribute("readonly");
+  });
+
+  it("keeps the existing text when microphone permission is denied", async () => {
+    installMediaRecorder(async () => {
+      throw new DOMException("denied", "NotAllowedError");
+    });
+    render(
+      <Harness
+        initialInput="Не менять"
+        transcriptionConfig={transcriptionConfig}
+        onTranscribe={vi.fn(async () => "текст")}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    expect(await screen.findByText(/Нет доступа к микрофону/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("Не менять");
+  });
+
+  it("disables the microphone when the server has no configured provider", () => {
+    render(<Harness transcriptionConfig={{ ...transcriptionConfig, providers: [] }} />);
+    expect(screen.getByRole("button", { name: "Распознавание речи не настроено" })).toBeDisabled();
+  });
 });
 
-function Harness({ hasSupplementalContent = false }: { hasSupplementalContent?: boolean }) {
-  const [input, setInput] = useState("");
+const transcriptionConfig: TranscriptionConfigResponse = {
+  providers: ["local", "openai"],
+  maxRecordingSeconds: 300,
+  maxUploadBytes: 24 * 1024 * 1024,
+};
+
+function Harness({
+  busy = false,
+  hasSupplementalContent = false,
+  initialInput = "",
+  transcriptionConfig: speechConfig,
+  onTranscribe,
+}: {
+  busy?: boolean;
+  hasSupplementalContent?: boolean;
+  initialInput?: string;
+  transcriptionConfig?: TranscriptionConfigResponse;
+  onTranscribe?(audio: Blob): Promise<string>;
+}) {
+  const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>([]);
   const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
   return (
@@ -151,7 +241,7 @@ function Harness({ hasSupplementalContent = false }: { hasSupplementalContent?: 
       images={images}
       onImagesChange={setImages}
       onSubmit={(event) => event.preventDefault()}
-      busy={false}
+      busy={busy}
       settings={settings}
       onSettingsChange={(patch) =>
         setSettings((current) => {
@@ -164,8 +254,44 @@ function Harness({ hasSupplementalContent = false }: { hasSupplementalContent?: 
         })
       }
       models={models}
+      transcriptionConfig={speechConfig}
+      transcriptionProvider={speechConfig?.providers[0] ?? null}
+      onTranscribe={onTranscribe}
       error={null}
       hasSupplementalContent={hasSupplementalContent}
     />
   );
+}
+
+function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
+  class FakeMediaRecorder extends EventTarget {
+    static isTypeSupported = vi.fn(() => true);
+    readonly mimeType: string;
+    state: RecordingState = "inactive";
+
+    constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+      super();
+      this.mimeType = options?.mimeType ?? "audio/webm";
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      if (this.state === "inactive") return;
+      this.state = "inactive";
+      const data = new Blob(["audio"], { type: this.mimeType });
+      const dataEvent = new Event("dataavailable") as BlobEvent;
+      Object.defineProperty(dataEvent, "data", { value: data });
+      this.dispatchEvent(dataEvent);
+      this.dispatchEvent(new Event("stop"));
+    }
+  }
+
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia: vi.fn(getUserMedia) },
+  });
 }

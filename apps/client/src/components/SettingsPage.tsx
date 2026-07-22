@@ -1,7 +1,13 @@
 import { Capacitor } from "@capacitor/core";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import type { GlobalPermissionSettings, PermissionPreset, TaskDefaults } from "@codexnest/protocol";
+import type {
+  GlobalPermissionSettings,
+  PermissionPreset,
+  TaskDefaults,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
+} from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
 import {
@@ -10,7 +16,7 @@ import {
   type BrowserNotificationPermission,
 } from "../browser-notifications";
 import { useConnection } from "../connection";
-import { BellIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { CodexSettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
@@ -48,6 +54,10 @@ export function SettingsPage({
   onSidebarSideChange,
   projectListDirection,
   onProjectListDirectionChange,
+  transcriptionConfig = null,
+  transcriptionConfigError = null,
+  transcriptionProvider = null,
+  onTranscriptionProviderChange = () => undefined,
 }: {
   onOpenNavigation(): void;
   onSwitchServer(): void;
@@ -57,6 +67,10 @@ export function SettingsPage({
   onSidebarSideChange(side: SidebarSide): void;
   projectListDirection: ProjectListDirection;
   onProjectListDirectionChange(direction: ProjectListDirection): void;
+  transcriptionConfig?: TranscriptionConfigResponse | null;
+  transcriptionConfigError?: string | null;
+  transcriptionProvider?: TranscriptionProvider | null;
+  onTranscriptionProviderChange?(provider: TranscriptionProvider): void;
 }) {
   const { api, state } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
@@ -206,6 +220,59 @@ export function SettingsPage({
                 <option value="top-down">Сверху вниз</option>
               </select>
             </label>
+          </section>
+
+          <section className="settings-card">
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <MicrophoneIcon />
+              </span>
+              <div>
+                <h2>Распознавание речи</h2>
+                <p>Провайдер выбирается отдельно на каждом устройстве.</p>
+              </div>
+            </div>
+            {transcriptionConfigError && (
+              <div className="settings-notice danger" role="alert">
+                Не удалось получить настройки распознавания: {transcriptionConfigError}
+              </div>
+            )}
+            {!transcriptionConfig && !transcriptionConfigError && (
+              <div className="settings-loading">
+                <span className="spinner small" /> Загружаем провайдеры…
+              </div>
+            )}
+            {transcriptionConfig?.providers.length === 0 && (
+              <div className="settings-notice warning" role="status">
+                Распознавание не настроено на сервере. Укажите локальный STT URL или API-ключ
+                OpenAI.
+              </div>
+            )}
+            {transcriptionConfig && transcriptionConfig.providers.length > 0 && (
+              <>
+                <label className="theme-setting">
+                  <span>Провайдер</span>
+                  <select
+                    aria-label="Провайдер распознавания речи"
+                    value={transcriptionProvider ?? ""}
+                    onChange={(event) =>
+                      onTranscriptionProviderChange(event.target.value as TranscriptionProvider)
+                    }
+                  >
+                    {transcriptionConfig.providers.map((provider) => (
+                      <option value={provider} key={provider}>
+                        {provider === "local" ? "Локальная модель" : "OpenAI"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="settings-notice" role="status">
+                  {transcriptionProvider === "openai"
+                    ? "Записи отправляются в OpenAI API через сервер CodexNest."
+                    : "Записи обрабатываются локальной моделью на вашем сервере."}
+                </div>
+              </>
+            )}
           </section>
 
           {!Capacitor.isNativePlatform() && (

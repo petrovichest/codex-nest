@@ -8,11 +8,12 @@ import { AttentionManager } from "./attention";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
-import { loadConfig } from "./config";
+import { childProcessEnvironment, loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
 import { ThreadTitleGenerator } from "./thread-title";
+import { TranscriptionService } from "./transcription";
 
 const config = loadConfig();
 const store = new StateStore(config.statePath);
@@ -40,12 +41,20 @@ const bridge = new CodexBridge({
         )
       : (spawn(config.codexBin, ["app-server", "--listen", "stdio://"], {
           stdio: ["pipe", "pipe", "pipe"],
-          env: process.env,
+          env: childProcessEnvironment(),
         }) as unknown as JsonlProcess),
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);
 const threadTitles = new ThreadTitleGenerator(bridge);
+const transcription = new TranscriptionService({
+  localUrl: config.sttLocalUrl,
+  openAiApiKey: config.sttOpenAiApiKey,
+  openAiModel: config.sttOpenAiModel,
+  language: config.sttLanguage,
+  timeoutMs: config.sttTimeoutMs,
+  proxyEnvFile: config.codexProxyEnvFile,
+});
 const codexManager = new CodexManager({
   codexBin: config.codexBin,
   managementBin: config.codexManagementBin,
@@ -102,6 +111,7 @@ const app = await buildApp(config, {
   push,
   codexManager,
   threadTitles,
+  transcription,
 });
 await app.listen({ host: config.host, port: config.port });
 void bridge.start();

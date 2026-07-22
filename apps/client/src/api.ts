@@ -24,6 +24,9 @@ import type {
   ThreadDetail,
   ThreadGoal,
   ThreadSummary,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
+  TranscriptionResponse,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
@@ -46,6 +49,20 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  readTranscriptionConfig(): Promise<TranscriptionConfigResponse> {
+    return this.request("/api/v1/transcriptions/config");
+  }
+
+  transcribe(provider: TranscriptionProvider, audio: Blob): Promise<TranscriptionResponse> {
+    const query = new URLSearchParams({ provider });
+    return this.request(`/api/v1/transcriptions?${query}`, {
+      method: "POST",
+      rawBody: audio,
+      contentType: audio.type,
+      timeoutMs: null,
+    });
   }
 
   readCodexRateLimits(): Promise<CodexRateLimitsResponse> {
@@ -257,6 +274,8 @@ export class ApiClient {
     options: {
       method?: string;
       body?: unknown;
+      rawBody?: BodyInit;
+      contentType?: string;
       authenticated?: boolean;
       timeoutMs?: number | null;
     } = {},
@@ -264,7 +283,11 @@ export class ApiClient {
     const headers = new Headers({ Accept: "application/json" });
     if (options.authenticated !== false)
       headers.set("Authorization", `Bearer ${this.settings.token}`);
-    if (options.body !== undefined) headers.set("Content-Type", "application/json");
+    if (options.rawBody !== undefined) {
+      headers.set("Content-Type", options.contentType || "application/octet-stream");
+    } else if (options.body !== undefined) {
+      headers.set("Content-Type", "application/json");
+    }
     let response: Response;
     const controller = new AbortController();
     const timeout =
@@ -275,7 +298,9 @@ export class ApiClient {
       response = await fetch(new URL(path, `${this.settings.baseUrl}/`), {
         method: options.method ?? "GET",
         headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        body:
+          options.rawBody ??
+          (options.body === undefined ? undefined : JSON.stringify(options.body)),
         signal: controller.signal,
       });
     } catch {

@@ -5,6 +5,8 @@ import type {
   CodexRateLimitWindow,
   CodexRateLimitsResponse,
   ThreadSummary,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
 } from "@codexnest/protocol";
 
 import {
@@ -44,6 +46,7 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
+const TRANSCRIPTION_PROVIDER_KEY = "codexnest.transcriptionProvider";
 
 export function App({
   settings,
@@ -52,7 +55,7 @@ export function App({
   settings: ConnectionSettings;
   onDisconnected(): void;
 }) {
-  const { state, reconnect } = useConnection();
+  const { api, state, reconnect } = useConnection();
   const location = useLocation();
   const navigate = useNavigate();
   const [drawer, setDrawer] = useState(false);
@@ -71,6 +74,12 @@ export function App({
   );
   const [notificationRequesting, setNotificationRequesting] = useState(false);
   const [notificationError, setNotificationError] = useState<string | null>(null);
+  const [transcriptionConfig, setTranscriptionConfig] =
+    useState<TranscriptionConfigResponse | null>(null);
+  const [transcriptionConfigError, setTranscriptionConfigError] = useState<string | null>(null);
+  const [transcriptionProvider, setTranscriptionProvider] = useState<TranscriptionProvider | null>(
+    () => storedTranscriptionProvider(),
+  );
   const {
     dragging: drawerDragging,
     frameRef,
@@ -96,6 +105,36 @@ export function App({
   useEffect(() => {
     localStorage.setItem(PROJECT_LIST_DIRECTION_KEY, projectListDirection);
   }, [projectListDirection]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTranscriptionConfigError(null);
+    void api
+      .readTranscriptionConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setTranscriptionConfig(config);
+        setTranscriptionProvider((current) => preferredTranscriptionProvider(config, current));
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        setTranscriptionConfig(null);
+        setTranscriptionConfigError(
+          caught instanceof Error ? caught.message : "Не удалось загрузить конфигурацию",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (transcriptionProvider) {
+      localStorage.setItem(TRANSCRIPTION_PROVIDER_KEY, transcriptionProvider);
+    } else {
+      localStorage.removeItem(TRANSCRIPTION_PROVIDER_KEY);
+    }
+  }, [transcriptionProvider]);
 
   async function enableBrowserNotifications() {
     setNotificationRequesting(true);
@@ -180,6 +219,11 @@ export function App({
               element={
                 <NewSession
                   projects={snapshot.projects}
+                  transcriptionProvider={activeTranscriptionProvider(
+                    transcriptionConfig,
+                    transcriptionProvider,
+                  )}
+                  transcriptionConfig={transcriptionConfig}
                   onOpenNavigation={() => setDrawer(true)}
                   onNewProject={() => setNewProject(true)}
                 />
@@ -187,7 +231,16 @@ export function App({
             />
             <Route
               path="/threads/:threadId"
-              element={<ThreadPage onOpenNavigation={() => setDrawer(true)} />}
+              element={
+                <ThreadPage
+                  transcriptionProvider={activeTranscriptionProvider(
+                    transcriptionConfig,
+                    transcriptionProvider,
+                  )}
+                  transcriptionConfig={transcriptionConfig}
+                  onOpenNavigation={() => setDrawer(true)}
+                />
+              }
             />
             <Route
               path="/settings"
@@ -206,6 +259,13 @@ export function App({
                   onSidebarSideChange={setSidebarSide}
                   projectListDirection={projectListDirection}
                   onProjectListDirectionChange={setProjectListDirection}
+                  transcriptionConfig={transcriptionConfig}
+                  transcriptionConfigError={transcriptionConfigError}
+                  transcriptionProvider={activeTranscriptionProvider(
+                    transcriptionConfig,
+                    transcriptionProvider,
+                  )}
+                  onTranscriptionProviderChange={setTranscriptionProvider}
                 />
               }
             />
@@ -263,6 +323,27 @@ export function App({
       )}
     </div>
   );
+}
+
+function storedTranscriptionProvider(): TranscriptionProvider | null {
+  const value = localStorage.getItem(TRANSCRIPTION_PROVIDER_KEY);
+  return value === "local" || value === "openai" ? value : null;
+}
+
+function preferredTranscriptionProvider(
+  config: TranscriptionConfigResponse,
+  current: TranscriptionProvider | null,
+): TranscriptionProvider | null {
+  if (current && config.providers.includes(current)) return current;
+  if (config.providers.includes("local")) return "local";
+  return config.providers.includes("openai") ? "openai" : null;
+}
+
+function activeTranscriptionProvider(
+  config: TranscriptionConfigResponse | null,
+  provider: TranscriptionProvider | null,
+): TranscriptionProvider | null {
+  return provider && config?.providers.includes(provider) ? provider : null;
 }
 
 function HomeRedirect({ threads }: { threads: ThreadSummary[] }) {

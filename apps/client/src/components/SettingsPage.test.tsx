@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
+import type { TranscriptionConfigResponse, TranscriptionProvider } from "@codexnest/protocol";
+
 import { ApiClientError } from "../api";
 import { SettingsPage } from "./SettingsPage";
 
@@ -170,6 +172,36 @@ describe("SettingsPage", () => {
     expect(onProjectListDirectionChange).toHaveBeenCalledWith("top-down");
   });
 
+  it("changes the speech transcription provider on this device", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+    const onTranscriptionProviderChange = vi.fn();
+
+    renderPage("system", vi.fn(), vi.fn(), "left", vi.fn(), "bottom-up", vi.fn(), {
+      config: {
+        providers: ["local", "openai"],
+        maxRecordingSeconds: 300,
+        maxUploadBytes: 24 * 1024 * 1024,
+      },
+      provider: "local",
+      onChange: onTranscriptionProviderChange,
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Провайдер распознавания речи" }), {
+      target: { value: "openai" },
+    });
+
+    expect(onTranscriptionProviderChange).toHaveBeenCalledWith("openai");
+  });
+
   it("requests browser notification permission from an explicit action", async () => {
     const requestPermission = vi.fn().mockResolvedValue("granted");
     vi.stubGlobal("isSecureContext", true);
@@ -273,6 +305,11 @@ function renderPage(
   onSidebarSideChange = vi.fn(),
   projectListDirection: "bottom-up" | "top-down" = "bottom-up",
   onProjectListDirectionChange = vi.fn(),
+  transcription: {
+    config: TranscriptionConfigResponse;
+    provider: TranscriptionProvider;
+    onChange(provider: TranscriptionProvider): void;
+  } | null = null,
 ) {
   return render(
     <MemoryRouter>
@@ -285,6 +322,9 @@ function renderPage(
         onSidebarSideChange={onSidebarSideChange}
         projectListDirection={projectListDirection}
         onProjectListDirectionChange={onProjectListDirectionChange}
+        transcriptionConfig={transcription?.config}
+        transcriptionProvider={transcription?.provider}
+        onTranscriptionProviderChange={transcription?.onChange}
       />
     </MemoryRouter>,
   );

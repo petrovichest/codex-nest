@@ -1,0 +1,18 @@
+[Unit]
+Description=CodexNest local speech-to-text server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/opt/whisper.cpp
+ExecStart=%h/.local/opt/whisper.cpp/build/bin/whisper-server --host 127.0.0.1 --port 8178 -m %h/.local/share/codexnest/whisper-model.bin --convert
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

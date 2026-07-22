@@ -16,6 +16,8 @@ import type {
   GitChangesSummary,
   QueuedMessage,
   ThreadDetail,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
   TurnProgress,
   TurnView,
   UpdateThreadGoalRequest,
@@ -54,7 +56,15 @@ import {
 import { SessionInspector, type GitChangesView } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
-export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
+export function ThreadPage({
+  transcriptionConfig = null,
+  transcriptionProvider = null,
+  onOpenNavigation,
+}: {
+  transcriptionConfig?: TranscriptionConfigResponse | null;
+  transcriptionProvider?: TranscriptionProvider | null;
+  onOpenNavigation(): void;
+}) {
   const { threadId = "" } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -712,6 +722,12 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
               ? () => void api.interrupt(threadId, summary.currentTurnId!)
               : undefined
           }
+          transcriptionConfig={transcriptionConfig}
+          transcriptionProvider={transcriptionProvider}
+          onTranscribe={async (audio) => {
+            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
+            return (await api.transcribe(transcriptionProvider, audio)).text;
+          }}
           error={error}
           hasSupplementalContent={annotations.length > 0}
         />

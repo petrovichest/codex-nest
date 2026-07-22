@@ -7,6 +7,8 @@ import type {
   Project,
   SessionSettings,
   TaskDefaults,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
@@ -19,10 +21,14 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export function NewSession({
   projects,
+  transcriptionConfig = null,
+  transcriptionProvider = null,
   onOpenNavigation,
   onNewProject,
 }: {
   projects: Project[];
+  transcriptionConfig?: TranscriptionConfigResponse | null;
+  transcriptionProvider?: TranscriptionProvider | null;
   onOpenNavigation(): void;
   onNewProject(): void;
 }) {
@@ -137,6 +143,12 @@ export function NewSession({
           projectId={projectId}
           onProjectChange={setProjectId}
           onNewProject={onNewProject}
+          transcriptionConfig={transcriptionConfig}
+          transcriptionProvider={transcriptionProvider}
+          onTranscribe={async (audio) => {
+            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
+            return (await api.transcribe(transcriptionProvider, audio)).text;
+          }}
           error={error}
         />
       </div>

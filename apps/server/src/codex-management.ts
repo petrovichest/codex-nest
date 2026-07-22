@@ -11,6 +11,8 @@ import type {
   CodexProxyStatus,
 } from "@codexnest/protocol";
 
+import { childProcessEnvironment } from "./config";
+
 const execFileAsync = promisify(execFile);
 const PROXY_VARIABLES = [
   "HTTPS_PROXY",
@@ -469,26 +471,9 @@ async function readProxyStatus(path: string): Promise<CodexProxyStatus> {
     hasPassword: false,
     error: null,
   };
-  let content: string;
   try {
-    const metadata = await stat(path);
-    if ((metadata.mode & 0o077) !== 0) {
-      return { ...empty, error: "Файл прокси доступен группе или другим пользователям" };
-    }
-    content = await readFile(path, "utf8");
-  } catch (error) {
-    if (isNodeError(error, "ENOENT")) return empty;
-    return { ...empty, error: "Не удалось прочитать конфигурацию прокси" };
-  }
-  try {
-    const values = parseEnvironmentFile(content);
-    const proxyUrl = values.get("HTTPS_PROXY");
-    if (!proxyUrl) throw new Error("missing proxy");
-    for (const name of PROXY_VARIABLES) {
-      if (values.get(name) !== proxyUrl) throw new Error("inconsistent proxy");
-    }
-    if (values.get("NO_PROXY") !== values.get("no_proxy")) throw new Error("inconsistent bypass");
-    const proxy = parseProxyUrl(proxyUrl);
+    const proxy = await readProxyFile(path);
+    if (!proxy) return empty;
     return {
       configured: true,
       protocol: proxy.protocol,
@@ -498,8 +483,50 @@ async function readProxyStatus(path: string): Promise<CodexProxyStatus> {
       hasPassword: Boolean(proxy.password),
       error: null,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof ProxyFileError && error.kind === "permissions") {
+      return { ...empty, error: "Файл прокси доступен группе или другим пользователям" };
+    }
+    if (error instanceof ProxyFileError && error.kind === "read") {
+      return { ...empty, error: "Не удалось прочитать конфигурацию прокси" };
+    }
     return { ...empty, error: "Конфигурация прокси повреждена или противоречива" };
+  }
+}
+
+export async function readProxyUrl(path: string): Promise<string | null> {
+  return (await readProxyFile(path))?.url ?? null;
+}
+
+class ProxyFileError extends Error {
+  constructor(public readonly kind: "permissions" | "read" | "invalid") {
+    super(`Proxy configuration ${kind}`);
+    this.name = "ProxyFileError";
+  }
+}
+
+async function readProxyFile(path: string): Promise<ParsedProxy | null> {
+  let content: string;
+  try {
+    const metadata = await stat(path);
+    if ((metadata.mode & 0o077) !== 0) throw new ProxyFileError("permissions");
+    content = await readFile(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return null;
+    if (error instanceof ProxyFileError) throw error;
+    throw new ProxyFileError("read");
+  }
+  try {
+    const values = parseEnvironmentFile(content);
+    const proxyUrl = values.get("HTTPS_PROXY");
+    if (!proxyUrl) throw new Error("missing proxy");
+    for (const name of PROXY_VARIABLES) {
+      if (values.get(name) !== proxyUrl) throw new Error("inconsistent proxy");
+    }
+    if (values.get("NO_PROXY") !== values.get("no_proxy")) throw new Error("inconsistent bypass");
+    return parseProxyUrl(proxyUrl);
+  } catch {
+    throw new ProxyFileError("invalid");
   }
 }
 
@@ -522,10 +549,9 @@ function unquoteShellValue(value: string): string {
 }
 
 function cleanProxyEnvironment(proxyEnvFile: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  const env = childProcessEnvironment({
     CODEXNEST_CODEX_PROXY_ENV_FILE: proxyEnvFile,
-  };
+  });
   for (const name of [...PROXY_VARIABLES, "NO_PROXY", "no_proxy"]) delete env[name];
   return env;
 }

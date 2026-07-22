@@ -303,6 +303,28 @@ describe("App routing and navigation", () => {
     expect(frame).toHaveAttribute("data-sidebar-side", "left");
   });
 
+  it("restores and persists the speech transcription provider", async () => {
+    localStorage.setItem("codexnest.transcriptionProvider", "openai");
+    const api = mockConnection(snapshot([baseThread]));
+    api.readTranscriptionConfig.mockResolvedValue({
+      providers: ["local", "openai"],
+      maxRecordingSeconds: 300,
+      maxUploadBytes: 24 * 1024 * 1024,
+    });
+
+    renderApp("/settings");
+    const provider = await screen.findByRole("combobox", {
+      name: "Провайдер распознавания речи",
+    });
+    expect(provider).toHaveValue("openai");
+
+    fireEvent.change(provider, { target: { value: "local" } });
+    await waitFor(() =>
+      expect(localStorage.getItem("codexnest.transcriptionProvider")).toBe("local"),
+    );
+    expect(api.readTranscriptionConfig).toHaveBeenCalledOnce();
+  });
+
   it("restores the project flow and scrolls to the bottom when bottom-up is selected", async () => {
     localStorage.setItem("codexnest.projectListDirection", "top-down");
     mockConnection(snapshot([baseThread]));
@@ -794,6 +816,11 @@ function mockConnection(
     createThread: vi.fn(),
     createProjectThread: vi.fn(),
     moveProject: vi.fn(),
+    readTranscriptionConfig: vi.fn().mockResolvedValue({
+      providers: [],
+      maxRecordingSeconds: 300,
+      maxUploadBytes: 24 * 1024 * 1024,
+    }),
     readCodexRateLimits: vi.fn(),
     readCodexSettings: vi.fn().mockResolvedValue({
       supported: true,

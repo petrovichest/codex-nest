@@ -2076,6 +2076,32 @@ pre {
   background: var(--surface-muted);
 }
 
+.composer-action.microphone {
+  color: var(--muted-strong);
+  border-color: transparent;
+  background: transparent;
+}
+
+.composer-action.microphone.recording {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  animation: microphone-pulse 1.4s ease-in-out infinite;
+}
+
+.composer-recording-status {
+  color: var(--danger);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@keyframes microphone-pulse {
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+}
+
 .composer-hint {
   color: var(--muted);
   font-size: 11px;

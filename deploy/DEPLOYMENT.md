@@ -281,6 +281,67 @@ accept-all certificate handler).
 | `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
 | `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
 | `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
+| `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |
+| `CODEXNEST_STT_OPENAI_API_KEY`   | Отдельный API-ключ OpenAI для транскрипции        | OpenAI-провайдер выключен                     |
+| `CODEXNEST_STT_OPENAI_MODEL`     | Модель OpenAI speech-to-text                      | `gpt-4o-transcribe`                           |
+| `CODEXNEST_STT_LANGUAGE`         | ISO-код языка записи                              | автоопределение                               |
+| `CODEXNEST_STT_TIMEOUT_MS`       | Timeout одного распознавания                      | `600000`                                      |
+
+### Speech-to-text
+
+Можно настроить один или оба провайдера. Клиент получает только список доступных
+вариантов; URL локального сервиса, API-ключ и proxy credentials браузеру не
+возвращаются. Выбор провайдера сохраняется отдельно на каждом устройстве.
+
+Для OpenAI добавьте `CODEXNEST_STT_OPENAI_API_KEY` в приватный `server.env`.
+CodexNest использует `gpt-4o-transcribe`, если модель не переопределена. Вызов
+автоматически использует тот же валидный proxy-файл, что и Codex. Если proxy-файла
+нет, соединение прямое; повреждённый или доступный посторонним файл блокирует
+запрос вместо скрытого перехода на прямое соединение. API-ключ удаляется из
+окружения запускаемых Codex-процессов.
+
+Для полностью локального варианта установите `cmake`, C++ compiler, `ffmpeg` и,
+при необходимости, OpenBLAS или CUDA toolkit. Затем соберите протестированную
+версию `whisper.cpp`:
+
+```bash
+mkdir -p "$HOME/.local/opt" "$HOME/.local/share/codexnest"
+git clone --branch v1.8.1 --depth 1 \
+  https://github.com/ggml-org/whisper.cpp.git \
+  "$HOME/.local/opt/whisper.cpp"
+cd "$HOME/.local/opt/whisper.cpp"
+cmake -B build -DWHISPER_BUILD_SERVER=ON
+cmake --build build --config Release -j
+./models/download-ggml-model.sh small
+ln -sfn "$PWD/models/ggml-small.bin" \
+  "$HOME/.local/share/codexnest/whisper-model.bin"
+```
+
+Профиль `small` подходит для CPU и Raspberry Pi. На NVIDIA-сервере соберите с
+`-DGGML_CUDA=1`, загрузите `large-v3-turbo` и направьте symlink
+`whisper-model.bin` на эту модель. Модель выбирается сервисом, а не клиентом.
+
+Установите отдельный пользовательский сервис и проверьте его до включения в
+CodexNest:
+
+```bash
+cp deploy/systemd/codexnest-stt.service.example \
+  "$HOME/.config/systemd/user/codexnest-stt.service"
+systemctl --user daemon-reload
+systemctl --user enable --now codexnest-stt.service
+systemctl --user status codexnest-stt.service
+curl --fail --silent http://127.0.0.1:8178/
+```
+
+После проверки добавьте в `server.env`:
+
+```dotenv
+CODEXNEST_STT_LOCAL_URL=http://127.0.0.1:8178/inference
+```
+
+Запись ограничена пятью минутами и 24 MiB. Android-клиент запрашивает системное
+разрешение микрофона. Браузеру нужен secure context: HTTPS либо localhost;
+страница, открытая по обычному LAN HTTP-адресу, не получит доступ к микрофону.
 
 Android-клиент получает фоновые уведомления напрямую через существующий WebSocket
 CodexNest. Firebase, Google Play Services, внешний push-провайдер и дополнительные
