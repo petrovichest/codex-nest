@@ -18,7 +18,8 @@ prepare_case() {
     "$case_home/.local/state/codexnest" "$case_repo/deploy/systemd" "$case_fake_bin" \
     "$case_node/bin"
 
-  printf '{"name":"fixture","version":"0.1.0"}\n' > "$case_repo/package.json"
+  printf '%s\n' '{' '  "name": "fixture",' '  "version": "0.1.0"' '}' \
+    > "$case_repo/package.json"
   cp "$test_script_dir/codexnest" "$case_repo/deploy/codexnest"
   cp "$test_script_dir/systemd/codexnest-managed.service" \
     "$case_repo/deploy/systemd/codexnest-managed.service"
