@@ -1,4 +1,9 @@
-import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
+import {
+  FormData,
+  ProxyAgent,
+  fetch as undiciFetch,
+  type RequestInit as UndiciRequestInit,
+} from "undici";
 
 import type { TranscriptionConfigResponse, TranscriptionProvider } from "@codexnest/protocol";
 
@@ -13,7 +18,7 @@ const AUDIO_TYPES = new Map([
   ["audio/mp4", "mp4"],
 ]);
 
-type FetchOptions = RequestInit & { dispatcher?: Dispatcher };
+type FetchOptions = UndiciRequestInit;
 type FetchLike = (input: string | URL, init?: FetchOptions) => Promise<Response>;
 
 export interface TranscriptionServiceOptions {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { FormData as UndiciFormData, Request as UndiciRequest } from "undici";
 
 import { TranscriptionService, type TranscriptionError } from "./transcription";
 
@@ -18,7 +19,10 @@ describe("TranscriptionService", () => {
   });
 
   it("sends OpenAI multipart requests through the configured Codex proxy", async () => {
-    const requests: Array<{ input: string; init: RequestInit & { dispatcher?: unknown } }> = [];
+    const requests: Array<{
+      input: string;
+      init: { body?: unknown; dispatcher?: unknown; headers?: unknown };
+    }> = [];
     const readProxy = vi.fn(async () => "http://user:password@proxy.example:8080");
     const service = createService({
       openAiApiKey: "secret",
@@ -37,7 +41,13 @@ describe("TranscriptionService", () => {
     expect(requests[0]?.input).toBe("https://api.openai.com/v1/audio/transcriptions");
     expect(requests[0]?.init.headers).toEqual({ Authorization: "Bearer secret" });
     expect(requests[0]?.init.dispatcher).toBeDefined();
-    const form = requests[0]?.init.body as FormData;
+    const form = requests[0]?.init.body as UndiciFormData;
+    expect(form).toBeInstanceOf(UndiciFormData);
+    expect(
+      new UndiciRequest("https://example.test", { method: "POST", body: form }).headers.get(
+        "content-type",
+      ),
+    ).toMatch(/^multipart\/form-data; boundary=/);
     expect(form.get("model")).toBe("gpt-4o-transcribe");
     expect(form.get("response_format")).toBe("json");
     expect(form.get("language")).toBe("ru");
@@ -47,7 +57,7 @@ describe("TranscriptionService", () => {
   it("calls the local server directly and defaults language detection to auto", async () => {
     const readProxy = vi.fn(async () => "http://proxy.example:8080");
     const fetch = vi.fn(async (_input, init) => {
-      const form = init?.body as FormData;
+      const form = init?.body as UndiciFormData;
       expect(form.get("language")).toBe("auto");
       expect(init?.dispatcher).toBeUndefined();
       return jsonResponse({ text: "local text" });
