@@ -25,6 +25,29 @@ beforeEach(() => {
 });
 
 describe("NewSession", () => {
+  it("keeps the inspector closed until the user opens it on wide screens", () => {
+    vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
+    connection.mockReturnValue({
+      api: { createThread: vi.fn() },
+      dispatch: vi.fn(),
+      state: { snapshot: { connection: { state: "ready" }, models: [] }, network: "connected" },
+    });
+
+    render(
+      <MemoryRouter>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByLabelText("Сведения о новой задаче")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    expect(screen.getByLabelText("Сведения о новой задаче")).toBeInTheDocument();
+  });
+
   it("creates a task from the empty chat and navigates to it", async () => {
     const dispatch = vi.fn();
     const createThread = vi.fn().mockResolvedValue({

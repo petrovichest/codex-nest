@@ -960,6 +960,16 @@ describe("Activity", () => {
     expect(await screen.findByText("Нет изменений")).toBeInTheDocument();
   });
 
+  it("keeps the inspector closed until the user opens it on wide screens", () => {
+    vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
+    mockThreadConnection(threadApi(), summary);
+    renderThread();
+
+    expect(screen.queryByLabelText("Сведения о задаче")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    expect(screen.getByLabelText("Сведения о задаче")).toBeInTheDocument();
+  });
+
   it("refreshes Git changes when the active turn diff changes", async () => {
     const api = threadApi();
     api.readGitChanges

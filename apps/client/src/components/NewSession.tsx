@@ -47,9 +47,7 @@ export function NewSession({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(() =>
-    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
-  );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   useEffect(() => {
     if (!projectId && projects[0]) setProjectId(projects[0].id);

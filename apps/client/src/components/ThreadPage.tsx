@@ -103,9 +103,7 @@ export function ThreadPage({
   } | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderError, setOlderError] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(() =>
-    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
-  );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [gitChangesState, setGitChangesState] = useState<{
     threadId: string;
     value: GitChangesView;
