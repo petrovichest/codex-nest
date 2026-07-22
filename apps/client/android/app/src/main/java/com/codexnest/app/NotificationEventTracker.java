@@ -90,7 +90,8 @@ final class NotificationEventTracker {
         lastObservedAt = newest;
     }
 
-    private void acceptEvent(JSONObject event, List<CodexNotification> notifications) {
+    private void acceptEvent(JSONObject event, List<CodexNotification> notifications)
+        throws Exception {
         String type = event.optString("type");
         if ("thread.upserted".equals(type)) {
             JSONObject thread = event.getJSONObject("thread");
