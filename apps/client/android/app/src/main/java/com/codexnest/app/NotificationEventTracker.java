@@ -2,10 +2,8 @@ package com.codexnest.app;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -13,7 +11,7 @@ final class NotificationEventTracker {
 
     private final Map<String, String> threadStates = new HashMap<>();
     private final Map<String, String> threadTitles = new HashMap<>();
-    private final Set<String> attentionIds = new HashSet<>();
+    private final Map<String, String> attentionThreads = new HashMap<>();
     private long lastObservedAt;
 
     NotificationEventTracker(long lastObservedAt) {
@@ -42,7 +40,9 @@ final class NotificationEventTracker {
         long newest = cutoff;
         threadStates.clear();
         threadTitles.clear();
-        attentionIds.clear();
+        attentionThreads.clear();
+        List<JSONObject> missedThreads = new ArrayList<>();
+        List<CodexNotification> missedAttention = new ArrayList<>();
 
         JSONArray threads = snapshot.optJSONArray("threads");
         if (threads != null) {
@@ -59,9 +59,9 @@ final class NotificationEventTracker {
                 if (
                     !firstConnection &&
                     updatedAt > cutoff &&
-                    thread.optBoolean("unread", false)
+                    (thread.optBoolean("unread", false) || "needsAttention".equals(state))
                 ) {
-                    addTerminalNotification(notifications, state, id, title);
+                    missedThreads.add(thread);
                 }
             }
         }
@@ -72,12 +72,12 @@ final class NotificationEventTracker {
                 JSONObject request = attention.optJSONObject(index);
                 if (request == null) continue;
                 String id = request.optString("id");
-                attentionIds.add(id);
+                String threadId = nullableString(request, "threadId");
+                attentionThreads.put(id, threadId);
                 long createdAt = request.optLong("createdAt", 0);
                 newest = Math.max(newest, createdAt);
                 if (!firstConnection && createdAt > cutoff) {
-                    String threadId = nullableString(request, "threadId");
-                    notifications.add(
+                    missedAttention.add(
                         new CodexNotification(
                             CodexNotification.Kind.ATTENTION,
                             threadId,
@@ -87,6 +87,15 @@ final class NotificationEventTracker {
                 }
             }
         }
+        for (JSONObject thread : missedThreads) {
+            addStateNotification(
+                notifications,
+                thread.optString("state"),
+                thread.optString("id"),
+                thread.optString("title", "Задача Codex")
+            );
+        }
+        notifications.addAll(missedAttention);
         lastObservedAt = newest;
     }
 
@@ -100,7 +109,7 @@ final class NotificationEventTracker {
             String title = thread.optString("title", "Задача Codex");
             String previous = threadStates.put(id, state);
             threadTitles.put(id, title);
-            if (!state.equals(previous)) addTerminalNotification(notifications, state, id, title);
+            if (!state.equals(previous)) addStateNotification(notifications, state, id, title);
             lastObservedAt = Math.max(lastObservedAt, thread.optLong("updatedAt", 0));
         } else if ("thread.removed".equals(type)) {
             String id = event.optString("threadId");
@@ -109,23 +118,26 @@ final class NotificationEventTracker {
         } else if ("attention.upserted".equals(type)) {
             JSONObject request = event.getJSONObject("attention");
             String id = request.optString("id");
-            if (attentionIds.add(id)) {
+            if (!attentionThreads.containsKey(id)) {
                 String threadId = nullableString(request, "threadId");
-                notifications.add(
-                    new CodexNotification(
-                        CodexNotification.Kind.ATTENTION,
-                        threadId,
-                        titleFor(threadId)
-                    )
-                );
+                attentionThreads.put(id, threadId);
+                if (threadId == null || !"needsAttention".equals(threadStates.get(threadId))) {
+                    notifications.add(
+                        new CodexNotification(
+                            CodexNotification.Kind.ATTENTION,
+                            threadId,
+                            titleFor(threadId)
+                        )
+                    );
+                }
             }
             lastObservedAt = Math.max(lastObservedAt, request.optLong("createdAt", 0));
         } else if ("attention.removed".equals(type)) {
-            attentionIds.remove(event.optString("attentionId"));
+            attentionThreads.remove(event.optString("attentionId"));
         }
     }
 
-    private void addTerminalNotification(
+    private void addStateNotification(
         List<CodexNotification> notifications,
         String state,
         String threadId,
@@ -137,6 +149,10 @@ final class NotificationEventTracker {
             );
         } else if ("failed".equals(state)) {
             notifications.add(new CodexNotification(CodexNotification.Kind.FAILED, threadId, title));
+        } else if ("needsAttention".equals(state) && !attentionThreads.containsValue(threadId)) {
+            notifications.add(
+                new CodexNotification(CodexNotification.Kind.ATTENTION, threadId, title)
+            );
         }
     }
 

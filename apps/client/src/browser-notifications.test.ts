@@ -69,10 +69,36 @@ describe("BrowserNotificationTracker", () => {
 
     tracker.acceptEvent({ type: "attention.upserted", attention });
     tracker.acceptEvent({ type: "attention.upserted", attention });
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...thread("needsAttention", 21) },
+    });
 
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.title).toBe("Codex ждёт решения");
     expect(notifications[0]?.options?.body).toBe("Тестовая задача");
+  });
+
+  it("notifies when a thread starts needing attention without an explicit request", () => {
+    const tracker = new BrowserNotificationTracker();
+    const running = thread("running", 10);
+    tracker.acceptSnapshot(snapshot([running]));
+
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "needsAttention", updatedAt: 20 },
+    });
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "needsAttention", updatedAt: 21 },
+    });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Codex ждёт решения");
+    expect(notifications[0]?.options).toMatchObject({
+      body: "Тестовая задача",
+      tag: "needs-attention:thread",
+    });
   });
 
   it("does not display system notifications while the page is visible", () => {
@@ -101,6 +127,16 @@ describe("BrowserNotificationTracker", () => {
       "Задача завершена",
       "Codex ждёт решения",
     ]);
+  });
+
+  it("catches up a missed needs-attention state after a reconnect", () => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+
+    tracker.acceptSnapshot(snapshot([thread("needsAttention", 20)]));
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Codex ждёт решения");
   });
 });
 

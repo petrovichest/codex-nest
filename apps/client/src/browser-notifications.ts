@@ -19,7 +19,7 @@ export async function requestBrowserNotificationPermission(): Promise<BrowserNot
 export class BrowserNotificationTracker {
   private readonly threadStates = new Map<string, string>();
   private readonly threadTitles = new Map<string, string>();
-  private readonly attentionIds = new Set<string>();
+  private readonly attentionThreads = new Map<string, string | null>();
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
 
@@ -29,28 +29,40 @@ export class BrowserNotificationTracker {
     let newest = cutoff;
     this.threadStates.clear();
     this.threadTitles.clear();
-    this.attentionIds.clear();
+    this.attentionThreads.clear();
+    const missedThreads: AppSnapshot["threads"] = [];
+    const missedAttention: AppSnapshot["attention"] = [];
 
     for (const thread of snapshot.threads) {
       this.threadStates.set(thread.id, thread.state);
       this.threadTitles.set(thread.id, thread.title);
       newest = Math.max(newest, thread.updatedAt);
-      if (!firstConnection && thread.updatedAt > cutoff && thread.unread) {
-        this.showTerminal(thread.state, thread.id, thread.title);
+      if (
+        !firstConnection &&
+        thread.updatedAt > cutoff &&
+        (thread.unread || thread.state === "needsAttention")
+      ) {
+        missedThreads.push(thread);
       }
     }
 
     for (const attention of snapshot.attention) {
-      this.attentionIds.add(attention.id);
+      this.attentionThreads.set(attention.id, attention.threadId);
       newest = Math.max(newest, attention.createdAt);
       if (!firstConnection && attention.createdAt > cutoff) {
-        this.show(
-          "Codex ждёт решения",
-          this.titleFor(attention.threadId),
-          `attention:${attention.id}`,
-          attention.threadId,
-        );
+        missedAttention.push(attention);
       }
+    }
+    for (const thread of missedThreads) {
+      this.showThreadState(thread.state, thread.id, thread.title);
+    }
+    for (const attention of missedAttention) {
+      this.show(
+        "Codex ждёт решения",
+        this.titleFor(attention.threadId),
+        `attention:${attention.id}`,
+        attention.threadId,
+      );
     }
     this.lastObservedAt = newest;
   }
@@ -61,34 +73,45 @@ export class BrowserNotificationTracker {
       this.threadStates.set(event.thread.id, event.thread.state);
       this.threadTitles.set(event.thread.id, event.thread.title);
       if (previous !== event.thread.state) {
-        this.showTerminal(event.thread.state, event.thread.id, event.thread.title);
+        this.showThreadState(event.thread.state, event.thread.id, event.thread.title);
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.thread.updatedAt);
     } else if (event.type === "thread.removed") {
       this.threadStates.delete(event.threadId);
       this.threadTitles.delete(event.threadId);
     } else if (event.type === "attention.upserted") {
-      if (!this.attentionIds.has(event.attention.id)) {
-        this.attentionIds.add(event.attention.id);
-        this.show(
-          "Codex ждёт решения",
-          this.titleFor(event.attention.threadId),
-          `attention:${event.attention.id}`,
-          event.attention.threadId,
-        );
+      if (!this.attentionThreads.has(event.attention.id)) {
+        this.attentionThreads.set(event.attention.id, event.attention.threadId);
+        if (
+          !event.attention.threadId ||
+          this.threadStates.get(event.attention.threadId) !== "needsAttention"
+        ) {
+          this.show(
+            "Codex ждёт решения",
+            this.titleFor(event.attention.threadId),
+            `attention:${event.attention.id}`,
+            event.attention.threadId,
+          );
+        }
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.attention.createdAt);
     } else if (event.type === "attention.removed") {
-      this.attentionIds.delete(event.attentionId);
+      this.attentionThreads.delete(event.attentionId);
     }
   }
 
-  private showTerminal(state: string, threadId: string, threadTitle: string): void {
+  private showThreadState(state: string, threadId: string, threadTitle: string): void {
     if (state === "completed") {
       this.show("Задача завершена", threadTitle, `completed:${threadId}`, threadId);
     } else if (state === "failed") {
       this.show("Задача завершилась с ошибкой", threadTitle, `failed:${threadId}`, threadId);
+    } else if (state === "needsAttention" && !this.hasAttentionForThread(threadId)) {
+      this.show("Codex ждёт решения", threadTitle, `needs-attention:${threadId}`, threadId);
     }
+  }
+
+  private hasAttentionForThread(threadId: string): boolean {
+    return [...this.attentionThreads.values()].includes(threadId);
   }
 
   private titleFor(threadId: string | null): string {
