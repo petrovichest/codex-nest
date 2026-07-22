@@ -726,7 +726,7 @@ export class AppProjection extends EventEmitter {
   private sortedThreads(): ThreadSummary[] {
     return [...this.threads.values()]
       .map((cached) => this.toSummary(cached))
-      .sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt);
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   private publishThread(threadId: string): void {
@@ -974,14 +974,4 @@ function turnKey(threadId: string, turnId: string): string {
 
 function isTerminal(state: ThreadState): state is ThreadOutcome {
   return state === "completed" || state === "failed" || state === "interrupted";
-}
-
-function rank(thread: ThreadSummary): number {
-  if (thread.state === "idle" && thread.title === "Без названия" && !thread.preview.trim())
-    return 0;
-  if (thread.state === "needsAttention") return 1;
-  if (thread.state === "running") return 2;
-  if (thread.unread && isTerminal(thread.state)) return 3;
-  if (thread.pinned) return 4;
-  return 5;
 }

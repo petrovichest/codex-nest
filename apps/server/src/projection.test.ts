@@ -137,7 +137,7 @@ describe("AppProjection", () => {
     expect(events).toEqual([]);
   });
 
-  it("places a newly created empty session before prioritized threads", async () => {
+  it("sorts sessions only by most recent activity", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -149,9 +149,9 @@ describe("AppProjection", () => {
       new AttentionManager(),
       false,
     );
-    projection.upsertThread(thread("running", "/work", 20, { type: "active", activeFlags: [] }));
+    projection.upsertThread(thread("running", "/work", 10, { type: "active", activeFlags: [] }));
     projection.upsertThread({
-      ...thread("blank", "/work", 10),
+      ...thread("blank", "/work", 20),
       preview: "",
       name: null,
     });

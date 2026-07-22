@@ -256,7 +256,7 @@ describe("clientReducer", () => {
     expect(state.details.one?.queuedMessages[0]?.text).toBe("Следом");
   });
 
-  it("sorts attention, running, terminal unread, pinned, then recency", () => {
+  it("sorts sessions only by most recent activity", () => {
     const threads = [
       {
         ...baseThread,
@@ -264,27 +264,35 @@ describe("clientReducer", () => {
         title: "Без названия",
         state: "idle" as const,
         currentTurnId: null,
-        updatedAt: 1,
+        updatedAt: 10,
       },
       { ...baseThread, id: "normal", state: "idle" as const, currentTurnId: null, updatedAt: 100 },
-      { ...baseThread, id: "pinned", state: "idle" as const, currentTurnId: null, pinned: true },
+      {
+        ...baseThread,
+        id: "pinned",
+        state: "idle" as const,
+        currentTurnId: null,
+        pinned: true,
+        updatedAt: 20,
+      },
       {
         ...baseThread,
         id: "unread",
         state: "completed" as const,
         currentTurnId: null,
         unread: true,
+        updatedAt: 30,
       },
-      { ...baseThread, id: "running" },
-      { ...baseThread, id: "attention", state: "needsAttention" as const },
+      { ...baseThread, id: "running", updatedAt: 40 },
+      { ...baseThread, id: "attention", state: "needsAttention" as const, updatedAt: 50 },
     ];
     expect(sortThreads(threads).map((thread) => thread.id)).toEqual([
-      "blank",
+      "normal",
       "attention",
       "running",
       "unread",
       "pinned",
-      "normal",
+      "blank",
     ]);
   });
 });

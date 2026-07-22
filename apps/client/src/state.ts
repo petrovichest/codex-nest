@@ -229,17 +229,7 @@ function upsert<T extends { id: string }>(items: T[], item: T): T[] {
 }
 
 export function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
-  return [...threads].sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt);
-}
-
-function rank(thread: ThreadSummary): number {
-  if (thread.state === "idle" && thread.title === "Без названия" && !thread.preview.trim())
-    return 0;
-  if (thread.state === "needsAttention") return 1;
-  if (thread.state === "running") return 2;
-  if (thread.unread && ["completed", "failed", "interrupted"].includes(thread.state)) return 3;
-  if (thread.pinned) return 4;
-  return 5;
+  return [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export function groupedThreads(
