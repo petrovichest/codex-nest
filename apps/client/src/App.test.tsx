@@ -303,11 +303,18 @@ describe("App routing and navigation", () => {
     expect(frame).toHaveAttribute("data-sidebar-side", "left");
   });
 
-  it("restores and persists the speech transcription provider", async () => {
+  it("uses the global speech provider and removes the legacy device preference", async () => {
     localStorage.setItem("codexnest.transcriptionProvider", "openai");
     const api = mockConnection(snapshot([baseThread]));
     api.readTranscriptionConfig.mockResolvedValue({
       providers: ["local", "openai"],
+      provider: "local",
+      localUrl: "http://127.0.0.1:8178/inference",
+      openAiApiKeyConfigured: true,
+      openAiModel: "gpt-4o-transcribe",
+      language: "ru",
+      refineLocal: true,
+      refinementModel: "gpt-5.6-luna",
       maxRecordingSeconds: 300,
       maxUploadBytes: 24 * 1024 * 1024,
     });
@@ -316,12 +323,8 @@ describe("App routing and navigation", () => {
     const provider = await screen.findByRole("combobox", {
       name: "Провайдер распознавания речи",
     });
-    expect(provider).toHaveValue("openai");
-
-    fireEvent.change(provider, { target: { value: "local" } });
-    await waitFor(() =>
-      expect(localStorage.getItem("codexnest.transcriptionProvider")).toBe("local"),
-    );
+    await waitFor(() => expect(provider).toHaveValue("local"));
+    await waitFor(() => expect(localStorage.getItem("codexnest.transcriptionProvider")).toBeNull());
     expect(api.readTranscriptionConfig).toHaveBeenCalledOnce();
   });
 
@@ -818,9 +821,17 @@ function mockConnection(
     moveProject: vi.fn(),
     readTranscriptionConfig: vi.fn().mockResolvedValue({
       providers: [],
+      provider: null,
+      localUrl: null,
+      openAiApiKeyConfigured: false,
+      openAiModel: "gpt-4o-transcribe",
+      language: "ru",
+      refineLocal: true,
+      refinementModel: "gpt-5.6-luna",
       maxRecordingSeconds: 300,
       maxUploadBytes: 24 * 1024 * 1024,
     }),
+    updateTranscriptionSettings: vi.fn(),
     readCodexRateLimits: vi.fn(),
     readCodexSettings: vi.fn().mockResolvedValue({
       supported: true,

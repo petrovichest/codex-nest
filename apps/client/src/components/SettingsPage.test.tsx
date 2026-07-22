@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-import type { TranscriptionConfigResponse, TranscriptionProvider } from "@codexnest/protocol";
+import type { TranscriptionConfigResponse } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
 import { SettingsPage } from "./SettingsPage";
@@ -172,9 +172,14 @@ describe("SettingsPage", () => {
     expect(onProjectListDirectionChange).toHaveBeenCalledWith("top-down");
   });
 
-  it("changes the speech transcription provider on this device", () => {
+  it("saves the speech transcription provider globally on the server", async () => {
+    const updateTranscriptionSettings = vi.fn().mockResolvedValue({
+      ...transcriptionConfig,
+      provider: "openai",
+    });
     connection.mockReturnValue({
       api: {
+        settings: { baseUrl: "https://codex.example" },
         readPermissionSettings: vi.fn().mockResolvedValue({
           preset: "auto",
           version: "version-1",
@@ -182,24 +187,79 @@ describe("SettingsPage", () => {
           message: null,
         }),
         updatePermissionSettings: vi.fn(),
+        updateTranscriptionSettings,
       },
     });
-    const onTranscriptionProviderChange = vi.fn();
+    const onTranscriptionConfigChange = vi.fn();
 
     renderPage("system", vi.fn(), vi.fn(), "left", vi.fn(), "bottom-up", vi.fn(), {
-      config: {
-        providers: ["local", "openai"],
-        maxRecordingSeconds: 300,
-        maxUploadBytes: 24 * 1024 * 1024,
-      },
-      provider: "local",
-      onChange: onTranscriptionProviderChange,
+      config: transcriptionConfig,
+      onChange: onTranscriptionConfigChange,
     });
     fireEvent.change(screen.getByRole("combobox", { name: "Провайдер распознавания речи" }), {
       target: { value: "openai" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить распознавание" }));
 
-    expect(onTranscriptionProviderChange).toHaveBeenCalledWith("openai");
+    await waitFor(() =>
+      expect(updateTranscriptionSettings).toHaveBeenCalledWith({
+        provider: "openai",
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: true,
+        refinementModel: "gpt-5.6-luna",
+      }),
+    );
+    expect(onTranscriptionConfigChange).toHaveBeenCalledWith({
+      ...transcriptionConfig,
+      provider: "openai",
+    });
+  });
+
+  it("masks and removes the OpenAI key without allowing key input over remote HTTP", async () => {
+    const openAiConfig: TranscriptionConfigResponse = {
+      ...transcriptionConfig,
+      provider: "openai",
+    };
+    const updateTranscriptionSettings = vi.fn().mockResolvedValue({
+      ...openAiConfig,
+      providers: ["local"],
+      provider: "local",
+      openAiApiKeyConfigured: false,
+    });
+    connection.mockReturnValue({
+      api: {
+        settings: { baseUrl: "http://192.168.2.228:4310" },
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+        updateTranscriptionSettings,
+      },
+    });
+
+    renderPage("system", vi.fn(), vi.fn(), "left", vi.fn(), "bottom-up", vi.fn(), {
+      config: openAiConfig,
+      onChange: vi.fn(),
+    });
+
+    expect(screen.getByText("API key настроен")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenAI API key")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Удалить ключ" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Провайдер распознавания речи" }), {
+      target: { value: "local" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить распознавание" }));
+
+    await waitFor(() =>
+      expect(updateTranscriptionSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "local", openAiApiKey: null }),
+      ),
+    );
   });
 
   it("requests browser notification permission from an explicit action", async () => {
@@ -307,8 +367,7 @@ function renderPage(
   onProjectListDirectionChange = vi.fn(),
   transcription: {
     config: TranscriptionConfigResponse;
-    provider: TranscriptionProvider;
-    onChange(provider: TranscriptionProvider): void;
+    onChange(config: TranscriptionConfigResponse): void;
   } | null = null,
 ) {
   return render(
@@ -323,9 +382,21 @@ function renderPage(
         projectListDirection={projectListDirection}
         onProjectListDirectionChange={onProjectListDirectionChange}
         transcriptionConfig={transcription?.config}
-        transcriptionProvider={transcription?.provider}
-        onTranscriptionProviderChange={transcription?.onChange}
+        onTranscriptionConfigChange={transcription?.onChange}
       />
     </MemoryRouter>,
   );
 }
+
+const transcriptionConfig: TranscriptionConfigResponse = {
+  providers: ["local", "openai"],
+  provider: "local",
+  localUrl: "http://127.0.0.1:8178/inference",
+  openAiApiKeyConfigured: true,
+  openAiModel: "gpt-4o-transcribe",
+  language: "ru",
+  refineLocal: true,
+  refinementModel: "gpt-5.6-luna",
+  maxRecordingSeconds: 300,
+  maxUploadBytes: 24 * 1024 * 1024,
+};

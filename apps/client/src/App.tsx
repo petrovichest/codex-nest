@@ -6,7 +6,6 @@ import type {
   CodexRateLimitsResponse,
   ThreadSummary,
   TranscriptionConfigResponse,
-  TranscriptionProvider,
 } from "@codexnest/protocol";
 
 import {
@@ -46,7 +45,6 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
-const TRANSCRIPTION_PROVIDER_KEY = "codexnest.transcriptionProvider";
 
 export function App({
   settings,
@@ -77,9 +75,6 @@ export function App({
   const [transcriptionConfig, setTranscriptionConfig] =
     useState<TranscriptionConfigResponse | null>(null);
   const [transcriptionConfigError, setTranscriptionConfigError] = useState<string | null>(null);
-  const [transcriptionProvider, setTranscriptionProvider] = useState<TranscriptionProvider | null>(
-    () => storedTranscriptionProvider(),
-  );
   const {
     dragging: drawerDragging,
     frameRef,
@@ -114,7 +109,7 @@ export function App({
       .then((config) => {
         if (cancelled) return;
         setTranscriptionConfig(config);
-        setTranscriptionProvider((current) => preferredTranscriptionProvider(config, current));
+        localStorage.removeItem("codexnest.transcriptionProvider");
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
@@ -127,14 +122,6 @@ export function App({
       cancelled = true;
     };
   }, [api]);
-
-  useEffect(() => {
-    if (transcriptionProvider) {
-      localStorage.setItem(TRANSCRIPTION_PROVIDER_KEY, transcriptionProvider);
-    } else {
-      localStorage.removeItem(TRANSCRIPTION_PROVIDER_KEY);
-    }
-  }, [transcriptionProvider]);
 
   async function enableBrowserNotifications() {
     setNotificationRequesting(true);
@@ -219,10 +206,7 @@ export function App({
               element={
                 <NewSession
                   projects={snapshot.projects}
-                  transcriptionProvider={activeTranscriptionProvider(
-                    transcriptionConfig,
-                    transcriptionProvider,
-                  )}
+                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
                   transcriptionConfig={transcriptionConfig}
                   onOpenNavigation={() => setDrawer(true)}
                   onNewProject={() => setNewProject(true)}
@@ -233,10 +217,7 @@ export function App({
               path="/threads/:threadId"
               element={
                 <ThreadPage
-                  transcriptionProvider={activeTranscriptionProvider(
-                    transcriptionConfig,
-                    transcriptionProvider,
-                  )}
+                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
                   transcriptionConfig={transcriptionConfig}
                   onOpenNavigation={() => setDrawer(true)}
                 />
@@ -261,11 +242,7 @@ export function App({
                   onProjectListDirectionChange={setProjectListDirection}
                   transcriptionConfig={transcriptionConfig}
                   transcriptionConfigError={transcriptionConfigError}
-                  transcriptionProvider={activeTranscriptionProvider(
-                    transcriptionConfig,
-                    transcriptionProvider,
-                  )}
-                  onTranscriptionProviderChange={setTranscriptionProvider}
+                  onTranscriptionConfigChange={setTranscriptionConfig}
                 />
               }
             />
@@ -325,25 +302,10 @@ export function App({
   );
 }
 
-function storedTranscriptionProvider(): TranscriptionProvider | null {
-  const value = localStorage.getItem(TRANSCRIPTION_PROVIDER_KEY);
-  return value === "local" || value === "openai" ? value : null;
-}
-
-function preferredTranscriptionProvider(
-  config: TranscriptionConfigResponse,
-  current: TranscriptionProvider | null,
-): TranscriptionProvider | null {
-  if (current && config.providers.includes(current)) return current;
-  if (config.providers.includes("local")) return "local";
-  return config.providers.includes("openai") ? "openai" : null;
-}
-
 function activeTranscriptionProvider(
   config: TranscriptionConfigResponse | null,
-  provider: TranscriptionProvider | null,
-): TranscriptionProvider | null {
-  return provider && config?.providers.includes(provider) ? provider : null;
+): "local" | "openai" | null {
+  return config?.provider && config.providers.includes(config.provider) ? config.provider : null;
 }
 
 function HomeRedirect({ threads }: { threads: ThreadSummary[] }) {

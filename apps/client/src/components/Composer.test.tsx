@@ -214,6 +214,13 @@ describe("Composer", () => {
 
 const transcriptionConfig: TranscriptionConfigResponse = {
   providers: ["local", "openai"],
+  provider: "local",
+  localUrl: "http://127.0.0.1:8178/inference",
+  openAiApiKeyConfigured: true,
+  openAiModel: "gpt-4o-transcribe",
+  language: "ru",
+  refineLocal: true,
+  refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
 };
@@ -255,7 +262,7 @@ function Harness({
       }
       models={models}
       transcriptionConfig={speechConfig}
-      transcriptionProvider={speechConfig?.providers[0] ?? null}
+      transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
       error={null}
       hasSupplementalContent={hasSupplementalContent}

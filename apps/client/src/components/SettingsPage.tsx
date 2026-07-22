@@ -7,6 +7,7 @@ import type {
   TaskDefaults,
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  UpdateTranscriptionSettingsRequest,
 } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
@@ -56,8 +57,7 @@ export function SettingsPage({
   onProjectListDirectionChange,
   transcriptionConfig = null,
   transcriptionConfigError = null,
-  transcriptionProvider = null,
-  onTranscriptionProviderChange = () => undefined,
+  onTranscriptionConfigChange = () => undefined,
 }: {
   onOpenNavigation(): void;
   onSwitchServer(): void;
@@ -69,8 +69,7 @@ export function SettingsPage({
   onProjectListDirectionChange(direction: ProjectListDirection): void;
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionConfigError?: string | null;
-  transcriptionProvider?: TranscriptionProvider | null;
-  onTranscriptionProviderChange?(provider: TranscriptionProvider): void;
+  onTranscriptionConfigChange?(config: TranscriptionConfigResponse): void;
 }) {
   const { api, state } = useConnection();
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
@@ -222,58 +221,11 @@ export function SettingsPage({
             </label>
           </section>
 
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <MicrophoneIcon />
-              </span>
-              <div>
-                <h2>Распознавание речи</h2>
-                <p>Провайдер выбирается отдельно на каждом устройстве.</p>
-              </div>
-            </div>
-            {transcriptionConfigError && (
-              <div className="settings-notice danger" role="alert">
-                Не удалось получить настройки распознавания: {transcriptionConfigError}
-              </div>
-            )}
-            {!transcriptionConfig && !transcriptionConfigError && (
-              <div className="settings-loading">
-                <span className="spinner small" /> Загружаем провайдеры…
-              </div>
-            )}
-            {transcriptionConfig?.providers.length === 0 && (
-              <div className="settings-notice warning" role="status">
-                Распознавание не настроено на сервере. Укажите локальный STT URL или API-ключ
-                OpenAI.
-              </div>
-            )}
-            {transcriptionConfig && transcriptionConfig.providers.length > 0 && (
-              <>
-                <label className="theme-setting">
-                  <span>Провайдер</span>
-                  <select
-                    aria-label="Провайдер распознавания речи"
-                    value={transcriptionProvider ?? ""}
-                    onChange={(event) =>
-                      onTranscriptionProviderChange(event.target.value as TranscriptionProvider)
-                    }
-                  >
-                    {transcriptionConfig.providers.map((provider) => (
-                      <option value={provider} key={provider}>
-                        {provider === "local" ? "Локальная модель" : "OpenAI"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="settings-notice" role="status">
-                  {transcriptionProvider === "openai"
-                    ? "Записи отправляются в OpenAI API через сервер CodexNest."
-                    : "Записи обрабатываются локальной моделью на вашем сервере."}
-                </div>
-              </>
-            )}
-          </section>
+          <TranscriptionSettingsCard
+            config={transcriptionConfig}
+            configError={transcriptionConfigError}
+            onChange={onTranscriptionConfigChange}
+          />
 
           {!Capacitor.isNativePlatform() && (
             <section className="settings-card">
@@ -479,4 +431,307 @@ export function SettingsPage({
       </main>
     </div>
   );
+}
+
+type TranscriptionForm = Omit<UpdateTranscriptionSettingsRequest, "openAiApiKey">;
+
+function TranscriptionSettingsCard({
+  config,
+  configError,
+  onChange,
+}: {
+  config: TranscriptionConfigResponse | null;
+  configError: string | null;
+  onChange(config: TranscriptionConfigResponse): void;
+}) {
+  const { api, state } = useConnection();
+  const [form, setForm] = useState<TranscriptionForm>(() => transcriptionForm(config));
+  const [apiKey, setApiKey] = useState("");
+  const [removeApiKey, setRemoveApiKey] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const secure = secureServerUrl(api.settings?.baseUrl ?? "");
+  const models = state?.snapshot?.models ?? [];
+
+  useEffect(() => {
+    if (!config) return;
+    setForm(transcriptionForm(config));
+    setApiKey("");
+    setRemoveApiKey(false);
+  }, [config]);
+
+  async function saveTranscriptionSettings(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const keyUpdate = apiKey.trim()
+        ? { openAiApiKey: apiKey.trim() }
+        : removeApiKey
+          ? { openAiApiKey: null }
+          : {};
+      const updated = await api.updateTranscriptionSettings({ ...form, ...keyUpdate });
+      onChange(updated);
+      setApiKey("");
+      setRemoveApiKey(false);
+      setNotice("Настройки применены на сервере для всех клиентов.");
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Не удалось сохранить настройки распознавания",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-heading">
+        <span className="settings-card-icon">
+          <MicrophoneIcon />
+        </span>
+        <div>
+          <h2>Распознавание речи</h2>
+          <p>Эти настройки общие для всех клиентов и сохраняются на сервере.</p>
+        </div>
+      </div>
+      {configError && (
+        <div className="settings-notice danger" role="alert">
+          Не удалось получить настройки распознавания: {configError}
+        </div>
+      )}
+      {!config && !configError && (
+        <div className="settings-loading compact">
+          <span className="spinner small" /> Загружаем настройки…
+        </div>
+      )}
+      {config && (
+        <form className="transcription-settings-form" onSubmit={saveTranscriptionSettings}>
+          <label className="theme-setting">
+            <span>Провайдер</span>
+            <select
+              aria-label="Провайдер распознавания речи"
+              disabled={saving}
+              value={form.provider ?? ""}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  provider: event.target.value as TranscriptionProvider,
+                }))
+              }
+            >
+              <option value="" disabled>
+                Выберите провайдера
+              </option>
+              <option value="local">Локальная модель</option>
+              <option value="openai">OpenAI API</option>
+            </select>
+          </label>
+
+          {form.provider === "local" && (
+            <div className="transcription-provider-settings">
+              <label className="theme-setting">
+                <span>URL локального STT</span>
+                <input
+                  aria-label="URL локального STT"
+                  disabled={saving}
+                  placeholder="http://127.0.0.1:8178/inference"
+                  spellCheck={false}
+                  value={form.localUrl ?? ""}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      localUrl: event.target.value || null,
+                    }))
+                  }
+                />
+              </label>
+              <label className="check">
+                <input
+                  checked={form.refineLocal}
+                  disabled={saving}
+                  type="checkbox"
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, refineLocal: event.target.checked }))
+                  }
+                />
+                <span>Расставлять пунктуацию и исправлять очевидные ошибки через Codex</span>
+              </label>
+              {form.refineLocal && (
+                <label className="theme-setting">
+                  <span>Модель улучшения</span>
+                  <select
+                    aria-label="Модель улучшения расшифровки"
+                    disabled={saving}
+                    value={form.refinementModel}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        refinementModel: event.target.value,
+                      }))
+                    }
+                  >
+                    {!models.some((model) => model.id === form.refinementModel) && (
+                      <option value={form.refinementModel}>{form.refinementModel}</option>
+                    )}
+                    {models.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className="settings-notice" role="status">
+                Аудио остаётся на сервере. При включённом улучшении в Codex отправляется только
+                распознанный текст.
+              </div>
+            </div>
+          )}
+
+          {form.provider === "openai" && (
+            <div className="transcription-provider-settings">
+              <label className="theme-setting">
+                <span>Модель OpenAI</span>
+                <select
+                  aria-label="Модель распознавания OpenAI"
+                  disabled={saving}
+                  value={form.openAiModel}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, openAiModel: event.target.value }))
+                  }
+                >
+                  <option value="gpt-4o-transcribe">gpt-4o-transcribe — точнее</option>
+                  <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe — дешевле</option>
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>OpenAI API key</span>
+                <span className="codex-proxy-input">
+                  <input
+                    aria-label="OpenAI API key"
+                    autoComplete="off"
+                    disabled={!secure || saving}
+                    placeholder={
+                      config.openAiApiKeyConfigured && !removeApiKey
+                        ? "Ключ сохранён; оставьте пустым без изменений"
+                        : "sk-…"
+                    }
+                    spellCheck={false}
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(event) => {
+                      setApiKey(event.target.value);
+                      if (event.target.value) setRemoveApiKey(false);
+                    }}
+                  />
+                  <button
+                    disabled={!apiKey}
+                    type="button"
+                    onClick={() => setShowApiKey((current) => !current)}
+                  >
+                    {showApiKey ? "Скрыть" : "Показать"}
+                  </button>
+                </span>
+              </label>
+              {config.openAiApiKeyConfigured && (
+                <div className="settings-actions codex-actions transcription-key-actions">
+                  <span>{removeApiKey ? "Ключ будет удалён" : "API key настроен"}</span>
+                  <button
+                    disabled={saving}
+                    type="button"
+                    onClick={() => {
+                      setRemoveApiKey((current) => !current);
+                      setApiKey("");
+                    }}
+                  >
+                    {removeApiKey ? "Не удалять" : "Удалить ключ"}
+                  </button>
+                </div>
+              )}
+              {!secure && (
+                <div className="settings-notice danger" role="alert">
+                  Ввод API key доступен только через HTTPS или локальное подключение.
+                </div>
+              )}
+              <div className="settings-notice warning" role="status">
+                Аудио отправляется в OpenAI API и оплачивается отдельно от подписки ChatGPT или
+                Codex.
+              </div>
+            </div>
+          )}
+
+          <label className="theme-setting">
+            <span>Язык</span>
+            <input
+              aria-label="Язык распознавания"
+              disabled={saving}
+              maxLength={32}
+              placeholder="ru"
+              spellCheck={false}
+              value={form.language ?? ""}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, language: event.target.value || null }))
+              }
+            />
+          </label>
+
+          {config.providers.length === 0 && (
+            <div className="settings-notice warning" role="status">
+              Настройте URL локального STT или OpenAI API key, чтобы включить микрофон.
+            </div>
+          )}
+          {config.provider && !config.providers.includes(config.provider) && (
+            <div className="settings-notice danger" role="alert">
+              Выбранный провайдер настроен не полностью. Исправьте параметры и сохраните форму.
+            </div>
+          )}
+          {error && (
+            <div className="settings-notice danger" role="alert">
+              {error}
+            </div>
+          )}
+          {notice && !error && (
+            <div className="settings-notice success" role="status">
+              {notice}
+            </div>
+          )}
+          <div className="settings-actions">
+            <button className="primary" disabled={saving || !form.provider} type="submit">
+              {saving ? "Сохраняем…" : "Сохранить распознавание"}
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function transcriptionForm(config: TranscriptionConfigResponse | null): TranscriptionForm {
+  return {
+    provider: config?.provider ?? null,
+    localUrl: config?.localUrl ?? null,
+    openAiModel: config?.openAiModel ?? "gpt-4o-transcribe",
+    language: config?.language ?? "ru",
+    refineLocal: config?.refineLocal ?? true,
+    refinementModel: config?.refinementModel ?? "gpt-5.6-luna",
+  };
+}
+
+function secureServerUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" ||
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
 }

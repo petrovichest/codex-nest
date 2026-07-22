@@ -39,6 +39,7 @@ import type {
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
+  UpdateTranscriptionSettingsRequest,
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
@@ -100,7 +101,10 @@ export interface ApiServices {
   push: PushNotifier;
   codexManager?: CodexManager;
   threadTitles?: Pick<ThreadTitleGenerator, "generate">;
-  transcription?: Pick<TranscriptionService, "configuration" | "transcribe">;
+  transcription?: Pick<
+    TranscriptionService,
+    "configuration" | "updateConfiguration" | "transcribe"
+  >;
   projectRoot?: string;
 }
 
@@ -287,23 +291,45 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return (
       services.transcription?.configuration() ?? {
         providers: [],
+        provider: null,
+        localUrl: null,
+        openAiApiKeyConfigured: false,
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: true,
+        refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: MAX_TRANSCRIPTION_BYTES,
       }
     );
   });
 
+  app.put<{ Body: UpdateTranscriptionSettingsRequest }>(
+    "/api/v1/settings/transcription",
+    async (request): Promise<TranscriptionConfigResponse> => {
+      if (!services.transcription) {
+        throw new TranscriptionError("unavailable", "Transcription is not configured");
+      }
+      if (
+        typeof request.body?.openAiApiKey === "string" &&
+        request.protocol !== "https" &&
+        !isLoopbackAddress(request.ip)
+      ) {
+        throw new TranscriptionError(
+          "validation",
+          "OpenAI API key can only be set over HTTPS or a local connection",
+        );
+      }
+      return services.transcription.updateConfiguration(request.body);
+    },
+  );
+
   app.post<{
-    Querystring: { provider?: string };
     Body: Buffer;
   }>(
     "/api/v1/transcriptions",
     { bodyLimit: MAX_TRANSCRIPTION_BYTES },
     async (request, reply): Promise<TranscriptionResponse | undefined> => {
-      const provider = request.query.provider;
-      if (provider !== "local" && provider !== "openai") {
-        return apiError(reply, 400, "validation_failed", "provider must be local or openai");
-      }
       if (!Buffer.isBuffer(request.body) || request.body.length === 0) {
         return apiError(reply, 400, "validation_failed", "Audio body is required");
       }
@@ -317,7 +343,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!services.transcription) {
         return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
       }
-      const text = await services.transcription.transcribe(provider, request.body, contentType);
+      const text = await services.transcription.transcribe(request.body, contentType);
       return { text };
     },
   );
@@ -921,6 +947,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 503, "app_server_unavailable", error.message);
     }
     if (error instanceof TranscriptionError) {
+      if (error.kind === "validation") {
+        return apiError(reply, 400, "validation_failed", error.message);
+      }
       return apiError(
         reply,
         error.kind === "unavailable" ? 503 : 502,
@@ -996,6 +1025,10 @@ function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<
 
 function compact(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
+}
+
+function isLoopbackAddress(value: string): boolean {
+  return value === "127.0.0.1" || value === "::1" || value.startsWith("::ffff:127.");
 }
 
 function messageInput(

@@ -278,27 +278,38 @@ accept-all certificate handler).
 | `CODEXNEST_CODEX_BIN`            | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
 | `CODEXNEST_CODEX_MANAGEMENT_BIN` | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
 | `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
+| `CODEXNEST_SERVER_ENV_FILE`      | Env-файл, обновляемый серверными настройками      | `~/.config/codexnest/server.env`              |
 | `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
 | `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
 | `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
+| `CODEXNEST_STT_PROVIDER`         | Глобальный режим: `local` или `openai`            | первый настроенный провайдер                  |
 | `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |
 | `CODEXNEST_STT_OPENAI_API_KEY`   | Отдельный API-ключ OpenAI для транскрипции        | OpenAI-провайдер выключен                     |
 | `CODEXNEST_STT_OPENAI_MODEL`     | Модель OpenAI speech-to-text                      | `gpt-4o-transcribe`                           |
-| `CODEXNEST_STT_LANGUAGE`         | ISO-код языка записи                              | автоопределение                               |
+| `CODEXNEST_STT_LANGUAGE`         | ISO-код языка записи                              | `ru`                                          |
+| `CODEXNEST_STT_REFINE_LOCAL`     | Улучшать локальный текст через Codex              | `true`                                        |
+| `CODEXNEST_STT_REFINEMENT_MODEL` | Модель улучшения локального текста                | `gpt-5.6-luna`                                |
 | `CODEXNEST_STT_TIMEOUT_MS`       | Timeout одного распознавания                      | `600000`                                      |
 
 ### Speech-to-text
 
-Можно настроить один или оба провайдера. Клиент получает только список доступных
-вариантов; URL локального сервиса, API-ключ и proxy credentials браузеру не
-возвращаются. Выбор провайдера сохраняется отдельно на каждом устройстве.
+Активный провайдер и параметры распознавания общие для всех клиентов. Их можно
+изменить в разделе «Настройки → Распознавание речи» или через переменные выше.
+UI атомарно обновляет `server.env` и применяет значения без перезапуска; ручное
+изменение файла применяется после перезапуска `codexnest.service`. API-ключ и
+proxy credentials браузеру не возвращаются и не записываются в лог.
 
 Для OpenAI добавьте `CODEXNEST_STT_OPENAI_API_KEY` в приватный `server.env`.
-CodexNest использует `gpt-4o-transcribe`, если модель не переопределена. Вызов
-автоматически использует тот же валидный proxy-файл, что и Codex. Если proxy-файла
-нет, соединение прямое; повреждённый или доступный посторонним файл блокирует
-запрос вместо скрытого перехода на прямое соединение. API-ключ удаляется из
-окружения запускаемых Codex-процессов.
+CodexNest поддерживает `gpt-4o-transcribe` и `gpt-4o-mini-transcribe`. Исходная
+запись отправляется в Audio API одним запросом через тот же валидный proxy-файл,
+что и Codex. Если proxy-файла нет, соединение прямое; повреждённый или доступный
+посторонним файл блокирует запрос вместо скрытого перехода на прямое соединение.
+API-ключ удаляется из окружения запускаемых Codex-процессов. Ввод нового ключа
+через UI/API разрешён только по HTTPS или с локального подключения.
+
+В режиме `local` CodexNest может после Whisper консервативно расставить
+пунктуацию, регистр и исправить очевидные ошибки через изолированный поток Codex.
+При ошибке или таймауте улучшения клиент получает исходный локальный текст.
 
 Для полностью локального варианта установите `cmake`, C++ compiler, `ffmpeg` и,
 при необходимости, OpenBLAS или CUDA toolkit. Затем соберите протестированную
@@ -337,6 +348,9 @@ curl --fail --silent http://127.0.0.1:8178/
 
 ```dotenv
 CODEXNEST_STT_LOCAL_URL=http://127.0.0.1:8178/inference
+CODEXNEST_STT_PROVIDER=local
+CODEXNEST_STT_REFINE_LOCAL=true
+CODEXNEST_STT_REFINEMENT_MODEL=gpt-5.6-luna
 ```
 
 Запись ограничена пятью минутами и 24 MiB. Android-клиент запрашивает системное

@@ -24,8 +24,25 @@ export type TranscriptionProvider = "local" | "openai";
 
 export type TranscriptionConfigResponse = {
   providers: TranscriptionProvider[];
+  provider: TranscriptionProvider | null;
+  localUrl: string | null;
+  openAiApiKeyConfigured: boolean;
+  openAiModel: string;
+  language: string | null;
+  refineLocal: boolean;
+  refinementModel: string;
   maxRecordingSeconds: number;
   maxUploadBytes: number;
+};
+
+export type UpdateTranscriptionSettingsRequest = {
+  provider: TranscriptionProvider | null;
+  localUrl: string | null;
+  openAiApiKey?: string | null;
+  openAiModel: string;
+  language: string | null;
+  refineLocal: boolean;
+  refinementModel: string;
 };
 
 export type TranscriptionResponse = {

@@ -33,10 +33,45 @@ describe("loadConfig", () => {
     vi.stubEnv("CODEXNEST_STT_OPENAI_MODEL", "");
     expect(loadConfig()).toMatchObject({
       sttLocalUrl: undefined,
+      sttProvider: undefined,
       sttOpenAiApiKey: undefined,
       sttOpenAiModel: "gpt-4o-transcribe",
+      sttLanguage: "ru",
+      sttRefineLocal: true,
+      sttRefinementModel: "gpt-5.6-luna",
       sttTimeoutMs: 600_000,
     });
+  });
+
+  it("loads and validates the global transcription mode", () => {
+    vi.stubEnv("CODEXNEST_STT_PROVIDER", "openai");
+    vi.stubEnv("CODEXNEST_STT_OPENAI_MODEL", "gpt-4o-mini-transcribe");
+    vi.stubEnv("CODEXNEST_STT_LANGUAGE", "en-US");
+    vi.stubEnv("CODEXNEST_STT_REFINE_LOCAL", "false");
+    vi.stubEnv("CODEXNEST_STT_REFINEMENT_MODEL", "gpt-5.6-terra");
+    expect(loadConfig()).toMatchObject({
+      sttProvider: "openai",
+      sttOpenAiModel: "gpt-4o-mini-transcribe",
+      sttLanguage: "en-US",
+      sttRefineLocal: false,
+      sttRefinementModel: "gpt-5.6-terra",
+    });
+
+    vi.stubEnv("CODEXNEST_STT_PROVIDER", "device");
+    expect(() => loadConfig()).toThrow("CODEXNEST_STT_PROVIDER");
+  });
+
+  it("rejects invalid OpenAI transcription models, languages, and booleans", () => {
+    vi.stubEnv("CODEXNEST_STT_OPENAI_MODEL", "gpt-other");
+    expect(() => loadConfig()).toThrow("CODEXNEST_STT_OPENAI_MODEL");
+
+    vi.stubEnv("CODEXNEST_STT_OPENAI_MODEL", "gpt-4o-transcribe");
+    vi.stubEnv("CODEXNEST_STT_LANGUAGE", "not a language");
+    expect(() => loadConfig()).toThrow("CODEXNEST_STT_LANGUAGE");
+
+    vi.stubEnv("CODEXNEST_STT_LANGUAGE", "ru");
+    vi.stubEnv("CODEXNEST_STT_REFINE_LOCAL", "sometimes");
+    expect(() => loadConfig()).toThrow("CODEXNEST_STT_REFINE_LOCAL");
   });
 
   it("validates local transcription URLs and timeouts", () => {

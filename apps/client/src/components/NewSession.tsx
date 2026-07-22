@@ -147,7 +147,7 @@ export function NewSession({
           transcriptionProvider={transcriptionProvider}
           onTranscribe={async (audio) => {
             if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
-            return (await api.transcribe(transcriptionProvider, audio)).text;
+            return (await api.transcribe(audio)).text;
           }}
           error={error}
         />

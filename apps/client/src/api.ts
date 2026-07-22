@@ -25,8 +25,8 @@ import type {
   ThreadGoal,
   ThreadSummary,
   TranscriptionConfigResponse,
-  TranscriptionProvider,
   TranscriptionResponse,
+  UpdateTranscriptionSettingsRequest,
   TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
@@ -55,9 +55,14 @@ export class ApiClient {
     return this.request("/api/v1/transcriptions/config");
   }
 
-  transcribe(provider: TranscriptionProvider, audio: Blob): Promise<TranscriptionResponse> {
-    const query = new URLSearchParams({ provider });
-    return this.request(`/api/v1/transcriptions?${query}`, {
+  updateTranscriptionSettings(
+    body: UpdateTranscriptionSettingsRequest,
+  ): Promise<TranscriptionConfigResponse> {
+    return this.request("/api/v1/settings/transcription", { method: "PUT", body });
+  }
+
+  transcribe(audio: Blob): Promise<TranscriptionResponse> {
+    return this.request("/api/v1/transcriptions", {
       method: "POST",
       rawBody: audio,
       contentType: audio.type,

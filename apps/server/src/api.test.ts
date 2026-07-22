@@ -344,6 +344,25 @@ describe("audio transcriptions", () => {
     const transcription = {
       configuration: vi.fn(() => ({
         providers: ["local" as const, "openai" as const],
+        provider: "local" as const,
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKeyConfigured: true,
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: true,
+        refinementModel: "gpt-5.6-luna",
+        maxRecordingSeconds: 300,
+        maxUploadBytes: 24 * 1024 * 1024,
+      })),
+      updateConfiguration: vi.fn(async () => ({
+        providers: ["local" as const, "openai" as const],
+        provider: "openai" as const,
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKeyConfigured: true,
+        openAiModel: "gpt-4o-mini-transcribe",
+        language: "ru",
+        refineLocal: false,
+        refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
       })),
@@ -373,33 +392,60 @@ describe("audio transcriptions", () => {
 
     const transcribed = await app.inject({
       method: "POST",
-      url: "/api/v1/transcriptions?provider=openai",
+      url: "/api/v1/transcriptions",
       headers: { ...authorization, "content-type": "audio/webm;codecs=opus" },
       payload: Buffer.from("audio"),
     });
     expect(transcribed.statusCode).toBe(200);
     expect(transcribed.json()).toEqual({ text: "распознанный текст" });
     expect(transcription.transcribe).toHaveBeenCalledWith(
-      "openai",
       Buffer.from("audio"),
       "audio/webm;codecs=opus",
     );
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/transcription",
+      headers: { ...authorization, "content-type": "application/json" },
+      payload: {
+        provider: "openai",
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKey: "new-secret",
+        openAiModel: "gpt-4o-mini-transcribe",
+        language: "ru",
+        refineLocal: false,
+        refinementModel: "gpt-5.6-luna",
+      },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).not.toHaveProperty("openAiApiKey");
+    expect(transcription.updateConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", openAiApiKey: "new-secret" }),
+    );
+
+    const insecureKeyUpdate = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/transcription",
+      remoteAddress: "192.168.2.99",
+      headers: { ...authorization, "content-type": "application/json" },
+      payload: {
+        provider: "local",
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKey: "must-not-be-accepted",
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: true,
+        refinementModel: "gpt-5.6-luna",
+      },
+    });
+    expect(insecureKeyUpdate.statusCode).toBe(400);
+    expect(transcription.updateConfiguration).toHaveBeenCalledTimes(1);
 
     expect(
       (
         await app.inject({
           method: "POST",
-          url: "/api/v1/transcriptions?provider=other",
-          headers: { ...authorization, "content-type": "audio/webm" },
-          payload: Buffer.from("audio"),
-        })
-      ).statusCode,
-    ).toBe(400);
-    expect(
-      (
-        await app.inject({
-          method: "POST",
-          url: "/api/v1/transcriptions?provider=local",
+          url: "/api/v1/transcriptions",
           headers: { ...authorization, "content-type": "audio/mpeg" },
           payload: Buffer.from("audio"),
         })
@@ -411,7 +457,7 @@ describe("audio transcriptions", () => {
     );
     const unavailable = await app.inject({
       method: "POST",
-      url: "/api/v1/transcriptions?provider=local",
+      url: "/api/v1/transcriptions",
       headers: { ...authorization, "content-type": "audio/mp4" },
       payload: Buffer.from("audio"),
     });

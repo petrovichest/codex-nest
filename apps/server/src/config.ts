@@ -10,14 +10,18 @@ export interface AppConfig {
   codexBin: string;
   codexManagementBin: string;
   codexProxyEnvFile: string;
+  serverEnvFile: string;
   codexTransport: "stdio" | "daemon";
   allowedOrigins: Set<string>;
   clientDist: string;
   websocketAuthTimeoutMs: number;
   sttLocalUrl?: string;
+  sttProvider?: "local" | "openai";
   sttOpenAiApiKey?: string;
   sttOpenAiModel: string;
   sttLanguage?: string;
+  sttRefineLocal: boolean;
+  sttRefinementModel: string;
   sttTimeoutMs: number;
   firebaseCredentialPath?: string;
   firebaseProjectId?: string;
@@ -44,6 +48,27 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   }
   const sttLocalUrl = env("CODEXNEST_STT_LOCAL_URL");
   if (sttLocalUrl) validateHttpUrl(sttLocalUrl, "CODEXNEST_STT_LOCAL_URL");
+  const configuredSttProvider = env("CODEXNEST_STT_PROVIDER");
+  if (
+    configuredSttProvider !== undefined &&
+    configuredSttProvider !== "local" &&
+    configuredSttProvider !== "openai"
+  ) {
+    throw new Error("CODEXNEST_STT_PROVIDER must be local or openai");
+  }
+  const sttOpenAiApiKey = env("CODEXNEST_STT_OPENAI_API_KEY");
+  const sttOpenAiModel = env("CODEXNEST_STT_OPENAI_MODEL") ?? "gpt-4o-transcribe";
+  if (sttOpenAiModel !== "gpt-4o-transcribe" && sttOpenAiModel !== "gpt-4o-mini-transcribe") {
+    throw new Error(
+      "CODEXNEST_STT_OPENAI_MODEL must be gpt-4o-transcribe or gpt-4o-mini-transcribe",
+    );
+  }
+  const sttLanguage = env("CODEXNEST_STT_LANGUAGE") ?? "ru";
+  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/.test(sttLanguage)) {
+    throw new Error("CODEXNEST_STT_LANGUAGE must be an ISO language code");
+  }
+  const sttProvider =
+    configuredSttProvider ?? (sttLocalUrl ? "local" : sttOpenAiApiKey ? "openai" : undefined);
 
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
@@ -53,6 +78,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     codexManagementBin: env("CODEXNEST_CODEX_MANAGEMENT_BIN") ?? resolve(homedir(), "bin/codex"),
     codexProxyEnvFile:
       env("CODEXNEST_CODEX_PROXY_ENV_FILE") ?? resolve(homedir(), ".config/codex/app-server.env"),
+    serverEnvFile:
+      env("CODEXNEST_SERVER_ENV_FILE") ?? resolve(homedir(), ".config/codexnest/server.env"),
     codexTransport,
     allowedOrigins: new Set([
       "http://localhost",
@@ -64,14 +91,25 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     clientDist: env("CODEXNEST_CLIENT_DIST") ?? resolve(process.cwd(), "apps/client/dist"),
     websocketAuthTimeoutMs: 5_000,
     sttLocalUrl,
-    sttOpenAiApiKey: env("CODEXNEST_STT_OPENAI_API_KEY"),
-    sttOpenAiModel: env("CODEXNEST_STT_OPENAI_MODEL") ?? "gpt-4o-transcribe",
-    sttLanguage: env("CODEXNEST_STT_LANGUAGE"),
+    sttProvider,
+    sttOpenAiApiKey,
+    sttOpenAiModel,
+    sttLanguage,
+    sttRefineLocal: envBoolean("CODEXNEST_STT_REFINE_LOCAL", true),
+    sttRefinementModel: env("CODEXNEST_STT_REFINEMENT_MODEL") ?? "gpt-5.6-luna",
     sttTimeoutMs,
     firebaseCredentialPath: env("CODEXNEST_FIREBASE_CREDENTIAL_PATH"),
     firebaseProjectId: env("CODEXNEST_FIREBASE_PROJECT_ID"),
     ...overrides,
   };
+}
+
+function envBoolean(name: string, fallback: boolean): boolean {
+  const value = env(name);
+  if (value === undefined) return fallback;
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 export function childProcessEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {

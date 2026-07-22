@@ -14,6 +14,7 @@ import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
 import { ThreadTitleGenerator } from "./thread-title";
 import { TranscriptionService } from "./transcription";
+import { TranscriptRefiner } from "./transcript-refiner";
 
 const config = loadConfig();
 const store = new StateStore(config.statePath);
@@ -47,13 +48,20 @@ const bridge = new CodexBridge({
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);
 const threadTitles = new ThreadTitleGenerator(bridge);
+const transcriptRefiner = new TranscriptRefiner(bridge);
 const transcription = new TranscriptionService({
+  provider: config.sttProvider,
   localUrl: config.sttLocalUrl,
   openAiApiKey: config.sttOpenAiApiKey,
   openAiModel: config.sttOpenAiModel,
   language: config.sttLanguage,
+  refineLocal: config.sttRefineLocal,
+  refinementModel: config.sttRefinementModel,
   timeoutMs: config.sttTimeoutMs,
   proxyEnvFile: config.codexProxyEnvFile,
+  settingsEnvFile: config.serverEnvFile,
+  cwd: process.cwd(),
+  refiner: transcriptRefiner,
 });
 const codexManager = new CodexManager({
   codexBin: config.codexBin,

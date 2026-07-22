@@ -953,7 +953,9 @@ pre {
 }
 
 .codex-proxy-form,
-.codex-proxy-form label {
+.codex-proxy-form label,
+.transcription-settings-form,
+.transcription-provider-settings {
   display: grid;
   gap: 7px;
 }
@@ -966,6 +968,25 @@ pre {
 .codex-proxy-form > small {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.transcription-settings-form,
+.transcription-provider-settings {
+  gap: 14px;
+}
+
+.transcription-provider-settings {
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.transcription-key-actions {
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted-strong);
+  font-size: 12px;
 }
 
 .codex-proxy-input {
