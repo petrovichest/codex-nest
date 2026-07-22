@@ -37,6 +37,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
     },
     logController: new LogController({ disableRequestLogging: true }),
     bodyLimit: 1_048_576,
+    forceCloseConnections: true,
   });
 
   await app.register(cors, {
@@ -46,7 +47,13 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["authorization", "content-type"],
   });
-  await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
+  await app.register(websocket, {
+    options: { maxPayload: 64 * 1024 },
+    preClose(done) {
+      for (const client of this.websocketServer.clients) client.terminate();
+      this.websocketServer.close(() => done());
+    },
+  });
 
   app.addHook("onRequest", async (request, reply) => {
     if (!isAllowedRequestOrigin(request, config.allowedOrigins)) {

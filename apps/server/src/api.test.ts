@@ -349,7 +349,20 @@ describe("HTTP authentication", () => {
       state.auth.tokenSha256 = hashToken("rotated");
     });
     await expect(revoked).resolves.toBe(1008);
-    await app.close();
+
+    const shutdownSocket = await app.injectWS("/api/v1/events", {
+      headers: { origin: "http://localhost" },
+    });
+    const shutdownSnapshot = new Promise<void>((resolve) =>
+      shutdownSocket.once("message", () => resolve()),
+    );
+    shutdownSocket.send(JSON.stringify({ type: "authenticate", token: "rotated" }));
+    await shutdownSnapshot;
+    const shutdownClosed = new Promise<void>((resolve) =>
+      shutdownSocket.once("close", () => resolve()),
+    );
+    await expect(app.close()).resolves.toBeUndefined();
+    await shutdownClosed;
   });
 });
 

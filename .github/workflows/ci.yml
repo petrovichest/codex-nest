@@ -19,7 +19,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: bash -n deploy/install.sh deploy/codexnest
+      - run: bash -n deploy/install.sh deploy/adopt-existing.sh deploy/adopt-existing.test.sh deploy/codexnest
+      - run: deploy/adopt-existing.test.sh
       - name: Verify pinned Node.js checksums are published
         run: |
           node_version="$(sed -n 's/^codexnest_node_version="\([^"]*\)"/\1/p' deploy/install.sh)"

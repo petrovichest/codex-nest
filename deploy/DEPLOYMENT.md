@@ -58,6 +58,27 @@ UI проверяет обновления только по явному дей
 Оставшаяся часть документа описывает ручную и расширенную установку, включая
 proxy, speech-to-text и reverse proxy.
 
+### Переход существующей ручной установки
+
+После публикации стабильного тега существующий чистый Git-checkout можно один
+раз перевести на managed releases без запуска installer и без смены config,
+state, token или systemd drop-ins:
+
+```bash
+deploy/adopt-existing.sh \
+  --repo "$HOME/git/codex-nest" \
+  --node "$HOME/.local/node-v24" \
+  --dry-run
+
+deploy/adopt-existing.sh \
+  --repo "$HOME/git/codex-nest" \
+  --node "$HOME/.local/node-v24"
+```
+
+Скрипт сначала собирает tagged release рядом с работающей версией и только затем
+переключает user-systemd service. При неудачном restart или health-check прежние
+`server.env` и базовый unit восстанавливаются автоматически.
+
 ## 1. Требования
 
 На сервере должны быть установлены:
