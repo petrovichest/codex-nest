@@ -59,6 +59,13 @@ class FakeBridge extends EventEmitter {
         nextCursor: null,
       };
     }
+    if (method === "thread/turns/list" && this.active && params.itemsView === "full") {
+      return {
+        data: liveThread().turns,
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    }
     if (method === "thread/turns/list")
       return {
         data: [
@@ -288,7 +295,7 @@ describe("AppProjection", () => {
         },
       }),
     );
-    projection.setCurrentTurn("one", "steered");
+    await projection.setCurrentTurn("one", "steered");
     bridge.emit("notification", {
       method: "turn/completed",
       params: {
@@ -331,6 +338,152 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 
+  it("persists question responses and live plan checklists and marks a finished plan for attention", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const statePath = join(directory, "state.json");
+    const store = new StateStore(statePath);
+    await store.load();
+    const bridge = new FakeBridge();
+    const historicalTurn = {
+      id: "plan-turn",
+      items: [
+        {
+          type: "userMessage" as const,
+          id: "question-tool",
+          clientId: null,
+          content: [{ type: "text" as const, text: "Вопрос", text_elements: [] }],
+        },
+        { type: "plan" as const, id: "final-plan", text: "Готовый план" },
+      ],
+      itemsView: "full" as const,
+      status: "completed" as const,
+      error: null,
+      startedAt: 10,
+      completedAt: 20,
+      durationMs: 10_000,
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [historicalTurn], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    await projection.setSettings("one", { collaborationMode: "plan" });
+
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: {
+        threadId: "one",
+        turn: { ...historicalTurn, items: [], status: "inProgress", completedAt: null },
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "plan-turn",
+        item: historicalTurn.items[0],
+        completedAtMs: 10_100,
+      },
+    } as ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "plan-turn",
+        explanation: "Проверяю решение",
+        plan: [
+          { step: "Исследовать", status: "completed" },
+          { step: "Составить план", status: "inProgress" },
+        ],
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]).toHaveLength(1),
+    );
+
+    await projection.recordAttentionResponse(
+      {
+        id: "attention-1",
+        kind: "userInput",
+        threadId: "one",
+        turnId: "plan-turn",
+        itemId: "question-tool",
+        createdAt: 10_200,
+        autoResolutionMs: null,
+        questions: [
+          {
+            id: "token",
+            header: "Токен",
+            question: "Какое значение?",
+            isOther: true,
+            isSecret: true,
+            options: null,
+          },
+        ],
+      },
+      { kind: "userInput", answers: { token: ["secret-value"] } },
+    );
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: historicalTurn },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("needsAttention"));
+    const artifacts = store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"] ?? [];
+    expect(artifacts).toMatchObject([
+      { type: "planChecklist", status: "completed" },
+      {
+        type: "userInputResponse",
+        entries: [{ question: "Какое значение?", answers: ["secret-value"] }],
+      },
+    ]);
+
+    const detail = await projection.readThread("one");
+    expect(detail.turns[0]?.items.map((item) => item.id)).toEqual([
+      "question-tool",
+      "plan-turn-plan-checklist",
+      "question-tool-response",
+      "final-plan",
+    ]);
+    const reloadedStore = new StateStore(statePath);
+    await reloadedStore.load();
+    expect(
+      reloadedStore.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]?.[1],
+    ).toMatchObject({ entries: [{ answers: ["secret-value"] }] });
+
+    await projection.setCurrentTurn("one", "implementation-turn");
+    expect(projection.summary("one")?.state).toBe("running");
+    expect(store.snapshot().threadMeta.one?.awaitingPlanResponse).toBe(false);
+  });
+
+  it("does not report a phantom active thread without an in-progress turn as running", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    const value = projection.upsertThread(
+      thread("phantom", "/work", 10, { type: "active", activeFlags: [] }, []),
+    );
+    expect(value.currentTurnId).toBeNull();
+    expect(value.state).not.toBe("running");
+  });
+
   it("rejoins and restores an active turn once per app-server connection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -361,7 +514,7 @@ describe("AppProjection", () => {
       progress: { startedAt: 3_000 },
       items: [
         {
-          id: "user",
+          id: "client-user",
           type: "userMessage",
           text: "Запрос",
           images: ["data:image/png;base64,aW1hZ2U="],
@@ -378,6 +531,17 @@ describe("AppProjection", () => {
         },
       ],
     });
+    expect(bridge.request).toHaveBeenCalledWith(
+      "thread/turns/list",
+      {
+        threadId: "one",
+        cursor: null,
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+      30_000,
+    );
 
     await projection.sync();
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
@@ -435,6 +599,7 @@ function liveThread(): Thread {
         {
           type: "userMessage",
           id: "user",
+          clientId: "client-user",
           content: [
             { type: "text", text: "Запрос", text_elements: [] },
             { type: "image", url: "data:image/png;base64,aW1hZ2U=" },

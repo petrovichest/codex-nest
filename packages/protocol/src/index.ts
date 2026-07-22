@@ -184,6 +184,27 @@ export type ActivityItem =
       detail: string;
     }
   | {
+      type: "userInputResponse";
+      id: string;
+      status: "completed";
+      entries: Array<{
+        header: string;
+        question: string;
+        answers: string[];
+      }>;
+      timestamp: number;
+      afterItemId: string | null;
+    }
+  | {
+      type: "planChecklist";
+      id: string;
+      status: "inProgress" | "completed" | "failed";
+      explanation: string | null;
+      steps: TurnPlanStep[];
+      timestamp: number;
+      afterItemId: string | null;
+    }
+  | {
       type: "error" | "unsupported";
       id: string;
       status: "failed";
@@ -204,6 +225,7 @@ export type ThreadDetail = {
   summary: ThreadSummary;
   turns: TurnView[];
   queuedMessages: QueuedMessage[];
+  olderTurnsCursor: string | null;
 };
 
 export type ModelOption = {
@@ -505,6 +527,7 @@ export type StartTurnRequest = {
 export type QueueMessageRequest = {
   input: string;
   images?: string[];
+  clientMessageId?: string;
 };
 
 export type UpdateThreadSettingsRequest = {

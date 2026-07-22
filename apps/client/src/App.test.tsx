@@ -783,7 +783,7 @@ function mockConnection(
       details: Object.fromEntries(
         appSnapshot.threads.map((thread) => [
           thread.id,
-          { summary: thread, turns: [], queuedMessages: [] },
+          { summary: thread, turns: [], queuedMessages: [], olderTurnsCursor: null },
         ]),
       ),
       network,
@@ -795,6 +795,7 @@ function mockConnection(
       summary: appSnapshot.threads.find((thread) => thread.id === id),
       turns: [],
       queuedMessages: [],
+      olderTurnsCursor: null,
     })),
   });
   return api;

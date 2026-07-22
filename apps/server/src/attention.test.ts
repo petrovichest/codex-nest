@@ -37,9 +37,11 @@ describe("AttentionManager", () => {
       command: "git status",
       canAcceptForSession: true,
     });
-    expect(manager.resolve(request.id, { kind: "approval", decision: "accept" })).toBe(true);
+    expect(manager.resolve(request.id, { kind: "approval", decision: "accept" })).toMatchObject({
+      id: request.id,
+    });
     expect(transport.respond).toHaveBeenCalledWith(42, { decision: "accept" });
-    expect(manager.resolve(request.id, { kind: "approval", decision: "decline" })).toBe(false);
+    expect(manager.resolve(request.id, { kind: "approval", decision: "decline" })).toBeNull();
   });
 
   it("maps experimental user input without logging secret answers", () => {

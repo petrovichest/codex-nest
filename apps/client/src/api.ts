@@ -128,12 +128,20 @@ export class ApiClient {
     });
   }
 
-  readThread(id: string): Promise<ThreadDetail> {
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}`);
+  readThread(id: string, cursor?: string): Promise<ThreadDetail> {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`);
   }
 
   readGitChanges(id: string): Promise<GitChangesSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
+  }
+
+  createDownload(id: string, path: string): Promise<DownloadTicketResponse> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/downloads`, {
+      method: "POST",
+      body: { path },
+    });
   }
 
   createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary } & TurnStartResult> {
@@ -286,6 +294,11 @@ export class ApiClient {
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
+}
+
+export interface DownloadTicketResponse {
+  downloadUrl: string;
+  expiresAt: number;
 }
 
 export class ApiClientError extends Error {

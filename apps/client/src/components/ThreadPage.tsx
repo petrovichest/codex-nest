@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import type {
@@ -23,12 +24,13 @@ import type {
 
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
+import { openDownloadUrl } from "../downloads";
+import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage } from "./Composer";
 import {
   ArchiveIcon,
   ChevronDownIcon,
-  ClockIcon,
   CopyIcon,
   FileIcon,
   MoreIcon,
@@ -46,7 +48,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const { threadId = "" } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const { api, state, dispatch, refreshDetail } = useConnection();
+  const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
@@ -67,6 +69,14 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const followsTail = useRef(true);
   const previousAttentionIds = useRef<string | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
+  const detailReconcileKey = useRef<string | null>(null);
+  const olderScrollAnchor = useRef<{
+    threadId: string;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia("(min-width: 1280px)").matches,
   );
@@ -80,6 +90,13 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     [state.snapshot?.attention, threadId],
   );
   const goal = state.goals?.[threadId];
+  const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
+  const optimisticTurnMessages = optimisticMessages.filter(
+    (message) => message.destination === "turn",
+  );
+  const optimisticQueuedMessages = optimisticMessages.filter(
+    (message) => message.destination === "queue",
+  );
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
     : undefined;
@@ -91,6 +108,14 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
         activeProgress?.deletions ?? 0,
       ].join(":")
     : "idle";
+
+  const downloadFile = useCallback(
+    async (path: string) => {
+      const ticket = await api.createDownload(threadId, path);
+      await openDownloadUrl(api.settings.baseUrl, ticket.downloadUrl);
+    },
+    [api, threadId],
+  );
 
   useEffect(() => {
     if (goal) setGoalMode(false);
@@ -135,7 +160,30 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
 
   useEffect(() => {
     if (threadId) void refreshDetail(threadId).catch((caught: Error) => setError(caught.message));
-  }, [threadId, refreshDetail, summary?.updatedAt, state.snapshotEpoch]);
+  }, [threadId, refreshDetail]);
+
+  useEffect(() => {
+    if (!detail) return;
+    const currentTurnId = summary?.currentTurnId ?? null;
+    const currentTurn = currentTurnId
+      ? detail.turns.find((turn) => turn.id === currentTurnId)
+      : null;
+    const staleTurn = !currentTurnId && detail.turns.some((turn) => turn.status === "inProgress");
+    const missingTurn = Boolean(
+      currentTurnId && (!currentTurn || currentTurn.status !== "inProgress"),
+    );
+    if (!staleTurn && !missingTurn) {
+      detailReconcileKey.current = null;
+      return;
+    }
+    const key = `${threadId}:${currentTurnId ?? "idle"}:${staleTurn ? "stale" : "missing"}`;
+    if (detailReconcileKey.current === key) return;
+    detailReconcileKey.current = key;
+    void refreshDetail(threadId).catch((caught: Error) => {
+      detailReconcileKey.current = null;
+      setError(caught.message);
+    });
+  }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
   useEffect(() => {
     if (
@@ -152,6 +200,14 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     initialScrollThread.current = threadId;
     followsTail.current = true;
     scrollToEnd(scrollRef.current);
+  }, [detail, threadId]);
+
+  useLayoutEffect(() => {
+    const anchor = olderScrollAnchor.current;
+    const node = scrollRef.current;
+    if (!anchor || anchor.threadId !== threadId || !node) return;
+    node.scrollTop = anchor.scrollTop + (node.scrollHeight - anchor.scrollHeight);
+    olderScrollAnchor.current = null;
   }, [detail, threadId]);
 
   useLayoutEffect(() => {
@@ -172,6 +228,27 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     previousAttentionIds.current = ids;
   }, [attention]);
 
+  const loadOlder = useCallback(async () => {
+    const cursor = detail?.olderTurnsCursor;
+    const node = scrollRef.current;
+    if (!cursor || !node || loadingOlder) return;
+    olderScrollAnchor.current = {
+      threadId,
+      scrollHeight: node.scrollHeight,
+      scrollTop: node.scrollTop,
+    };
+    setLoadingOlder(true);
+    setOlderError(false);
+    try {
+      await loadOlderDetail(threadId, cursor);
+    } catch {
+      olderScrollAnchor.current = null;
+      setOlderError(true);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [detail?.olderTurnsCursor, loadOlderDetail, loadingOlder, threadId]);
+
   if (!summary)
     return (
       <div className="center-state">
@@ -182,26 +259,52 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   async function submit(event: FormEvent) {
     event.preventDefault();
     if ((!input.trim() && !images.length) || (goalMode && !input.trim())) return;
+    const submittedInput = input;
+    const submittedImages = images;
+    const submittedGoalMode = goalMode;
+    const clientMessageId = createClientMessageId();
+    const optimisticMessage: OptimisticMessage = {
+      id: clientMessageId,
+      threadId,
+      text: submittedInput.trim(),
+      images: submittedImages.map((image) => image.url),
+      createdAt: Date.now(),
+      destination: summary!.currentTurnId ? "queue" : "turn",
+      turnId: null,
+    };
     setBusy(true);
     setError(null);
+    dispatch({ type: "optimistic.add", message: optimisticMessage });
+    setInput("");
+    setImages([]);
+    setGoalMode(false);
     try {
       if (summary!.currentTurnId) {
         await api.enqueue(threadId, {
-          input,
-          ...(images.length ? { images: images.map((image) => image.url) } : {}),
+          input: submittedInput,
+          ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
+          clientMessageId,
         });
       } else {
         const result = await api.startTurn(threadId, {
-          input,
-          ...(images.length ? { images: images.map((image) => image.url) } : {}),
-          ...(goalMode ? { goal: true } : {}),
+          input: submittedInput,
+          ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
+          ...(submittedGoalMode ? { goal: true } : {}),
+          clientMessageId,
+        });
+        dispatch({
+          type: "optimistic.accept",
+          threadId,
+          messageId: clientMessageId,
+          turnId: result.turnId,
         });
         if (result.goalWarning) setError(result.goalWarning);
       }
-      setInput("");
-      setImages([]);
-      setGoalMode(false);
     } catch (caught) {
+      dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
+      setInput(submittedInput);
+      setImages(submittedImages);
+      setGoalMode(submittedGoalMode);
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
     } finally {
       setBusy(false);
@@ -212,12 +315,38 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     setBusy(true);
     setError(null);
     let changedMode = false;
+    let clientMessageId: string | null = null;
     try {
       const thread = await api.updateThreadSettings(threadId, { collaborationMode: "default" });
       changedMode = true;
       dispatch({ type: "thread", thread });
-      await api.startTurn(threadId, { input: "Да, реализуй этот план" });
+      clientMessageId = createClientMessageId();
+      dispatch({
+        type: "optimistic.add",
+        message: {
+          id: clientMessageId,
+          threadId,
+          text: "Да, реализуй этот план",
+          images: [],
+          createdAt: Date.now(),
+          destination: "turn",
+          turnId: null,
+        },
+      });
+      const result = await api.startTurn(threadId, {
+        input: "Да, реализуй этот план",
+        clientMessageId,
+      });
+      dispatch({
+        type: "optimistic.accept",
+        threadId,
+        messageId: clientMessageId,
+        turnId: result.turnId,
+      });
     } catch (caught) {
+      if (clientMessageId) {
+        dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
+      }
       if (changedMode) {
         await api
           .updateThreadSettings(threadId, { collaborationMode: "plan" })
@@ -340,22 +469,52 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
             const node = event.currentTarget;
             followsTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120;
             if (followsTail.current) setAttentionJump(false);
+            if (node.scrollTop < 160) void loadOlder();
           }}
         >
           <section className="timeline" aria-live="polite">
-            {!detail && (
+            {loadingOlder && (
+              <div className="history-loader" aria-label="Загружаем старые сообщения">
+                <span className="spinner small" />
+              </div>
+            )}
+            {olderError && (
+              <button className="history-retry" type="button" onClick={() => void loadOlder()}>
+                Повторить загрузку старых сообщений
+              </button>
+            )}
+            {!detail && optimisticTurnMessages.length === 0 && (
               <div className="center-state compact">
                 <div className="spinner" />
               </div>
             )}
             {detail?.turns.map((turn) => (
               <div className="turn" key={turn.id}>
+                {optimisticTurnMessages
+                  .filter(
+                    (message) =>
+                      message.turnId === turn.id ||
+                      (!message.turnId && summary.currentTurnId === turn.id),
+                  )
+                  .map((message) => (
+                    <Activity
+                      item={optimisticActivity(message)}
+                      cwd={summary.cwd}
+                      onDownload={downloadFile}
+                      key={message.id}
+                    />
+                  ))}
                 {groupActivities(turn.items).map((entry) =>
                   Array.isArray(entry) ? (
-                    <ActivityGroup items={entry} key={entry.map((item) => item.id).join(":")} />
+                    <ActivityGroup
+                      items={entry}
+                      cwd={summary.cwd}
+                      onDownload={downloadFile}
+                      key={entry.map((item) => item.id).join(":")}
+                    />
                   ) : (
                     <div key={entry.id}>
-                      <Activity item={entry} />
+                      <Activity item={entry} cwd={summary.cwd} onDownload={downloadFile} />
                       {entry.id === latestPlanId && (
                         <button
                           className="implement-plan"
@@ -368,14 +527,38 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
                     </div>
                   ),
                 )}
-                <TurnTiming turn={turn} />
+                <TurnTiming turn={turn} active={summary.currentTurnId === turn.id} />
+              </div>
+            ))}
+            {summary.currentTurnId &&
+              !detail?.turns.some((turn) => turn.id === summary.currentTurnId) && (
+                <div className="turn active-turn-placeholder">
+                  <ActiveTurnStatus progress={activeProgress} />
+                </div>
+              )}
+            {detachedOptimisticMessages(
+              optimisticTurnMessages,
+              detail?.turns ?? [],
+              summary.currentTurnId,
+            ).map((message) => (
+              <div className="turn optimistic-turn" key={`optimistic:${message.id}`}>
+                <Activity
+                  item={optimisticActivity(message)}
+                  cwd={summary.cwd}
+                  onDownload={downloadFile}
+                />
               </div>
             ))}
             <AttentionPanel requests={attention} />
             <QueuedMessages
-              messages={detail?.queuedMessages ?? []}
+              messages={mergeOptimisticQueue(
+                detail?.queuedMessages ?? [],
+                optimisticQueuedMessages,
+              )}
               sendingId={sendingQueuedId}
               onSendNow={(messageId) => void sendQueuedNow(messageId)}
+              cwd={summary.cwd}
+              onDownload={downloadFile}
             />
           </section>
         </div>
@@ -391,10 +574,9 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
             Требуется внимание <ChevronDownIcon />
           </button>
         )}
-        {summary.currentTurnId && (
-          <TurnProgressIndicator key={summary.currentTurnId} progress={activeProgress} />
-        )}
         <Composer
+          key={threadId}
+          autoFocus={(location.state as { focusComposer?: unknown } | null)?.focusComposer === true}
           input={input}
           onInput={setInput}
           images={images}
@@ -450,12 +632,180 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   );
 }
 
-export function Activity({ item }: { item: ActivityItem }) {
+function optimisticActivity(message: OptimisticMessage): ActivityItem {
+  return {
+    type: "userMessage",
+    id: message.id,
+    status: "completed",
+    text: message.text,
+    images: message.images,
+    timestamp: message.createdAt,
+    phase: null,
+  };
+}
+
+function detachedOptimisticMessages(
+  messages: OptimisticMessage[],
+  turns: TurnView[],
+  currentTurnId: string | null,
+): OptimisticMessage[] {
+  const loadedTurnIds = new Set(turns.map((turn) => turn.id));
+  return messages.filter(
+    (message) =>
+      !(
+        (message.turnId && loadedTurnIds.has(message.turnId)) ||
+        (!message.turnId && currentTurnId && loadedTurnIds.has(currentTurnId))
+      ),
+  );
+}
+
+function mergeOptimisticQueue(
+  messages: QueuedMessage[],
+  optimistic: OptimisticMessage[],
+): QueuedMessage[] {
+  const confirmedIds = new Set(messages.map((message) => message.id));
+  return [
+    ...messages,
+    ...optimistic
+      .filter((message) => !confirmedIds.has(message.id))
+      .map((message) => ({
+        id: message.id,
+        threadId: message.threadId,
+        text: message.text,
+        ...(message.images.length ? { images: message.images } : {}),
+        createdAt: message.createdAt,
+        status: "queued" as const,
+      })),
+  ];
+}
+
+function createClientMessageId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function MarkdownContent({
+  text,
+  cwd,
+  onDownload,
+}: {
+  text: string;
+  cwd?: string;
+  onDownload?(path: string): Promise<void>;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        table({ children }) {
+          return (
+            <div className="markdown-table-scroll">
+              <table>{children}</table>
+            </div>
+          );
+        },
+        a({ href, children, title }) {
+          const path = cwd ? localDownloadPath(href, cwd) : null;
+          return path && onDownload ? (
+            <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
+              {children}
+            </DownloadLink>
+          ) : (
+            <a href={href} title={title}>
+              {children}
+            </a>
+          );
+        },
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+}
+
+function DownloadLink({
+  href,
+  path,
+  title,
+  onDownload,
+  children,
+}: {
+  href: string;
+  path: string;
+  title?: string;
+  onDownload(path: string): Promise<void>;
+  children: React.ReactNode;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const busyRef = useRef(false);
+
+  async function download() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setFailed(false);
+    try {
+      await onDownload(path);
+    } catch {
+      setFailed(true);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="download-link-container">
+      <a
+        href={href}
+        title={title}
+        className="download-link"
+        aria-busy={busy}
+        aria-disabled={busy}
+        onClick={(event) => {
+          event.preventDefault();
+          void download();
+        }}
+      >
+        {children}
+        {busy && <span className="download-link-status"> — скачиваем…</span>}
+      </a>
+      {failed && (
+        <span className="download-link-error" role="alert">
+          Не удалось скачать файл. Нажмите ещё раз.
+        </span>
+      )}
+    </span>
+  );
+}
+
+function localDownloadPath(href: string | undefined, cwd: string): string | null {
+  if (!href?.startsWith("/")) return null;
+  let path: string;
+  try {
+    path = decodeURI(href);
+  } catch {
+    return null;
+  }
+  const root = cwd.replace(/\/+$/, "") || "/";
+  if (root === "/" || path === root || path.startsWith(`${root}/`)) return path;
+  return null;
+}
+
+export function Activity({
+  item,
+  cwd,
+  onDownload,
+}: {
+  item: ActivityItem;
+  cwd?: string;
+  onDownload?(path: string): Promise<void>;
+}) {
   if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
     return (
       <article className={`message ${item.type}`}>
-        {item.text && <ReactMarkdown>{item.text}</ReactMarkdown>}
+        {item.text && <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />}
         {item.images.length > 0 && <MessageImages images={item.images} />}
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
@@ -464,7 +814,7 @@ export function Activity({ item }: { item: ActivityItem }) {
   if (item.type === "reasoning") {
     return (
       <article className="message reasoning">
-        <ReactMarkdown>{item.text}</ReactMarkdown>
+        <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
@@ -473,8 +823,50 @@ export function Activity({ item }: { item: ActivityItem }) {
     return (
       <article className="message plan">
         <div className="activity-label">План</div>
-        <ReactMarkdown>{item.text}</ReactMarkdown>
+        <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
         <MessageFooter text={item.text} timestamp={item.timestamp} />
+      </article>
+    );
+  }
+  if (item.type === "userInputResponse") {
+    const text = item.entries.flatMap((entry) => [entry.question, ...entry.answers]).join("\n");
+    return (
+      <article className="message userMessage user-input-response">
+        {item.entries.map((entry, index) => (
+          <section key={`${index}:${entry.header}:${entry.question}`}>
+            <strong>{entry.header}</strong>
+            <p>{entry.question}</p>
+            {entry.answers.map((answer, answerIndex) => (
+              <div className="user-input-answer" key={`${answerIndex}:${answer}`}>
+                {answer}
+              </div>
+            ))}
+          </section>
+        ))}
+        <MessageFooter text={text} timestamp={item.timestamp} />
+      </article>
+    );
+  }
+  if (item.type === "planChecklist") {
+    return (
+      <article className="message plan-checklist">
+        <div className="activity-label">Ход работы</div>
+        {item.explanation && <p>{item.explanation}</p>}
+        <ol>
+          {item.steps.map((step, index) => (
+            <li className={step.status} key={`${index}:${step.step}`}>
+              <input
+                aria-label={step.status === "completed" ? "Выполнено" : "Не выполнено"}
+                checked={step.status === "completed"}
+                readOnly
+                tabIndex={-1}
+                type="checkbox"
+              />
+              <span>{step.step}</span>
+              {step.status === "inProgress" && <span className="spinner small" />}
+            </li>
+          ))}
+        </ol>
       </article>
     );
   }
@@ -520,7 +912,15 @@ export function Activity({ item }: { item: ActivityItem }) {
   return null;
 }
 
-function ActivityGroup({ items }: { items: ActivityItem[] }) {
+function ActivityGroup({
+  items,
+  cwd,
+  onDownload,
+}: {
+  items: ActivityItem[];
+  cwd: string;
+  onDownload(path: string): Promise<void>;
+}) {
   const status = items.some((item) => item.status === "failed")
     ? "failed"
     : items.some((item) => item.status === "inProgress")
@@ -550,7 +950,7 @@ function ActivityGroup({ items }: { items: ActivityItem[] }) {
       </summary>
       <div className="activity-group-content">
         {items.map((item) => (
-          <Activity item={item} key={item.id} />
+          <Activity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
         ))}
       </div>
     </details>
@@ -561,17 +961,23 @@ function QueuedMessages({
   messages,
   sendingId,
   onSendNow,
+  cwd,
+  onDownload,
 }: {
   messages: QueuedMessage[];
   sendingId: string | null;
   onSendNow(messageId: string): void;
+  cwd: string;
+  onDownload(path: string): Promise<void>;
 }) {
   if (!messages.length) return null;
   return (
     <section className="queued-messages" aria-label="Очередь сообщений">
       {messages.map((message) => (
         <article className="message userMessage queued-message" key={message.id}>
-          {message.text && <ReactMarkdown>{message.text}</ReactMarkdown>}
+          {message.text && (
+            <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />
+          )}
           {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
           <MessageFooter text={message.text} timestamp={message.createdAt} />
           <div className="queued-message-footer">
@@ -638,18 +1044,36 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
   );
 }
 
-export function TurnTiming({ turn }: { turn: TurnView }) {
+export function TurnTiming({
+  turn,
+  active = turn.status === "inProgress",
+}: {
+  turn: TurnView;
+  active?: boolean;
+}) {
   const startedAt = turn.startedAt ?? turn.progress.startedAt;
-  const elapsed = useElapsed(startedAt ?? 0, turn.status === "inProgress" && startedAt !== null);
-  if (startedAt === null) return null;
-  if (turn.status === "inProgress") {
-    return <div className="turn-timing">Codex работает {elapsed}</div>;
-  }
+  if (active) return <ActiveTurnStatus progress={{ ...turn.progress, startedAt }} />;
+  if (turn.status === "inProgress" || startedAt === null) return null;
   const duration =
     turn.durationMs ??
     (turn.completedAt === null ? null : Math.max(0, turn.completedAt - startedAt));
   return duration === null ? null : (
     <div className="turn-timing">Работал {formatDuration(duration)}</div>
+  );
+}
+
+function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
+  const startedAt = progress?.startedAt ?? null;
+  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null);
+  const label = progress?.explanation?.trim() || "Codex работает";
+  return (
+    <div className="turn-timing active" role="status">
+      <span className="spinner small" />
+      <span>
+        {label}
+        {startedAt !== null ? ` ${elapsed}` : "…"}
+      </span>
+    </div>
   );
 }
 
@@ -662,77 +1086,6 @@ export function formatMessageTime(timestamp: number): string {
   }).format(value);
   if (value.toDateString() === today.toDateString()) return time;
   return `${new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
-}
-
-function TurnProgressIndicator({ progress }: { progress?: TurnProgress }) {
-  const [fallbackStartedAt] = useState(Date.now);
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const startedAt = progress?.startedAt ?? fallbackStartedAt;
-  const elapsed = useElapsed(startedAt);
-  const steps = progress?.steps ?? [];
-  const currentIndex = steps.findIndex((step) => step.status === "inProgress");
-  const firstPending = steps.findIndex((step) => step.status === "pending");
-  const stepNumber =
-    currentIndex >= 0
-      ? currentIndex + 1
-      : firstPending >= 0
-        ? firstPending + 1
-        : Math.max(steps.length, 1);
-  const hasDiff = Boolean(
-    progress && (progress.filesChanged || progress.additions || progress.deletions),
-  );
-  useEffect(() => {
-    if (!open) return;
-    function closeOutside(event: PointerEvent) {
-      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("pointerdown", closeOutside);
-    return () => document.removeEventListener("pointerdown", closeOutside);
-  }, [open]);
-  return (
-    <div className={`turn-progress${open ? " open" : ""}`} ref={containerRef}>
-      <button
-        type="button"
-        className="turn-progress-summary"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="spinner small" />
-        <span>{steps.length ? `Шаг ${stepNumber} / ${steps.length}` : "Codex работает…"}</span>
-        {hasDiff && (
-          <span className="turn-progress-diff">
-            Изменено {formatFileCount(progress!.filesChanged)}
-            <b className="diff-add">+{progress!.additions}</b>
-            <b className="diff-delete">-{progress!.deletions}</b>
-          </span>
-        )}
-        <ChevronDownIcon />
-      </button>
-      {open && (
-        <div className="turn-progress-popover" onClick={() => setOpen(false)}>
-          <div className="turn-progress-time">
-            <ClockIcon /> Работает уже {elapsed}
-          </div>
-          {progress?.explanation && <p>{progress.explanation}</p>}
-          {steps.length ? (
-            <ol>
-              {steps.map((step) => (
-                <li className={`progress-step ${step.status}`} key={step.step}>
-                  <span />
-                  {step.step}
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p>Codex выполняет текущую задачу.</p>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function useElapsed(startedAt: number, active = true): string {
@@ -752,20 +1105,6 @@ function formatDuration(durationMs: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours) return `${hours}ч ${minutes % 60}м ${seconds % 60}с`;
   return minutes ? `${minutes}м ${seconds % 60}с` : `${seconds}с`;
-}
-
-function formatFileCount(count: number): string {
-  const modulo100 = count % 100;
-  const modulo10 = count % 10;
-  const suffix =
-    modulo100 >= 11 && modulo100 <= 14
-      ? "файлов"
-      : modulo10 === 1
-        ? "файл"
-        : modulo10 >= 2 && modulo10 <= 4
-          ? "файла"
-          : "файлов";
-  return `${count} ${suffix}`;
 }
 
 function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityItem[]> {

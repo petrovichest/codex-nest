@@ -26,12 +26,14 @@ beforeEach(() => {
 
 describe("NewSession", () => {
   it("creates a task from the empty chat and navigates to it", async () => {
+    const dispatch = vi.fn();
     const createThread = vi.fn().mockResolvedValue({
       thread: { id: "created" },
       turnId: "turn",
     });
     connection.mockReturnValue({
       api: { createThread },
+      dispatch,
       state: {
         snapshot: {
           connection: { state: "ready" },
@@ -59,7 +61,9 @@ describe("NewSession", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(textbox).toHaveFocus();
+    fireEvent.change(textbox, {
       target: { value: "Обнови интерфейс" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -68,11 +72,20 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Обнови интерфейс",
+        clientMessageId: expect.any(String),
         settings: {
           collaborationMode: "default",
         },
       }),
     );
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.objectContaining({
+        threadId: "created",
+        text: "Обнови интерфейс",
+        turnId: "turn",
+      }),
+    });
     expect(await screen.findByText("Созданная задача")).toBeInTheDocument();
   });
 
@@ -80,6 +93,7 @@ describe("NewSession", () => {
     const onNewProject = vi.fn();
     connection.mockReturnValue({
       api: { createThread: vi.fn() },
+      dispatch: vi.fn(),
       state: { snapshot: { connection: { state: "ready" }, models: [] }, network: "connected" },
     });
 
@@ -101,6 +115,7 @@ describe("NewSession", () => {
     });
     connection.mockReturnValue({
       api: { createThread },
+      dispatch: vi.fn(),
       state: {
         snapshot: {
           connection: { state: "ready" },
@@ -144,6 +159,7 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Продолжай глубоко рассуждать",
+        clientMessageId: expect.any(String),
         settings: {
           collaborationMode: "default",
           reasoningEffort: "high",
@@ -156,6 +172,7 @@ describe("NewSession", () => {
     const createThread = vi.fn().mockResolvedValue({ thread: { id: "created" }, turnId: "turn" });
     connection.mockReturnValue({
       api: { createThread },
+      dispatch: vi.fn(),
       state: {
         snapshot: {
           connection: { state: "ready" },
@@ -206,6 +223,7 @@ describe("NewSession", () => {
         projectId: "project",
         input: "Доведи проверяемый результат до конца",
         goal: true,
+        clientMessageId: expect.any(String),
         settings: { collaborationMode: "default" },
       }),
     );

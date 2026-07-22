@@ -32,22 +32,34 @@ export class MessageQueue {
     return this.list(threadId).length;
   }
 
-  async enqueue(threadId: string, text: string, images: string[] = []): Promise<QueuedMessage> {
+  async enqueue(
+    threadId: string,
+    text: string,
+    images: string[] = [],
+    messageId: string = randomUUID(),
+  ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
-      id: randomUUID(),
+      id: messageId,
       threadId,
       text: text.trim(),
       ...(images.length ? { images } : {}),
       createdAt: Date.now(),
       status: "queued",
     };
+    let stored = message;
     await this.store.update((state) => {
       state.messageQueues ??= {};
-      (state.messageQueues[threadId] ??= []).push(message);
+      const queue = (state.messageQueues[threadId] ??= []);
+      const existing = queue.find((candidate) => candidate.id === messageId);
+      if (existing) {
+        stored = existing;
+        return;
+      }
+      queue.push(message);
     });
     this.publish(threadId);
     void this.drain(threadId).catch(() => undefined);
-    return message;
+    return stored;
   }
 
   sendNow(threadId: string, messageId: string): Promise<string> {

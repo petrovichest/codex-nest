@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -297,6 +297,127 @@ describe("HTTP authentication", () => {
   });
 });
 
+describe("file downloads", () => {
+  it("issues short-lived tickets and confines downloads to the task directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-download-api-test-"));
+    directories.push(directory);
+    const taskRoot = join(directory, "task");
+    const nested = join(taskRoot, "build", "app-debug.apk");
+    const outside = join(directory, "outside.bin");
+    const locked = join(taskRoot, "locked.bin");
+    const escapedLink = join(taskRoot, "escaped.bin");
+    const swappable = join(taskRoot, "swappable.bin");
+    await mkdir(join(taskRoot, "build"), { recursive: true });
+    await Promise.all([
+      writeFile(nested, Buffer.from([0, 1, 2, 255])),
+      writeFile(outside, "outside"),
+      writeFile(locked, "locked"),
+      writeFile(swappable, "original"),
+    ]);
+    await symlink(outside, escapedLink);
+
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    projection.upsertThread({ ...testThread("download"), cwd: taskRoot });
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        projectRoot: directory,
+      },
+    );
+    const headers = { authorization: "Bearer correct" };
+    const issue = (path: string, requestHeaders: Record<string, string> = headers) =>
+      app.inject({
+        method: "POST",
+        url: "/api/v1/threads/download/downloads",
+        headers: requestHeaders,
+        payload: { path },
+      });
+
+    expect((await issue(nested, {})).statusCode).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/missing/downloads",
+          headers,
+          payload: { path: nested },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect((await issue(outside)).statusCode).toBe(403);
+    expect((await issue(escapedLink)).statusCode).toBe(403);
+    expect((await issue(taskRoot)).statusCode).toBe(400);
+    expect((await issue(join(taskRoot, "missing.bin"))).statusCode).toBe(404);
+
+    await chmod(locked, 0o000);
+    try {
+      expect((await issue(locked)).statusCode).toBe(403);
+    } finally {
+      await chmod(locked, 0o600);
+    }
+
+    const issued = await issue(nested);
+    expect(issued.statusCode).toBe(201);
+    expect(issued.json()).toMatchObject({
+      downloadUrl: expect.stringMatching(/^\/downloads\/[A-Za-z0-9_-]+\/app-debug\.apk$/),
+      expiresAt: expect.any(Number),
+    });
+    expect(issued.json().downloadUrl).not.toContain("correct");
+    expect(issued.json().downloadUrl).not.toContain(taskRoot);
+
+    const downloaded = await app.inject({ url: issued.json().downloadUrl });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.rawPayload).toEqual(Buffer.from([0, 1, 2, 255]));
+    expect(downloaded.headers["content-type"]).toBe("application/octet-stream");
+    expect(downloaded.headers["cache-control"]).toBe("private, no-store");
+    expect(downloaded.headers["content-disposition"]).toContain("attachment");
+    expect(downloaded.headers["content-disposition"]).toContain("app-debug.apk");
+    expect((await app.inject({ url: issued.json().downloadUrl })).statusCode).toBe(404);
+
+    const changedName = await issue(nested);
+    const tamperedUrl = String(changedName.json().downloadUrl).replace(
+      /app-debug\.apk$/,
+      "renamed.apk",
+    );
+    expect((await app.inject({ url: tamperedUrl })).statusCode).toBe(404);
+    expect((await app.inject({ url: changedName.json().downloadUrl })).statusCode).toBe(404);
+
+    const swapped = await issue(swappable);
+    await unlink(swappable);
+    await symlink(outside, swappable);
+    expect((await app.inject({ url: swapped.json().downloadUrl })).statusCode).toBe(404);
+
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const expiring = await issue(nested);
+      expect(expiring.json().expiresAt).toBe(61_000);
+      dateNow.mockReturnValue(61_001);
+      expect((await app.inject({ url: expiring.json().downloadUrl })).statusCode).toBe(404);
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    await app.close();
+  });
+});
+
 describe("thread settings", () => {
   it("persists settings on the server and maps plan mode into turn/start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-api-test-"));
@@ -527,12 +648,12 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/queue",
       headers,
-      payload: { input: "Поставь в очередь" },
+      payload: { input: "Поставь в очередь", clientMessageId: "client-queued" },
     });
     expect(queued.statusCode).toBe(202);
     expect(store.snapshot().messageQueues?.thread).toEqual([
       expect.objectContaining({
-        id: queued.json().id,
+        id: "client-queued",
         text: "Поставь в очередь",
         status: "queued",
       }),
@@ -543,6 +664,7 @@ describe("thread settings", () => {
       headers,
     });
     expect(sentNow.statusCode).toBe(200);
+    expect(queued.json().id).toBe("client-queued");
     expect(store.snapshot().messageQueues?.thread).toBeUndefined();
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],

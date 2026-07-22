@@ -4,12 +4,18 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type {
+  ActivityItem,
   Project,
   QueuedMessage,
   SessionSettings,
   TaskDefaults,
   ThreadOutcome,
 } from "@codexnest/protocol";
+
+export type TimelineArtifact = Extract<
+  ActivityItem,
+  { type: "userInputResponse" | "planChecklist" }
+>;
 
 export interface ThreadMetaState {
   pinned: boolean;
@@ -18,6 +24,8 @@ export interface ThreadMetaState {
   outcomeUpdatedAt?: number;
   settings?: SessionSettings;
   inheritCodexSettings?: boolean;
+  awaitingPlanResponse?: boolean;
+  timelineArtifacts?: Record<string, TimelineArtifact[]>;
 }
 
 export interface DeviceState {
@@ -179,7 +187,9 @@ function validateState(value: unknown): CodexNestState {
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
       (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||
       (meta.settings !== undefined && !isSessionSettings(meta.settings)) ||
-      (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean")
+      (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
+      (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
+      (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
@@ -209,6 +219,52 @@ function validateState(value: unknown): CodexNestState {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
   return value as unknown as CodexNestState;
+}
+
+function isTimelineArtifacts(value: unknown): value is Record<string, TimelineArtifact[]> {
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(
+    (items) => Array.isArray(items) && items.every(isTimelineArtifact),
+  );
+}
+
+function isTimelineArtifact(value: unknown): value is TimelineArtifact {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.timestamp !== "number" ||
+    (value.afterItemId !== null && typeof value.afterItemId !== "string")
+  ) {
+    return false;
+  }
+  if (value.type === "userInputResponse") {
+    return (
+      value.status === "completed" &&
+      Array.isArray(value.entries) &&
+      value.entries.every(
+        (entry) =>
+          isRecord(entry) &&
+          typeof entry.header === "string" &&
+          typeof entry.question === "string" &&
+          Array.isArray(entry.answers) &&
+          entry.answers.every((answer) => typeof answer === "string"),
+      )
+    );
+  }
+  if (value.type === "planChecklist") {
+    return (
+      ["inProgress", "completed", "failed"].includes(String(value.status)) &&
+      (value.explanation === null || typeof value.explanation === "string") &&
+      Array.isArray(value.steps) &&
+      value.steps.every(
+        (step) =>
+          isRecord(step) &&
+          typeof step.step === "string" &&
+          ["pending", "inProgress", "completed"].includes(String(step.status)),
+      )
+    );
+  }
+  return false;
 }
 
 function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessage {

@@ -12,24 +12,41 @@ import type {
 export interface ClientState {
   snapshot: AppSnapshot | null;
   details: Record<string, ThreadDetail>;
+  expandedHistory: Record<string, boolean>;
+  optimisticMessages: Record<string, OptimisticMessage[]>;
   goals: Record<string, ThreadGoal | null>;
   network: "connecting" | "connected" | "offline";
   error: string | null;
   snapshotEpoch: number;
 }
 
+export type OptimisticMessage = {
+  id: string;
+  threadId: string;
+  text: string;
+  images: string[];
+  createdAt: number;
+  destination: "turn" | "queue";
+  turnId: string | null;
+};
+
 export type ClientAction =
   | { type: "network"; network: ClientState["network"]; error?: string | null }
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
-  | { type: "detail"; detail: ThreadDetail }
+  | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "goal"; threadId: string; goal: ThreadGoal | null }
+  | { type: "optimistic.add"; message: OptimisticMessage }
+  | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
+  | { type: "optimistic.remove"; threadId: string; messageId: string }
   | { type: "clear" };
 
 export const initialState: ClientState = {
   snapshot: null,
   details: {},
+  expandedHistory: {},
+  optimisticMessages: {},
   goals: {},
   network: "connecting",
   error: null,
@@ -51,14 +68,31 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
         snapshotEpoch: state.snapshotEpoch + 1,
       };
     case "detail":
-      return {
-        ...state,
-        details: { ...state.details, [action.detail.summary.id]: action.detail },
-      };
+      return applyDetail(state, action.detail, action.page);
     case "thread":
       return applyThreadSummary(state, action.thread);
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
+    case "optimistic.add":
+      return {
+        ...state,
+        optimisticMessages: {
+          ...state.optimisticMessages,
+          [action.message.threadId]: [
+            ...(state.optimisticMessages[action.message.threadId] ?? []).filter(
+              (message) => message.id !== action.message.id,
+            ),
+            action.message,
+          ],
+        },
+      };
+    case "optimistic.accept":
+      return updateOptimisticMessage(state, action.threadId, action.messageId, (message) => ({
+        ...message,
+        turnId: action.turnId,
+      }));
+    case "optimistic.remove":
+      return removeOptimisticMessage(state, action.threadId, action.messageId);
     case "event":
       if (!state.snapshot) return state;
       return applyEvent(state, action.sequence, action.event);
@@ -88,6 +122,9 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       return {
         ...state,
         snapshot,
+        details: withoutKey(state.details, event.threadId),
+        expandedHistory: withoutKey(state.expandedHistory, event.threadId),
+        optimisticMessages: withoutKey(state.optimisticMessages, event.threadId),
         goals: Object.fromEntries(
           Object.entries(state.goals).filter(([threadId]) => threadId !== event.threadId),
         ),
@@ -114,15 +151,61 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         goals: { ...state.goals, [event.threadId]: event.goal },
       };
     case "activity.upserted":
-      return applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item);
+      return removeOptimisticMessage(
+        applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item),
+        event.threadId,
+        event.item.id,
+      );
     case "turn.progressed":
       return applyProgress({ ...state, snapshot }, event.threadId, event.turnId, event.progress);
     case "queue.changed":
-      return applyQueue({ ...state, snapshot }, event.threadId, event.messages);
+      return removeConfirmedQueuedMessages(
+        applyQueue({ ...state, snapshot }, event.threadId, event.messages),
+        event.threadId,
+        event.messages,
+      );
     case "resync.required":
       break;
   }
   return { ...state, snapshot };
+}
+
+function applyDetail(
+  state: ClientState,
+  detail: ThreadDetail,
+  page: "latest" | "older",
+): ClientState {
+  const threadId = detail.summary.id;
+  const current = state.details[threadId];
+  const expanded = state.expandedHistory[threadId] ?? false;
+  const merged = current
+    ? {
+        ...detail,
+        turns:
+          page === "older"
+            ? mergeTurns(detail.turns, current.turns)
+            : mergeTurns(current.turns, detail.turns),
+        olderTurnsCursor:
+          page === "latest" && expanded ? current.olderTurnsCursor : detail.olderTurnsCursor,
+      }
+    : detail;
+  const confirmedIds = new Set([
+    ...merged.queuedMessages.map((message) => message.id),
+    ...merged.turns.flatMap((turn) =>
+      turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
+    ),
+  ]);
+  return {
+    ...state,
+    details: { ...state.details, [threadId]: merged },
+    expandedHistory:
+      page === "older" ? { ...state.expandedHistory, [threadId]: true } : state.expandedHistory,
+    optimisticMessages: setOptimisticMessages(
+      state.optimisticMessages,
+      threadId,
+      (state.optimisticMessages[threadId] ?? []).filter((message) => !confirmedIds.has(message.id)),
+    ),
+  };
 }
 
 function applyThreadSummary(state: ClientState, thread: ThreadSummary): ClientState {
@@ -146,7 +229,7 @@ function applyActivity(
   turnId: string,
   item: ActivityItem,
 ): ClientState {
-  const detail = state.details[threadId];
+  const detail = detailForEvent(state, threadId);
   if (!detail) return state;
   const turns = [...detail.turns];
   const index = turns.findIndex((turn) => turn.id === turnId);
@@ -162,9 +245,64 @@ function applyActivity(
     });
   } else {
     const turn = turns[index];
-    turns[index] = { ...turn, items: upsert(turn.items, item) };
+    turns[index] = { ...turn, items: upsertActivity(turn.items, item) };
   }
   return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
+function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem[] {
+  const existing = items.findIndex((candidate) => candidate.id === item.id);
+  if (existing >= 0) {
+    const next = [...items];
+    next[existing] = item;
+    return next;
+  }
+  if (item.type !== "userInputResponse" && item.type !== "planChecklist") {
+    const anchoredArtifact = items.findIndex(
+      (candidate) =>
+        (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&
+        candidate.afterItemId === item.id,
+    );
+    if (anchoredArtifact < 0) return [...items, item];
+    const next = [...items];
+    next.splice(anchoredArtifact, 0, item);
+    return next;
+  }
+  const anchor = item.afterItemId
+    ? items.findIndex((candidate) => candidate.id === item.afterItemId)
+    : -1;
+  let insertion = anchor >= 0 ? anchor + 1 : fallbackActivityPosition(items, item.type);
+  while (insertion < items.length) {
+    const candidate = items[insertion];
+    if (
+      !candidate ||
+      (candidate.type !== "userInputResponse" && candidate.type !== "planChecklist") ||
+      candidate.afterItemId !== item.afterItemId
+    ) {
+      break;
+    }
+    insertion += 1;
+  }
+  const next = [...items];
+  next.splice(insertion, 0, item);
+  return next;
+}
+
+function fallbackActivityPosition(
+  items: ActivityItem[],
+  type: "userInputResponse" | "planChecklist",
+): number {
+  if (type === "userInputResponse") {
+    const finalResponse = items.findIndex(
+      (item) =>
+        item.type === "plan" || (item.type === "agentMessage" && item.phase === "final_answer"),
+    );
+    if (finalResponse >= 0) return finalResponse;
+    return items.length;
+  }
+  let insertion = 0;
+  while (items[insertion]?.type === "userMessage") insertion += 1;
+  return insertion;
 }
 
 function applyProgress(
@@ -173,7 +311,7 @@ function applyProgress(
   turnId: string,
   progress: ThreadDetail["turns"][number]["progress"],
 ): ClientState {
-  const detail = state.details[threadId];
+  const detail = detailForEvent(state, threadId);
   if (!detail) return state;
   const turns = [...detail.turns];
   const index = turns.findIndex((turn) => turn.id === turnId);
@@ -198,7 +336,7 @@ function applyQueue(
   threadId: string,
   queuedMessages: QueuedMessage[],
 ): ClientState {
-  const detail = state.details[threadId];
+  const detail = detailForEvent(state, threadId);
   if (!detail) return state;
   return {
     ...state,
@@ -207,6 +345,95 @@ function applyQueue(
       [threadId]: { ...detail, queuedMessages },
     },
   };
+}
+
+function detailForEvent(state: ClientState, threadId: string): ThreadDetail | undefined {
+  const existing = state.details[threadId];
+  if (existing) return existing;
+  const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
+  return summary ? { summary, turns: [], queuedMessages: [], olderTurnsCursor: null } : undefined;
+}
+
+function mergeTurns(
+  first: ThreadDetail["turns"],
+  second: ThreadDetail["turns"],
+): ThreadDetail["turns"] {
+  const result = [...first];
+  for (const turn of second) {
+    const index = result.findIndex((candidate) => candidate.id === turn.id);
+    if (index < 0) result.push(turn);
+    else result[index] = turn;
+  }
+  return result;
+}
+
+function updateOptimisticMessage(
+  state: ClientState,
+  threadId: string,
+  messageId: string,
+  update: (message: OptimisticMessage) => OptimisticMessage,
+): ClientState {
+  const messages = state.optimisticMessages[threadId] ?? [];
+  if (!messages.some((message) => message.id === messageId)) return state;
+  return {
+    ...state,
+    optimisticMessages: setOptimisticMessages(
+      state.optimisticMessages,
+      threadId,
+      messages.map((message) => (message.id === messageId ? update(message) : message)),
+    ),
+  };
+}
+
+function removeOptimisticMessage(
+  state: ClientState,
+  threadId: string,
+  messageId: string,
+): ClientState {
+  const messages = state.optimisticMessages[threadId] ?? [];
+  if (!messages.some((message) => message.id === messageId)) return state;
+  return {
+    ...state,
+    optimisticMessages: setOptimisticMessages(
+      state.optimisticMessages,
+      threadId,
+      messages.filter((message) => message.id !== messageId),
+    ),
+  };
+}
+
+function removeConfirmedQueuedMessages(
+  state: ClientState,
+  threadId: string,
+  messages: QueuedMessage[],
+): ClientState {
+  const confirmedIds = new Set(messages.map((message) => message.id));
+  if (!confirmedIds.size) return state;
+  const optimistic = state.optimisticMessages[threadId] ?? [];
+  return {
+    ...state,
+    optimisticMessages: setOptimisticMessages(
+      state.optimisticMessages,
+      threadId,
+      optimistic.filter((message) => !confirmedIds.has(message.id)),
+    ),
+  };
+}
+
+function setOptimisticMessages(
+  all: ClientState["optimisticMessages"],
+  threadId: string,
+  messages: OptimisticMessage[],
+): ClientState["optimisticMessages"] {
+  if (messages.length) return { ...all, [threadId]: messages };
+  return withoutKey(all, threadId);
+}
+
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function emptyProgress(): ThreadDetail["turns"][number]["progress"] {

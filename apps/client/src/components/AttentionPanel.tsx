@@ -286,9 +286,11 @@ function UserInputForm({
               />
             )}
           </fieldset>
-          <button className="primary" disabled={busy || !currentAnswer}>
-            {isLastQuestion ? "Отправить ответы" : "Далее"}
-          </button>
+          <div className="user-input-actions">
+            <button className="primary" disabled={busy || !currentAnswer}>
+              {isLastQuestion ? "Отправить ответы" : "Далее"}
+            </button>
+          </div>
         </>
       )}
     </form>

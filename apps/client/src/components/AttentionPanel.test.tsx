@@ -88,6 +88,9 @@ describe("AttentionPanel", () => {
     expect(screen.getByText("Где хранить вложения?")).toBeInTheDocument();
     expect(screen.queryByText("Как выбирать изображение?")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Далее" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Далее" }).parentElement).toHaveClass(
+      "user-input-actions",
+    );
 
     fireEvent.click(screen.getByRole("radio", { name: /На сервере/ }));
     fireEvent.click(screen.getByRole("button", { name: "Далее" }));

@@ -4,11 +4,14 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type { AttentionRequest, ThreadSummary, TurnProgress } from "@codexnest/protocol";
 
+import type { OptimisticMessage } from "../state";
 import { Activity, ThreadPage, TurnTiming, formatMessageTime } from "./ThreadPage";
 
 const connection = vi.hoisted(() => vi.fn());
+const openDownloadUrl = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
+vi.mock("../downloads", () => ({ openDownloadUrl }));
 
 const summary: ThreadSummary = {
   id: "thread",
@@ -28,6 +31,7 @@ const summary: ThreadSummary = {
 };
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
 });
 
@@ -80,6 +84,50 @@ describe("Activity", () => {
     );
     expect(screen.getByText("Проверяю")).toBeInTheDocument();
     expect(screen.queryByText("Ход работы")).not.toBeInTheDocument();
+  });
+
+  it("renders GFM tables and task lists", () => {
+    const view = render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "markdown",
+          status: "completed",
+          text: "| Поле | Значение |\n| --- | --- |\n| Статус | Готово |\n\n- [x] Проверено",
+          images: [],
+          timestamp: null,
+          phase: "final_answer",
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Поле" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "" })).toBeChecked();
+    expect(view.container.querySelector(".markdown-table-scroll")).not.toBeNull();
+  });
+
+  it("renders submitted questions and answers as one user message", () => {
+    render(
+      <Activity
+        item={{
+          type: "userInputResponse",
+          id: "answers",
+          status: "completed",
+          entries: [
+            { header: "Хранение", question: "Где хранить?", answers: ["На сервере"] },
+            { header: "Токен", question: "Какой токен?", answers: ["secret-value"] },
+          ],
+          timestamp: Date.now(),
+          afterItemId: "request",
+        }}
+      />,
+    );
+
+    const article = screen.getByText("Где хранить?").closest("article");
+    expect(article).toHaveClass("userMessage", "user-input-response");
+    expect(screen.getByText("На сервере")).toBeInTheDocument();
+    expect(screen.getByText("secret-value")).toBeInTheDocument();
   });
 
   it("omits empty text activities and hides copy for image-only messages", () => {
@@ -213,6 +261,108 @@ describe("Activity", () => {
     }
   });
 
+  it("downloads task file links once and leaves other links unchanged", async () => {
+    const api = threadApi();
+    let resolveTicket: ((ticket: { downloadUrl: string; expiresAt: number }) => void) | undefined;
+    api.createDownload.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveTicket = resolve;
+        }),
+    );
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: [
+                "[Скачать APK](/work/project/build/app-debug.apk)",
+                "[Внешняя ссылка](https://example.com/file.apk)",
+                "[Раздел приложения](/settings)",
+              ].join("\n\n"),
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    const fileLink = screen.getByRole("link", { name: "Скачать APK" });
+    fireEvent.click(fileLink);
+    fireEvent.click(fileLink);
+    expect(api.createDownload).toHaveBeenCalledTimes(1);
+    expect(api.createDownload).toHaveBeenCalledWith("thread", "/work/project/build/app-debug.apk");
+    expect(fileLink).toHaveAttribute("aria-busy", "true");
+
+    resolveTicket?.({ downloadUrl: "/downloads/ticket/app-debug.apk", expiresAt: 61_000 });
+    await waitFor(() =>
+      expect(openDownloadUrl).toHaveBeenCalledWith(
+        "https://codex.home.arpa",
+        "/downloads/ticket/app-debug.apk",
+      ),
+    );
+    expect(fileLink).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByRole("link", { name: "Внешняя ссылка" })).toHaveAttribute(
+      "href",
+      "https://example.com/file.apk",
+    );
+    expect(screen.getByRole("link", { name: "Раздел приложения" })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+  });
+
+  it("shows a retryable error when a file ticket cannot be issued", async () => {
+    const api = threadApi();
+    api.createDownload
+      .mockRejectedValueOnce(new Error("unavailable"))
+      .mockResolvedValueOnce({ downloadUrl: "/downloads/retry/file.txt", expiresAt: 61_000 });
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: "[Скачать файл](/work/project/file.txt)",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    const link = screen.getByRole("link", { name: "Скачать файл" });
+    fireEvent.click(link);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скачать файл");
+
+    fireEvent.click(link);
+    await waitFor(() => expect(openDownloadUrl).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {
     const api = threadApi();
     mockThreadConnection(api, summary);
@@ -223,7 +373,10 @@ describe("Activity", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
     await waitFor(() =>
-      expect(api.startTurn).toHaveBeenCalledWith("thread", { input: "Продолжай" }),
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Продолжай", clientMessageId: expect.any(String) }),
+      ),
     );
 
     fireEvent.click(screen.getByLabelText("Действия с задачей"));
@@ -332,15 +485,34 @@ describe("Activity", () => {
 
   it("queues and interrupts a running task", async () => {
     const api = threadApi();
-    mockThreadConnection(api, { ...summary, state: "running", currentTurnId: "turn" });
+    const context = mockThreadConnection(api, {
+      ...summary,
+      state: "running",
+      currentTurnId: "turn",
+    });
     renderThread();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Направить текущую задачу" }), {
+    const textbox = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+    fireEvent.change(textbox, {
       target: { value: "Сначала проверь тесты" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
+    expect(textbox).toHaveValue("");
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.objectContaining({
+        text: "Сначала проверь тесты",
+        destination: "queue",
+      }),
+    });
     await waitFor(() =>
-      expect(api.enqueue).toHaveBeenCalledWith("thread", { input: "Сначала проверь тесты" }),
+      expect(api.enqueue).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          input: "Сначала проверь тесты",
+          clientMessageId: expect.any(String),
+        }),
+      ),
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
@@ -457,8 +629,22 @@ describe("Activity", () => {
 
     fireEvent.keyDown(textarea, { key: "Enter" });
     await waitFor(() =>
-      expect(api.startTurn).toHaveBeenCalledWith("thread", { input: "Сообщение" }),
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Сообщение", clientMessageId: expect.any(String) }),
+      ),
     );
+  });
+
+  it("focuses the composer only when navigation marks the session as newly created", () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary);
+    const view = renderThread({ focusComposer: true });
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveFocus();
+
+    view.unmount();
+    renderThread();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveFocus();
   });
 
   it("accepts a completed plan without offering a reject action", async () => {
@@ -500,7 +686,13 @@ describe("Activity", () => {
         collaborationMode: "default",
       }),
     );
-    expect(api.startTurn).toHaveBeenCalledWith("thread", { input: "Да, реализуй этот план" });
+    expect(api.startTurn).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({
+        input: "Да, реализуй этот план",
+        clientMessageId: expect.any(String),
+      }),
+    );
   });
 
   it("shows server-owned queued messages and sends one immediately", async () => {
@@ -524,7 +716,7 @@ describe("Activity", () => {
     await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "queued"));
   });
 
-  it("shows the current plan step and turn diff above the composer", () => {
+  it("shows the live plan checklist inside the turn without a composer status pill", () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
     mockThreadConnection(api, running, {
@@ -547,24 +739,34 @@ describe("Activity", () => {
             additions: 12,
             deletions: 3,
           },
-          items: [],
+          items: [
+            {
+              type: "planChecklist",
+              id: "turn-plan-checklist",
+              status: "inProgress",
+              explanation: "Проверяем изменения",
+              steps: [
+                { step: "Прочитать код", status: "completed" },
+                { step: "Исправить чат", status: "inProgress" },
+                { step: "Запустить тесты", status: "pending" },
+              ],
+              timestamp: Date.now(),
+              afterItemId: null,
+            },
+          ],
         },
       ],
     });
     renderThread();
 
-    expect(screen.getByText("Шаг 2 / 3")).toBeInTheDocument();
-    expect(screen.getByText("Изменено 2 файла")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Шаг 2 / 3"));
+    expect(screen.getByText("Ход работы")).toBeInTheDocument();
+    expect(screen.getByText("Прочитать код")).toBeInTheDocument();
     expect(screen.getByText("Исправить чат")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Исправить чат"));
-    expect(screen.queryByText("Исправить чат")).toBeNull();
-    fireEvent.click(screen.getByText("Шаг 2 / 3"));
-    fireEvent.click(screen.getByText("Шаг 2 / 3"));
-    expect(screen.queryByText("Исправить чат")).toBeNull();
-    fireEvent.click(screen.getByText("Шаг 2 / 3"));
-    fireEvent.pointerDown(document.body);
-    expect(screen.queryByText("Исправить чат")).toBeNull();
+    expect(screen.getByText("Запустить тесты")).toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(3);
+    expect(screen.getAllByRole("checkbox")[0]).toBeChecked();
+    expect(screen.getAllByText("Проверяем изменения").length).toBeGreaterThanOrEqual(1);
+    expect(document.querySelector(".turn-progress")).toBeNull();
   });
 
   it("does not leave timeline gaps for empty streamed activities", () => {
@@ -658,6 +860,138 @@ describe("Activity", () => {
     expect(attention.closest(".timeline")).not.toBeNull();
   });
 
+  it("renders an optimistic message before the running indicator while startTurn is pending", async () => {
+    let resolveStart: ((value: { turnId: string }) => void) | undefined;
+    const api = threadApi();
+    api.startTurn.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const context = mockThreadConnection(api, summary);
+    const view = renderThread();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textbox, { target: { value: "Появись сразу" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(textbox).toHaveValue("");
+    const optimistic = context.dispatch.mock.calls.find(
+      ([action]) => action.type === "optimistic.add",
+    )?.[0].message;
+    expect(optimistic).toMatchObject({
+      text: "Появись сразу",
+      destination: "turn",
+    });
+
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    context.state.snapshot.threads = [running];
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      summary: running,
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: Date.now(),
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [],
+        },
+      ],
+    };
+    context.state.optimisticMessages.thread = [optimistic];
+    view.rerender(threadRoute());
+
+    const message = screen.getByText("Появись сразу").closest("article")!;
+    const timing = view.container.querySelector(".turn-timing")!;
+    expect(message.compareDocumentPosition(timing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => resolveStart?.({ turnId: "turn" }));
+  });
+
+  it("loads older turns near the top and preserves the visible scroll position", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, { olderTurnsCursor: "older-page" });
+    let scrollHeight = 1_000;
+    context.loadOlderDetail.mockImplementation(async () => {
+      scrollHeight = 1_300;
+      const current = context.state.details.thread;
+      context.state.details.thread = {
+        ...current,
+        turns: [
+          {
+            id: "older",
+            status: "completed",
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            progress: progress(),
+            items: [],
+          },
+          ...current.turns,
+        ],
+        olderTurnsCursor: null,
+      };
+      return context.state.details.thread;
+    });
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, get: () => scrollHeight });
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, get: () => 500 });
+    scroll.scrollTop = 50;
+
+    fireEvent.scroll(scroll);
+
+    await waitFor(() =>
+      expect(context.loadOlderDetail).toHaveBeenCalledWith("thread", "older-page"),
+    );
+    await waitFor(() => expect(scroll.scrollTop).toBe(350));
+  });
+
+  it("does not reload history for a reconnect snapshot epoch", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary);
+    const view = renderThread();
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(1));
+
+    context.state.snapshotEpoch += 1;
+    view.rerender(threadRoute());
+
+    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a fallback working row and refreshes only when turn details disagree", async () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "missing-turn" };
+    const context = mockThreadConnection(api, running);
+    const view = renderThread();
+
+    expect(screen.getByText("Codex работает…")).toBeInTheDocument();
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalled());
+
+    context.state.snapshot.threads = [{ ...running, state: "completed", currentTurnId: null }];
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      summary: { ...running, state: "completed", currentTurnId: null },
+      turns: [
+        {
+          id: "stale-turn",
+          status: "inProgress",
+          startedAt: Date.now(),
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+    expect(screen.queryByText(/Codex работает/)).toBeNull();
+  });
+
   it("opens a loaded conversation at the bottom", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
       configurable: true,
@@ -672,13 +1006,13 @@ describe("Activity", () => {
   });
 });
 
-function renderThread() {
-  return render(threadRoute());
+function renderThread(state?: Record<string, unknown>) {
+  return render(threadRoute(state));
 }
 
-function threadRoute() {
+function threadRoute(state?: Record<string, unknown>) {
   return (
-    <MemoryRouter initialEntries={["/threads/thread"]}>
+    <MemoryRouter initialEntries={[{ pathname: "/threads/thread", state }]}>
       <Routes>
         <Route
           path="/threads/:threadId"
@@ -692,6 +1026,11 @@ function threadRoute() {
 
 function threadApi() {
   return {
+    settings: { baseUrl: "https://codex.home.arpa", token: "secret" },
+    createDownload: vi.fn().mockResolvedValue({
+      downloadUrl: "/downloads/ticket/file.bin",
+      expiresAt: Date.now() + 60_000,
+    }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
     enqueue: vi.fn().mockResolvedValue({ id: "queued" }),
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
@@ -736,6 +1075,7 @@ function mockThreadConnection(
       createdAt: number;
       status: "queued" | "dispatching";
     }>;
+    olderTurnsCursor: string | null;
     attention: AttentionRequest[];
   }> = {},
 ) {
@@ -743,6 +1083,7 @@ function mockThreadConnection(
     summary: thread,
     turns: detailPatch.turns ?? [],
     queuedMessages: detailPatch.queuedMessages ?? [],
+    olderTurnsCursor: detailPatch.olderTurnsCursor ?? null,
   };
   const value = {
     api,
@@ -773,10 +1114,13 @@ function mockThreadConnection(
         connection: { state: "ready" },
       },
       details: { thread: detail },
+      expandedHistory: {},
+      optimisticMessages: {} as Record<string, OptimisticMessage[]>,
       network: "connected",
       snapshotEpoch: 1,
     },
     refreshDetail: vi.fn().mockResolvedValue(detail),
+    loadOlderDetail: vi.fn().mockResolvedValue(detail),
     dispatch: vi.fn(),
   };
   connection.mockReturnValue(value);

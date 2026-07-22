@@ -67,6 +67,16 @@ describe("MessageQueue", () => {
     expect(delivery.steer).toHaveBeenCalledWith("thread", "active", message);
   });
 
+  it("deduplicates retries with the same client message id", async () => {
+    const { queue } = await setup("active");
+
+    const first = await queue.enqueue("thread", "Один раз", [], "client-message");
+    const retry = await queue.enqueue("thread", "Один раз", [], "client-message");
+
+    expect(retry).toEqual(first);
+    expect(queue.list("thread")).toEqual([first]);
+  });
+
   it("reconciles dispatching messages after a restart", async () => {
     const { queue, store, delivery } = await setup("active");
     const delivered = queued("delivered", "Доставлено", "dispatching");

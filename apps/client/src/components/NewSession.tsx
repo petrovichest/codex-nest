@@ -11,6 +11,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import type { OptimisticMessage } from "../state";
 import { Composer, type ComposerImage } from "./Composer";
 import { NewTaskIcon } from "./Icons";
 import { NewSessionInspector } from "./SessionInspector";
@@ -25,7 +26,7 @@ export function NewSession({
   onOpenNavigation(): void;
   onNewProject(): void;
 }) {
-  const { api, state } = useConnection();
+  const { api, state, dispatch } = useConnection();
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
@@ -56,6 +57,8 @@ export function NewSession({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!projectId || (!input.trim() && !images.length) || (goalMode && !input.trim())) return;
+    const clientMessageId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    const createdAt = Date.now();
     setBusy(true);
     setError(null);
     try {
@@ -64,6 +67,7 @@ export function NewSession({
         input,
         ...(images.length ? { images: images.map((image) => image.url) } : {}),
         ...(goalMode ? { goal: true } : {}),
+        clientMessageId,
         settings: {
           ...settings,
           ...(settings.reasoningEffort === undefined && state.snapshot?.defaultReasoningEffort
@@ -71,8 +75,24 @@ export function NewSession({
             : {}),
         },
       });
+      dispatch({ type: "thread", thread: result.thread });
+      dispatch({
+        type: "optimistic.add",
+        message: {
+          id: clientMessageId,
+          threadId: result.thread.id,
+          text: input.trim(),
+          images: images.map((image) => image.url),
+          createdAt,
+          destination: "turn",
+          turnId: result.turnId,
+        } satisfies OptimisticMessage,
+      });
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
-        state: result.goalWarning ? { notice: result.goalWarning } : undefined,
+        state: {
+          focusComposer: true,
+          ...(result.goalWarning ? { notice: result.goalWarning } : {}),
+        },
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось создать задачу");
@@ -98,6 +118,7 @@ export function NewSession({
           <p>Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.</p>
         </div>
         <Composer
+          autoFocus
           input={input}
           onInput={setInput}
           images={images}

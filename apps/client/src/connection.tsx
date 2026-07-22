@@ -24,6 +24,7 @@ interface ConnectionContextValue {
   state: ClientState;
   dispatch: Dispatch<ClientAction>;
   refreshDetail(threadId: string): Promise<ThreadDetail>;
+  loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
   reconnect(): void;
 }
 
@@ -37,15 +38,32 @@ export function ConnectionProvider({
   const [state, dispatch] = useReducer(clientReducer, initialState);
   const [generation, setGeneration] = useState(0);
   const sequence = useRef<number | null>(null);
+  const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
 
   const reconnect = useCallback(() => setGeneration((value) => value + 1), []);
-  const refreshDetail = useCallback(
-    async (threadId: string) => {
-      const detail = await api.readThread(threadId);
-      dispatch({ type: "detail", detail });
-      return detail;
+  const readDetail = useCallback(
+    (threadId: string, cursor?: string) => {
+      const key = JSON.stringify([threadId, cursor ?? null]);
+      const current = detailRequests.current.get(key);
+      if (current) return current;
+      const request = api
+        .readThread(threadId, cursor)
+        .then((detail) => {
+          dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
+          return detail;
+        })
+        .finally(() => {
+          if (detailRequests.current.get(key) === request) detailRequests.current.delete(key);
+        });
+      detailRequests.current.set(key, request);
+      return request;
     },
     [api],
+  );
+  const refreshDetail = useCallback((threadId: string) => readDetail(threadId), [readDetail]);
+  const loadOlderDetail = useCallback(
+    (threadId: string, cursor: string) => readDetail(threadId, cursor),
+    [readDetail],
   );
 
   useEffect(() => {
@@ -134,8 +152,8 @@ export function ConnectionProvider({
   }, [api, reconnect]);
 
   const value = useMemo(
-    () => ({ api, state, dispatch, refreshDetail, reconnect }),
-    [api, state, refreshDetail, reconnect],
+    () => ({ api, state, dispatch, refreshDetail, loadOlderDetail, reconnect }),
+    [api, state, refreshDetail, loadOlderDetail, reconnect],
   );
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;
 }

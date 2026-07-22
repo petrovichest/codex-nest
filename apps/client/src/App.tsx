@@ -316,7 +316,9 @@ function Sidebar({
     try {
       const result = await api.createProjectThread(projectId);
       onClose();
-      navigate(`/threads/${encodeURIComponent(result.thread.id)}`);
+      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
+        state: { focusComposer: true },
+      });
     } catch (caught) {
       setCreateError({
         projectId,

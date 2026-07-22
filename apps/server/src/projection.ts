@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ActivityItem,
+  AttentionRequest,
+  AttentionResponse,
   AppSnapshot,
   ModelOption,
   Project,
@@ -23,15 +25,10 @@ import type { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
-import {
-  parseModelList,
-  parseThreadList,
-  parseThreadRead,
-  parseThreadResume,
-  parseTurnsList,
-} from "./codex/guards";
+import { parseModelList, parseThreadList, parseThreadResume, parseTurnsList } from "./codex/guards";
 import { projectForCwd } from "./projects";
 import type { StateStore } from "./state/store";
+import type { TimelineArtifact } from "./state/store";
 
 interface CachedThread {
   thread: Thread;
@@ -39,6 +36,8 @@ interface CachedThread {
   currentTurnId: string | null;
   liveOutcome?: ThreadOutcome;
 }
+
+const THREAD_TURN_PAGE_SIZE = 20;
 
 export class AppProjection extends EventEmitter {
   private readonly threads = new Map<string, CachedThread>();
@@ -146,35 +145,42 @@ export class AppProjection extends EventEmitter {
     return this.syncPromise;
   }
 
-  async readThread(id: string): Promise<ThreadDetail> {
+  async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
     if (local && this.unmaterializedThreads.has(id)) {
       return {
         summary: this.toSummary(local),
         turns: [],
         queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
+        olderTurnsCursor: null,
       };
     }
-    const result = parseThreadRead(
+    const page = parseTurnsList(
       await this.bridge.request<unknown>(
-        "thread/read",
-        { threadId: id, includeTurns: true },
+        "thread/turns/list",
+        {
+          threadId: id,
+          cursor,
+          limit: THREAD_TURN_PAGE_SIZE,
+          sortDirection: "desc",
+          itemsView: "full",
+        },
         30_000,
       ),
     );
-    const cached = this.threads.get(id) ?? {
-      thread: result.thread,
-      archived: false,
-      currentTurnId: null,
-    };
-    cached.thread = result.thread;
-    this.threads.set(id, cached);
+    const cached = this.threads.get(id);
+    if (!cached) throw new Error("Thread not found");
+    const artifacts = this.store.snapshot().threadMeta[id]?.timelineArtifacts ?? {};
     return {
       summary: this.toSummary(cached),
-      turns: result.thread.turns.map((turn) =>
-        normalizeTurn(turn, this.progress.get(turnKey(id, turn.id))),
-      ),
+      turns: page.data
+        .slice()
+        .reverse()
+        .map((turn) =>
+          normalizeTurn(turn, this.progress.get(turnKey(id, turn.id)), artifacts[turn.id] ?? []),
+        ),
       queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
+      olderTurnsCursor: page.nextCursor,
     };
   }
 
@@ -251,12 +257,11 @@ export class AppProjection extends EventEmitter {
   }
 
   upsertThread(thread: Thread, archived = false): ThreadSummary {
-    const previous = this.threads.get(thread.id);
     const cached = {
       thread,
       archived,
-      currentTurnId: previous?.currentTurnId ?? activeTurnId(thread),
-      liveOutcome: previous?.liveOutcome,
+      currentTurnId: activeTurnId(thread),
+      liveOutcome: this.threads.get(thread.id)?.liveOutcome,
     };
     this.threads.set(thread.id, cached);
     this.publishThread(thread.id);
@@ -276,14 +281,84 @@ export class AppProjection extends EventEmitter {
     this.unmaterializedThreads.delete(threadId);
   }
 
-  setCurrentTurn(threadId: string, turnId: string): void {
+  async setCurrentTurn(threadId: string, turnId: string): Promise<void> {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
     cached.currentTurnId = turnId;
     cached.liveOutcome = undefined;
     cached.thread.status = { type: "active", activeFlags: [] };
     cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+    if (this.store.snapshot().threadMeta[threadId]?.awaitingPlanResponse) {
+      await this.store.update((state) => {
+        const meta = state.threadMeta[threadId];
+        if (meta) meta.awaitingPlanResponse = false;
+      });
+    }
     this.publishThread(threadId);
+  }
+
+  async recordAttentionResponse(
+    request: AttentionRequest,
+    response: AttentionResponse,
+  ): Promise<void> {
+    if (
+      request.kind !== "userInput" ||
+      response.kind !== "userInput" ||
+      !request.threadId ||
+      !request.turnId
+    ) {
+      return;
+    }
+    const item: TimelineArtifact = {
+      type: "userInputResponse",
+      id: `${request.itemId ?? request.id}-response`,
+      status: "completed",
+      entries: request.questions.map((question) => ({
+        header: question.header,
+        question: question.question,
+        answers: response.answers[question.id] ?? [],
+      })),
+      timestamp: Date.now(),
+      afterItemId: request.itemId,
+    };
+    await this.upsertTimelineArtifact(request.threadId, request.turnId, item);
+  }
+
+  private async upsertTimelineArtifact(
+    threadId: string,
+    turnId: string,
+    item: TimelineArtifact,
+  ): Promise<void> {
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.timelineArtifacts ??= {};
+      const items = meta.timelineArtifacts[turnId] ?? [];
+      const index = items.findIndex((candidate) => candidate.id === item.id);
+      meta.timelineArtifacts[turnId] =
+        index < 0
+          ? [...items, item]
+          : items.map((candidate, itemIndex) => (itemIndex === index ? item : candidate));
+      state.threadMeta[threadId] = meta;
+    });
+    this.activity.set(activityKey(threadId, turnId, item.id), item);
+    this.publish({ type: "activity.upserted", threadId, turnId, item });
+  }
+
+  private latestActivityId(threadId: string, turnId: string): string | null {
+    const prefix = `${threadId}:${turnId}:`;
+    let latest: string | null = null;
+    for (const [key, item] of this.activity.entries()) {
+      if (key.startsWith(prefix) && item.type !== "planChecklist") latest = item.id;
+    }
+    return latest;
+  }
+
+  private hasLivePlan(threadId: string, turnId: string): boolean {
+    const prefix = `${threadId}:${turnId}:`;
+    for (const [key, item] of this.activity.entries()) {
+      if (key.startsWith(prefix) && item.type === "plan" && item.text.trim()) return true;
+    }
+    return false;
   }
 
   private async performSync(): Promise<void> {
@@ -299,7 +374,7 @@ export class AppProjection extends EventEmitter {
       this.threads.set(thread.id, {
         thread,
         archived: false,
-        currentTurnId: reconciledTurnId(thread, this.threads.get(thread.id)?.currentTurnId),
+        currentTurnId: activeTurnId(thread),
       });
       this.hydrateLiveTurn(thread);
     }
@@ -308,7 +383,7 @@ export class AppProjection extends EventEmitter {
       this.threads.set(thread.id, {
         thread,
         archived: true,
-        currentTurnId: reconciledTurnId(thread, this.threads.get(thread.id)?.currentTurnId),
+        currentTurnId: activeTurnId(thread),
       });
     }
     for (const id of this.threads.keys()) {
@@ -403,7 +478,17 @@ export class AppProjection extends EventEmitter {
       if (cached.thread.status.type !== "idle") continue;
       const updatedAt = cached.thread.updatedAt * 1_000;
       const meta = state.threadMeta[cached.thread.id];
-      if (meta?.outcomeUpdatedAt === updatedAt) continue;
+      if (meta?.outcomeUpdatedAt === updatedAt && meta.awaitingPlanResponse !== undefined) {
+        continue;
+      }
+      const planMode = meta?.settings?.collaborationMode === "plan";
+      if (meta?.outcomeUpdatedAt === updatedAt && !planMode) {
+        await this.store.update((draft) => {
+          const item = draft.threadMeta[cached.thread.id];
+          if (item) item.awaitingPlanResponse = false;
+        });
+        continue;
+      }
       const page = parseTurnsList(
         await this.bridge.request<unknown>(
           "thread/turns/list",
@@ -411,12 +496,15 @@ export class AppProjection extends EventEmitter {
             threadId: cached.thread.id,
             limit: 1,
             sortDirection: "desc",
-            itemsView: "notLoaded",
+            itemsView: planMode ? "full" : "notLoaded",
           },
           30_000,
         ),
       );
-      const outcome = normalizeOutcome(page.data[0]?.status);
+      const latestTurn = page.data[0];
+      const outcome = normalizeOutcome(latestTurn?.status);
+      const awaitingPlanResponse =
+        planMode && outcome === "completed" && Boolean(latestTurn && turnContainsPlan(latestTurn));
       await this.store.update((draft) => {
         const item = draft.threadMeta[cached.thread.id] ?? {
           pinned: false,
@@ -424,6 +512,7 @@ export class AppProjection extends EventEmitter {
         };
         item.lastOutcome = outcome;
         item.outcomeUpdatedAt = updatedAt;
+        item.awaitingPlanResponse = awaitingPlanResponse;
         draft.threadMeta[cached.thread.id] = item;
       });
     }
@@ -464,6 +553,7 @@ export class AppProjection extends EventEmitter {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
           cached.thread.status = notification.params.status;
+          if (notification.params.status.type !== "active") cached.currentTurnId = null;
           this.publishThread(notification.params.threadId);
         }
         break;
@@ -527,7 +617,7 @@ export class AppProjection extends EventEmitter {
           progress,
         });
         if (this.threads.has(notification.params.threadId)) {
-          this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
+          await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }
         break;
       }
@@ -541,6 +631,9 @@ export class AppProjection extends EventEmitter {
           cached.thread.status = { type: "idle" };
           cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
           const updatedAt = cached.thread.updatedAt * 1_000;
+          const hasPlan =
+            turnContainsPlan(notification.params.turn) ||
+            this.hasLivePlan(notification.params.threadId, notification.params.turn.id);
           await this.store.update((state) => {
             const meta = state.threadMeta[cached.thread.id] ?? {
               pinned: false,
@@ -548,6 +641,19 @@ export class AppProjection extends EventEmitter {
             };
             meta.lastOutcome = outcome;
             meta.outcomeUpdatedAt = updatedAt;
+            meta.awaitingPlanResponse =
+              outcome === "completed" && meta.settings?.collaborationMode === "plan" && hasPlan;
+            const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
+            if (artifacts) {
+              meta.timelineArtifacts![notification.params.turn.id] = artifacts.map((item) =>
+                item.type === "planChecklist"
+                  ? {
+                      ...item,
+                      status: outcome === "failed" ? "failed" : "completed",
+                    }
+                  : item,
+              );
+            }
             state.threadMeta[cached.thread.id] = meta;
           });
           this.publishThread(notification.params.threadId);
@@ -562,6 +668,26 @@ export class AppProjection extends EventEmitter {
           steps: notification.params.plan,
         } satisfies TurnProgress;
         this.progress.set(key, progress);
+        const existing = this.store
+          .snapshot()
+          .threadMeta[notification.params.threadId]?.timelineArtifacts?.[
+            notification.params.turnId
+          ]?.find((item) => item.type === "planChecklist");
+        await this.upsertTimelineArtifact(
+          notification.params.threadId,
+          notification.params.turnId,
+          {
+            type: "planChecklist",
+            id: `${notification.params.turnId}-plan-checklist`,
+            status: "inProgress",
+            explanation: notification.params.explanation,
+            steps: notification.params.plan,
+            timestamp: existing?.timestamp ?? Date.now(),
+            afterItemId:
+              existing?.afterItemId ??
+              this.latestActivityId(notification.params.threadId, notification.params.turnId),
+          },
+        );
         this.publish({
           type: "turn.progressed",
           threadId: notification.params.threadId,
@@ -718,7 +844,10 @@ export class AppProjection extends EventEmitter {
     ) {
       return "needsAttention";
     }
-    if (cached.thread.status.type === "active" || cached.currentTurnId) return "running";
+    if (cached.currentTurnId) return "running";
+    if (this.store.snapshot().threadMeta[cached.thread.id]?.awaitingPlanResponse) {
+      return "needsAttention";
+    }
     if (cached.thread.status.type === "systemError") return "failed";
     return cached.liveOutcome ?? stored ?? "idle";
   }
@@ -778,11 +907,18 @@ function normalizeModel(model: Model): ModelOption {
   };
 }
 
-function normalizeTurn(turn: Turn, liveProgress?: TurnProgress): TurnView {
+function normalizeTurn(
+  turn: Turn,
+  liveProgress?: TurnProgress,
+  artifacts: TimelineArtifact[] = [],
+): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
-  const items = turn.items.map((item) =>
-    normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
+  const items = mergeTimelineArtifacts(
+    turn.items.map((item) =>
+      normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
+    ),
+    artifacts,
   );
   if (turn.error) {
     items.push({
@@ -811,7 +947,7 @@ function normalizeActivity(
     case "userMessage":
       return {
         type: "userMessage",
-        id: item.id,
+        id: item.clientId ?? item.id,
         status: "completed",
         text: item.content
           .filter((part) => part.type === "text")
@@ -897,6 +1033,53 @@ function normalizeActivity(
   }
 }
 
+function mergeTimelineArtifacts(
+  items: ActivityItem[],
+  artifacts: TimelineArtifact[],
+): ActivityItem[] {
+  const result = [...items];
+  for (const artifact of artifacts) {
+    const existing = result.findIndex((item) => item.id === artifact.id);
+    if (existing >= 0) {
+      result[existing] = artifact;
+      continue;
+    }
+    const anchor = artifact.afterItemId
+      ? result.findIndex((item) => item.id === artifact.afterItemId)
+      : -1;
+    let insertion = anchor >= 0 ? anchor + 1 : fallbackArtifactPosition(result, artifact);
+    while (insertion < result.length) {
+      const candidate = result[insertion];
+      if (!candidate || !isTimelineArtifact(candidate)) break;
+      if (candidate.afterItemId !== artifact.afterItemId) break;
+      insertion += 1;
+    }
+    result.splice(insertion, 0, artifact);
+  }
+  return result;
+}
+
+function fallbackArtifactPosition(items: ActivityItem[], artifact: TimelineArtifact): number {
+  if (artifact.type === "userInputResponse") {
+    const finalResponse = items.findIndex(
+      (item) =>
+        item.type === "plan" || (item.type === "agentMessage" && item.phase === "final_answer"),
+    );
+    if (finalResponse >= 0) return finalResponse;
+  }
+  let insertion = 0;
+  while (items[insertion]?.type === "userMessage") insertion += 1;
+  return artifact.type === "planChecklist" ? insertion : items.length;
+}
+
+function isTimelineArtifact(item: ActivityItem): item is TimelineArtifact {
+  return item.type === "userInputResponse" || item.type === "planChecklist";
+}
+
+function turnContainsPlan(turn: Turn): boolean {
+  return turn.items.some((item) => item.type === "plan" && item.text.trim());
+}
+
 function commandKind(actions: Array<{ type: string }>): "read" | "search" | "command" {
   if (actions.length && actions.every((action) => action.type === "read")) return "read";
   if (
@@ -958,10 +1141,6 @@ function activeTurnId(thread: Thread): string | null {
     if (turn?.status === "inProgress") return turn.id;
   }
   return null;
-}
-
-function reconciledTurnId(thread: Thread, previous?: string | null): string | null {
-  return activeTurnId(thread) ?? (thread.status.type === "active" ? (previous ?? null) : null);
 }
 
 function activityKey(threadId: string, turnId: string, itemId: string): string {

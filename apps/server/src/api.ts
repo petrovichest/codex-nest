@@ -1,3 +1,8 @@
+import { randomBytes } from "node:crypto";
+import { constants, createReadStream, type Stats } from "node:fs";
+import { access, realpath, stat } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
+
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type {
@@ -56,6 +61,7 @@ import {
   createDirectory,
   createProject,
   listDirectories,
+  pathContains,
   ProjectConflictError,
   ProjectForbiddenError,
   ProjectNotFoundError,
@@ -68,6 +74,15 @@ import type { StateStore } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
 
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
+const DOWNLOAD_TICKET_TTL_MS = 60_000;
+const MAX_DOWNLOAD_TICKETS = 128;
+
+interface DownloadTicket {
+  root: string;
+  path: string;
+  fileName: string;
+  expiresAt: number;
+}
 
 export interface ApiServices {
   bridge: CodexBridge;
@@ -82,6 +97,7 @@ export interface ApiServices {
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const { bridge, store, projection, attention, codexManager, threadTitles } = services;
+  const downloadTickets = new Map<string, DownloadTicket>();
   const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
     if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
     const model = effectiveModel(summary.settings, projection.availableModels);
@@ -146,7 +162,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       throw error;
     }
     projection.markMaterialized(threadId);
-    projection.setCurrentTurn(threadId, turn.turn.id);
+    await projection.setCurrentTurn(threadId, turn.turn.id);
     if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
     if (!goal) return { turnId: turn.turn.id };
     try {
@@ -187,7 +203,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         input: messageInput(input, images),
       }),
     );
-    if (projection.summary(threadId)) projection.setCurrentTurn(threadId, result.turnId);
+    if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, result.turnId);
     return result.turnId;
   };
   const queue = new MessageQueue(store, {
@@ -485,11 +501,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
   });
 
-  app.get<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
-    if (!projection.summary(request.params.id))
-      return apiError(reply, 404, "not_found", "Thread not found");
-    return projection.readThread(request.params.id);
-  });
+  app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(
+    "/api/v1/threads/:id",
+    async (request, reply) => {
+      if (!projection.summary(request.params.id))
+        return apiError(reply, 404, "not_found", "Thread not found");
+      const cursor =
+        typeof request.query.cursor === "string" && request.query.cursor.length
+          ? request.query.cursor
+          : null;
+      return projection.readThread(request.params.id, cursor);
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
     if (!projection.summary(request.params.id)) {
@@ -521,6 +544,61 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
     return readGitChanges(summary.cwd);
   });
+
+  app.post<{ Params: { id: string }; Body: { path?: unknown } }>(
+    "/api/v1/threads/:id/downloads",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      const body = requireRecord<{ path?: unknown }>(request.body);
+      if (Object.keys(body).some((key) => key !== "path") || typeof body.path !== "string") {
+        return apiError(reply, 400, "validation_failed", "path is required");
+      }
+      const file = await resolveDownloadFile(body.path, summary.cwd);
+      const now = Date.now();
+      removeExpiredDownloadTickets(downloadTickets, now);
+      while (downloadTickets.size >= MAX_DOWNLOAD_TICKETS) {
+        const oldest = downloadTickets.keys().next().value as string | undefined;
+        if (!oldest) break;
+        downloadTickets.delete(oldest);
+      }
+      const ticket = randomBytes(24).toString("base64url");
+      const expiresAt = now + DOWNLOAD_TICKET_TTL_MS;
+      downloadTickets.set(ticket, { ...file, expiresAt });
+      return reply.code(201).send({
+        downloadUrl: `/downloads/${ticket}/${encodeURIComponent(file.fileName)}`,
+        expiresAt,
+      });
+    },
+  );
+
+  app.get<{ Params: { ticket: string; filename: string } }>(
+    "/downloads/:ticket/:filename",
+    async (request, reply) => {
+      const now = Date.now();
+      removeExpiredDownloadTickets(downloadTickets, now);
+      const ticket = downloadTickets.get(request.params.ticket);
+      if (!ticket) return downloadNotFound(reply);
+      downloadTickets.delete(request.params.ticket);
+      if (ticket.expiresAt <= now || request.params.filename !== ticket.fileName) {
+        return downloadNotFound(reply);
+      }
+      const currentPath = await realpath(ticket.path).catch(() => null);
+      if (!currentPath || currentPath !== ticket.path || !pathContains(ticket.root, currentPath)) {
+        return downloadNotFound(reply);
+      }
+      const info = await Promise.all([stat(currentPath), access(currentPath, constants.R_OK)])
+        .then(([value]) => value)
+        .catch(() => null);
+      if (!info?.isFile()) return downloadNotFound(reply);
+      return reply
+        .header("Cache-Control", "private, no-store")
+        .header("Content-Disposition", attachmentDisposition(ticket.fileName))
+        .header("Content-Length", info.size)
+        .type("application/octet-stream")
+        .send(createReadStream(currentPath));
+    },
+  );
 
   app.post<{ Body: CreateThreadRequest }>(
     "/api/v1/threads",
@@ -650,13 +728,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     async (request, reply) => {
       const body = requireRecord<QueueMessageRequest>(request.body);
       const images = validateImages(body.images);
+      const clientMessageId = optionalClientMessageId(body.clientMessageId);
       if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
         return apiError(reply, 400, "validation_failed", "input or images are required");
+      }
+      if (body.clientMessageId !== undefined && clientMessageId === null) {
+        return apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
       }
       if (!projection.summary(request.params.id)) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
-      const message = await queue.enqueue(request.params.id, body.input, images);
+      const message = await queue.enqueue(
+        request.params.id,
+        body.input,
+        images,
+        clientMessageId ?? undefined,
+      );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
   );
@@ -727,7 +814,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/attention/:attentionId/respond",
     async (request, reply) => {
       const body = requireRecord<AttentionResponse>(request.body);
-      if (!attention.resolve(request.params.attentionId, body)) {
+      const resolved = attention.resolve(request.params.attentionId, body);
+      if (!resolved) {
         return apiError(
           reply,
           409,
@@ -735,6 +823,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "Attention request has already been resolved or expired",
         );
       }
+      await projection.recordAttentionResponse(resolved, body);
       return reply.code(204).send();
     },
   );
@@ -878,6 +967,13 @@ function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadReq
     apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
     return undefined;
   }
+  if (
+    value.clientMessageId !== undefined &&
+    optionalClientMessageId(value.clientMessageId) === null
+  ) {
+    apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
+    return undefined;
+  }
   return { ...value, images, settings: validateSettings(value.settings) };
 }
 
@@ -901,7 +997,23 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
     apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
     return undefined;
   }
+  if (
+    value.clientMessageId !== undefined &&
+    optionalClientMessageId(value.clientMessageId) === null
+  ) {
+    apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
+    return undefined;
+  }
   return { ...value, images };
+}
+
+function optionalClientMessageId(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    value.trim() === value
+    ? value
+    : null;
 }
 
 function validateImages(value: unknown): string[] {
@@ -1249,6 +1361,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validInstallationId(value: string): boolean {
   return /^[A-Za-z0-9._-]{8,128}$/.test(value);
+}
+
+async function resolveDownloadFile(
+  input: string,
+  cwd: string,
+): Promise<{ root: string; path: string; fileName: string }> {
+  if (!isAbsolute(input) || input.includes("\0")) {
+    throw new ProjectValidationError("File path must be absolute");
+  }
+  let root: string;
+  let path: string;
+  try {
+    [root, path] = await Promise.all([realpath(cwd), realpath(input)]);
+  } catch (error) {
+    throwDownloadFilesystemError(error);
+  }
+  if (!pathContains(root, path)) {
+    throw new ProjectForbiddenError("File must stay inside the task directory");
+  }
+  let info: Stats;
+  try {
+    [info] = await Promise.all([stat(path), access(path, constants.R_OK)]);
+  } catch (error) {
+    throwDownloadFilesystemError(error);
+  }
+  if (!info.isFile()) throw new ProjectValidationError("Path must point to a regular file");
+  return { root, path, fileName: basename(input) };
+}
+
+function throwDownloadFilesystemError(error: unknown): never {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    throw new ProjectNotFoundError("File does not exist");
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    throw new ProjectForbiddenError("File is not accessible");
+  }
+  if (code === "EINVAL" || code === "ENAMETOOLONG") {
+    throw new ProjectValidationError("Invalid file path");
+  }
+  throw new Error("File could not be opened", { cause: error });
+}
+
+function removeExpiredDownloadTickets(tickets: Map<string, DownloadTicket>, now: number): void {
+  for (const [ticket, download] of tickets) {
+    if (download.expiresAt <= now) tickets.delete(ticket);
+  }
+}
+
+function attachmentDisposition(fileName: string): string {
+  const fallback = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\\r\n]/g, "_") || "download";
+  const encoded = encodeURIComponent(fileName).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+function downloadNotFound(reply: FastifyReply): FastifyReply {
+  return reply.code(404).send({ error: { code: "not_found", message: "Download not found" } });
 }
 
 function apiError(

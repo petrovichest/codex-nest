@@ -49,6 +49,7 @@ export function Composer({
   onNewProject,
   onStop,
   error,
+  autoFocus = false,
 }: {
   input: string;
   onInput(value: string): void;
@@ -73,6 +74,7 @@ export function Composer({
   onNewProject?(): void;
   onStop?(): void;
   error: string | null;
+  autoFocus?: boolean;
 }) {
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -182,6 +184,7 @@ export function Composer({
       <div className="composer-box">
         <textarea
           ref={textareaRef}
+          autoFocus={autoFocus}
           aria-label={running ? "Направить текущую задачу" : "Сообщение для Codex"}
           rows={2}
           maxLength={goalMode ? 4_000 : undefined}

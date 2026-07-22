@@ -51,14 +51,14 @@ export class AttentionManager extends EventEmitter {
     return request;
   }
 
-  resolve(id: string, response: AttentionResponse): boolean {
+  resolve(id: string, response: AttentionResponse): AttentionRequest | null {
     const pending = this.pending.get(id);
-    if (!pending || pending.request.kind === "unsupported") return false;
+    if (!pending || pending.request.kind === "unsupported") return null;
     const result = mapResponse(pending.request, response, pending.legacy, pending.serverRequest);
     this.pending.delete(id);
     pending.transport.respond(pending.rpcId, result);
     this.emit("removed", id);
-    return true;
+    return pending.request;
   }
 
   expireByRpcId(rpcId: number | string): void {

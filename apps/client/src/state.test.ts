@@ -35,7 +35,9 @@ describe("clientReducer", () => {
   it("resets all projection data on a reconnect snapshot", () => {
     const dirty = {
       ...initialState,
-      details: { old: { summary: baseThread, turns: [], queuedMessages: [] } },
+      details: {
+        old: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+      },
     };
     const next = clientReducer(dirty, { type: "snapshot", snapshot });
     expect(next.snapshot).toBe(snapshot);
@@ -118,7 +120,9 @@ describe("clientReducer", () => {
           },
         ],
         queuedMessages: [],
+        olderTurnsCursor: null,
       },
+      page: "latest",
     });
     state = clientReducer(state, {
       type: "event",
@@ -173,7 +177,8 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
-      detail: { summary: baseThread, turns: [], queuedMessages: [] },
+      detail: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+      page: "latest",
     });
     const updated = {
       ...baseThread,
@@ -215,7 +220,8 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
-      detail: { summary: baseThread, turns: [], queuedMessages: [] },
+      detail: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+      page: "latest",
     });
     state = clientReducer(state, {
       type: "event",
@@ -254,6 +260,182 @@ describe("clientReducer", () => {
 
     expect(state.details.one?.turns[0]?.progress.steps[0]?.step).toBe("Проверка");
     expect(state.details.one?.queuedMessages[0]?.text).toBe("Следом");
+  });
+
+  it("prepends older pages and keeps their cursor across latest-page refreshes", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [turn("newer")],
+        queuedMessages: [],
+        olderTurnsCursor: "page-2",
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "older",
+      detail: {
+        summary: baseThread,
+        turns: [turn("oldest"), turn("older")],
+        queuedMessages: [],
+        olderTurnsCursor: "page-3",
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [turn("newer"), turn("newest")],
+        queuedMessages: [],
+        olderTurnsCursor: "shifted-page-2",
+      },
+    });
+
+    expect(state.details.one?.turns.map((item) => item.id)).toEqual([
+      "oldest",
+      "older",
+      "newer",
+      "newest",
+    ]);
+    expect(state.details.one?.olderTurnsCursor).toBe("page-3");
+  });
+
+  it("reconciles an optimistic message whether the event arrives before or after acceptance", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "optimistic.add",
+      message: {
+        id: "client-message",
+        threadId: "one",
+        text: "Сразу видно",
+        images: [],
+        createdAt: 10,
+        destination: "turn",
+        turnId: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "server-turn",
+        item: {
+          type: "userMessage",
+          id: "client-message",
+          status: "completed",
+          text: "Сразу видно",
+          images: [],
+          timestamp: 10,
+          phase: null,
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "optimistic.accept",
+      threadId: "one",
+      messageId: "client-message",
+      turnId: "server-turn",
+    });
+
+    expect(state.optimisticMessages.one).toBeUndefined();
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["client-message"]);
+  });
+
+  it("inserts persisted timeline activities after their anchor and updates them in place", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            items: [
+              {
+                type: "tool",
+                id: "request",
+                status: "completed",
+                title: "Вопрос",
+                detail: "",
+              },
+              {
+                type: "plan",
+                id: "final",
+                status: "completed",
+                text: "План",
+                images: [],
+                timestamp: 2,
+                phase: null,
+              },
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          type: "userInputResponse",
+          id: "response",
+          status: "completed",
+          entries: [{ header: "Выбор", question: "Как?", answers: ["Так"] }],
+          timestamp: 3,
+          afterItemId: "request",
+        },
+      },
+    });
+    const checklist = {
+      type: "planChecklist" as const,
+      id: "checklist",
+      status: "inProgress" as const,
+      explanation: "Работаю",
+      steps: [{ step: "Шаг", status: "inProgress" as const }],
+      timestamp: 4,
+      afterItemId: "response",
+    };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: { type: "activity.upserted", threadId: "one", turnId: "turn", item: checklist },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 8,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          ...checklist,
+          steps: [{ step: "Шаг", status: "completed" }],
+        },
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "request",
+      "response",
+      "checklist",
+      "final",
+    ]);
+    expect(
+      state.details.one?.turns[0]?.items.find((item) => item.id === "checklist"),
+    ).toMatchObject({ steps: [{ status: "completed" }] });
   });
 
   it("sorts sessions only by most recent activity", () => {
@@ -296,3 +478,22 @@ describe("clientReducer", () => {
     ]);
   });
 });
+
+function turn(id: string) {
+  return {
+    id,
+    status: "completed" as const,
+    startedAt: 1,
+    completedAt: 2,
+    durationMs: 1,
+    progress: {
+      startedAt: 1,
+      explanation: null,
+      steps: [],
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+    },
+    items: [],
+  };
+}
