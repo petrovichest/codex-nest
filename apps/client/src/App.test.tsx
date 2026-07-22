@@ -16,7 +16,10 @@ const capacitor = vi.hoisted(() => ({
 }));
 
 vi.mock("./connection", () => ({ useConnection: connection }));
-vi.mock("./push", () => ({ usePushNotifications: vi.fn() }));
+vi.mock("./push", () => ({
+  stopPushNotifications: vi.fn().mockResolvedValue(undefined),
+  usePushNotifications: vi.fn(),
+}));
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     getPlatform: capacitor.getPlatform,

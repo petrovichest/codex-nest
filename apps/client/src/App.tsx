@@ -31,7 +31,7 @@ import {
 } from "./components/SettingsPage";
 import { ThreadPage } from "./components/ThreadPage";
 import { useConnection } from "./connection";
-import { usePushNotifications } from "./push";
+import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
 import { useDrawerNavigation } from "./useDrawerNavigation";
@@ -46,7 +46,7 @@ export function App({
   settings: ConnectionSettings;
   onDisconnected(): void;
 }) {
-  const { api, state, reconnect } = useConnection();
+  const { state, reconnect } = useConnection();
   const location = useLocation();
   const navigate = useNavigate();
   const [drawer, setDrawer] = useState(false);
@@ -69,7 +69,7 @@ export function App({
     side: sidebarSide,
     setOpen: setDrawer,
   });
-  usePushNotifications(api, navigate);
+  usePushNotifications(navigate);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -159,7 +159,12 @@ export function App({
               element={
                 <SettingsPage
                   onOpenNavigation={() => setDrawer(true)}
-                  onSwitchServer={() => void clearConnectionSettings().then(onDisconnected)}
+                  onSwitchServer={() =>
+                    void stopPushNotifications()
+                      .catch(() => undefined)
+                      .then(clearConnectionSettings)
+                      .then(onDisconnected)
+                  }
                   theme={theme}
                   onThemeChange={setTheme}
                   sidebarSide={sidebarSide}

@@ -269,23 +269,23 @@ accept-all certificate handler).
 
 ### Переменные окружения
 
-| Переменная                           | Назначение                                        | Значение по умолчанию                         |
-| ------------------------------------ | ------------------------------------------------- | --------------------------------------------- |
-| `CODEXNEST_HOST`                     | Адрес прослушивания                               | `127.0.0.1`                                   |
-| `CODEXNEST_PORT`                     | HTTP/API порт                                     | `4310`                                        |
-| `CODEXNEST_ALLOWED_ORIGINS`          | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
-| `CODEXNEST_STATE_PATH`               | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
-| `CODEXNEST_CODEX_BIN`                | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
-| `CODEXNEST_CODEX_MANAGEMENT_BIN`     | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
-| `CODEXNEST_CODEX_PROXY_ENV_FILE`     | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
-| `CODEXNEST_CODEX_TRANSPORT`          | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
-| `CODEXNEST_CLIENT_DIST`              | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
-| `CODEXNEST_LOG_LEVEL`                | Уровень логов Fastify                             | `info`                                        |
-| `CODEXNEST_FIREBASE_CREDENTIAL_PATH` | Необязательный service account JSON для FCM       | выключено                                     |
-| `CODEXNEST_FIREBASE_PROJECT_ID`      | Необязательный Firebase project ID                | выключено                                     |
+| Переменная                       | Назначение                                        | Значение по умолчанию                         |
+| -------------------------------- | ------------------------------------------------- | --------------------------------------------- |
+| `CODEXNEST_HOST`                 | Адрес прослушивания                               | `127.0.0.1`                                   |
+| `CODEXNEST_PORT`                 | HTTP/API порт                                     | `4310`                                        |
+| `CODEXNEST_ALLOWED_ORIGINS`      | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
+| `CODEXNEST_STATE_PATH`           | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
+| `CODEXNEST_CODEX_BIN`            | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
+| `CODEXNEST_CODEX_MANAGEMENT_BIN` | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
+| `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
+| `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
+| `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
+| `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
 
-Для обычного запуска Firebase не нужен. Без него работают веб-интерфейс,
-Android-клиент и все операции с задачами; недоступны только фоновые push-уведомления.
+Android-клиент получает фоновые уведомления напрямую через существующий WebSocket
+CodexNest. Firebase, Google Play Services, внешний push-провайдер и дополнительные
+серверные credentials не используются. Для надёжной работы Android показывает
+постоянное низкоприоритетное уведомление foreground service.
 
 ## 4. Создание access token
 
@@ -433,12 +433,12 @@ systemctl --user start codexnest.service
 - **Codex видит другой логин или конфигурацию.** Повторите `codex login status` от
   того же пользователя. CodexNest использует его `~/.codex` и окружение.
 
-## Android / Firebase release
+## Android release
 
 Для подписанной APK-сборки следуйте
-[`apps/client/android/README.md`](../apps/client/android/README.md). Личные
-`google-services.json`, Firebase service account, signing keystore и пароли
-остаются вне Git. После сборки проверьте подпись и создайте checksum:
+[`apps/client/android/README.md`](../apps/client/android/README.md). Signing
+keystore и пароли остаются вне Git. После сборки проверьте подпись и создайте
+checksum:
 
 ```bash
 cd "$HOME/codex-nest/apps/client/android"
@@ -447,6 +447,6 @@ shasum -a 256 app/build/outputs/apk/release/app-release.apk > CodexNest-1.0.apk.
 ```
 
 Перед релизом проверьте чистую установку и обновление APK, подключение по выбранной
-схеме HTTP/HTTPS, а при включённом FCM — уведомления в foreground, background и
-после обычного завершения процесса. Android force-stop блокирует уведомления до
-следующего ручного запуска приложения.
+схеме HTTP/HTTPS, уведомления в foreground/background и восстановление соединения
+после обычного завершения процесса и перезагрузки устройства. Android force-stop
+блокирует foreground service до следующего ручного запуска приложения.

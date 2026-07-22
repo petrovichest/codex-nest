@@ -30,5 +30,13 @@ export CODEXNEST_KEY_PASSWORD=...
 ./gradlew assembleRelease
 ```
 
-For personal FCM, place the private `google-services.json` at `app/google-services.json`
-before `cap sync`/Gradle build. The file, keystore, passwords, and APKs are ignored.
+Notifications do not use Firebase, Google Play Services, or a third-party push provider.
+The Android app starts a `remoteMessaging` foreground service that keeps an authenticated
+WebSocket connection to the configured CodexNest server. Android displays a permanent,
+low-priority connection notification while this service is active; this is required for
+reliable real-time delivery when the app is in the background.
+
+The service reads the existing server URL and encrypted bearer token from the same native
+storage as the UI, reconnects after network loss and device reboot, and emits local
+notifications for completed/failed tasks and attention requests. No additional account or
+server credential is required. The signing keystore, passwords, and APKs remain ignored.
