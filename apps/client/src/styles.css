@@ -1410,69 +1410,62 @@ pre {
 }
 
 .annotation-editor {
-  width: min(340px, calc(100vw - 32px));
-  display: grid;
-  gap: 10px;
-  padding: 13px;
+  width: min(320px, calc(100vw - 32px));
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px;
   border: 1px solid var(--line-strong);
-  border-radius: 13px;
+  border-radius: 12px;
   background: var(--surface-raised);
 }
 
-.annotation-editor-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.annotation-editor-header button {
-  width: 27px;
-  min-width: 27px;
-  height: 27px;
-  min-height: 27px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-}
-
-.annotation-editor-header svg {
-  width: 15px;
-  height: 15px;
-}
-
-.annotation-editor blockquote {
-  max-height: 112px;
-  overflow: auto;
-  margin: 0;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--surface-muted);
-  color: var(--muted-strong);
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-}
-
-.annotation-editor label {
-  display: grid;
-  gap: 5px;
-  color: var(--muted-strong);
-  font-size: 12px;
-}
-
 .annotation-editor textarea {
-  min-height: 82px;
+  min-width: 0;
+  min-height: 48px;
+  max-height: 112px;
+  flex: 1;
+  padding: 8px 10px;
   resize: vertical;
   color: var(--text);
   font-size: 14px;
 }
 
-.annotation-save {
+.annotation-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.annotation-editor-actions button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
   min-height: 34px;
-  justify-self: end;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.annotation-editor-actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.annotation-editor-save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.annotation-editor-save:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
+.annotation-editor-delete {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .turn-timing {
@@ -2914,21 +2907,12 @@ pre {
     max-width: 90%;
   }
 
-  .annotation-editor {
-    position: fixed;
-    right: 10px;
-    bottom: calc(10px + env(safe-area-inset-bottom));
-    left: 10px !important;
-    top: auto !important;
-    z-index: 70;
-    width: auto;
-    max-height: min(72dvh, 560px);
-    overflow: auto;
-    transform: none;
-  }
-
   .composer {
     padding: 0 10px calc(9px + env(safe-area-inset-bottom));
+  }
+
+  .composer.keyboard-open {
+    padding-bottom: 0;
   }
 
   .composer-box {

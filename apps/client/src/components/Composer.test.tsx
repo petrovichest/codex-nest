@@ -82,6 +82,25 @@ describe("Composer", () => {
     view.rerender(<Harness hasSupplementalContent />);
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
   });
+
+  it("removes the mobile safe-area gap while the keyboard shrinks the viewport", () => {
+    const initialHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+    const view = render(<Harness />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const composer = view.container.querySelector(".composer");
+
+    textarea.focus();
+    expect(textarea).toHaveFocus();
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
+    fireEvent(window, new Event("resize"));
+    expect(composer).toHaveClass("keyboard-open");
+
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+    fireEvent(window, new Event("resize"));
+    expect(composer).not.toHaveClass("keyboard-open");
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: initialHeight });
+  });
 });
 
 function Harness({ hasSupplementalContent = false }: { hasSupplementalContent?: boolean }) {

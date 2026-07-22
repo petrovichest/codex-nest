@@ -45,6 +45,7 @@ import {
   MoreIcon,
   PencilIcon,
   PinIcon,
+  SendIcon,
   TerminalIcon,
   ToolIcon,
   TrashIcon,
@@ -1133,12 +1134,35 @@ function AnnotatableMarkdownContent({
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLFormElement>(null);
   const copyTimerRef = useRef<number | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [editor, setEditor] = useState<AnnotationEditor | null>(null);
   const [comment, setComment] = useState("");
   const [markerPositions, setMarkerPositions] = useState<Record<string, AnnotationPosition>>({});
+
+  const saveEditor = useCallback(() => {
+    if (!editor) return true;
+    const value = comment.trim();
+    if (!value) {
+      setEditor(null);
+      return true;
+    }
+    const saved =
+      editor.mode === "new"
+        ? onCreate?.({
+            messageId,
+            source,
+            quote: editor.quote,
+            startOffset: editor.startOffset,
+            endOffset: editor.endOffset,
+            comment: value,
+          })
+        : onUpdate?.(editor.annotationId, value);
+    if (saved) setEditor(null);
+    return Boolean(saved);
+  }, [comment, editor, messageId, onCreate, onUpdate, source]);
 
   const captureSelection = useCallback(() => {
     if (!enabled || editor) {
@@ -1161,12 +1185,11 @@ function AnnotatableMarkdownContent({
     }
     const rect = safeRangeRect(range, content);
     const surfaceRect = surface.getBoundingClientRect();
-    const selectionTop =
-      rect.top >= 44 ? rect.top - surfaceRect.top - 42 : rect.bottom - surfaceRect.top + 6;
+    const selectionTop = rect.bottom - surfaceRect.top + 8;
     const editorTop =
-      rect.bottom + 330 < window.innerHeight
+      rect.bottom + 112 < window.innerHeight
         ? rect.bottom - surfaceRect.top + 8
-        : rect.top - surfaceRect.top - 330;
+        : rect.top - surfaceRect.top - 112;
     setSelectionDraft({
       quote,
       ...offsets,
@@ -1232,6 +1255,19 @@ function AnnotatableMarkdownContent({
   }, [readOnly]);
 
   useEffect(() => {
+    if (!editor) return;
+    function closeOutside(event: PointerEvent) {
+      if (event.target instanceof Node && editorRef.current?.contains(event.target)) return;
+      if (!saveEditor()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }
+    document.addEventListener("pointerdown", closeOutside, true);
+    return () => document.removeEventListener("pointerdown", closeOutside, true);
+  }, [editor, saveEditor]);
+
+  useEffect(() => {
     if (!enabled) return;
     let timer: number | null = null;
     const selectionChanged = () => {
@@ -1289,7 +1325,7 @@ function AnnotatableMarkdownContent({
       mode: "existing",
       annotationId: item.annotation.id,
       left: clampEditorLeft(position.left, surface?.clientWidth ?? 0),
-      top: markerViewportTop + 330 < window.innerHeight ? position.top + 28 : position.top - 330,
+      top: markerViewportTop + 112 < window.innerHeight ? position.top + 28 : position.top - 112,
     });
     setSelectionDraft(null);
   }
@@ -1298,7 +1334,6 @@ function AnnotatableMarkdownContent({
     editor?.mode === "existing"
       ? annotations.find(({ annotation }) => annotation.id === editor.annotationId)
       : null;
-  const editorQuote = editor?.mode === "new" ? editor.quote : editedAnnotation?.annotation.quote;
 
   return (
     <div className="annotation-surface" ref={surfaceRef}>
@@ -1344,62 +1379,46 @@ function AnnotatableMarkdownContent({
           </button>
         </div>
       )}
-      {editor && editorQuote && (
+      {editor && (
         <form
+          ref={editorRef}
           className="annotation-editor"
           style={{ left: editor.left, top: editor.top }}
           onSubmit={(event) => {
             event.preventDefault();
-            const value = comment.trim();
-            if (!value) return;
-            const saved =
-              editor.mode === "new"
-                ? onCreate?.({
-                    messageId,
-                    source,
-                    quote: editor.quote,
-                    startOffset: editor.startOffset,
-                    endOffset: editor.endOffset,
-                    comment: value,
-                  })
-                : onUpdate?.(editor.annotationId, value);
-            if (saved) setEditor(null);
+            saveEditor();
           }}
         >
-          <div className="annotation-editor-header">
-            <strong>
-              {editedAnnotation ? `Аннотация ${editedAnnotation.number}` : "Новая аннотация"}
-            </strong>
+          <textarea
+            autoFocus
+            aria-label="Комментарий к выделенному тексту"
+            placeholder="Комментарий"
+            rows={2}
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+          />
+          <div className="annotation-editor-actions">
             <button
+              className="annotation-editor-save"
+              type="submit"
+              aria-label="Сохранить аннотацию"
+              disabled={!comment.trim()}
+            >
+              <SendIcon />
+            </button>
+            <button
+              className="annotation-editor-delete"
               type="button"
-              aria-label={
-                editedAnnotation
-                  ? `Удалить аннотацию ${editedAnnotation.number}`
-                  : "Отменить аннотацию"
-              }
+              aria-label="Удалить аннотацию"
               onClick={() => {
                 if (!editedAnnotation || onDelete?.(editedAnnotation.annotation.id)) {
                   setEditor(null);
                 }
               }}
             >
-              <XIcon />
+              <TrashIcon />
             </button>
           </div>
-          <blockquote>{editorQuote}</blockquote>
-          <label>
-            <span>Комментарий</span>
-            <textarea
-              autoFocus
-              aria-label="Комментарий к выделенному тексту"
-              rows={3}
-              value={comment}
-              onChange={(event) => setComment(event.target.value)}
-            />
-          </label>
-          <button className="primary annotation-save" disabled={!comment.trim()}>
-            Сохранить
-          </button>
         </form>
       )}
     </div>
@@ -1419,7 +1438,7 @@ function clampPopoverLeft(left: number, width: number): number {
 
 function clampEditorLeft(left: number, width: number): number {
   if (width <= 0) return Math.max(0, left);
-  const halfWidth = Math.min(170, width / 2);
+  const halfWidth = Math.min(160, width / 2);
   return Math.max(halfWidth, Math.min(left, width - halfWidth));
 }
 

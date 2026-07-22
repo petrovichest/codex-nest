@@ -25,6 +25,12 @@ export type ComposerImage = {
   url: string;
 };
 
+const KEYBOARD_VIEWPORT_DELTA = 120;
+
+function viewportHeight(): number {
+  return Math.min(window.innerHeight, window.visualViewport?.height ?? window.innerHeight);
+}
+
 export function Composer({
   input,
   onInput,
@@ -82,8 +88,10 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<HTMLDivElement>(null);
+  const viewportBaselineRef = useRef(viewportHeight());
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
   const canSubmit =
     hasContent &&
@@ -105,6 +113,38 @@ export function Composer({
       setSelectedImageId(null);
     }
   }, [images, selectedImageId]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    function updateKeyboardState() {
+      const height = viewportHeight();
+      if (document.activeElement !== textarea) {
+        viewportBaselineRef.current = height;
+        setKeyboardOpen(false);
+        return;
+      }
+      setKeyboardOpen(viewportBaselineRef.current - height > KEYBOARD_VIEWPORT_DELTA);
+    }
+
+    function captureViewportBaseline() {
+      viewportBaselineRef.current = Math.max(viewportBaselineRef.current, viewportHeight());
+      updateKeyboardState();
+    }
+
+    textarea.addEventListener("focus", captureViewportBaseline);
+    textarea.addEventListener("blur", updateKeyboardState);
+    window.addEventListener("resize", updateKeyboardState);
+    window.visualViewport?.addEventListener("resize", updateKeyboardState);
+    updateKeyboardState();
+    return () => {
+      textarea.removeEventListener("focus", captureViewportBaseline);
+      textarea.removeEventListener("blur", updateKeyboardState);
+      window.removeEventListener("resize", updateKeyboardState);
+      window.visualViewport?.removeEventListener("resize", updateKeyboardState);
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedImageId) return;
@@ -144,7 +184,7 @@ export function Composer({
   }
 
   return (
-    <form className="composer" onSubmit={onSubmit}>
+    <form className={`composer${keyboardOpen ? " keyboard-open" : ""}`} onSubmit={onSubmit}>
       {creating && projects.length === 0 && (
         <div className="composer-empty-projects">
           <span>Чтобы начать задачу, добавьте рабочую папку.</span>

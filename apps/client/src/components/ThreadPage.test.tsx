@@ -255,10 +255,14 @@ describe("Activity", () => {
     selectText(text, 0, 10);
     fireEvent.pointerUp(text);
     fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    expect(screen.queryByText("Новая аннотация")).toBeNull();
+    expect(screen.getByPlaceholderText("Комментарий")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить аннотацию" })).toHaveTextContent("");
+    expect(screen.getByRole("button", { name: "Удалить аннотацию" })).toHaveTextContent("");
     fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
       target: { value: "Перепроверь это" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить аннотацию" }));
 
     expect(onCreate).toHaveBeenCalledWith({
       messageId: "agent",
@@ -299,6 +303,52 @@ describe("Activity", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("только"));
   });
 
+  it("places selection actions below the selected range", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () =>
+        ({
+          top: 100,
+          bottom: 120,
+          left: 40,
+          right: 80,
+          width: 40,
+          height: 20,
+          x: 40,
+          y: 100,
+          toJSON: () => ({}),
+        }) satisfies DOMRect,
+    });
+    try {
+      render(
+        <Activity
+          item={{
+            type: "agentMessage",
+            id: "agent",
+            status: "completed",
+            text: "Выделение снизу",
+            images: [],
+            timestamp: 1,
+            phase: "final_answer",
+          }}
+          annotationEnabled
+        />,
+      );
+
+      const text = screen.getByText("Выделение снизу");
+      selectText(text, 0, 9);
+      fireEvent.pointerUp(text);
+
+      expect((await screen.findByRole("button", { name: "Аннотация" })).parentElement).toHaveStyle({
+        top: "128px",
+      });
+    } finally {
+      if (descriptor) Object.defineProperty(Range.prototype, "getBoundingClientRect", descriptor);
+      else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+    }
+  });
+
   it("edits and deletes an annotation through its numbered marker", async () => {
     const onUpdate = vi.fn().mockReturnValue(true);
     const onDelete = vi.fn().mockReturnValue(true);
@@ -334,12 +384,124 @@ describe("Activity", () => {
     const editor = screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" });
     expect(editor).toHaveValue("Старый комментарий");
     fireEvent.change(editor, { target: { value: "Новый комментарий" } });
-    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить аннотацию" }));
     expect(onUpdate).toHaveBeenCalledWith("note", "Новый комментарий");
 
     fireEvent.click(marker);
-    fireEvent.click(screen.getByRole("button", { name: "Удалить аннотацию 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить аннотацию" }));
     expect(onDelete).toHaveBeenCalledWith("note");
+  });
+
+  it("saves a non-empty new annotation on outside click and discards an empty one", async () => {
+    const onCreate = vi.fn().mockReturnValue(true);
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Фрагмент для пометки",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotationEnabled
+        onCreateAnnotation={onCreate}
+      />,
+    );
+
+    const text = screen.getByText("Фрагмент для пометки");
+    selectText(text, 0, 8);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
+      target: { value: "Сохранить снаружи" },
+    });
+    fireEvent.pointerDown(document.body);
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ quote: "Фрагмент", comment: "Сохранить снаружи" }),
+    );
+    expect(screen.queryByRole("textbox", { name: "Комментарий к выделенному тексту" })).toBeNull();
+
+    selectText(text, 9, 12);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    fireEvent.pointerDown(document.body);
+
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox", { name: "Комментарий к выделенному тексту" })).toBeNull();
+  });
+
+  it("does not erase an existing annotation when its input is cleared and closed outside", async () => {
+    const onUpdate = vi.fn().mockReturnValue(true);
+    const annotation: PendingAnnotation = {
+      id: "note",
+      messageId: "agent",
+      source: "agentMessage",
+      quote: "фрагментом",
+      startOffset: 8,
+      endOffset: 18,
+      comment: "Сохранённый комментарий",
+      createdAt: 1,
+    };
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Ответ с фрагментом",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotations={[annotation]}
+        onUpdateAnnotation={onUpdate}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация 1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
+      target: { value: "" },
+    });
+    fireEvent.pointerDown(document.body);
+
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Аннотация 1" })).toBeInTheDocument();
+  });
+
+  it("keeps the editor open when saving on an outside click fails", async () => {
+    const onCreate = vi.fn().mockReturnValue(false);
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Фрагмент с ошибкой",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotationEnabled
+        onCreateAnnotation={onCreate}
+      />,
+    );
+
+    const text = screen.getByText("Фрагмент с ошибкой");
+    selectText(text, 0, 8);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
+      target: { value: "Не потерять" },
+    });
+    fireEvent.pointerDown(document.body);
+
+    expect(onCreate).toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" })).toHaveValue(
+      "Не потерять",
+    );
   });
 
   it("shows a live turn timer and a final duration", () => {
@@ -538,6 +700,30 @@ describe("Activity", () => {
         .text,
     ).toContain("### Аннотация 1");
     await waitFor(() => expect(localStorage.getItem(annotationStorageKey("thread"))).toBeNull());
+  });
+
+  it("persists a comment closed outside and restores it from the numbered marker", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary, { turns: [completedAgentTurn()] });
+    renderThread();
+
+    const text = screen.getByText("Готовый фрагмент ответа");
+    selectText(text, 8, 16);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
+      target: { value: "Локальный комментарий" },
+    });
+    fireEvent.pointerDown(document.body);
+
+    const marker = await screen.findByRole("button", { name: "Аннотация 1" });
+    expect(JSON.parse(localStorage.getItem(annotationStorageKey("thread"))!)[0].comment).toBe(
+      "Локальный комментарий",
+    );
+    fireEvent.click(marker);
+    expect(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" })).toHaveValue(
+      "Локальный комментарий",
+    );
   });
 
   it("keeps local annotations when sending fails", async () => {
