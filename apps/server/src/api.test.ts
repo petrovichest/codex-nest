@@ -721,7 +721,7 @@ describe("thread settings", () => {
         startsBeforeCompletion + 1,
       ),
     );
-    expect(store.snapshot().messageQueues?.thread).toBeUndefined();
+    await vi.waitFor(() => expect(store.snapshot().messageQueues?.thread).toBeUndefined());
 
     const image = `data:image/png;base64,${"a".repeat(1_100_000)}`;
     const imageTurn = await app.inject({

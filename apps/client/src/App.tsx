@@ -616,7 +616,9 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
   const statusClass =
     thread.state === "completed" && thread.unread
       ? "status-completed-unread"
-      : `status-${thread.state}`;
+      : thread.state === "interrupted" && !thread.unread
+        ? "status-interrupted-read"
+        : `status-${thread.state}`;
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}

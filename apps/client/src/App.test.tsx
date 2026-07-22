@@ -230,7 +230,7 @@ describe("App routing and navigation", () => {
     ).toHaveTextContent("Повторить лимиты");
   });
 
-  it("uses one status indicator and only highlights unread successful completion in green", () => {
+  it("uses one status indicator and dims acknowledged interruptions", () => {
     const threads: ThreadSummary[] = [
       { ...baseThread, id: "completed-read", title: "Прочитана", state: "completed" },
       {
@@ -241,7 +241,19 @@ describe("App routing and navigation", () => {
         unread: true,
       },
       { ...baseThread, id: "failed", title: "Ошибка", state: "failed", unread: true },
-      { ...baseThread, id: "interrupted", title: "Прервана", state: "interrupted", unread: true },
+      {
+        ...baseThread,
+        id: "interrupted-unread",
+        title: "Прервана",
+        state: "interrupted",
+        unread: true,
+      },
+      {
+        ...baseThread,
+        id: "interrupted-read",
+        title: "Прерывание прочитано",
+        state: "interrupted",
+      },
       { ...baseThread, id: "running", title: "Выполняется", state: "running" },
       { ...baseThread, id: "attention", title: "Нужно внимание", state: "needsAttention" },
     ];
@@ -253,9 +265,10 @@ describe("App routing and navigation", () => {
     expect(statusFor("Новый результат")).toHaveClass("status-completed-unread");
     expect(statusFor("Ошибка")).toHaveClass("status-failed");
     expect(statusFor("Прервана")).toHaveClass("status-interrupted");
+    expect(statusFor("Прерывание прочитано")).toHaveClass("status-interrupted-read");
     expect(statusFor("Выполняется")).toHaveClass("status-running");
     expect(statusFor("Нужно внимание")).toHaveClass("status-needsAttention");
-    expect(container.querySelectorAll(".thread-link .status")).toHaveLength(6);
+    expect(container.querySelectorAll(".thread-link .status")).toHaveLength(7);
     expect(container.querySelector(".unread")).toBeNull();
   });
 

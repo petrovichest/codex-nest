@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { SessionSettings } from "@codexnest/protocol";
 
@@ -81,6 +81,22 @@ describe("Composer", () => {
 
     view.rerender(<Harness hasSupplementalContent />);
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
+
+  it("keeps textarea focus through a send press and still submits on click", () => {
+    const view = render(<Harness />);
+    const onSubmit = vi.fn((event: Event) => event.preventDefault());
+    view.container.querySelector("form")?.addEventListener("submit", onSubmit);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const send = screen.getByRole("button", { name: "Отправить" });
+
+    fireEvent.change(textarea, { target: { value: "Сообщение" } });
+    textarea.focus();
+    expect(fireEvent.pointerDown(send)).toBe(false);
+    expect(textarea).toHaveFocus();
+
+    fireEvent.click(send);
+    expect(onSubmit).toHaveBeenCalledOnce();
   });
 
   it("removes the mobile safe-area gap while the keyboard shrinks the viewport", () => {

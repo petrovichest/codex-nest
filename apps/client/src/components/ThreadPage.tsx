@@ -206,7 +206,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
   useEffect(() => {
-    if (summary?.unread && detail && ["failed", "interrupted"].includes(summary.state)) {
+    if (summary?.unread && detail && summary.state === "failed") {
       void api.markRead(threadId, { observedUpdatedAt: summary.updatedAt }).catch(() => undefined);
     }
   }, [api, detail, summary, threadId]);
@@ -658,7 +658,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
               cwd={summary.cwd}
               onDownload={downloadFile}
             />
-            {summary.state === "completed" && summary.unread && (
+            {["completed", "interrupted"].includes(summary.state) && summary.unread && (
               <button
                 className="finish-thread-action"
                 disabled={finishing}

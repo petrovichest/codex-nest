@@ -871,6 +871,40 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
   });
 
+  it("keeps an interrupted session purple until the user finishes it", () => {
+    const api = threadApi();
+    const interrupted = {
+      ...summary,
+      state: "interrupted" as const,
+      unread: true,
+      updatedAt: 123,
+    };
+    const context = mockThreadConnection(api, interrupted, {
+      turns: [
+        {
+          id: "interrupted-turn",
+          status: "interrupted",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    expect(api.markRead).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Закончить" }));
+    expect(api.markRead).toHaveBeenCalledWith("thread", { observedUpdatedAt: 123 });
+
+    const finished = { ...interrupted, unread: false };
+    context.state.snapshot.threads = [finished];
+    context.state.details.thread.summary = finished;
+    view.rerender(threadRoute());
+    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+  });
+
   it("keeps the finish action available when marking the session fails", async () => {
     const api = threadApi();
     api.markRead.mockRejectedValue(new Error("Сервер недоступен"));

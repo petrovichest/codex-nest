@@ -306,6 +306,8 @@ export function Composer({
               }
               className="composer-action send"
               disabled={!canSubmit}
+              onPointerDown={(event) => event.preventDefault()}
+              type="submit"
             >
               <SendIcon />
             </button>

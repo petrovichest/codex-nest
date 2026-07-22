@@ -543,6 +543,10 @@ pre {
   background: #9974db;
 }
 
+.status-interrupted-read {
+  background: #a0a39d;
+}
+
 .show-more {
   width: calc(100% - 32px);
   min-height: 30px;

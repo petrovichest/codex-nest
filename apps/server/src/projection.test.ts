@@ -16,7 +16,10 @@ import { StateStore } from "./state/store";
 
 class FakeBridge extends EventEmitter {
   state = "ready" as const;
-  constructor(private readonly active = false) {
+  constructor(
+    private readonly active = false,
+    private readonly activeGoal = false,
+  ) {
     super();
   }
   request = vi.fn(async (method: string, params: Record<string, unknown>) => {
@@ -39,6 +42,9 @@ class FakeBridge extends EventEmitter {
     }
     if (method === "thread/resume") return { thread: liveThread() };
     if (method === "thread/read") return { thread: liveThread() };
+    if (method === "thread/goal/get") {
+      return { goal: this.activeGoal ? goalNotification("active").params.goal : null };
+    }
     if (method === "model/list") {
       return {
         data: [
@@ -719,6 +725,9 @@ describe("AppProjection", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       1,
     );
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/goal/get"),
+    ).toHaveLength(1);
     expect((await projection.readThread("one")).turns[0]).toMatchObject({
       id: "live",
       status: "inProgress",
@@ -761,6 +770,9 @@ describe("AppProjection", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       1,
     );
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/goal/get"),
+    ).toHaveLength(1);
 
     bridge.emit("state", "unavailable");
     bridge.emit("state", "ready");
@@ -768,6 +780,49 @@ describe("AppProjection", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       2,
     );
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/goal/get"),
+    ).toHaveLength(2);
+  });
+
+  it("restores an active goal after restart before the resumed turn completes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge(true, true);
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      unread: false,
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/goal/get"),
+    ).toHaveLength(1);
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("live", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(projection.summary("one")).toMatchObject({
+        state: "running",
+        currentTurnId: null,
+        unread: false,
+      }),
+    );
+
+    bridge.emit("notification", goalNotification("complete", 3));
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+    await store.flushed();
   });
 });
 

@@ -35,7 +35,7 @@ interface CachedThread {
   archived: boolean;
   currentTurnId: string | null;
   liveOutcome?: ThreadOutcome;
-  goalStatus?: ThreadGoal["status"];
+  goalStatus?: ThreadGoal["status"] | null;
 }
 
 const THREAD_TURN_PAGE_SIZE = 20;
@@ -63,6 +63,7 @@ export class AppProjection extends EventEmitter {
       if (state !== "ready") {
         this.subscribedThreads.clear();
         this.hiddenThreads.clear();
+        for (const cached of this.threads.values()) cached.goalStatus = undefined;
       }
       this.publish({ type: "connection.changed", connection: this.connection });
     });
@@ -369,15 +370,27 @@ export class AppProjection extends EventEmitter {
       this.listAllThreads(true),
       this.listAllModels(),
     ]);
-    const active = await Promise.all(listedActive.map((thread) => this.rejoinActiveThread(thread)));
+    const active = await Promise.all(
+      listedActive.map(async (thread) => {
+        const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
+        const [resumedThread, restoredGoalStatus] = await Promise.all([
+          this.rejoinActiveThread(thread),
+          thread.status.type === "active" && cachedGoalStatus === undefined
+            ? this.readThreadGoalStatus(thread.id)
+            : Promise.resolve(cachedGoalStatus),
+        ]);
+        return { thread: resumedThread, restoredGoalStatus };
+      }),
+    );
     const incoming = new Set<string>();
-    for (const thread of active) {
+    for (const { thread, restoredGoalStatus } of active) {
       incoming.add(thread.id);
+      const liveGoalStatus = this.threads.get(thread.id)?.goalStatus;
       this.threads.set(thread.id, {
         thread,
         archived: false,
         currentTurnId: activeTurnId(thread),
-        goalStatus: this.threads.get(thread.id)?.goalStatus,
+        goalStatus: liveGoalStatus === undefined ? restoredGoalStatus : liveGoalStatus,
       });
       this.hydrateLiveTurn(thread);
     }
@@ -420,6 +433,18 @@ export class AppProjection extends EventEmitter {
     } catch (error) {
       this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
       return thread;
+    }
+  }
+
+  private async readThreadGoalStatus(
+    threadId: string,
+  ): Promise<ThreadGoal["status"] | null | undefined> {
+    try {
+      const response = await this.bridge.request<unknown>("thread/goal/get", { threadId }, 30_000);
+      return parseThreadGoalStatus(response);
+    } catch (error) {
+      this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+      return undefined;
     }
   }
 
@@ -587,8 +612,8 @@ export class AppProjection extends EventEmitter {
       }
       case "thread/goal/cleared": {
         const cached = this.threads.get(notification.params.threadId);
-        const statusChanged = cached?.goalStatus !== undefined;
-        if (cached) cached.goalStatus = undefined;
+        const statusChanged = cached?.goalStatus !== null;
+        if (cached) cached.goalStatus = null;
         this.publish({
           type: "goal.changed",
           threadId: notification.params.threadId,
@@ -1151,6 +1176,29 @@ function normalizeOutcome(status: string | undefined): ThreadOutcome {
   if (status === "failed") return "failed";
   if (status === "interrupted") return "interrupted";
   return "completed";
+}
+
+function parseThreadGoalStatus(response: unknown): ThreadGoal["status"] | null {
+  if (!response || typeof response !== "object" || !("goal" in response)) {
+    throw new Error("Invalid thread goal response");
+  }
+  const goal = (response as { goal?: unknown }).goal;
+  if (goal === null) return null;
+  if (!goal || typeof goal !== "object" || !("status" in goal)) {
+    throw new Error("Invalid thread goal response");
+  }
+  const status = (goal as { status?: unknown }).status;
+  if (
+    status !== "active" &&
+    status !== "paused" &&
+    status !== "blocked" &&
+    status !== "usageLimited" &&
+    status !== "budgetLimited" &&
+    status !== "complete"
+  ) {
+    throw new Error("Invalid thread goal response");
+  }
+  return status;
 }
 
 function activeTurnId(thread: Thread): string | null {
