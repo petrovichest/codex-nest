@@ -105,7 +105,7 @@ describe("BrowserNotificationTracker", () => {
 });
 
 describe("browser notification permission", () => {
-  it("requests permission only in a secure supported browser", async () => {
+  it("requests permission in a supported browser", async () => {
     MockNotification.permission = "default";
     MockNotification.requestPermission.mockResolvedValue("granted");
 
@@ -114,8 +114,17 @@ describe("browser notification permission", () => {
     expect(MockNotification.requestPermission).toHaveBeenCalledOnce();
   });
 
-  it("reports unsupported on an insecure origin", () => {
+  it("allows HTTP when the browser exposes the notification API", async () => {
     Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
+    MockNotification.permission = "default";
+    MockNotification.requestPermission.mockResolvedValue("granted");
+
+    expect(getBrowserNotificationPermission()).toBe("default");
+    await expect(requestBrowserNotificationPermission()).resolves.toBe("granted");
+  });
+
+  it("reports unsupported when the browser does not expose the notification API", () => {
+    vi.stubGlobal("Notification", undefined);
 
     expect(getBrowserNotificationPermission()).toBe("unsupported");
   });

@@ -45,10 +45,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     codexTransport,
     allowedOrigins: new Set([
       "http://localhost",
-      ...(
-        env("CODEXNEST_ALLOWED_ORIGINS") ??
-        "http://127.0.0.1:4310,http://localhost:5173"
-      )
+      ...(env("CODEXNEST_ALLOWED_ORIGINS") ?? "http://127.0.0.1:4310,http://localhost:5173")
         .split(",")
         .map((origin) => origin.trim())
         .filter(Boolean),

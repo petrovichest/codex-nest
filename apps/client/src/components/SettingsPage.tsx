@@ -231,8 +231,8 @@ export function SettingsPage({
               )}
               {notificationPermission === "unsupported" && (
                 <div className="settings-notice warning" role="status">
-                  Этот браузер или текущее HTTP-подключение не поддерживает системные уведомления.
-                  Откройте CodexNest по HTTPS.
+                  Этот браузер не предоставляет системные уведомления для текущего подключения.
+                  Некоторые браузеры требуют открыть CodexNest по HTTPS.
                 </div>
               )}
               {notificationError && (

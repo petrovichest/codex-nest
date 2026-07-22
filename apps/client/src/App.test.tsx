@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import type { AppSnapshot, Project, ThreadSummary } from "@codexnest/protocol";
@@ -74,7 +74,42 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("App routing and navigation", () => {
+  it("offers browser notifications and requests native permission from the action", async () => {
+    const requestPermission = vi.fn().mockResolvedValue("granted");
+    vi.stubGlobal("Notification", { permission: "default", requestPermission });
+    mockConnection(snapshot([baseThread]));
+
+    renderApp("/threads/newer");
+
+    expect(screen.getByRole("dialog", { name: "Разрешить уведомления?" })).toBeInTheDocument();
+    expect(requestPermission).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Разрешить уведомления" }));
+
+    await waitFor(() => expect(requestPermission).toHaveBeenCalledOnce());
+    expect(
+      screen.queryByRole("dialog", { name: "Разрешить уведомления?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not repeat a dismissed browser notification offer", () => {
+    vi.stubGlobal("Notification", { permission: "default", requestPermission: vi.fn() });
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Не сейчас" }));
+    view.unmount();
+    renderApp("/threads/newer");
+
+    expect(
+      screen.queryByRole("dialog", { name: "Разрешить уведомления?" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("opens the most recently updated non-archived task from the root route", async () => {
     const older = { ...baseThread, id: "older", title: "Старая задача", updatedAt: 10 };
     mockConnection(snapshot([older, baseThread]));

@@ -166,6 +166,39 @@ describe("AppProjection", () => {
     expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["blank", "running"]);
   });
 
+  it("only clears a completed session through its observed update", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 10_000,
+      };
+    });
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+
+    await projection.markRead("one", 5_000);
+    expect(projection.summary("one")?.unread).toBe(true);
+
+    await projection.markRead("one", 10_000);
+    expect(projection.summary("one")?.unread).toBe(false);
+
+    projection.upsertThread(thread("one", "/work", 11));
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+  });
+
   it("paginates exact thread count, reconciles outcomes once, and updates live terminal state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

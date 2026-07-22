@@ -5,7 +5,7 @@ import type { AppSnapshot, ServerEvent } from "@codexnest/protocol";
 export type BrowserNotificationPermission = NotificationPermission | "unsupported";
 
 export function getBrowserNotificationPermission(): BrowserNotificationPermission {
-  if (Capacitor.isNativePlatform() || !window.isSecureContext || !("Notification" in window)) {
+  if (Capacitor.isNativePlatform() || typeof Notification === "undefined") {
     return "unsupported";
   }
   return Notification.permission;

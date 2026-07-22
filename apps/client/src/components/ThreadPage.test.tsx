@@ -396,6 +396,93 @@ describe("Activity", () => {
     expect(api.archive).toHaveBeenCalledWith("thread", true);
   });
 
+  it("keeps a completed session green until the user finishes it", async () => {
+    let resolveFinish: (() => void) | undefined;
+    const api = threadApi();
+    api.markRead.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveFinish = resolve;
+      }),
+    );
+    const unfinished = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 123,
+    };
+    const context = mockThreadConnection(api, unfinished, {
+      turns: [
+        {
+          id: "completed-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "completed",
+              text: "Готово",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    expect(api.markRead).not.toHaveBeenCalled();
+    const finish = screen.getByRole("button", { name: "Закончить" });
+    expect(view.container.querySelector(".timeline")?.lastElementChild).toBe(finish);
+
+    fireEvent.click(finish);
+    expect(api.markRead).toHaveBeenCalledWith("thread", { observedUpdatedAt: 123 });
+    expect(screen.getByRole("button", { name: "Заканчиваем…" })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Ещё вопрос" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Ещё вопрос", clientMessageId: expect.any(String) }),
+      ),
+    );
+
+    resolveFinish?.();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Закончить" })).toBeEnabled());
+
+    const finished = { ...unfinished, unread: false };
+    context.state.snapshot.threads = [finished];
+    context.state.details.thread.summary = finished;
+    view.rerender(threadRoute());
+    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+  });
+
+  it("keeps the finish action available when marking the session fails", async () => {
+    const api = threadApi();
+    api.markRead.mockRejectedValue(new Error("Сервер недоступен"));
+    mockThreadConnection(api, {
+      ...summary,
+      state: "completed",
+      unread: true,
+      updatedAt: 123,
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Закончить" }));
+
+    expect(await screen.findByText("Сервер недоступен")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Закончить" })).toBeEnabled();
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(api.interrupt).not.toHaveBeenCalled();
+  });
+
   it("deletes an empty unnamed session after confirmation", async () => {
     const api = threadApi();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);

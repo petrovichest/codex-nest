@@ -58,6 +58,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const [goalMode, setGoalMode] = useState(false);
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
@@ -186,11 +187,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
   useEffect(() => {
-    if (
-      summary?.unread &&
-      detail &&
-      ["completed", "failed", "interrupted"].includes(summary.state)
-    ) {
+    if (summary?.unread && detail && ["failed", "interrupted"].includes(summary.state)) {
       void api.markRead(threadId, { observedUpdatedAt: summary.updatedAt }).catch(() => undefined);
     }
   }, [api, detail, summary, threadId]);
@@ -368,6 +365,18 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
     } finally {
       setSendingQueuedId(null);
+    }
+  }
+
+  async function finishThread() {
+    setFinishing(true);
+    setError(null);
+    try {
+      await api.markRead(threadId, { observedUpdatedAt: summary!.updatedAt });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Не удалось закончить сессию");
+    } finally {
+      setFinishing(false);
     }
   }
 
@@ -560,6 +569,15 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
               cwd={summary.cwd}
               onDownload={downloadFile}
             />
+            {summary.state === "completed" && summary.unread && (
+              <button
+                className="finish-thread-action"
+                disabled={finishing}
+                onClick={() => void finishThread()}
+              >
+                {finishing ? "Заканчиваем…" : "Закончить"}
+              </button>
+            )}
           </section>
         </div>
         {attentionJump && (

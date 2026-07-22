@@ -7,12 +7,17 @@ import type {
   ThreadSummary,
 } from "@codexnest/protocol";
 
+import {
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+} from "./browser-notifications";
 import type { ConnectionSettings } from "./storage";
 import { copyText } from "./clipboard";
 import { AttentionPanel } from "./components/AttentionPanel";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  BellIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -38,6 +43,7 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
+const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
 
 export function App({
   settings,
@@ -58,6 +64,13 @@ export function App({
   const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(() =>
     localStorage.getItem(PROJECT_LIST_DIRECTION_KEY) === "top-down" ? "top-down" : "bottom-up",
   );
+  const [notificationPrompt, setNotificationPrompt] = useState(
+    () =>
+      getBrowserNotificationPermission() === "default" &&
+      localStorage.getItem(NOTIFICATION_PROMPT_DISMISSED_KEY) !== "true",
+  );
+  const [notificationRequesting, setNotificationRequesting] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
   const {
     dragging: drawerDragging,
     frameRef,
@@ -83,6 +96,28 @@ export function App({
   useEffect(() => {
     localStorage.setItem(PROJECT_LIST_DIRECTION_KEY, projectListDirection);
   }, [projectListDirection]);
+
+  async function enableBrowserNotifications() {
+    setNotificationRequesting(true);
+    setNotificationError(null);
+    try {
+      const permission = await requestBrowserNotificationPermission();
+      if (permission === "granted" || permission === "denied") {
+        setNotificationPrompt(false);
+      } else {
+        setNotificationError("Браузер не выдал разрешение. Попробуйте ещё раз.");
+      }
+    } catch {
+      setNotificationError("Не удалось запросить разрешение у браузера");
+    } finally {
+      setNotificationRequesting(false);
+    }
+  }
+
+  function dismissNotificationPrompt() {
+    localStorage.setItem(NOTIFICATION_PROMPT_DISMISSED_KEY, "true");
+    setNotificationPrompt(false);
+  }
 
   useEffect(() => {
     function closePopupsOutside(event: MouseEvent) {
@@ -184,6 +219,48 @@ export function App({
         </div>
       )}
       {newProject && <ProjectDialog onClose={() => setNewProject(false)} />}
+      {notificationPrompt && (
+        <div className="modal-backdrop" role="presentation">
+          <div
+            className="modal compact"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notification-permission-title"
+          >
+            <div className="settings-card-heading">
+              <span className="settings-card-icon">
+                <BellIcon />
+              </span>
+              <div>
+                <h2 id="notification-permission-title">Разрешить уведомления?</h2>
+                <p>CodexNest сообщит, когда задача завершится или потребуется ваше решение.</p>
+              </div>
+            </div>
+            {notificationError && (
+              <div className="settings-notice danger" role="alert">
+                {notificationError}
+              </div>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                disabled={notificationRequesting}
+                onClick={dismissNotificationPrompt}
+              >
+                Не сейчас
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={notificationRequesting}
+                onClick={() => void enableBrowserNotifications()}
+              >
+                {notificationRequesting ? "Запрашиваем…" : "Разрешить уведомления"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

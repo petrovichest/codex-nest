@@ -1444,6 +1444,12 @@ pre {
   color: var(--text);
 }
 
+.finish-thread-action {
+  display: flex;
+  width: fit-content;
+  margin: 24px 0 0 auto;
+}
+
 .activity-label {
   margin-bottom: 6px;
   color: var(--muted);
