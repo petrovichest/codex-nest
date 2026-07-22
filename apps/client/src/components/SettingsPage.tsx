@@ -18,6 +18,7 @@ import {
 } from "../browser-notifications";
 import { useConnection } from "../connection";
 import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 import { CodexSettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
@@ -410,6 +411,8 @@ export function SettingsPage({
           </form>
 
           <CodexSettingsCard />
+
+          <ApplicationSettingsCard />
 
           <section className="settings-card">
             <div className="settings-card-heading">

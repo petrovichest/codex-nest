@@ -117,7 +117,7 @@ export class CodexManager {
       ? "Управление доступно только при daemon-режиме Codex"
       : daemon
         ? null
-        : "Не удалось получить состояние Codex daemon";
+        : "Codex CLI или daemon недоступны. Установите Codex, выполните вход и запустите codexnest repair.";
     const latestVersion = diagnostics?.latestVersion ?? null;
     const cliVersion = daemon?.cliVersion ?? null;
     return {

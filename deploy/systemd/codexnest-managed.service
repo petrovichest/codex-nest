@@ -1,0 +1,19 @@
+[Unit]
+Description=CodexNest server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/codexnest/current
+EnvironmentFile=%h/.config/codexnest/server.env
+ExecStart=%h/.local/share/codexnest/runtime/current/bin/node %h/.local/share/codexnest/current/apps/server/dist/index.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+
+[Install]
+WantedBy=default.target

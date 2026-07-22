@@ -64,15 +64,25 @@ reproducible.
 
 ## Production
 
-The server binds to loopback by default. Set `CODEXNEST_HOST=0.0.0.0` only for
-intentional direct LAN HTTP access, or keep loopback and use the reverse-proxy
-examples under `deploy/`. Never expose CodexNest directly to the public
-internet. LAN HTTP remains available for simple trusted-home-network setups, but
-it provides no transport encryption: anyone able to observe or alter that network
-traffic can steal the bearer token and take over the owner's CodexNest access.
-Read the HTTP threat model in the deployment guide before enabling it.
+Install the latest stable release on Ubuntu or Debian (`amd64` or `arm64`) as a
+regular user:
 
-See the step-by-step [deployment and launch guide](./deploy/DEPLOYMENT.md) and
+```bash
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
+```
+
+The installer provides its own pinned Node.js runtime, creates a versioned
+release, installs user `systemd` services, generates the owner token, and prints
+the private LAN URL. It never installs Codex CLI: when Codex is missing,
+CodexNest starts in diagnostic mode and becomes ready after the user installs
+and signs in to Codex, then runs `codexnest repair`.
+
+The managed install listens on the private LAN by default. Never forward port
+`4310` to the public internet. HTTP is intentionally supported for trusted home
+networks and private WireGuard/Tailscale links, while HTTPS reverse-proxy
+examples remain available under `deploy/`.
+
+See the [deployment and update guide](./deploy/DEPLOYMENT.md) and
 [Android build instructions](./apps/client/android/README.md). No commit, push,
 deployment, signing secret, Firebase credential, or release APK is produced by
 the normal build.

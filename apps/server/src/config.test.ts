@@ -27,6 +27,15 @@ describe("loadConfig", () => {
     );
   });
 
+  it("keeps app updates opt-in for unmanaged development checkouts", () => {
+    vi.stubEnv("CODEXNEST_MANAGED_INSTALL", "");
+    expect(loadConfig()).toMatchObject({
+      managedInstall: false,
+      updateStatusPath: expect.stringContaining("codexnest/update.json"),
+      managementCli: expect.stringContaining(".local/bin/codexnest"),
+    });
+  });
+
   it("keeps speech-to-text optional and defaults OpenAI to the accurate model", () => {
     vi.stubEnv("CODEXNEST_STT_LOCAL_URL", "");
     vi.stubEnv("CODEXNEST_STT_OPENAI_API_KEY", "");

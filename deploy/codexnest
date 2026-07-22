@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+codexnest_root="${CODEXNEST_ROOT:-$HOME/.local/share/codexnest}"
+codexnest_source="$codexnest_root/source"
+codexnest_releases="$codexnest_root/releases"
+codexnest_current="$codexnest_root/current"
+codexnest_previous="$codexnest_root/previous"
+codexnest_config="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest/server.env"
+codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
+codexnest_update_status="$codexnest_state_root/update.json"
+codexnest_service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+codexnest_die() {
+  printf 'codexnest: %s\n' "$1" >&2
+  exit 1
+}
+
+codexnest_current_version() {
+  local target
+  target="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
+  [[ -n "$target" ]] || codexnest_die "managed installation is not available"
+  basename "$target" | sed 's/^v//'
+}
+
+codexnest_latest_tag() {
+  local node_bin="$codexnest_root/runtime/current/bin/node"
+  [[ -x "$node_bin" ]] || codexnest_die "managed Node.js runtime is missing"
+  curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    https://api.github.com/repos/petrovichest/codex-nest/releases/latest \
+    | "$node_bin" -e '
+        const fs = require("node:fs");
+        const release = JSON.parse(fs.readFileSync(0, "utf8"));
+        const tag = typeof release.tag_name === "string" ? release.tag_name : "";
+        if (release.draft || release.prerelease || !/^v\d+\.\d+\.\d+$/.test(tag)) process.exit(1);
+        process.stdout.write(tag);
+      '
+}
+
+codexnest_version_greater() {
+  [[ "$(printf '%s\n%s\n' "$1" "$2" | sed 's/^v//' | sort -V | tail -n 1)" == "${1#v}" && "${1#v}" != "${2#v}" ]]
+}
+
+codexnest_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]/ /g'
+}
+
+codexnest_write_status() {
+  local operation="$1" result="$2" message="$3" latest="$4" available="$5"
+  local current timestamp temporary latest_json message_json
+  current="$(codexnest_current_version)"
+  timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  temporary="$codexnest_update_status.$$"
+  latest_json=null
+  [[ -z "$latest" ]] || latest_json="\"$(codexnest_json_escape "${latest#v}")\""
+  message_json=null
+  [[ -z "$message" ]] || message_json="\"$(codexnest_json_escape "$message")\""
+  mkdir -p "$codexnest_state_root"
+  chmod 700 "$codexnest_state_root"
+  umask 077
+  printf '{"supported":true,"currentVersion":"%s","latestVersion":%s,"updateAvailable":%s,"operation":"%s","result":"%s","message":%s,"checkedAt":"%s","updatedAt":"%s"}\n' \
+    "$current" "$latest_json" "$available" "$operation" "$result" "$message_json" "$timestamp" "$timestamp" > "$temporary"
+  mv -f "$temporary" "$codexnest_update_status"
+}
+
+codexnest_print_check_json() {
+  local current latest available timestamp
+  current="$(codexnest_current_version)"
+  latest="$(codexnest_latest_tag)"
+  [[ -n "$latest" ]] || codexnest_die "no stable release tags are available"
+  available=false
+  if codexnest_version_greater "$latest" "$current"; then available=true; fi
+  codexnest_write_status idle none "Update check completed" "$latest" "$available"
+  timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  printf '{"supported":true,"currentVersion":"%s","latestVersion":"%s","updateAvailable":%s,"operation":"idle","result":"none","message":"Update check completed","checkedAt":"%s","updatedAt":"%s"}\n' \
+    "$current" "${latest#v}" "$available" "$timestamp" "$timestamp"
+}
+
+codexnest_set_env_value() {
+  local key="$1" value="$2" temporary
+  temporary="$codexnest_config.$$"
+  mkdir -p "$(dirname "$codexnest_config")"
+  if [[ -f "$codexnest_config" ]]; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { replaced = 0 }
+      index($0, key "=") == 1 { print key "=" value; replaced = 1; next }
+      { print }
+      END { if (!replaced) print key "=" value }
+    ' "$codexnest_config" > "$temporary"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$temporary"
+  fi
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$codexnest_config"
+}
+
+codexnest_install_assets() {
+  local release="$1"
+  install -m 0755 "$release/deploy/codexnest" "$HOME/.local/bin/codexnest"
+  install -m 0644 "$release/deploy/systemd/codexnest-managed.service" \
+    "$codexnest_service_dir/codexnest.service"
+  install -m 0644 "$release/deploy/systemd/codexnest-update.service" \
+    "$codexnest_service_dir/codexnest-update.service"
+  systemctl --user daemon-reload
+}
+
+codexnest_switch_release() {
+  local target="$1" temporary="$codexnest_root/.current.$$"
+  ln -s "$target" "$temporary"
+  mv -Tf "$temporary" "$codexnest_current"
+}
+
+codexnest_health_ok() {
+  local expected="$1" attempt body
+  for attempt in $(seq 1 30); do
+    body="$(curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health 2>/dev/null || true)"
+    if [[ "$body" == *"\"serverVersion\":\"$expected\""* ]]; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+codexnest_build_release() {
+  local tag="$1" target="$codexnest_releases/$tag" node_bin
+  [[ "$target" == "$codexnest_releases"/v* ]] || codexnest_die "invalid release path"
+  if [[ -f "$target/.codexnest-built" && \
+        -f "$target/apps/server/dist/index.js" && \
+        -f "$target/apps/client/dist/index.html" ]]; then
+    return
+  fi
+  git -C "$codexnest_source" fetch --tags --prune origin
+  git -C "$codexnest_source" worktree remove --force "$target" 2>/dev/null || true
+  if [[ -e "$target" ]]; then
+    rm -rf -- "$target"
+  fi
+  git -C "$codexnest_source" worktree prune
+  git -C "$codexnest_source" worktree add --detach "$target" "$tag"
+  node_bin="$codexnest_root/runtime/current/bin"
+  (
+    cd "$target"
+    PATH="$node_bin:$PATH" "$node_bin/npm" ci
+    PATH="$node_bin:$PATH" CODEXNEST_VERSION="${tag#v}" "$node_bin/npm" run build
+    printf '%s\n' "$tag" > .codexnest-built
+  ) || {
+    git -C "$codexnest_source" worktree remove --force "$target" || true
+    return 1
+  }
+}
+
+codexnest_restore_release() {
+  local target="$1" version="$2" latest="$3" reason="$4" restored=true
+  codexnest_switch_release "$target" || restored=false
+  codexnest_set_env_value CODEXNEST_VERSION "$version" || restored=false
+  codexnest_install_assets "$target" || restored=false
+  systemctl --user restart codexnest.service || restored=false
+  if $restored && codexnest_health_ok "$version"; then
+    codexnest_write_status idle rolled_back "$reason; the previous release was restored" "$latest" true
+  else
+    codexnest_write_status idle failed "$reason; automatic rollback also failed" "$latest" true
+  fi
+}
+
+codexnest_update_worker() {
+  local current_version latest target old_target old_version
+  current_version="$(codexnest_current_version)"
+  if ! latest="$(codexnest_latest_tag)" || [[ -z "$latest" ]]; then
+    codexnest_write_status idle failed "Failed to discover stable CodexNest releases" "" false
+    return 1
+  fi
+  if ! codexnest_version_greater "$latest" "$current_version"; then
+    codexnest_write_status idle none "CodexNest is already up to date" "$latest" false
+    return
+  fi
+  codexnest_write_status preparing none "Preparing CodexNest $latest" "$latest" true
+  target="$codexnest_releases/$latest"
+  codexnest_write_status building none "Building CodexNest $latest" "$latest" true
+  codexnest_build_release "$latest" || {
+    codexnest_write_status idle failed "Failed to build CodexNest $latest" "$latest" true
+    return 1
+  }
+  codexnest_write_status switching none "Switching to CodexNest $latest" "$latest" true
+  old_target="$(readlink -f "$codexnest_current")"
+  [[ "$old_target" == "$codexnest_releases"/* ]] || codexnest_die "invalid current release path"
+  old_version="$(basename "$old_target" | sed 's/^v//')"
+  if ! ln -sfn "$old_target" "$codexnest_previous"; then
+    codexnest_write_status idle failed "Failed to prepare rollback for CodexNest $latest" "$latest" true
+    return 1
+  fi
+  if ! codexnest_switch_release "$target" || \
+     ! codexnest_set_env_value CODEXNEST_VERSION "${latest#v}" || \
+     ! codexnest_install_assets "$target" || \
+     ! codexnest_write_status restarting none "Restarting CodexNest $latest" "$latest" true || \
+     ! systemctl --user restart codexnest.service; then
+    codexnest_restore_release "$old_target" "$old_version" "$latest" \
+      "Failed to activate CodexNest $latest"
+    return 1
+  fi
+  if codexnest_health_ok "${latest#v}"; then
+    codexnest_write_status idle updated "CodexNest was updated successfully" "$latest" false
+    return
+  fi
+  codexnest_restore_release "$old_target" "$old_version" "$latest" \
+    "CodexNest $latest failed its health check"
+  return 1
+}
+
+codexnest_repair() {
+  local codex_bin
+  codex_bin="$(command -v codex 2>/dev/null || true)"
+  [[ -n "$codex_bin" ]] || codexnest_die "Codex CLI is not installed; install it and run codexnest repair again"
+  codexnest_set_env_value CODEXNEST_CODEX_BIN "$codex_bin"
+  codexnest_set_env_value CODEXNEST_CODEX_MANAGEMENT_BIN "$codex_bin"
+  "$codex_bin" app-server daemon bootstrap
+  systemctl --user restart codexnest.service
+  codexnest_health_ok "$(codexnest_current_version)" || codexnest_die "CodexNest did not become healthy"
+  printf 'CodexNest and Codex daemon are ready.\n'
+}
+
+codexnest_rollback() {
+  local target current version
+  target="$(readlink -f "$codexnest_previous" 2>/dev/null || true)"
+  current="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
+  [[ -n "$target" && -d "$target" ]] || codexnest_die "no previous release is available"
+  [[ "$target" == "$codexnest_releases"/* ]] || codexnest_die "invalid previous release path"
+  ln -sfn "$current" "$codexnest_previous"
+  codexnest_switch_release "$target"
+  version="$(basename "$target" | sed 's/^v//')"
+  codexnest_set_env_value CODEXNEST_VERSION "$version"
+  codexnest_install_assets "$target"
+  systemctl --user restart codexnest.service
+  codexnest_health_ok "$version" || codexnest_die "rolled back release did not become healthy"
+  printf 'Rolled back to CodexNest %s.\n' "$version"
+}
+
+codexnest_doctor() {
+  local failed=0
+  printf 'CodexNest version: %s\n' "$(codexnest_current_version)"
+  if systemctl --user is-active --quiet codexnest.service; then
+    printf 'Service: active\n'
+  else
+    printf 'Service: inactive\n'
+    failed=1
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    codex --version || failed=1
+  else
+    printf 'Codex CLI: not installed (run codexnest repair after installing it)\n'
+  fi
+  curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health || failed=1
+  printf '\n'
+  return "$failed"
+}
+
+case "${1:-help}" in
+  status) systemctl --user status codexnest.service --no-pager ;;
+  logs) journalctl --user -u codexnest.service -n 100 --no-pager "${@:2}" ;;
+  doctor) codexnest_doctor ;;
+  repair) codexnest_repair ;;
+  check-update) codexnest_print_check_json ;;
+  update) systemctl --user start codexnest-update.service; cat "$codexnest_update_status" ;;
+  update-worker) codexnest_update_worker ;;
+  rollback) codexnest_rollback ;;
+  restart) systemctl --user restart codexnest.service ;;
+  *)
+    printf '%s\n' 'Usage: codexnest status|logs|doctor|repair|check-update|update|rollback|restart'
+    ;;
+esac

@@ -402,10 +402,56 @@ function mergeTurn(
 
 function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
   let result = [...current];
+  const incomingIds = new Set(incoming.map((item) => item.id));
   for (const [itemIndex, item] of incoming.entries()) {
     const existing = result.findIndex((candidate) => candidate.id === item.id);
     if (existing >= 0) {
-      result[existing] = fresherActivity(result[existing]!, item);
+      let semanticAlias = -1;
+      for (let candidateIndex = existing - 1; candidateIndex >= 0; candidateIndex -= 1) {
+        const candidate = result[candidateIndex]!;
+        if (candidate.type === "userInputResponse" || candidate.type === "planChecklist") continue;
+        if (
+          !incomingIds.has(candidate.id) &&
+          sameRenderedActivity(
+            candidate,
+            item,
+            candidate.status === "inProgress" || item.status === "inProgress",
+          )
+        ) {
+          semanticAlias = candidateIndex;
+        }
+        break;
+      }
+      const canonical = fresherActivity(result[existing]!, item);
+      if (semanticAlias >= 0) {
+        const aliasId = result[semanticAlias]!.id;
+        result[semanticAlias] = {
+          ...fresherActivity(result[semanticAlias]!, canonical),
+          id: item.id,
+        } as ActivityItem;
+        result = remapArtifactAnchors(result, aliasId, item.id);
+        result.splice(existing, 1);
+      } else {
+        result[existing] = canonical;
+      }
+      continue;
+    }
+    const semanticMatch = result.findIndex(
+      (candidate) =>
+        !incomingIds.has(candidate.id) &&
+        sameRenderedActivity(
+          candidate,
+          item,
+          candidate.status === "inProgress" || item.status === "inProgress",
+        ),
+    );
+    if (semanticMatch >= 0) {
+      const aliasId = result[semanticMatch]!.id;
+      result[semanticMatch] = {
+        ...fresherActivity(result[semanticMatch]!, item),
+        id: item.id,
+      } as ActivityItem;
+      result = remapArtifactAnchors(result, aliasId, item.id);
       continue;
     }
     if (item.type === "userInputResponse" || item.type === "planChecklist") {
@@ -430,6 +476,19 @@ function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]): 
   return result;
 }
 
+function remapArtifactAnchors(
+  items: ActivityItem[],
+  previousId: string,
+  canonicalId: string,
+): ActivityItem[] {
+  return items.map((candidate) =>
+    (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&
+    candidate.afterItemId === previousId
+      ? { ...candidate, afterItemId: canonicalId }
+      : candidate,
+  );
+}
+
 function fresherActivity(current: ActivityItem, incoming: ActivityItem): ActivityItem {
   if (current.status !== "inProgress" && incoming.status === "inProgress") return current;
   if (
@@ -450,6 +509,30 @@ function fresherActivity(current: ActivityItem, incoming: ActivityItem): Activit
     return { ...incoming, output: current.output };
   }
   return incoming;
+}
+
+function sameRenderedActivity(
+  first: ActivityItem,
+  second: ActivityItem,
+  allowPrefix: boolean,
+): boolean {
+  if (
+    first.type !== second.type ||
+    !["agentMessage", "reasoning", "plan"].includes(first.type) ||
+    !("text" in first) ||
+    !("text" in second)
+  ) {
+    return false;
+  }
+  const compatiblePhase =
+    first.phase === second.phase || first.phase === null || second.phase === null;
+  if (!compatiblePhase) return false;
+  if (first.text === second.text) return true;
+  return (
+    allowPrefix &&
+    Boolean(first.text && second.text) &&
+    (first.text.startsWith(second.text) || second.text.startsWith(first.text))
+  );
 }
 
 function updateOptimisticMessage(

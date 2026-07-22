@@ -1,5 +1,6 @@
 import type {
   ApiError,
+  AppUpdateStatus,
   AppSnapshot,
   AttentionResponse,
   CodexRateLimitsResponse,
@@ -49,6 +50,18 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  readAppSettings(): Promise<AppUpdateStatus> {
+    return this.request("/api/v1/settings/app");
+  }
+
+  checkAppUpdate(): Promise<AppUpdateStatus> {
+    return this.request("/api/v1/settings/app/check", { method: "POST", timeoutMs: null });
+  }
+
+  updateApp(): Promise<AppUpdateStatus> {
+    return this.request("/api/v1/settings/app/update", { method: "POST", timeoutMs: null });
   }
 
   readTranscriptionConfig(): Promise<TranscriptionConfigResponse> {

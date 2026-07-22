@@ -9,6 +9,55 @@ CodexNest рассчитан на одного владельца и прива�
 `4310` в интернете. Для доступа извне домашней сети используйте VPN или HTTPS с
 обычной проверкой сертификата.
 
+## Рекомендуемая установка через GitHub Release
+
+На Ubuntu или Debian (`amd64`/`arm64`) последнюю стабильную версию можно
+установить одной командой от обычного пользователя:
+
+```bash
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
+```
+
+Installer загрузит закреплённый Node.js в пользовательский каталог, соберёт
+помеченный semver-тег, создаст user-systemd services, owner token и versioned
+release с symlink-ами `current`/`previous`. Существующие config, state и token
+при повторном запуске сохраняются.
+
+Установка конкретной версии:
+
+```bash
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/download/v0.2.0/install.sh | \
+  bash -s -- --version 0.2.0
+```
+
+Codex CLI installer не устанавливает. Если CLI отсутствует, диагностический UI
+всё равно запускается; после ручной установки и `codex login` выполните
+`codexnest repair`.
+
+Основные команды управления:
+
+```bash
+codexnest status
+codexnest logs
+codexnest doctor
+codexnest repair
+codexnest update
+codexnest rollback
+codexnest restart
+```
+
+Managed install слушает `0.0.0.0:4310`. Собственный origin браузера разрешается
+динамически для LAN/VPN IP и приватного DNS. Installer не меняет firewall, не
+настраивает VPN или HTTPS и не предназначен для публичного port forwarding.
+
+UI проверяет обновления только по явному действию пользователя и читает последний
+стабильный GitHub Release. Отдельный `codexnest-update.service` собирает его тег
+рядом с текущей версией, атомарно переключает `current`, перезапускает приложение
+и возвращает `previous`, если health-check не прошёл.
+
+Оставшаяся часть документа описывает ручную и расширенную установку, включая
+proxy, speech-to-text и reverse proxy.
+
 ## 1. Требования
 
 На сервере должны быть установлены:

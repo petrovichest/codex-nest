@@ -5,10 +5,11 @@ import { basename, dirname, resolve } from "node:path";
 
 import { buildApp } from "./app";
 import { AttentionManager } from "./attention";
+import { AppManager } from "./app-management";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
-import { childProcessEnvironment, loadConfig } from "./config";
+import { childProcessEnvironment, loadConfig, SERVER_VERSION } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
@@ -73,6 +74,12 @@ const codexManager = new CodexManager({
   bridgeState: () => bridge.state,
   bridgeVersion: () => bridge.actualVersion,
 });
+const appManager = new AppManager({
+  currentVersion: SERVER_VERSION,
+  managedInstall: config.managedInstall,
+  statusPath: config.updateStatusPath,
+  managementCli: config.managementCli,
+});
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
@@ -118,6 +125,7 @@ const app = await buildApp(config, {
   attention,
   push,
   codexManager,
+  appManager,
   threadTitles,
   transcription,
 });

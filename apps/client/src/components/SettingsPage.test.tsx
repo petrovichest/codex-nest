@@ -11,6 +11,7 @@ const connection = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("./CodexSettingsCard", () => ({ CodexSettingsCard: () => null }));
+vi.mock("./ApplicationSettingsCard", () => ({ ApplicationSettingsCard: () => null }));
 
 beforeEach(() => {
   connection.mockReset();

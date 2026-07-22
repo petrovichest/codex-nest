@@ -1,7 +1,10 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
-export const SERVER_VERSION = "0.1.0";
+const releaseDirectory = basename(process.cwd());
+export const SERVER_VERSION = /^v\d+\.\d+\.\d+$/.test(releaseDirectory)
+  ? releaseDirectory.slice(1)
+  : process.env.CODEXNEST_VERSION?.trim() || "0.1.0";
 
 export interface AppConfig {
   host: string;
@@ -25,6 +28,9 @@ export interface AppConfig {
   sttTimeoutMs: number;
   firebaseCredentialPath?: string;
   firebaseProjectId?: string;
+  managedInstall: boolean;
+  updateStatusPath: string;
+  managementCli: string;
 }
 
 function env(name: string): string | undefined {
@@ -100,6 +106,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sttTimeoutMs,
     firebaseCredentialPath: env("CODEXNEST_FIREBASE_CREDENTIAL_PATH"),
     firebaseProjectId: env("CODEXNEST_FIREBASE_PROJECT_ID"),
+    managedInstall: envBoolean("CODEXNEST_MANAGED_INSTALL", false),
+    updateStatusPath:
+      env("CODEXNEST_UPDATE_STATUS_PATH") ?? resolve(stateRoot, "codexnest/update.json"),
+    managementCli: env("CODEXNEST_MANAGEMENT_CLI") ?? resolve(homedir(), ".local/bin/codexnest"),
     ...overrides,
   };
 }

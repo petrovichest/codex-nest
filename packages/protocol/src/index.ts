@@ -94,6 +94,23 @@ export type CodexManagementStatus = {
   proxy: CodexProxyStatus;
 };
 
+export type AppUpdateOperation =
+  "idle" | "checking" | "preparing" | "building" | "switching" | "restarting";
+
+export type AppUpdateResult = "none" | "updated" | "rolled_back" | "failed";
+
+export type AppUpdateStatus = {
+  supported: boolean;
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean | null;
+  operation: AppUpdateOperation;
+  result: AppUpdateResult;
+  message: string | null;
+  checkedAt: string | null;
+  updatedAt: string | null;
+};
+
 export type UpdateCodexProxyRequest = {
   proxy: string;
 };

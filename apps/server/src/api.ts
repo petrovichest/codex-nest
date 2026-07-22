@@ -7,6 +7,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type {
   ApiErrorCode,
+  AppUpdateStatus,
   AttentionResponse,
   CodexManagementStatus,
   CodexRateLimitsResponse,
@@ -43,6 +44,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
+import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ThreadResumeResponse } from "./codex/generated/v2/index";
@@ -100,6 +102,7 @@ export interface ApiServices {
   attention: AttentionManager;
   push: PushNotifier;
   codexManager?: CodexManager;
+  appManager?: AppManager;
   threadTitles?: Pick<ThreadTitleGenerator, "generate">;
   transcription?: Pick<
     TranscriptionService,
@@ -109,7 +112,7 @@ export interface ApiServices {
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention, codexManager, threadTitles } = services;
+  const { bridge, store, projection, attention, codexManager, appManager, threadTitles } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
@@ -463,6 +466,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     } finally {
       await queue.resume();
     }
+  });
+
+  app.get("/api/v1/settings/app", async (): Promise<AppUpdateStatus> => {
+    return requireAppManager(appManager).status();
+  });
+
+  app.post("/api/v1/settings/app/check", async (): Promise<AppUpdateStatus> => {
+    return requireAppManager(appManager).check();
+  });
+
+  app.post("/api/v1/settings/app/update", async (): Promise<AppUpdateStatus> => {
+    return requireAppManager(appManager).update();
   });
 
   app.get<{ Querystring: { path?: string } }>("/api/v1/directories", async (request) => {
@@ -984,6 +999,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         return apiError(reply, 503, "app_server_unavailable", error.message);
       return apiError(reply, 409, "conflict", error.message);
     }
+    if (error instanceof AppManagementError) {
+      if (error.kind === "failed")
+        return apiError(reply, 503, "app_server_unavailable", error.message);
+      return apiError(reply, 409, "conflict", error.message);
+    }
     if (error instanceof ProjectConflictError)
       return apiError(reply, 409, "conflict", error.message);
     return apiError(reply, 500, "internal_error", "Internal server error");
@@ -993,6 +1013,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 function requireCodexManager(manager: CodexManager | undefined): CodexManager {
   if (!manager) {
     throw new CodexManagementError("unsupported", "Codex management is not configured");
+  }
+  return manager;
+}
+
+function requireAppManager(manager: AppManager | undefined): AppManager {
+  if (!manager) {
+    throw new AppManagementError("unsupported", "CodexNest management is not configured");
   }
   return manager;
 }

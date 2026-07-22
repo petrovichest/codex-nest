@@ -798,18 +798,32 @@ export class AppProjection extends EventEmitter {
       }
       case "item/started":
       case "item/completed": {
-        const key = activityKey(
+        let key = activityKey(
           notification.params.threadId,
           notification.params.turnId,
-          notification.params.item.id,
+          notification.params.item.type === "userMessage"
+            ? (notification.params.item.clientId ?? notification.params.item.id)
+            : notification.params.item.id,
         );
-        const previous = this.activity.get(key);
+        let previous = this.activity.get(key);
         const eventTimestamp =
           notification.method === "item/started"
             ? notification.params.startedAtMs
             : notification.params.completedAtMs;
         const timestamp = previous?.type === "userMessage" ? previous.timestamp : eventTimestamp;
-        const item = normalizeActivity(notification.params.item, timestamp);
+        let item = normalizeActivity(notification.params.item, timestamp);
+        if (notification.method === "item/completed" && !previous) {
+          const alias = this.streamingActivityAlias(
+            notification.params.threadId,
+            notification.params.turnId,
+            item,
+          );
+          if (alias) {
+            key = alias.key;
+            previous = alias.item;
+            item = { ...item, id: previous.id } as ActivityItem;
+          }
+        }
         this.activity.set(key, item);
         this.publish({
           type: "activity.upserted",
@@ -895,6 +909,28 @@ export class AppProjection extends EventEmitter {
     };
     this.activity.set(key, item);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
+  }
+
+  private streamingActivityAlias(
+    threadId: string,
+    turnId: string,
+    completed: ActivityItem,
+  ): { key: string; item: ActivityItem } | undefined {
+    const prefix = `${threadId}:${turnId}:`;
+    const entries = [...this.activity.entries()];
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (!entry) continue;
+      const [key, item] = entry;
+      if (
+        key.startsWith(prefix) &&
+        item.status === "inProgress" &&
+        sameRenderedActivity(item, completed, true)
+      ) {
+        return { key, item };
+      }
+    }
+    return undefined;
   }
 
   private toSummary(cached: CachedThread): ThreadSummary {
@@ -1001,19 +1037,14 @@ function normalizeTurn(
 ): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
-  const items = mergeTimelineArtifacts(
-    mergeLiveActivities(
-      turn.items.map((item) =>
-        normalizeActivity(
-          item,
-          item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
-        ),
-      ),
-      liveActivities,
-      turn.status !== "inProgress",
+  const liveMerge = mergeLiveActivities(
+    turn.items.map((item) =>
+      normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
     ),
-    artifacts,
+    liveActivities,
+    turn.status !== "inProgress",
   );
+  const items = mergeTimelineArtifacts(liveMerge.items, artifacts, liveMerge.aliases);
   if (turn.error) {
     items.push({
       type: "error",
@@ -1037,12 +1068,36 @@ function mergeLiveActivities(
   items: ActivityItem[],
   liveActivities: ActivityItem[],
   turnIsTerminal: boolean,
-): ActivityItem[] {
+): { items: ActivityItem[]; aliases: Map<string, string> } {
   const result = [...items];
+  const canonicalIds = new Set(items.map((item) => item.id));
+  const matchedCanonicalIds = new Set<string>();
+  const aliases = new Map<string, string>();
   for (const [itemIndex, item] of liveActivities.entries()) {
     const existing = result.findIndex((candidate) => candidate.id === item.id);
     if (existing >= 0) {
       result[existing] = fresherLiveActivity(result[existing]!, item, turnIsTerminal);
+      if (canonicalIds.has(item.id)) matchedCanonicalIds.add(item.id);
+      continue;
+    }
+    const semanticMatch = result.findIndex(
+      (candidate) =>
+        canonicalIds.has(candidate.id) &&
+        !matchedCanonicalIds.has(candidate.id) &&
+        sameRenderedActivity(
+          candidate,
+          item,
+          candidate.status === "inProgress" || item.status === "inProgress",
+        ),
+    );
+    if (semanticMatch >= 0) {
+      const canonical = result[semanticMatch]!;
+      aliases.set(item.id, canonical.id);
+      matchedCanonicalIds.add(canonical.id);
+      result[semanticMatch] = {
+        ...fresherLiveActivity(canonical, item, turnIsTerminal),
+        id: canonical.id,
+      } as ActivityItem;
       continue;
     }
     if (
@@ -1060,7 +1115,7 @@ function mergeLiveActivities(
       : result.length;
     result.splice(insertion, 0, item);
   }
-  return result;
+  return { items: result, aliases };
 }
 
 function fresherLiveActivity(
@@ -1185,6 +1240,7 @@ function normalizeActivity(
 function mergeTimelineArtifacts(
   items: ActivityItem[],
   artifacts: TimelineArtifact[],
+  aliases: Map<string, string> = new Map(),
 ): ActivityItem[] {
   const result = [...items];
   for (const artifact of artifacts) {
@@ -1193,19 +1249,50 @@ function mergeTimelineArtifacts(
       result[existing] = artifact;
       continue;
     }
-    const anchor = artifact.afterItemId
-      ? result.findIndex((item) => item.id === artifact.afterItemId)
+    const resolvedAfterItemId = artifact.afterItemId
+      ? (aliases.get(artifact.afterItemId) ?? artifact.afterItemId)
+      : null;
+    const resolvedArtifact =
+      resolvedAfterItemId === artifact.afterItemId
+        ? artifact
+        : { ...artifact, afterItemId: resolvedAfterItemId };
+    const anchor = resolvedAfterItemId
+      ? result.findIndex((item) => item.id === resolvedAfterItemId)
       : -1;
-    let insertion = anchor >= 0 ? anchor + 1 : fallbackArtifactPosition(result, artifact);
+    let insertion = anchor >= 0 ? anchor + 1 : fallbackArtifactPosition(result, resolvedArtifact);
     while (insertion < result.length) {
       const candidate = result[insertion];
       if (!candidate || !isTimelineArtifact(candidate)) break;
-      if (candidate.afterItemId !== artifact.afterItemId) break;
+      if (candidate.afterItemId !== resolvedAfterItemId) break;
       insertion += 1;
     }
-    result.splice(insertion, 0, artifact);
+    result.splice(insertion, 0, resolvedArtifact);
   }
   return result;
+}
+
+function sameRenderedActivity(
+  first: ActivityItem,
+  second: ActivityItem,
+  allowPrefix: boolean,
+): boolean {
+  if (
+    first.type !== second.type ||
+    !["agentMessage", "reasoning", "plan"].includes(first.type) ||
+    !("text" in first) ||
+    !("text" in second)
+  ) {
+    return false;
+  }
+  const compatiblePhase =
+    first.phase === second.phase || first.phase === null || second.phase === null;
+  if (!compatiblePhase) return false;
+  if (first.text === second.text) return true;
+  return (
+    allowPrefix &&
+    Boolean(first.text && second.text) &&
+    (first.text.startsWith(second.text) || second.text.startsWith(first.text))
+  );
 }
 
 function fallbackArtifactPosition(items: ActivityItem[], artifact: TimelineArtifact): number {

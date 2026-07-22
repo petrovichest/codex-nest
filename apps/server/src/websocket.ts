@@ -4,6 +4,7 @@ import type { WebSocket } from "ws";
 import { isClientFrame, type ServerFrame } from "@codexnest/protocol";
 
 import { verifyToken } from "./auth";
+import { isAllowedRequestOrigin } from "./origin";
 import type { AppProjection } from "./projection";
 import type { StateStore } from "./state/store";
 
@@ -73,8 +74,7 @@ export function registerEventsWebSocket(
 }
 
 function allowedOrigin(request: FastifyRequest, allowedOrigins: Set<string>): boolean {
-  const origin = request.headers.origin;
-  return !origin || allowedOrigins.has(origin);
+  return isAllowedRequestOrigin(request, allowedOrigins);
 }
 
 function send(socket: WebSocket, frame: ServerFrame): void {

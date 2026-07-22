@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ThreadGoal } from "@codexnest/protocol";
+import type { ActivityItem, ThreadGoal } from "@codexnest/protocol";
 
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
@@ -899,6 +899,86 @@ describe("AppProjection", () => {
       "client-steer",
       "after-steer",
     ]);
+  });
+
+  it("reconciles a streamed agent message when the canonical item id changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const canonicalTurn = {
+      ...testTurn("live", "completed"),
+      itemsView: "full" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "canonical-agent",
+          text: "Готово",
+          phase: "final_answer" as const,
+          memoryCitation: null,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [canonicalTurn], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const activities: ActivityItem[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "activity.upserted") activities.push(event.item);
+    });
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "stream-agent",
+        delta: "Готово",
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: canonicalTurn.items[0],
+        completedAtMs: 12_000,
+      },
+    } as ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        explanation: "Готово",
+        plan: [{ step: "Ответить", status: "completed" }],
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.live).toHaveLength(1),
+    );
+
+    expect(activities.slice(0, 2).map((item) => item.id)).toEqual(["stream-agent", "stream-agent"]);
+    const items = (await projection.readThread("one")).turns[0]?.items ?? [];
+    expect(items.map((item) => item.id)).toEqual([
+      "canonical-agent",
+      expect.stringContaining("live-plan-checklist-"),
+    ]);
+    expect(items[1]).toMatchObject({
+      type: "planChecklist",
+      afterItemId: "canonical-agent",
+    });
   });
 
   it("rejoins and restores an active turn once per app-server connection", async () => {

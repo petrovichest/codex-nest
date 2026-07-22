@@ -8,6 +8,7 @@ import Fastify, { LogController, type FastifyInstance } from "fastify";
 
 import { registerApi, type ApiServices } from "./api";
 import type { AppConfig } from "./config";
+import { isAllowedRequestOrigin } from "./origin";
 import { registerEventsWebSocket } from "./websocket";
 
 export async function buildApp(config: AppConfig, services: ApiServices): Promise<FastifyInstance> {
@@ -48,8 +49,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
   await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
 
   app.addHook("onRequest", async (request, reply) => {
-    const origin = request.headers.origin;
-    if (origin && !config.allowedOrigins.has(origin)) {
+    if (!isAllowedRequestOrigin(request, config.allowedOrigins)) {
       return reply
         .code(403)
         .send({ error: { code: "unauthorized", message: "Origin not allowed" } });

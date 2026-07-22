@@ -19,6 +19,28 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: bash -n deploy/install.sh deploy/codexnest
+      - name: Verify pinned Node.js checksums are published
+        run: |
+          node_version="$(sed -n 's/^codexnest_node_version="\([^"]*\)"/\1/p' deploy/install.sh)"
+          curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" -o node-shasums.txt
+          grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-x64.tar.xz$" node-shasums.txt
+          grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-arm64.tar.xz$" node-shasums.txt
+
+  installer-dry-run:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [ubuntu:24.04, debian:12]
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Validate installer in an isolated distribution
+        run: >-
+          docker run --rm --platform "${{ matrix.platform }}" --user 1000:1000
+          --volume "$PWD:/workspace:ro" --workdir /workspace "${{ matrix.image }}"
+          bash deploy/install.sh --dry-run
 
   android-debug:
     runs-on: ubuntu-latest
@@ -38,3 +60,26 @@ jobs:
       - run: npm run android:sync -w @codexnest/client
       - run: ./gradlew assembleDebug
         working-directory: apps/client/android
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, installer-dry-run, android-debug]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate release version
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - name: Prepare installer asset
+        run: |
+          mkdir -p release
+          sed "s/__CODEXNEST_VERSION__/$GITHUB_REF_NAME/g" deploy/install.sh > release/install.sh
+          chmod 0755 release/install.sh
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/install.sh --generate-notes --verify-tag

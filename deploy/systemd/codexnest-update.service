@@ -1,0 +1,11 @@
+[Unit]
+Description=Update CodexNest to the latest stable release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/codexnest update-worker
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true

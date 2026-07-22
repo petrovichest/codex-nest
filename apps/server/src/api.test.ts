@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app";
+import type { AppManager } from "./app-management";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
@@ -99,6 +100,18 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          url: "/api/v1/summary",
+          headers: {
+            host: "codexnest.home:4310",
+            origin: "http://codexnest.home:4310",
+            authorization: "Bearer correct",
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
 
     const authorization = { authorization: "Bearer correct" };
     const workspace = join(directory, "workspace");
@@ -310,6 +323,18 @@ describe("HTTP authentication", () => {
     await expect(
       app.injectWS("/api/v1/events", { headers: { origin: "https://evil.example" } }),
     ).rejects.toThrow();
+
+    const lanOrigin = await app.injectWS("/api/v1/events", {
+      headers: { host: "codexnest.home:4310", origin: "http://codexnest.home:4310" },
+    });
+    const lanSnapshot = new Promise<Record<string, unknown>>((resolve) => {
+      lanOrigin.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    lanOrigin.send(JSON.stringify({ type: "authenticate", token: "correct" }));
+    await expect(lanSnapshot).resolves.toMatchObject({ type: "snapshot" });
+    lanOrigin.terminate();
 
     const revocable = await app.injectWS("/api/v1/events", {
       headers: { origin: "http://localhost" },
@@ -1055,6 +1080,7 @@ describe("thread settings", () => {
     });
     const bridge = new SettingsBridge();
     const { codexManager, codexStatus } = createCodexManagerMock();
+    const { appManager, appStatus } = createAppManagerMock();
     const attention = new AttentionManager();
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
@@ -1072,6 +1098,7 @@ describe("thread settings", () => {
         attention,
         push: new PushNotifier(store),
         codexManager,
+        appManager,
         projectRoot: directory,
       },
     );
@@ -1103,6 +1130,24 @@ describe("thread settings", () => {
     expect(management.statusCode).toBe(200);
     expect(management.json()).toEqual(codexStatus);
     expect(JSON.stringify(management.json())).not.toContain("secret");
+
+    const appManagement = await app.inject({ url: "/api/v1/settings/app", headers });
+    expect(appManagement.statusCode).toBe(200);
+    expect(appManagement.json()).toEqual(appStatus);
+    const checkedApp = await app.inject({
+      method: "POST",
+      url: "/api/v1/settings/app/check",
+      headers,
+    });
+    expect(checkedApp.json()).toMatchObject({ latestVersion: "0.2.0", updateAvailable: true });
+    const queuedApp = await app.inject({
+      method: "POST",
+      url: "/api/v1/settings/app/update",
+      headers,
+    });
+    expect(queuedApp.json()).toMatchObject({ operation: "preparing" });
+    expect(appManager.check).toHaveBeenCalledOnce();
+    expect(appManager.update).toHaveBeenCalledOnce();
 
     const appliedProxy = await app.inject({
       method: "PUT",
@@ -1217,6 +1262,30 @@ function createCodexManagerMock() {
     restart: vi.fn(async () => codexStatus),
   } as unknown as CodexManager;
   return { codexManager, codexStatus };
+}
+
+function createAppManagerMock() {
+  const appStatus = {
+    supported: true,
+    currentVersion: "0.1.0",
+    latestVersion: null,
+    updateAvailable: null,
+    operation: "idle" as const,
+    result: "none" as const,
+    message: null,
+    checkedAt: null,
+    updatedAt: null,
+  };
+  const appManager = {
+    status: vi.fn(async () => appStatus),
+    check: vi.fn(async () => ({
+      ...appStatus,
+      latestVersion: "0.2.0",
+      updateAvailable: true,
+    })),
+    update: vi.fn(async () => ({ ...appStatus, operation: "preparing" as const })),
+  } as unknown as AppManager;
+  return { appManager, appStatus };
 }
 
 class SettingsBridge extends EventEmitter {

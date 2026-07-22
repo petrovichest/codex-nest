@@ -585,6 +585,95 @@ describe("clientReducer", () => {
     });
   });
 
+  it("reconciles one streamed message with its differently-id canonical item", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [
+              {
+                type: "agentMessage",
+                id: "stream-agent",
+                status: "inProgress",
+                text: "Готово полностью",
+                images: [],
+                timestamp: 5,
+                phase: null,
+              },
+              {
+                type: "planChecklist",
+                id: "checklist",
+                status: "inProgress",
+                explanation: null,
+                steps: [{ step: "Ответить", status: "completed" }],
+                timestamp: 6,
+                afterItemId: "stream-agent",
+              },
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    const canonicalDetail = {
+      summary: { ...baseThread, currentTurnId: null, state: "completed" as const },
+      turns: [
+        {
+          ...turn("turn"),
+          items: [
+            {
+              type: "agentMessage" as const,
+              id: "canonical-agent",
+              status: "completed" as const,
+              text: "Готово",
+              images: [],
+              timestamp: 7,
+              phase: "final_answer" as const,
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 9,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: canonicalDetail.turns[0].items[0],
+      },
+    });
+    expect(
+      state.details.one?.turns[0]?.items.filter((item) => item.type === "agentMessage"),
+    ).toHaveLength(2);
+
+    state = clientReducer(state, { type: "detail", page: "latest", detail: canonicalDetail });
+    state = clientReducer(state, { type: "detail", page: "latest", detail: canonicalDetail });
+
+    expect(state.details.one?.turns[0]?.items).toMatchObject([
+      {
+        type: "agentMessage",
+        id: "canonical-agent",
+        status: "completed",
+        text: "Готово полностью",
+        phase: "final_answer",
+      },
+      { type: "planChecklist", id: "checklist", afterItemId: "canonical-agent" },
+    ]);
+  });
+
   it("keeps chronological plan checklists after their respective anchors", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
