@@ -611,6 +611,10 @@ describe("thread settings", () => {
     const attention = new AttentionManager();
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
+    const activityEvents: Array<Record<string, unknown>> = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "activity.upserted") activityEvents.push(event);
+    });
     const threadTitles = {
       generate: vi.fn(async (input: string) =>
         input === "Первое сообщение" ? "Первая задача" : "Начать работу",
@@ -791,7 +795,7 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Составь план" },
+      payload: { input: "Составь план", clientMessageId: "client-started" },
     });
     expect(started.statusCode).toBe(201);
     const resumeCall = bridge.request.mock.calls
@@ -805,6 +809,7 @@ describe("thread settings", () => {
       .at(-1);
     expect(startCall?.[1]).toMatchObject({
       threadId: "thread",
+      clientUserMessageId: "client-started",
       collaborationMode: {
         mode: "plan",
         settings: {
@@ -816,6 +821,11 @@ describe("thread settings", () => {
     });
     expect(startCall?.[1]).not.toHaveProperty("approvalPolicy");
     expect(startCall?.[1]).not.toHaveProperty("approvalsReviewer");
+    expect(activityEvents.at(-1)).toMatchObject({
+      threadId: "thread",
+      turnId: "turn",
+      item: { type: "userMessage", id: "client-started", text: "Составь план" },
+    });
 
     const queued = await app.inject({
       method: "POST",
@@ -844,6 +854,11 @@ describe("thread settings", () => {
     ).toMatchObject({
       clientUserMessageId: queued.json().id,
       input: [{ type: "text", text: "Поставь в очередь", text_elements: [] }],
+    });
+    expect(activityEvents.at(-1)).toMatchObject({
+      threadId: "thread",
+      turnId: "steered",
+      item: { type: "userMessage", id: "client-queued", text: "Поставь в очередь" },
     });
 
     const invalid = await app.inject({
@@ -993,14 +1008,20 @@ describe("thread settings", () => {
     ).toBe(204);
 
     bridge.failNextTurnStart = true;
+    const activityCountBeforeFailure = activityEvents.length;
     const failedFirstTurn = await app.inject({
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Эта цель не запустится", goal: true },
+      payload: {
+        input: "Эта цель не запустится",
+        goal: true,
+        clientMessageId: "client-failed",
+      },
     });
     expect(failedFirstTurn.statusCode).toBe(500);
     expect(bridge.goal).toBeNull();
+    expect(activityEvents).toHaveLength(activityCountBeforeFailure);
 
     bridge.failNextGoalActivation = true;
     const failedActivation = await app.inject({

@@ -359,9 +359,233 @@ describe("clientReducer", () => {
 
     expect(state.optimisticMessages.one).toBeUndefined();
     expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["client-message"]);
+
+    state = clientReducer(state, {
+      type: "optimistic.add",
+      message: {
+        id: "client-message",
+        threadId: "one",
+        text: "Сразу видно",
+        images: [],
+        createdAt: 10,
+        destination: "turn",
+        turnId: "server-turn",
+      },
+    });
+    expect(state.optimisticMessages.one).toBeUndefined();
   });
 
-  it("inserts persisted timeline activities after their anchor and updates them in place", () => {
+  it("does not let a stale detail remove confirmed messages or roll back streamed text", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null, items: [] }],
+        queuedMessages: [
+          {
+            id: "client-message",
+            threadId: "one",
+            text: "Не пропадай",
+            createdAt: 5,
+            status: "dispatching",
+          },
+        ],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          type: "userMessage",
+          id: "client-message",
+          status: "completed",
+          text: "Не пропадай",
+          images: [],
+          timestamp: 5,
+          phase: null,
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          type: "agentMessage",
+          id: "agent",
+          status: "inProgress",
+          text: "Уже пишу длинный ответ",
+          images: [],
+          timestamp: 6,
+          phase: "commentary",
+        },
+      },
+    });
+
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [
+              {
+                type: "command",
+                id: "command-before-agent",
+                status: "completed",
+                kind: "command",
+                command: "true",
+                cwd: null,
+                output: "",
+                exitCode: 0,
+              },
+              {
+                type: "agentMessage",
+                id: "agent",
+                status: "inProgress",
+                text: "Уже пишу",
+                images: [],
+                timestamp: 6,
+                phase: "commentary",
+              },
+            ],
+          },
+        ],
+        queuedMessages: [
+          {
+            id: "client-message",
+            threadId: "one",
+            text: "Не пропадай",
+            createdAt: 5,
+            status: "dispatching",
+          },
+        ],
+        olderTurnsCursor: null,
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toMatchObject([
+      { type: "userMessage", id: "client-message", text: "Не пропадай" },
+      { type: "command", id: "command-before-agent" },
+      { type: "agentMessage", id: "agent", text: "Уже пишу длинный ответ" },
+    ]);
+    expect(state.details.one?.queuedMessages).toEqual([]);
+    expect(state.optimisticMessages.one).toBeUndefined();
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: {
+        type: "queue.changed",
+        threadId: "one",
+        messages: [
+          {
+            id: "client-message",
+            threadId: "one",
+            text: "Не пропадай",
+            createdAt: 5,
+            status: "dispatching",
+          },
+        ],
+      },
+    });
+    expect(state.details.one?.queuedMessages).toEqual([]);
+
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: { ...baseThread, currentTurnId: null, state: "completed" },
+        turns: [
+          {
+            ...turn("turn"),
+            items: [
+              {
+                type: "agentMessage",
+                id: "agent",
+                status: "completed",
+                text: "Уже пишу",
+                images: [],
+                timestamp: 7,
+                phase: "final_answer",
+              },
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    expect(state.details.one?.turns[0]?.items[2]).toMatchObject({
+      status: "completed",
+      text: "Уже пишу длинный ответ",
+      phase: "final_answer",
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 8,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          type: "agentMessage",
+          id: "agent",
+          status: "inProgress",
+          text: "Уже пишу",
+          images: [],
+          timestamp: 6,
+          phase: "commentary",
+        },
+      },
+    });
+    expect(state.details.one?.turns[0]?.items[2]).toMatchObject({
+      status: "completed",
+      text: "Уже пишу длинный ответ",
+      phase: "final_answer",
+    });
+
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            durationMs: null,
+            items: [],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    expect(state.details.one?.turns[0]).toMatchObject({
+      status: "completed",
+      completedAt: 2,
+      durationMs: 1,
+    });
+  });
+
+  it("keeps chronological plan checklists after their respective anchors", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
@@ -379,15 +603,6 @@ describe("clientReducer", () => {
                 status: "completed",
                 title: "Вопрос",
                 detail: "",
-              },
-              {
-                type: "plan",
-                id: "final",
-                status: "completed",
-                text: "План",
-                images: [],
-                timestamp: 2,
-                phase: null,
               },
             ],
           },
@@ -435,8 +650,47 @@ describe("clientReducer", () => {
         threadId: "one",
         turnId: "turn",
         item: {
+          type: "agentMessage",
+          id: "progress-message",
+          status: "completed",
+          text: "Перехожу дальше",
+          images: [],
+          timestamp: 5,
+          phase: "commentary",
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 9,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
           ...checklist,
+          id: "completed-checklist",
+          timestamp: 6,
+          afterItemId: "progress-message",
           steps: [{ step: "Шаг", status: "completed" }],
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 10,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          type: "plan",
+          id: "final",
+          status: "completed",
+          text: "План",
+          images: [],
+          timestamp: 7,
+          phase: null,
         },
       },
     });
@@ -445,10 +699,12 @@ describe("clientReducer", () => {
       "request",
       "response",
       "checklist",
+      "progress-message",
+      "completed-checklist",
       "final",
     ]);
     expect(
-      state.details.one?.turns[0]?.items.find((item) => item.id === "checklist"),
+      state.details.one?.turns[0]?.items.find((item) => item.id === "completed-checklist"),
     ).toMatchObject({ steps: [{ status: "completed" }] });
   });
 

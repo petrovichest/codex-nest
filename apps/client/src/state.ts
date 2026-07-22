@@ -74,6 +74,7 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
     case "optimistic.add":
+      if (isMessageConfirmed(state, action.message)) return state;
       return {
         ...state,
         optimisticMessages: {
@@ -189,15 +190,18 @@ function applyDetail(
           page === "latest" && expanded ? current.olderTurnsCursor : detail.olderTurnsCursor,
       }
     : detail;
+  const confirmedUserIds = userMessageIds(merged);
+  const reconciled = {
+    ...merged,
+    queuedMessages: merged.queuedMessages.filter((message) => !confirmedUserIds.has(message.id)),
+  };
   const confirmedIds = new Set([
-    ...merged.queuedMessages.map((message) => message.id),
-    ...merged.turns.flatMap((turn) =>
-      turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
-    ),
+    ...confirmedUserIds,
+    ...reconciled.queuedMessages.map((message) => message.id),
   ]);
   return {
     ...state,
-    details: { ...state.details, [threadId]: merged },
+    details: { ...state.details, [threadId]: reconciled },
     expandedHistory:
       page === "older" ? { ...state.expandedHistory, [threadId]: true } : state.expandedHistory,
     optimisticMessages: setOptimisticMessages(
@@ -247,14 +251,21 @@ function applyActivity(
     const turn = turns[index];
     turns[index] = { ...turn, items: upsertActivity(turn.items, item) };
   }
-  return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+  const queuedMessages =
+    item.type === "userMessage"
+      ? detail.queuedMessages.filter((message) => message.id !== item.id)
+      : detail.queuedMessages;
+  return {
+    ...state,
+    details: { ...state.details, [threadId]: { ...detail, turns, queuedMessages } },
+  };
 }
 
 function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem[] {
   const existing = items.findIndex((candidate) => candidate.id === item.id);
   if (existing >= 0) {
     const next = [...items];
-    next[existing] = item;
+    next[existing] = fresherActivity(next[existing]!, item);
     return next;
   }
   if (item.type !== "userInputResponse" && item.type !== "planChecklist") {
@@ -338,11 +349,15 @@ function applyQueue(
 ): ClientState {
   const detail = detailForEvent(state, threadId);
   if (!detail) return state;
+  const confirmedIds = userMessageIds(detail);
   return {
     ...state,
     details: {
       ...state.details,
-      [threadId]: { ...detail, queuedMessages },
+      [threadId]: {
+        ...detail,
+        queuedMessages: queuedMessages.filter((message) => !confirmedIds.has(message.id)),
+      },
     },
   };
 }
@@ -362,9 +377,79 @@ function mergeTurns(
   for (const turn of second) {
     const index = result.findIndex((candidate) => candidate.id === turn.id);
     if (index < 0) result.push(turn);
-    else result[index] = turn;
+    else result[index] = mergeTurn(result[index]!, turn);
   }
   return result;
+}
+
+function mergeTurn(
+  current: ThreadDetail["turns"][number],
+  incoming: ThreadDetail["turns"][number],
+): ThreadDetail["turns"][number] {
+  const preserveTerminal = current.status !== "inProgress" && incoming.status === "inProgress";
+  return {
+    ...incoming,
+    ...(preserveTerminal
+      ? {
+          status: current.status,
+          completedAt: current.completedAt,
+          durationMs: current.durationMs,
+        }
+      : {}),
+    items: mergeActivityItems(current.items, incoming.items),
+  };
+}
+
+function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
+  let result = [...current];
+  for (const [itemIndex, item] of incoming.entries()) {
+    const existing = result.findIndex((candidate) => candidate.id === item.id);
+    if (existing >= 0) {
+      result[existing] = fresherActivity(result[existing]!, item);
+      continue;
+    }
+    if (item.type === "userInputResponse" || item.type === "planChecklist") {
+      result = upsertActivity(result, item);
+      continue;
+    }
+    const anchoredArtifact = result.findIndex(
+      (candidate) =>
+        (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&
+        candidate.afterItemId === item.id,
+    );
+    const nextIncomingId = incoming
+      .slice(itemIndex + 1)
+      .find((candidate) => result.some((existingItem) => existingItem.id === candidate.id))?.id;
+    const nextIncoming = nextIncomingId
+      ? result.findIndex((candidate) => candidate.id === nextIncomingId)
+      : -1;
+    const insertion =
+      anchoredArtifact >= 0 ? anchoredArtifact : nextIncoming >= 0 ? nextIncoming : result.length;
+    result.splice(insertion, 0, item);
+  }
+  return result;
+}
+
+function fresherActivity(current: ActivityItem, incoming: ActivityItem): ActivityItem {
+  if (current.status !== "inProgress" && incoming.status === "inProgress") return current;
+  if (
+    current.type === incoming.type &&
+    "text" in current &&
+    "text" in incoming &&
+    current.text.startsWith(incoming.text) &&
+    current.text.length > incoming.text.length
+  ) {
+    return { ...incoming, text: current.text } as ActivityItem;
+  }
+  if (
+    current.type === "command" &&
+    incoming.type === "command" &&
+    current.output.startsWith(incoming.output) &&
+    current.output.length > incoming.output.length
+  ) {
+    return { ...incoming, output: current.output };
+  }
+  return incoming;
 }
 
 function updateOptimisticMessage(
@@ -427,6 +512,23 @@ function setOptimisticMessages(
 ): ClientState["optimisticMessages"] {
   if (messages.length) return { ...all, [threadId]: messages };
   return withoutKey(all, threadId);
+}
+
+function isMessageConfirmed(state: ClientState, message: OptimisticMessage): boolean {
+  const detail = state.details[message.threadId];
+  if (!detail) return false;
+  return (
+    detail.queuedMessages.some((candidate) => candidate.id === message.id) ||
+    userMessageIds(detail).has(message.id)
+  );
+}
+
+function userMessageIds(detail: ThreadDetail): Set<string> {
+  return new Set(
+    detail.turns.flatMap((turn) =>
+      turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
+    ),
+  );
 }
 
 function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {

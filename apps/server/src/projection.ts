@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
@@ -185,7 +186,12 @@ export class AppProjection extends EventEmitter {
         .slice()
         .reverse()
         .map((turn) =>
-          normalizeTurn(turn, this.progress.get(turnKey(id, turn.id)), artifacts[turn.id] ?? []),
+          normalizeTurn(
+            turn,
+            this.progress.get(turnKey(id, turn.id)),
+            this.liveActivities(id, turn.id),
+            artifacts[turn.id] ?? [],
+          ),
         ),
       queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
       olderTurnsCursor: page.nextCursor,
@@ -333,6 +339,28 @@ export class AppProjection extends EventEmitter {
     await this.upsertTimelineArtifact(request.threadId, request.turnId, item);
   }
 
+  recordUserMessage(
+    threadId: string,
+    turnId: string,
+    messageId: string,
+    text: string,
+    images: string[],
+  ): void {
+    const key = activityKey(threadId, turnId, messageId);
+    if (this.activity.get(key)?.type === "userMessage") return;
+    const item: ActivityItem = {
+      type: "userMessage",
+      id: messageId,
+      status: "completed",
+      text: text.trim(),
+      images,
+      timestamp: Date.now(),
+      phase: null,
+    };
+    this.activity.set(key, item);
+    this.publish({ type: "activity.upserted", threadId, turnId, item });
+  }
+
   private async upsertTimelineArtifact(
     threadId: string,
     turnId: string,
@@ -360,6 +388,15 @@ export class AppProjection extends EventEmitter {
       if (key.startsWith(prefix) && item.type !== "planChecklist") latest = item.id;
     }
     return latest;
+  }
+
+  private liveActivities(threadId: string, turnId: string): ActivityItem[] {
+    const prefix = `${threadId}:${turnId}:`;
+    const items: ActivityItem[] = [];
+    for (const [key, item] of this.activity.entries()) {
+      if (key.startsWith(prefix) && !isTimelineArtifact(item)) items.push(item);
+    }
+    return items;
   }
 
   private hasLivePlan(threadId: string, turnId: string): boolean {
@@ -720,24 +757,20 @@ export class AppProjection extends EventEmitter {
           steps: notification.params.plan,
         } satisfies TurnProgress;
         this.progress.set(key, progress);
-        const existing = this.store
-          .snapshot()
-          .threadMeta[notification.params.threadId]?.timelineArtifacts?.[
-            notification.params.turnId
-          ]?.find((item) => item.type === "planChecklist");
         await this.upsertTimelineArtifact(
           notification.params.threadId,
           notification.params.turnId,
           {
             type: "planChecklist",
-            id: `${notification.params.turnId}-plan-checklist`,
+            id: `${notification.params.turnId}-plan-checklist-${randomUUID()}`,
             status: "inProgress",
             explanation: notification.params.explanation,
             steps: notification.params.plan,
-            timestamp: existing?.timestamp ?? Date.now(),
-            afterItemId:
-              existing?.afterItemId ??
-              this.latestActivityId(notification.params.threadId, notification.params.turnId),
+            timestamp: Date.now(),
+            afterItemId: this.latestActivityId(
+              notification.params.threadId,
+              notification.params.turnId,
+            ),
           },
         );
         this.publish({
@@ -963,13 +996,21 @@ function normalizeModel(model: Model): ModelOption {
 function normalizeTurn(
   turn: Turn,
   liveProgress?: TurnProgress,
+  liveActivities: ActivityItem[] = [],
   artifacts: TimelineArtifact[] = [],
 ): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
   const items = mergeTimelineArtifacts(
-    turn.items.map((item) =>
-      normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
+    mergeLiveActivities(
+      turn.items.map((item) =>
+        normalizeActivity(
+          item,
+          item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+        ),
+      ),
+      liveActivities,
+      turn.status !== "inProgress",
     ),
     artifacts,
   );
@@ -990,6 +1031,61 @@ function normalizeTurn(
     progress: liveProgress ?? emptyProgress(turn.startedAt),
     items,
   };
+}
+
+function mergeLiveActivities(
+  items: ActivityItem[],
+  liveActivities: ActivityItem[],
+  turnIsTerminal: boolean,
+): ActivityItem[] {
+  const result = [...items];
+  for (const [itemIndex, item] of liveActivities.entries()) {
+    const existing = result.findIndex((candidate) => candidate.id === item.id);
+    if (existing >= 0) {
+      result[existing] = fresherLiveActivity(result[existing]!, item, turnIsTerminal);
+      continue;
+    }
+    if (
+      item.type === "userMessage" &&
+      !result.some((candidate) => candidate.type === "userMessage")
+    ) {
+      result.unshift(item);
+      continue;
+    }
+    const nextLiveId = liveActivities
+      .slice(itemIndex + 1)
+      .find((candidate) => result.some((existingItem) => existingItem.id === candidate.id))?.id;
+    const insertion = nextLiveId
+      ? result.findIndex((candidate) => candidate.id === nextLiveId)
+      : result.length;
+    result.splice(insertion, 0, item);
+  }
+  return result;
+}
+
+function fresherLiveActivity(
+  current: ActivityItem,
+  live: ActivityItem,
+  turnIsTerminal: boolean,
+): ActivityItem {
+  if (current.status === "inProgress" && live.status !== "inProgress") return live;
+  if (current.status !== "inProgress" && live.status === "inProgress") {
+    return turnIsTerminal ? current : live;
+  }
+  if (current.type === live.type && "text" in current && "text" in live) {
+    if (current.text.startsWith(live.text) && current.text.length > live.text.length)
+      return current;
+    if (live.text.startsWith(current.text) && live.text.length > current.text.length) return live;
+  }
+  if (current.type === "command" && live.type === "command") {
+    if (current.output.startsWith(live.output) && current.output.length > live.output.length) {
+      return current;
+    }
+    if (live.output.startsWith(current.output) && live.output.length > current.output.length) {
+      return live;
+    }
+  }
+  return live;
 }
 
 function normalizeActivity(

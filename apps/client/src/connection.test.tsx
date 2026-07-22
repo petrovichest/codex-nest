@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ThreadDetail, ThreadSummary } from "@codexnest/protocol";
@@ -67,6 +67,85 @@ describe("ConnectionProvider", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await expect(Promise.all(requests)).resolves.toEqual([detail, detail]);
+    view.unmount();
+  });
+
+  it("ignores an older forced detail request that finishes last", async () => {
+    const responses: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          responses.push(resolve);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const requests: Array<Promise<ThreadDetail>> = [];
+
+    const detail = (text: string): ThreadDetail => ({
+      summary,
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: {
+            startedAt: 1,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text,
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    });
+
+    function Probe() {
+      const { refreshDetail, state } = useConnection();
+      useEffect(() => {
+        requests.push(
+          refreshDetail("thread", { force: true }),
+          refreshDetail("thread", { force: true }),
+        );
+      }, [refreshDetail]);
+      return (
+        <span>
+          {state.details.thread?.turns[0]?.items[0]?.type === "agentMessage"
+            ? state.details.thread.turns[0].items[0].text
+            : ""}
+        </span>
+      );
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    act(() => responses[1]?.(new Response(JSON.stringify(detail("Новый ответ")))));
+    expect(await screen.findByText("Новый ответ")).toBeInTheDocument();
+    act(() => responses[0]?.(new Response(JSON.stringify(detail("Старый ответ")))));
+    await expect(Promise.all(requests)).resolves.toHaveLength(2);
+    expect(screen.getByText("Новый ответ")).toBeInTheDocument();
+    expect(screen.queryByText("Старый ответ")).toBeNull();
     view.unmount();
   });
 

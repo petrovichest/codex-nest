@@ -95,6 +95,7 @@ export function ThreadPage({
   const previousAttentionIds = useRef<string | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
   const detailReconcileKey = useRef<string | null>(null);
+  const scrollTargetMessageId = useRef<string | null>(null);
   const olderScrollAnchor = useRef<{
     threadId: string;
     scrollHeight: number;
@@ -189,7 +190,11 @@ export function ThreadPage({
   }, [gitChangesRefreshKey, inspectorOpen, loadGitChanges, threadId]);
 
   useEffect(() => {
-    if (threadId) void refreshDetail(threadId).catch((caught: Error) => setError(caught.message));
+    if (threadId) {
+      void refreshDetail(threadId, { force: true }).catch((caught: Error) =>
+        setError(caught.message),
+      );
+    }
   }, [threadId, refreshDetail, state.snapshotEpoch]);
 
   useEffect(() => {
@@ -209,7 +214,7 @@ export function ThreadPage({
     const key = `${threadId}:${currentTurnId ?? "idle"}:${staleTurn ? "stale" : "missing"}`;
     if (detailReconcileKey.current === key) return;
     detailReconcileKey.current = key;
-    void refreshDetail(threadId).catch((caught: Error) => {
+    void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
       detailReconcileKey.current = null;
       setError(caught.message);
     });
@@ -240,6 +245,24 @@ export function ThreadPage({
     if (!detail || initialScrollThread.current !== threadId || !followsTail.current) return;
     scrollToEnd(scrollRef.current);
   }, [attention, detail, threadId]);
+
+  useLayoutEffect(() => {
+    const messageId = scrollTargetMessageId.current;
+    const node = scrollRef.current;
+    if (!messageId || !node) return;
+    const target = [...node.querySelectorAll<HTMLElement>("[data-message-id]")].find(
+      (candidate) => candidate.dataset.messageId === messageId,
+    );
+    if (!target) return;
+    followsTail.current = true;
+    setAttentionJump(false);
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } else {
+      scrollToEnd(node, "smooth");
+    }
+    scrollTargetMessageId.current = null;
+  }, [detail, optimisticMessages, threadId]);
 
   useEffect(() => {
     const ids = attention.map((request) => request.id).join(":");
@@ -349,6 +372,7 @@ export function ThreadPage({
     };
     setBusy(true);
     setError(null);
+    scrollTargetMessageId.current = clientMessageId;
     dispatch({ type: "optimistic.add", message: optimisticMessage });
     setInput("");
     setImages([]);
@@ -398,6 +422,7 @@ export function ThreadPage({
       changedMode = true;
       dispatch({ type: "thread", thread });
       clientMessageId = createClientMessageId();
+      scrollTargetMessageId.current = clientMessageId;
       dispatch({
         type: "optimistic.add",
         message: {
@@ -947,7 +972,10 @@ export function Activity({
   if (item.type === "userMessage" || item.type === "agentMessage") {
     const messageAnnotations = numberedAnnotations(annotations, item.id);
     return (
-      <article className={`message ${item.type}`}>
+      <article
+        className={`message ${item.type}`}
+        data-message-id={item.type === "userMessage" ? item.id : undefined}
+      >
         <div className="message-body">
           {item.text &&
             (item.type === "agentMessage" ? (
@@ -1520,7 +1548,11 @@ function QueuedMessages({
   return (
     <section className="queued-messages" aria-label="Очередь сообщений">
       {messages.map((message) => (
-        <article className="message userMessage queued-message" key={message.id}>
+        <article
+          className="message userMessage queued-message"
+          data-message-id={message.id}
+          key={message.id}
+        >
           <div className="message-body">
             {message.text && (
               <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />

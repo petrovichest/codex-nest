@@ -1295,7 +1295,7 @@ describe("Activity", () => {
     await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "queued"));
   });
 
-  it("shows the live plan checklist inside the turn without a composer status pill", () => {
+  it("shows chronological plan checklists inside the turn without a composer status pill", () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
     mockThreadConnection(api, running, {
@@ -1321,7 +1321,29 @@ describe("Activity", () => {
           items: [
             {
               type: "planChecklist",
-              id: "turn-plan-checklist",
+              id: "turn-plan-checklist-started",
+              status: "inProgress",
+              explanation: "Читаем код",
+              steps: [
+                { step: "Прочитать код", status: "inProgress" },
+                { step: "Исправить чат", status: "pending" },
+                { step: "Запустить тесты", status: "pending" },
+              ],
+              timestamp: Date.now() - 2_000,
+              afterItemId: null,
+            },
+            {
+              type: "agentMessage",
+              id: "progress-message",
+              status: "completed",
+              text: "Код прочитан",
+              images: [],
+              timestamp: Date.now() - 1_000,
+              phase: "commentary",
+            },
+            {
+              type: "planChecklist",
+              id: "turn-plan-checklist-next",
               status: "inProgress",
               explanation: "Проверяем изменения",
               steps: [
@@ -1336,14 +1358,19 @@ describe("Activity", () => {
         },
       ],
     });
-    renderThread();
+    const view = renderThread();
 
-    expect(screen.getByText("Ход работы")).toBeInTheDocument();
-    expect(screen.getByText("Прочитать код")).toBeInTheDocument();
-    expect(screen.getByText("Исправить чат")).toBeInTheDocument();
-    expect(screen.getByText("Запустить тесты")).toBeInTheDocument();
-    expect(screen.getAllByRole("checkbox")).toHaveLength(3);
-    expect(screen.getAllByRole("checkbox")[0]).toBeChecked();
+    expect(screen.getAllByText("Ход работы")).toHaveLength(2);
+    expect(screen.getByText("Код прочитан")).toBeInTheDocument();
+    expect(screen.getAllByText("Прочитать код")).toHaveLength(2);
+    expect(screen.getAllByText("Исправить чат")).toHaveLength(2);
+    expect(screen.getAllByText("Запустить тесты")).toHaveLength(2);
+    expect(screen.getAllByRole("checkbox")).toHaveLength(6);
+    expect(screen.getAllByRole("checkbox")[0]).not.toBeChecked();
+    expect(screen.getAllByRole("checkbox")[3]).toBeChecked();
+    const cards = view.container.querySelectorAll(".plan-checklist");
+    expect(cards[0]).toHaveTextContent("Читаем код");
+    expect(cards[1]).toHaveTextContent("Проверяем изменения");
     expect(screen.getAllByText("Проверяем изменения").length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector(".turn-progress")).toBeNull();
   });
@@ -1440,6 +1467,11 @@ describe("Activity", () => {
   });
 
   it("renders an optimistic message before the running indicator while startTurn is pending", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     let resolveStart: ((value: { turnId: string }) => void) | undefined;
     const api = threadApi();
     api.startTurn.mockImplementationOnce(
@@ -1487,8 +1519,11 @@ describe("Activity", () => {
     const message = screen.getByText("Появись сразу").closest("article")!;
     const timing = view.container.querySelector(".turn-timing")!;
     expect(message.compareDocumentPosition(timing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(message).toHaveAttribute("data-message-id", optimistic.id);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "nearest" });
 
     await act(async () => resolveStart?.({ turnId: "turn" }));
+    delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
   it("loads older turns near the top and preserves the visible scroll position", async () => {

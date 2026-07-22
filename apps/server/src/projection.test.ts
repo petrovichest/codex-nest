@@ -604,7 +604,7 @@ describe("AppProjection", () => {
     });
   });
 
-  it("persists question responses and live plan checklists and marks a finished plan for attention", async () => {
+  it("persists chronological plan checklists and marks a finished plan for attention", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const statePath = join(directory, "state.json");
@@ -619,6 +619,13 @@ describe("AppProjection", () => {
           id: "question-tool",
           clientId: null,
           content: [{ type: "text" as const, text: "Вопрос", text_elements: [] }],
+        },
+        {
+          type: "agentMessage" as const,
+          id: "progress-message",
+          text: "Перехожу к следующему шагу",
+          phase: "commentary" as const,
+          memoryCitation: null,
         },
         { type: "plan" as const, id: "final-plan", text: "Готовый план" },
       ],
@@ -667,13 +674,37 @@ describe("AppProjection", () => {
         turnId: "plan-turn",
         explanation: "Проверяю решение",
         plan: [
+          { step: "Исследовать", status: "inProgress" },
+          { step: "Составить план", status: "pending" },
+        ],
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]).toHaveLength(1),
+    );
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "plan-turn",
+        item: historicalTurn.items[1],
+        completedAtMs: 10_150,
+      },
+    } as ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "plan-turn",
+        explanation: "Составляю итоговый план",
+        plan: [
           { step: "Исследовать", status: "completed" },
           { step: "Составить план", status: "inProgress" },
         ],
       },
     } satisfies ServerNotification);
     await vi.waitFor(() =>
-      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]).toHaveLength(1),
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]).toHaveLength(2),
     );
 
     await projection.recordAttentionResponse(
@@ -706,25 +737,52 @@ describe("AppProjection", () => {
     await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("needsAttention"));
     const artifacts = store.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"] ?? [];
     expect(artifacts).toMatchObject([
-      { type: "planChecklist", status: "completed" },
+      {
+        type: "planChecklist",
+        status: "completed",
+        afterItemId: "question-tool",
+        steps: [
+          { step: "Исследовать", status: "inProgress" },
+          { step: "Составить план", status: "pending" },
+        ],
+      },
+      {
+        type: "planChecklist",
+        status: "completed",
+        afterItemId: "progress-message",
+        steps: [
+          { step: "Исследовать", status: "completed" },
+          { step: "Составить план", status: "inProgress" },
+        ],
+      },
       {
         type: "userInputResponse",
         entries: [{ question: "Какое значение?", answers: ["secret-value"] }],
       },
     ]);
+    const checklistIds = artifacts
+      .filter((item) => item.type === "planChecklist")
+      .map((item) => item.id);
+    expect(new Set(checklistIds).size).toBe(2);
 
     const detail = await projection.readThread("one");
     expect(detail.turns[0]?.items.map((item) => item.id)).toEqual([
       "question-tool",
-      "plan-turn-plan-checklist",
+      checklistIds[0],
       "question-tool-response",
+      "progress-message",
+      checklistIds[1],
       "final-plan",
     ]);
     const reloadedStore = new StateStore(statePath);
     await reloadedStore.load();
-    expect(
-      reloadedStore.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]?.[1],
-    ).toMatchObject({ entries: [{ answers: ["secret-value"] }] });
+    expect(reloadedStore.snapshot().threadMeta.one?.timelineArtifacts?.["plan-turn"]).toMatchObject(
+      [
+        { type: "planChecklist", id: checklistIds[0] },
+        { type: "planChecklist", id: checklistIds[1] },
+        { entries: [{ answers: ["secret-value"] }] },
+      ],
+    );
 
     await projection.setCurrentTurn("one", "implementation-turn");
     expect(projection.summary("one")?.state).toBe("running");
@@ -748,6 +806,99 @@ describe("AppProjection", () => {
     );
     expect(value.currentTurnId).toBeNull();
     expect(value.state).not.toBe("running");
+  });
+
+  it("overlays accepted user messages onto a lagging turn read", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const laggingTurn = {
+      ...testTurn("live", "inProgress"),
+      itemsView: "full" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "agent",
+          text: "Уже отвечаю",
+          phase: "commentary" as const,
+          memoryCitation: null,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [laggingTurn], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    projection.recordUserMessage("one", "live", "client-user", "Мой запрос", ["image"]);
+
+    expect((await projection.readThread("one")).turns[0]?.items).toMatchObject([
+      { type: "userMessage", id: "client-user", text: "Мой запрос", images: ["image"] },
+      { type: "agentMessage", id: "agent", text: "Уже отвечаю" },
+    ]);
+
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: {
+          type: "userMessage",
+          id: "server-user",
+          clientId: "client-user",
+          content: [{ type: "text", text: "Канонический запрос", text_elements: [] }],
+        },
+        completedAtMs: 11_000,
+      },
+    } as ServerNotification);
+    expect((await projection.readThread("one")).turns[0]?.items[0]).toMatchObject({
+      id: "client-user",
+      text: "Канонический запрос",
+    });
+
+    projection.recordUserMessage("one", "live", "client-steer", "Уточнение", []);
+    laggingTurn.items = [
+      {
+        type: "userMessage",
+        id: "server-user",
+        clientId: "client-user",
+        content: [{ type: "text", text: "Канонический запрос", text_elements: [] }],
+      },
+      laggingTurn.items[0]!,
+      {
+        type: "agentMessage",
+        id: "after-steer",
+        text: "Продолжаю после уточнения",
+        phase: "commentary",
+        memoryCitation: null,
+      },
+    ];
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: laggingTurn.items[2],
+        completedAtMs: 12_000,
+      },
+    } as ServerNotification);
+    expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
+      "client-user",
+      "agent",
+      "client-steer",
+      "after-steer",
+    ]);
   });
 
   it("rejoins and restores an active turn once per app-server connection", async () => {

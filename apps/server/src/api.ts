@@ -179,6 +179,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     projection.markMaterialized(threadId);
     await projection.setCurrentTurn(threadId, turn.turn.id);
+    if (clientMessageId) {
+      projection.recordUserMessage(threadId, turn.turn.id, clientMessageId, input, images);
+    }
     if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
     if (!goal) return { turnId: turn.turn.id };
     try {
@@ -220,6 +223,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }),
     );
     if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, result.turnId);
+    if (clientMessageId) {
+      projection.recordUserMessage(threadId, result.turnId, clientMessageId, input, images);
+    }
     return result.turnId;
   };
   const queue = new MessageQueue(store, {

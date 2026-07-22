@@ -24,7 +24,7 @@ interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
   dispatch: Dispatch<ClientAction>;
-  refreshDetail(threadId: string): Promise<ThreadDetail>;
+  refreshDetail(threadId: string, options?: { force?: boolean }): Promise<ThreadDetail>;
   loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
   reconnect(): void;
 }
@@ -40,6 +40,7 @@ export function ConnectionProvider({
   const [generation, setGeneration] = useState(0);
   const sequence = useRef<number | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
+  const detailRequestVersions = useRef(new Map<string, number>());
   const browserNotifications = useMemo(
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
     [],
@@ -47,14 +48,18 @@ export function ConnectionProvider({
 
   const reconnect = useCallback(() => setGeneration((value) => value + 1), []);
   const readDetail = useCallback(
-    (threadId: string, cursor?: string) => {
+    (threadId: string, cursor?: string, force = false) => {
       const key = JSON.stringify([threadId, cursor ?? null]);
       const current = detailRequests.current.get(key);
-      if (current) return current;
+      if (current && !force) return current;
+      const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
+      detailRequestVersions.current.set(key, version);
       const request = api
         .readThread(threadId, cursor)
         .then((detail) => {
-          dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
+          if (detailRequestVersions.current.get(key) === version) {
+            dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
+          }
           return detail;
         })
         .finally(() => {
@@ -65,7 +70,11 @@ export function ConnectionProvider({
     },
     [api],
   );
-  const refreshDetail = useCallback((threadId: string) => readDetail(threadId), [readDetail]);
+  const refreshDetail = useCallback(
+    (threadId: string, options?: { force?: boolean }) =>
+      readDetail(threadId, undefined, options?.force),
+    [readDetail],
+  );
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
     [readDetail],
