@@ -3,6 +3,7 @@
 set -euo pipefail
 
 codexnest_root="${CODEXNEST_ROOT:-$HOME/.local/share/codexnest}"
+codexnest_repository="${CODEXNEST_REPOSITORY_URL:-https://github.com/petrovichest/codex-nest.git}"
 codexnest_source="$codexnest_root/source"
 codexnest_releases="$codexnest_root/releases"
 codexnest_current="$codexnest_root/current"
@@ -99,17 +100,17 @@ codexnest_set_env_value() {
 
 codexnest_install_assets() {
   local release="$1"
-  install -m 0755 "$release/deploy/codexnest" "$HOME/.local/bin/codexnest"
+  install -m 0755 "$release/deploy/codexnest" "$HOME/.local/bin/codexnest" || return 1
   install -m 0644 "$release/deploy/systemd/codexnest-managed.service" \
-    "$codexnest_service_dir/codexnest.service"
+    "$codexnest_service_dir/codexnest.service" || return 1
   install -m 0644 "$release/deploy/systemd/codexnest-update.service" \
-    "$codexnest_service_dir/codexnest-update.service"
+    "$codexnest_service_dir/codexnest-update.service" || return 1
   systemctl --user daemon-reload
 }
 
 codexnest_switch_release() {
   local target="$1" temporary="$codexnest_root/.current.$$"
-  ln -s "$target" "$temporary"
+  ln -s "$target" "$temporary" || return 1
   mv -Tf "$temporary" "$codexnest_current"
 }
 
@@ -132,23 +133,24 @@ codexnest_build_release() {
         -f "$target/apps/client/dist/index.html" ]]; then
     return
   fi
-  git -C "$codexnest_source" fetch --tags --prune origin
+  git -C "$codexnest_source" remote set-url origin "$codexnest_repository" || return 1
+  git -C "$codexnest_source" fetch --tags --prune origin || return 1
   git -C "$codexnest_source" worktree remove --force "$target" 2>/dev/null || true
   if [[ -e "$target" ]]; then
     rm -rf -- "$target"
   fi
-  git -C "$codexnest_source" worktree prune
-  git -C "$codexnest_source" worktree add --detach "$target" "$tag"
+  git -C "$codexnest_source" worktree prune || return 1
+  git -C "$codexnest_source" worktree add --detach "$target" "$tag" || return 1
   node_bin="$codexnest_root/runtime/current/bin"
-  (
-    cd "$target"
-    PATH="$node_bin:$PATH" "$node_bin/npm" ci
-    PATH="$node_bin:$PATH" CODEXNEST_VERSION="${tag#v}" "$node_bin/npm" run build
+  if ! (
+    cd "$target" &&
+    PATH="$node_bin:$PATH" "$node_bin/npm" ci &&
+    PATH="$node_bin:$PATH" CODEXNEST_VERSION="${tag#v}" "$node_bin/npm" run build &&
     printf '%s\n' "$tag" > .codexnest-built
-  ) || {
+  ); then
     git -C "$codexnest_source" worktree remove --force "$target" || true
     return 1
-  }
+  fi
 }
 
 codexnest_restore_release() {

@@ -64,6 +64,7 @@ EOF
   cat > "$case_node/bin/npm" <<'EOF'
 #!/usr/bin/env bash
 set -e
+if [[ -f "$HOME/fail-build" ]]; then exit 9; fi
 if [[ "${1:-}" == "ci" ]]; then exit 0; fi
 if [[ "${1:-}" == "run" && "${2:-}" == "build" ]]; then
   mkdir -p apps/server/dist apps/client/dist
@@ -101,6 +102,7 @@ run_adoption() {
   XDG_CONFIG_HOME="$case_home/.config" \
   XDG_STATE_HOME="$case_home/.local/state" \
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
+  CODEXNEST_REPOSITORY_URL="$case_repo" \
   PATH="$case_fake_bin:/usr/bin:/bin" \
   CODEXNEST_HEALTH_ATTEMPTS=1 \
   CODEXNEST_HEALTH_DELAY_SECONDS=0 \
@@ -112,6 +114,7 @@ run_cli() {
   XDG_CONFIG_HOME="$case_home/.config" \
   XDG_STATE_HOME="$case_home/.local/state" \
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
+  CODEXNEST_REPOSITORY_URL="$case_repo" \
   PATH="$case_fake_bin:/usr/bin:/bin" \
     "$case_home/.local/bin/codexnest" "$@"
 }
@@ -132,6 +135,16 @@ run_cli update-worker >/dev/null
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.1
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/previous")")" = v0.1.0
 grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
+
+prepare_case build_failure
+run_adoption >/dev/null
+touch "$case_home/fail-build"
+if run_cli update-worker >/dev/null 2>&1; then
+  printf '%s\n' 'Expected managed update build failure' >&2
+  exit 1
+fi
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+grep -q '"result":"failed"' "$case_home/.local/state/codexnest/update.json"
 
 prepare_case rollback
 cp "$case_home/.config/codexnest/server.env" "$test_root/rollback-env"

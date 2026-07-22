@@ -106,7 +106,7 @@ adopt_token_before="$($adopt_node_bin -e '
 ' "$adopt_state_path")"
 [[ "$adopt_token_before" =~ ^[0-9a-fA-F]{64}$ ]] || adopt_die "existing bearer token verifier is missing"
 
-adopt_origin="$(git -C "$adopt_repository" remote get-url origin)"
+adopt_origin="${CODEXNEST_REPOSITORY_URL:-https://github.com/petrovichest/codex-nest.git}"
 adopt_release="$adopt_releases/$adopt_tag"
 
 if $adopt_dry_run; then
