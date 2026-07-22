@@ -23,7 +23,7 @@ describe("ApplicationSettingsCard", () => {
       checkAppUpdate: vi.fn(async () => checked),
       updateApp: vi.fn(async () => checked),
     };
-    connection.mockReturnValue({ api });
+    connection.mockReturnValue({ api, state: { network: "connected" } });
 
     render(<ApplicationSettingsCard />);
 
@@ -48,7 +48,7 @@ describe("ApplicationSettingsCard", () => {
       checkAppUpdate: vi.fn(async () => current),
       updateApp: vi.fn(async () => queued),
     };
-    connection.mockReturnValue({ api });
+    connection.mockReturnValue({ api, state: { network: "connected" } });
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<ApplicationSettingsCard />);
@@ -67,7 +67,7 @@ describe("ApplicationSettingsCard", () => {
       checkAppUpdate: vi.fn(),
       updateApp: vi.fn(),
     };
-    connection.mockReturnValue({ api });
+    connection.mockReturnValue({ api, state: { network: "connected" } });
 
     render(<ApplicationSettingsCard />);
 
@@ -98,7 +98,7 @@ describe("ApplicationSettingsCard", () => {
       checkAppUpdate: vi.fn(),
       updateApp: vi.fn(),
     };
-    connection.mockReturnValue({ api });
+    connection.mockReturnValue({ api, state: { network: "connected" } });
 
     try {
       render(<ApplicationSettingsCard />);
@@ -114,6 +114,40 @@ describe("ApplicationSettingsCard", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reloads the final updater result after the server reconnects", async () => {
+    const interrupted = updateStatus({
+      latestVersion: "0.2.0",
+      updateAvailable: true,
+      result: "failed",
+      message: "Update interrupted",
+    });
+    const updated = updateStatus({
+      currentVersion: "0.2.0",
+      latestVersion: "0.2.0",
+      updateAvailable: false,
+      result: "updated",
+      message: "CodexNest was updated successfully",
+    });
+    const api = {
+      readAppSettings: vi.fn().mockResolvedValueOnce(interrupted).mockResolvedValue(updated),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    let network = "connected";
+    connection.mockImplementation(() => ({ api, state: { network } }));
+
+    const view = render(<ApplicationSettingsCard />);
+    expect(await screen.findByText("Update interrupted")).toBeInTheDocument();
+
+    network = "offline";
+    view.rerender(<ApplicationSettingsCard />);
+    network = "connected";
+    view.rerender(<ApplicationSettingsCard />);
+
+    expect(await screen.findByText("CodexNest was updated successfully")).toBeInTheDocument();
+    expect(screen.getByText("Обновлено")).toBeInTheDocument();
   });
 });
 

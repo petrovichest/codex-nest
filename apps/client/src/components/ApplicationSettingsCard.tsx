@@ -8,7 +8,7 @@ import { ServerIcon } from "./Icons";
 type Action = "checking" | "updating" | null;
 
 export function ApplicationSettingsCard() {
-  const { api } = useConnection();
+  const { api, state } = useConnection();
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<Action>(null);
@@ -27,8 +27,9 @@ export function ApplicationSettingsCard() {
   }, [api]);
 
   useEffect(() => {
+    if (state.network !== "connected") return;
     void load();
-  }, [load]);
+  }, [load, state.network]);
 
   useEffect(() => {
     if (!status || status.operation === "idle") return;
