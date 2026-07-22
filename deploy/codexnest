@@ -124,7 +124,8 @@ codexnest_health_ok() {
 }
 
 codexnest_build_release() {
-  local tag="$1" target="$codexnest_releases/$tag" node_bin
+  local tag="$1" target node_bin
+  target="$codexnest_releases/$tag"
   [[ "$target" == "$codexnest_releases"/v* ]] || codexnest_die "invalid release path"
   if [[ -f "$target/.codexnest-built" && \
         -f "$target/apps/server/dist/index.js" && \

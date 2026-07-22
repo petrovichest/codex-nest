@@ -34,6 +34,11 @@ prepare_case() {
   git -C "$case_repo" add .
   git -C "$case_repo" commit -q -m fixture
   git -C "$case_repo" tag v0.1.0
+  sed -i 's/"version": "0.1.0"/"version": "0.1.1"/' "$case_repo/package.json"
+  git -C "$case_repo" add package.json
+  git -C "$case_repo" commit -q -m update-fixture
+  git -C "$case_repo" tag v0.1.1
+  git -C "$case_repo" switch -q --detach v0.1.0
   git -C "$case_repo" remote add origin "$case_repo"
 
   printf 'CUSTOM_SETTING=keep\nCODEXNEST_STATE_PATH=%s\n' \
@@ -77,11 +82,16 @@ EOF
   cat > "$case_fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *api.github.com* ]]; then
-  printf '%s\n' '{"tag_name":"v0.1.0","draft":false,"prerelease":false}'
+  tag=v0.1.0
+  if [[ "$*" == *'/releases/latest'* ]]; then tag=v0.1.1; fi
+  printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "$tag"
   exit 0
 fi
 if [[ -f "$HOME/fail-health" ]]; then exit 22; fi
-printf '%s\n' '{"status":"ok","serverVersion":"0.1.0"}'
+current="$(readlink -f "$HOME/.local/share/codexnest/current" 2>/dev/null || true)"
+version="${current##*/v}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || version=0.1.0
+printf '{"status":"ok","serverVersion":"%s"}\n' "$version"
 EOF
   chmod 0755 "$case_fake_bin/systemctl" "$case_fake_bin/curl"
 }
@@ -97,6 +107,15 @@ run_adoption() {
     "$test_script_dir/adopt-existing.sh" --repo "$case_repo" --node "$case_node" "$@"
 }
 
+run_cli() {
+  HOME="$case_home" \
+  XDG_CONFIG_HOME="$case_home/.config" \
+  XDG_STATE_HOME="$case_home/.local/state" \
+  CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
+  PATH="$case_fake_bin:/usr/bin:/bin" \
+    "$case_home/.local/bin/codexnest" "$@"
+}
+
 prepare_case success
 run_adoption --dry-run >/dev/null
 run_adoption >/dev/null
@@ -109,6 +128,10 @@ test -x "$case_home/.local/bin/codexnest"
 test -f "$case_home/.config/systemd/user/codexnest-update.service"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
 test -z "$(find "$case_home/.local/state/codexnest" -maxdepth 1 -name 'adoption-backup.*' -print -quit)"
+run_cli update-worker >/dev/null
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.1
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/previous")")" = v0.1.0
+grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
 
 prepare_case rollback
 cp "$case_home/.config/codexnest/server.env" "$test_root/rollback-env"
