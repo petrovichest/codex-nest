@@ -22,6 +22,15 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import {
+  type AnnotationDraft,
+  formatAnnotatedMessage,
+  loadPendingAnnotations,
+  type PendingAnnotation,
+  rangeOffsets,
+  resolveAnnotationRange,
+  savePendingAnnotations,
+} from "../annotations";
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { openDownloadUrl } from "../downloads";
@@ -63,6 +72,10 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const [deleting, setDeleting] = useState(false);
   const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [annotationState, setAnnotationState] = useState<{
+    threadId: string;
+    items: PendingAnnotation[];
+  }>(() => ({ threadId, items: loadPendingAnnotations(threadId) }));
   const [renaming, setRenaming] = useState(false);
   const [attentionJump, setAttentionJump] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -98,6 +111,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
   );
+  const annotations = annotationState.threadId === threadId ? annotationState.items : [];
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
     : undefined;
@@ -121,6 +135,10 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
   useEffect(() => {
     if (goal) setGoalMode(false);
   }, [goal]);
+
+  useEffect(() => {
+    setAnnotationState({ threadId, items: loadPendingAnnotations(threadId) });
+  }, [threadId]);
 
   useEffect(() => {
     if (!threadId) return;
@@ -253,10 +271,59 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
       </div>
     );
 
+  function persistAnnotations(next: PendingAnnotation[]): boolean {
+    try {
+      savePendingAnnotations(threadId, next);
+      setAnnotationState({ threadId, items: next });
+      return true;
+    } catch {
+      setError("Не удалось сохранить аннотации локально");
+      return false;
+    }
+  }
+
+  function createAnnotation(draft: AnnotationDraft): boolean {
+    const saved = persistAnnotations([
+      ...annotations,
+      {
+        ...draft,
+        id: createClientMessageId(),
+        createdAt: Date.now(),
+      },
+    ]);
+    if (saved && goalMode) setGoalMode(false);
+    return saved;
+  }
+
+  function updateAnnotation(annotationId: string, comment: string): boolean {
+    const next = annotations.map((annotation) =>
+      annotation.id === annotationId ? { ...annotation, comment: comment.trim() } : annotation,
+    );
+    return persistAnnotations(next);
+  }
+
+  function deleteAnnotation(annotationId: string): boolean {
+    return persistAnnotations(annotations.filter((annotation) => annotation.id !== annotationId));
+  }
+
+  function clearSentAnnotations(sent: PendingAnnotation[]) {
+    if (!sent.length) return;
+    const sentIds = new Set(sent.map((annotation) => annotation.id));
+    const next = annotations.filter((annotation) => !sentIds.has(annotation.id));
+    try {
+      savePendingAnnotations(threadId, next);
+    } catch {
+      setError("Сообщение отправлено, но локальный черновик аннотаций не удалось очистить");
+    }
+    setAnnotationState({ threadId, items: next });
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if ((!input.trim() && !images.length) || (goalMode && !input.trim())) return;
-    const submittedInput = input;
+    const submittedComposerInput = input;
+    const submittedAnnotations = annotations;
+    const submittedInput = formatAnnotatedMessage(submittedComposerInput, submittedAnnotations);
+    if ((!submittedInput.trim() && !images.length) || (goalMode && !input.trim())) return;
     const submittedImages = images;
     const submittedGoalMode = goalMode;
     const clientMessageId = createClientMessageId();
@@ -282,6 +349,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
           ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
           clientMessageId,
         });
+        clearSentAnnotations(submittedAnnotations);
       } else {
         const result = await api.startTurn(threadId, {
           input: submittedInput,
@@ -295,11 +363,12 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
           messageId: clientMessageId,
           turnId: result.turnId,
         });
+        clearSentAnnotations(submittedAnnotations);
         if (result.goalWarning) setError(result.goalWarning);
       }
     } catch (caught) {
       dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
-      setInput(submittedInput);
+      setInput(submittedComposerInput);
       setImages(submittedImages);
       setGoalMode(submittedGoalMode);
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
@@ -440,6 +509,10 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
     !summary.currentTurnId && summary.settings.collaborationMode === "plan"
       ? findLatestCompletedPlan(detail)
       : null;
+  const latestAnnotatableId = findLatestAnnotatable(detail, summary.currentTurnId);
+  const latestPlanHasAnnotations = Boolean(
+    latestPlanId && annotations.some((annotation) => annotation.messageId === latestPlanId),
+  );
 
   return (
     <div className="thread-workspace">
@@ -523,11 +596,26 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
                     />
                   ) : (
                     <div key={entry.id}>
-                      <Activity item={entry} cwd={summary.cwd} onDownload={downloadFile} />
+                      <Activity
+                        item={entry}
+                        cwd={summary.cwd}
+                        onDownload={downloadFile}
+                        annotations={annotations}
+                        annotationEnabled={!busy && entry.id === latestAnnotatableId}
+                        annotationBusy={busy}
+                        onCreateAnnotation={createAnnotation}
+                        onUpdateAnnotation={updateAnnotation}
+                        onDeleteAnnotation={deleteAnnotation}
+                      />
                       {entry.id === latestPlanId && (
                         <button
                           className="implement-plan"
-                          disabled={busy}
+                          disabled={busy || latestPlanHasAnnotations}
+                          title={
+                            latestPlanHasAnnotations
+                              ? "Сначала отправьте или удалите аннотации к плану"
+                              : undefined
+                          }
                           onClick={() => void implementPlan()}
                         >
                           Да, реализуй этот план
@@ -608,7 +696,13 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
           goalMode={goalMode}
           goal={goal}
           goalBusy={goalBusy}
-          onGoalModeChange={setGoalMode}
+          onGoalModeChange={(value) => {
+            if (value && annotations.length) {
+              setError("Сначала отправьте или удалите аннотации");
+              return;
+            }
+            setGoalMode(value);
+          }}
           onGoalUpdate={(patch) => void updateGoal(patch)}
           onGoalClear={() => void clearGoal()}
           models={state.snapshot?.models ?? []}
@@ -618,6 +712,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
               : undefined
           }
           error={error}
+          hasSupplementalContent={annotations.length > 0}
         />
       </div>
       <SessionInspector
@@ -814,17 +909,49 @@ export function Activity({
   item,
   cwd,
   onDownload,
+  annotations = [],
+  annotationEnabled = false,
+  annotationBusy = false,
+  onCreateAnnotation,
+  onUpdateAnnotation,
+  onDeleteAnnotation,
 }: {
   item: ActivityItem;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  annotations?: PendingAnnotation[];
+  annotationEnabled?: boolean;
+  annotationBusy?: boolean;
+  onCreateAnnotation?(draft: AnnotationDraft): boolean;
+  onUpdateAnnotation?(annotationId: string, comment: string): boolean;
+  onDeleteAnnotation?(annotationId: string): boolean;
 }) {
   if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
+    const messageAnnotations = numberedAnnotations(annotations, item.id);
     return (
       <article className={`message ${item.type}`}>
-        {item.text && <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />}
-        {item.images.length > 0 && <MessageImages images={item.images} />}
+        <div className="message-body">
+          {item.text &&
+            (item.type === "agentMessage" ? (
+              <AnnotatableMarkdownContent
+                text={item.text}
+                messageId={item.id}
+                source="agentMessage"
+                cwd={cwd}
+                onDownload={onDownload}
+                annotations={messageAnnotations}
+                enabled={annotationEnabled}
+                readOnly={annotationBusy}
+                onCreate={onCreateAnnotation}
+                onUpdate={onUpdateAnnotation}
+                onDelete={onDeleteAnnotation}
+              />
+            ) : (
+              <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+            ))}
+          {item.images.length > 0 && <MessageImages images={item.images} />}
+        </div>
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
@@ -832,16 +959,33 @@ export function Activity({
   if (item.type === "reasoning") {
     return (
       <article className="message reasoning">
-        <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+        <div className="message-body">
+          <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+        </div>
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
   }
   if (item.type === "plan") {
+    const messageAnnotations = numberedAnnotations(annotations, item.id);
     return (
       <article className="message plan">
-        <div className="activity-label">План</div>
-        <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+        <div className="message-body">
+          <div className="activity-label">План</div>
+          <AnnotatableMarkdownContent
+            text={item.text}
+            messageId={item.id}
+            source="plan"
+            cwd={cwd}
+            onDownload={onDownload}
+            annotations={messageAnnotations}
+            enabled={annotationEnabled}
+            readOnly={annotationBusy}
+            onCreate={onCreateAnnotation}
+            onUpdate={onUpdateAnnotation}
+            onDelete={onDeleteAnnotation}
+          />
+        </div>
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
     );
@@ -850,17 +994,19 @@ export function Activity({
     const text = item.entries.flatMap((entry) => [entry.question, ...entry.answers]).join("\n");
     return (
       <article className="message userMessage user-input-response">
-        {item.entries.map((entry, index) => (
-          <section key={`${index}:${entry.header}:${entry.question}`}>
-            <strong>{entry.header}</strong>
-            <p>{entry.question}</p>
-            {entry.answers.map((answer, answerIndex) => (
-              <div className="user-input-answer" key={`${answerIndex}:${answer}`}>
-                {answer}
-              </div>
-            ))}
-          </section>
-        ))}
+        <div className="message-body">
+          {item.entries.map((entry, index) => (
+            <section key={`${index}:${entry.header}:${entry.question}`}>
+              <strong>{entry.header}</strong>
+              <p>{entry.question}</p>
+              {entry.answers.map((answer, answerIndex) => (
+                <div className="user-input-answer" key={`${answerIndex}:${answer}`}>
+                  {answer}
+                </div>
+              ))}
+            </section>
+          ))}
+        </div>
         <MessageFooter text={text} timestamp={item.timestamp} />
       </article>
     );
@@ -930,6 +1076,353 @@ export function Activity({
   return null;
 }
 
+type NumberedAnnotation = {
+  annotation: PendingAnnotation;
+  number: number;
+};
+
+type AnnotationPosition = {
+  left: number;
+  top: number;
+};
+
+type SelectionDraft = AnnotationPosition & {
+  quote: string;
+  startOffset: number;
+  endOffset: number;
+  editorTop: number;
+};
+
+type AnnotationEditor =
+  | ({ mode: "new" } & SelectionDraft)
+  | ({ mode: "existing"; annotationId: string } & AnnotationPosition);
+
+function numberedAnnotations(
+  annotations: PendingAnnotation[],
+  messageId: string,
+): NumberedAnnotation[] {
+  return annotations.flatMap((annotation, index) =>
+    annotation.messageId === messageId ? [{ annotation, number: index + 1 }] : [],
+  );
+}
+
+function AnnotatableMarkdownContent({
+  text,
+  messageId,
+  source,
+  cwd,
+  onDownload,
+  annotations,
+  enabled,
+  readOnly,
+  onCreate,
+  onUpdate,
+  onDelete,
+}: {
+  text: string;
+  messageId: string;
+  source: "agentMessage" | "plan";
+  cwd?: string;
+  onDownload?(path: string): Promise<void>;
+  annotations: NumberedAnnotation[];
+  enabled: boolean;
+  readOnly: boolean;
+  onCreate?(draft: AnnotationDraft): boolean;
+  onUpdate?(annotationId: string, comment: string): boolean;
+  onDelete?(annotationId: string): boolean;
+}) {
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [editor, setEditor] = useState<AnnotationEditor | null>(null);
+  const [comment, setComment] = useState("");
+  const [markerPositions, setMarkerPositions] = useState<Record<string, AnnotationPosition>>({});
+
+  const captureSelection = useCallback(() => {
+    if (!enabled || editor) {
+      setSelectionDraft(null);
+      return;
+    }
+    const content = contentRef.current;
+    const surface = surfaceRef.current;
+    const selection = window.getSelection();
+    if (!content || !surface || !selection || selection.rangeCount !== 1 || selection.isCollapsed) {
+      setSelectionDraft(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const quote = range.toString();
+    const offsets = quote.trim() ? rangeOffsets(content, range) : null;
+    if (!offsets) {
+      setSelectionDraft(null);
+      return;
+    }
+    const rect = safeRangeRect(range, content);
+    const surfaceRect = surface.getBoundingClientRect();
+    const selectionTop =
+      rect.top >= 44 ? rect.top - surfaceRect.top - 42 : rect.bottom - surfaceRect.top + 6;
+    const editorTop =
+      rect.bottom + 330 < window.innerHeight
+        ? rect.bottom - surfaceRect.top + 8
+        : rect.top - surfaceRect.top - 330;
+    setSelectionDraft({
+      quote,
+      ...offsets,
+      left: clampPopoverLeft(rect.left + rect.width / 2 - surfaceRect.left, surface.clientWidth),
+      top: selectionTop,
+      editorTop,
+    });
+  }, [editor, enabled]);
+
+  const positionMarkers = useCallback(() => {
+    const content = contentRef.current;
+    const surface = surfaceRef.current;
+    if (!content || !surface) return;
+    const surfaceRect = surface.getBoundingClientRect();
+    const next: Record<string, AnnotationPosition> = {};
+    const occupied: AnnotationPosition[] = [];
+    for (const { annotation } of annotations) {
+      const range = resolveAnnotationRange(content, annotation);
+      if (!range) continue;
+      const rect = safeRangeRect(range, content);
+      const position = {
+        left: Math.max(0, Math.min(rect.right - surfaceRect.left + 4, surface.clientWidth - 22)),
+        top: Math.max(0, rect.bottom - surfaceRect.top - 20),
+      };
+      while (
+        occupied.some(
+          (candidate) =>
+            Math.abs(candidate.left - position.left) < 22 &&
+            Math.abs(candidate.top - position.top) < 22,
+        )
+      ) {
+        position.left += 22;
+      }
+      occupied.push(position);
+      next[annotation.id] = position;
+    }
+    setMarkerPositions(next);
+  }, [annotations]);
+
+  useLayoutEffect(() => {
+    positionMarkers();
+  }, [positionMarkers, text]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(positionMarkers);
+    observer?.observe(content);
+    window.addEventListener("resize", positionMarkers);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", positionMarkers);
+    };
+  }, [positionMarkers]);
+
+  useEffect(() => {
+    if (!enabled) setSelectionDraft(null);
+  }, [enabled]);
+
+  useEffect(() => {
+    if (readOnly) setEditor(null);
+  }, [readOnly]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: number | null = null;
+    const selectionChanged = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(captureSelection, 80);
+    };
+    document.addEventListener("selectionchange", selectionChanged);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("selectionchange", selectionChanged);
+    };
+  }, [captureSelection, enabled]);
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    },
+    [],
+  );
+
+  async function copySelection() {
+    if (!selectionDraft) return;
+    try {
+      await copyText(selectionDraft.quote);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopyState("idle");
+      setSelectionDraft(null);
+    }, 1_200);
+  }
+
+  function openNewEditor() {
+    if (!selectionDraft) return;
+    setComment("");
+    setEditor({
+      mode: "new",
+      ...selectionDraft,
+      left: clampEditorLeft(selectionDraft.left, surfaceRef.current?.clientWidth ?? 0),
+      top: selectionDraft.editorTop,
+    });
+    setSelectionDraft(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function openExistingEditor(item: NumberedAnnotation) {
+    const position = markerPositions[item.annotation.id] ?? { left: 0, top: 0 };
+    const surface = surfaceRef.current;
+    const markerViewportTop = (surface?.getBoundingClientRect().top ?? 0) + position.top;
+    setComment(item.annotation.comment);
+    setEditor({
+      mode: "existing",
+      annotationId: item.annotation.id,
+      left: clampEditorLeft(position.left, surface?.clientWidth ?? 0),
+      top: markerViewportTop + 330 < window.innerHeight ? position.top + 28 : position.top - 330,
+    });
+    setSelectionDraft(null);
+  }
+
+  const editedAnnotation =
+    editor?.mode === "existing"
+      ? annotations.find(({ annotation }) => annotation.id === editor.annotationId)
+      : null;
+  const editorQuote = editor?.mode === "new" ? editor.quote : editedAnnotation?.annotation.quote;
+
+  return (
+    <div className="annotation-surface" ref={surfaceRef}>
+      <div
+        className="message-markdown"
+        ref={contentRef}
+        onPointerUp={() => window.setTimeout(captureSelection, 0)}
+        onKeyUp={captureSelection}
+      >
+        <MarkdownContent text={text} cwd={cwd} onDownload={onDownload} />
+      </div>
+      {annotations.map((item) => {
+        const position = markerPositions[item.annotation.id];
+        return position ? (
+          <button
+            type="button"
+            className="annotation-marker"
+            style={{ left: position.left, top: position.top }}
+            aria-label={`Аннотация ${item.number}`}
+            disabled={readOnly}
+            onClick={() => openExistingEditor(item)}
+            key={item.annotation.id}
+          >
+            {item.number}
+          </button>
+        ) : null;
+      })}
+      {selectionDraft && (
+        <div
+          className="selection-actions"
+          style={{ left: selectionDraft.left, top: selectionDraft.top }}
+          onPointerDown={(event) => event.preventDefault()}
+        >
+          <button type="button" onClick={openNewEditor}>
+            Аннотация
+          </button>
+          <button type="button" onClick={() => void copySelection()}>
+            {copyState === "copied"
+              ? "Скопировано"
+              : copyState === "failed"
+                ? "Ошибка копирования"
+                : "Копировать"}
+          </button>
+        </div>
+      )}
+      {editor && editorQuote && (
+        <form
+          className="annotation-editor"
+          style={{ left: editor.left, top: editor.top }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = comment.trim();
+            if (!value) return;
+            const saved =
+              editor.mode === "new"
+                ? onCreate?.({
+                    messageId,
+                    source,
+                    quote: editor.quote,
+                    startOffset: editor.startOffset,
+                    endOffset: editor.endOffset,
+                    comment: value,
+                  })
+                : onUpdate?.(editor.annotationId, value);
+            if (saved) setEditor(null);
+          }}
+        >
+          <div className="annotation-editor-header">
+            <strong>
+              {editedAnnotation ? `Аннотация ${editedAnnotation.number}` : "Новая аннотация"}
+            </strong>
+            <button
+              type="button"
+              aria-label={
+                editedAnnotation
+                  ? `Удалить аннотацию ${editedAnnotation.number}`
+                  : "Отменить аннотацию"
+              }
+              onClick={() => {
+                if (!editedAnnotation || onDelete?.(editedAnnotation.annotation.id)) {
+                  setEditor(null);
+                }
+              }}
+            >
+              <XIcon />
+            </button>
+          </div>
+          <blockquote>{editorQuote}</blockquote>
+          <label>
+            <span>Комментарий</span>
+            <textarea
+              autoFocus
+              aria-label="Комментарий к выделенному тексту"
+              rows={3}
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+            />
+          </label>
+          <button className="primary annotation-save" disabled={!comment.trim()}>
+            Сохранить
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function safeRangeRect(range: Range, fallback: HTMLElement): DOMRect {
+  return typeof range.getBoundingClientRect === "function"
+    ? range.getBoundingClientRect()
+    : fallback.getBoundingClientRect();
+}
+
+function clampPopoverLeft(left: number, width: number): number {
+  if (width <= 0) return Math.max(0, left);
+  return Math.max(76, Math.min(left, width - 76));
+}
+
+function clampEditorLeft(left: number, width: number): number {
+  if (width <= 0) return Math.max(0, left);
+  const halfWidth = Math.min(170, width / 2);
+  return Math.max(halfWidth, Math.min(left, width - halfWidth));
+}
+
 function ActivityGroup({
   items,
   cwd,
@@ -993,10 +1486,12 @@ function QueuedMessages({
     <section className="queued-messages" aria-label="Очередь сообщений">
       {messages.map((message) => (
         <article className="message userMessage queued-message" key={message.id}>
-          {message.text && (
-            <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />
-          )}
-          {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
+          <div className="message-body">
+            {message.text && (
+              <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />
+            )}
+            {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
+          </div>
           <MessageFooter text={message.text} timestamp={message.createdAt} />
           <div className="queued-message-footer">
             <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
@@ -1157,6 +1652,26 @@ function findLatestCompletedPlan(detail?: ThreadDetail): string | null {
     [...turn.items].reverse().find((item) => item.type === "plan" && item.status === "completed")
       ?.id ?? null
   );
+}
+
+function findLatestAnnotatable(
+  detail: ThreadDetail | undefined,
+  currentTurnId: string | null,
+): string | null {
+  if (!detail || currentTurnId) return null;
+  for (const turn of [...detail.turns].reverse()) {
+    if (turn.status === "inProgress") continue;
+    for (const item of [...turn.items].reverse()) {
+      if (
+        (item.type === "agentMessage" || item.type === "plan") &&
+        item.status === "completed" &&
+        Boolean(item.text.trim())
+      ) {
+        return item.id;
+      }
+    }
+  }
+  return null;
 }
 
 function scrollToEnd(node: HTMLDivElement | null, behavior: ScrollBehavior = "auto") {

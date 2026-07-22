@@ -225,7 +225,7 @@ public class SelfHostedNotificationService extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
         Notification notification = new NotificationCompat.Builder(this, EVENT_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(event.threadTitle)
             .setContentIntent(contentIntent)
@@ -244,7 +244,7 @@ public class SelfHostedNotificationService extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
         return new NotificationCompat.Builder(this, SERVICE_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("CodexNest")
             .setContentText(status)
             .setContentIntent(contentIntent)

@@ -35,6 +35,7 @@ interface CachedThread {
   archived: boolean;
   currentTurnId: string | null;
   liveOutcome?: ThreadOutcome;
+  goalStatus?: ThreadGoal["status"];
 }
 
 const THREAD_TURN_PAGE_SIZE = 20;
@@ -262,6 +263,7 @@ export class AppProjection extends EventEmitter {
       archived,
       currentTurnId: activeTurnId(thread),
       liveOutcome: this.threads.get(thread.id)?.liveOutcome,
+      goalStatus: this.threads.get(thread.id)?.goalStatus,
     };
     this.threads.set(thread.id, cached);
     this.publishThread(thread.id);
@@ -375,6 +377,7 @@ export class AppProjection extends EventEmitter {
         thread,
         archived: false,
         currentTurnId: activeTurnId(thread),
+        goalStatus: this.threads.get(thread.id)?.goalStatus,
       });
       this.hydrateLiveTurn(thread);
     }
@@ -384,6 +387,7 @@ export class AppProjection extends EventEmitter {
         thread,
         archived: true,
         currentTurnId: activeTurnId(thread),
+        goalStatus: this.threads.get(thread.id)?.goalStatus,
       });
     }
     for (const id of this.threads.keys()) {
@@ -553,7 +557,10 @@ export class AppProjection extends EventEmitter {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
           cached.thread.status = notification.params.status;
-          if (notification.params.status.type !== "active") cached.currentTurnId = null;
+          if (notification.params.status.type === "systemError") {
+            cached.currentTurnId = null;
+            cached.liveOutcome = "failed";
+          }
           this.publishThread(notification.params.threadId);
         }
         break;
@@ -566,20 +573,30 @@ export class AppProjection extends EventEmitter {
         }
         break;
       }
-      case "thread/goal/updated":
+      case "thread/goal/updated": {
+        const cached = this.threads.get(notification.params.threadId);
+        const statusChanged = cached?.goalStatus !== notification.params.goal.status;
+        if (cached) cached.goalStatus = notification.params.goal.status;
         this.publish({
           type: "goal.changed",
           threadId: notification.params.threadId,
           goal: notification.params.goal satisfies ThreadGoal,
         });
+        if (statusChanged) this.publishThread(notification.params.threadId);
         break;
-      case "thread/goal/cleared":
+      }
+      case "thread/goal/cleared": {
+        const cached = this.threads.get(notification.params.threadId);
+        const statusChanged = cached?.goalStatus !== undefined;
+        if (cached) cached.goalStatus = undefined;
         this.publish({
           type: "goal.changed",
           threadId: notification.params.threadId,
           goal: null,
         });
+        if (statusChanged) this.publishThread(notification.params.threadId);
         break;
+      }
       case "thread/archived": {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) cached.archived = true;
@@ -844,11 +861,12 @@ export class AppProjection extends EventEmitter {
     ) {
       return "needsAttention";
     }
+    if (cached.thread.status.type === "systemError") return "failed";
     if (cached.currentTurnId) return "running";
+    if (cached.goalStatus === "active") return "running";
     if (this.store.snapshot().threadMeta[cached.thread.id]?.awaitingPlanResponse) {
       return "needsAttention";
     }
-    if (cached.thread.status.type === "systemError") return "failed";
     return cached.liveOutcome ?? stored ?? "idle";
   }
 

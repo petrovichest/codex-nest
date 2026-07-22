@@ -50,6 +50,7 @@ export function Composer({
   onStop,
   error,
   autoFocus = false,
+  hasSupplementalContent = false,
 }: {
   input: string;
   onInput(value: string): void;
@@ -75,6 +76,7 @@ export function Composer({
   onStop?(): void;
   error: string | null;
   autoFocus?: boolean;
+  hasSupplementalContent?: boolean;
 }) {
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -82,7 +84,7 @@ export function Composer({
   const attachmentsRef = useRef<HTMLDivElement>(null);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const hasContent = Boolean(input.trim()) || images.length > 0;
+  const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
   const canSubmit =
     hasContent &&
     (!goalMode || Boolean(input.trim())) &&

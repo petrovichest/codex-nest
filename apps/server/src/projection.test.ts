@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ThreadGoal } from "@codexnest/protocol";
+
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
@@ -272,7 +274,7 @@ describe("AppProjection", () => {
       method: "thread/goal/cleared",
       params: { threadId: "one" },
     } satisfies ServerNotification);
-    expect(events.slice(-2)).toEqual([
+    expect(events.filter((event) => event.type === "goal.changed").slice(-2)).toEqual([
       { type: "goal.changed", threadId: "one", goal },
       { type: "goal.changed", threadId: "one", goal: null },
     ]);
@@ -369,6 +371,185 @@ describe("AppProjection", () => {
       expect(projection.summary("one")).toMatchObject({ state: "failed", unread: true }),
     );
     await store.flushed();
+  });
+
+  it("keeps an active turn running across a transient idle status", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const events: Array<{ type: string; [key: string]: unknown }> = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("first", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "thread/status/changed",
+      params: { threadId: "one", status: { type: "idle" } },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "first",
+        itemId: "continuation",
+        delta: "Продолжаю работу",
+      },
+    } satisfies ServerNotification);
+
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "first",
+      unread: false,
+    });
+    expect(events.filter((event) => event.type === "activity.upserted").at(-1)).toMatchObject({
+      threadId: "one",
+      turnId: "first",
+      item: { type: "agentMessage", text: "Продолжаю работу" },
+    });
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("first", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(projection.summary("one")).toMatchObject({
+        state: "completed",
+        currentTurnId: null,
+        unread: true,
+      }),
+    );
+    await store.flushed();
+  });
+
+  it("keeps an active goal running between turns and releases terminal state when stopped", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", goalNotification("active"));
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("first", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("first", "completed") },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(projection.summary("one")).toMatchObject({
+        state: "running",
+        currentTurnId: null,
+        unread: false,
+      }),
+    );
+
+    bridge.emit("notification", goalNotification("paused", 3));
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+
+    bridge.emit("notification", goalNotification("active", 4));
+    expect(projection.summary("one")).toMatchObject({ state: "running", unread: false });
+
+    bridge.emit("notification", {
+      method: "thread/goal/cleared",
+      params: { threadId: "one" },
+    } satisfies ServerNotification);
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+    await store.flushed();
+  });
+
+  it("publishes completion only after both the final turn and goal complete", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", goalNotification("active"));
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("goal-first", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", goalNotification("complete", 3));
+    expect(projection.summary("one")?.state).toBe("running");
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("goal-first", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("completed"));
+
+    bridge.emit("notification", goalNotification("active", 4));
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("turn-first", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("turn-first", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("running"));
+
+    bridge.emit("notification", goalNotification("complete", 5));
+    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+    await store.flushed();
+  });
+
+  it("fails immediately when an active thread reports a system error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    bridge.emit("notification", goalNotification("active"));
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("first", "inProgress") },
+    } satisfies ServerNotification);
+
+    bridge.emit("notification", {
+      method: "thread/status/changed",
+      params: { threadId: "one", status: { type: "systemError" } },
+    } satisfies ServerNotification);
+
+    expect(projection.summary("one")).toMatchObject({
+      state: "failed",
+      currentTurnId: null,
+    });
   });
 
   it("persists question responses and live plan checklists and marks a finished plan for attention", async () => {
@@ -653,4 +834,40 @@ function liveThread(): Thread {
       durationMs: null,
     },
   ]);
+}
+
+function testTurn(id: string, status: "inProgress" | "completed"): Thread["turns"][number] {
+  return {
+    id,
+    items: [],
+    itemsView: "summary",
+    status,
+    error: null,
+    startedAt: 1,
+    completedAt: status === "completed" ? 2 : null,
+    durationMs: status === "completed" ? 1_000 : null,
+  };
+}
+
+function goalNotification(
+  status: ThreadGoal["status"],
+  updatedAt = 2,
+): Extract<ServerNotification, { method: "thread/goal/updated" }> {
+  return {
+    method: "thread/goal/updated",
+    params: {
+      threadId: "one",
+      turnId: null,
+      goal: {
+        threadId: "one",
+        objective: "Довести задачу до конца",
+        status,
+        tokenBudget: null,
+        tokensUsed: 42,
+        timeUsedSeconds: 7,
+        createdAt: 1,
+        updatedAt,
+      },
+    },
+  };
 }

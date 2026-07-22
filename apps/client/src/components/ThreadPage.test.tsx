@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type { AttentionRequest, ThreadSummary, TurnProgress } from "@codexnest/protocol";
 
+import { annotationStorageKey, type PendingAnnotation } from "../annotations";
 import type { OptimisticMessage } from "../state";
 import { Activity, ThreadPage, TurnTiming, formatMessageTime } from "./ThreadPage";
 
@@ -32,6 +33,7 @@ const summary: ThreadSummary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
 });
 
@@ -51,6 +53,10 @@ describe("Activity", () => {
       />,
     );
     expect(screen.getByText("Сообщение").closest("article")).toHaveClass("userMessage");
+    const userArticle = screen.getByText("Сообщение").closest("article")!;
+    expect(userArticle.querySelector(":scope > .message-body")?.nextElementSibling).toHaveClass(
+      "message-footer",
+    );
     expect(screen.queryByText("Вы")).not.toBeInTheDocument();
 
     rerender(
@@ -227,6 +233,115 @@ describe("Activity", () => {
     expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
   });
 
+  it("creates an annotation from an exact text selection", async () => {
+    const onCreate = vi.fn().mockReturnValue(true);
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Выделенный фрагмент ответа",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotationEnabled
+        onCreateAnnotation={onCreate}
+      />,
+    );
+
+    const text = screen.getByText("Выделенный фрагмент ответа");
+    selectText(text, 0, 10);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Аннотация" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" }), {
+      target: { value: "Перепроверь это" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(onCreate).toHaveBeenCalledWith({
+      messageId: "agent",
+      source: "agentMessage",
+      quote: "Выделенный",
+      startOffset: 0,
+      endOffset: 10,
+      comment: "Перепроверь это",
+    });
+  });
+
+  it("copies only the selected fragment", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Скопируй только это",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotationEnabled
+      />,
+    );
+
+    const text = screen.getByText("Скопируй только это");
+    selectText(text, 9, 15);
+    fireEvent.pointerUp(text);
+    fireEvent.click(await screen.findByRole("button", { name: "Копировать" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("только"));
+  });
+
+  it("edits and deletes an annotation through its numbered marker", async () => {
+    const onUpdate = vi.fn().mockReturnValue(true);
+    const onDelete = vi.fn().mockReturnValue(true);
+    const annotation: PendingAnnotation = {
+      id: "note",
+      messageId: "agent",
+      source: "agentMessage",
+      quote: "фрагментом",
+      startOffset: 8,
+      endOffset: 18,
+      comment: "Старый комментарий",
+      createdAt: 1,
+    };
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Ответ с фрагментом",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotations={[annotation]}
+        onUpdateAnnotation={onUpdate}
+        onDeleteAnnotation={onDelete}
+      />,
+    );
+
+    const marker = await screen.findByRole("button", { name: "Аннотация 1" });
+    fireEvent.click(marker);
+    const editor = screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" });
+    expect(editor).toHaveValue("Старый комментарий");
+    fireEvent.change(editor, { target: { value: "Новый комментарий" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(onUpdate).toHaveBeenCalledWith("note", "Новый комментарий");
+
+    fireEvent.click(marker);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить аннотацию 1" }));
+    expect(onDelete).toHaveBeenCalledWith("note");
+  });
+
   it("shows a live turn timer and a final duration", () => {
     vi.useFakeTimers();
     try {
@@ -394,6 +509,112 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
     expect(api.archive).toHaveBeenCalledWith("thread", true);
+  });
+
+  it("sends annotation-only drafts as a visible user message and clears them on success", async () => {
+    const api = threadApi();
+    const annotation = pendingAnnotation();
+    localStorage.setItem(annotationStorageKey("thread"), JSON.stringify([annotation]));
+    const context = mockThreadConnection(api, summary, {
+      turns: [completedAgentTurn()],
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          input: expect.stringContaining("## Аннотации к предыдущему ответу агента"),
+          clientMessageId: expect.any(String),
+        }),
+      ),
+    );
+    expect(api.startTurn.mock.calls[0]?.[1].input).toContain("> фрагмент ответа");
+    expect(api.startTurn.mock.calls[0]?.[1].input).toContain("Уточни формулировку");
+    expect(
+      context.dispatch.mock.calls.find(([action]) => action.type === "optimistic.add")?.[0].message
+        .text,
+    ).toContain("### Аннотация 1");
+    await waitFor(() => expect(localStorage.getItem(annotationStorageKey("thread"))).toBeNull());
+  });
+
+  it("keeps local annotations when sending fails", async () => {
+    const api = threadApi();
+    api.startTurn.mockRejectedValueOnce(new Error("Сеть недоступна"));
+    const annotation = pendingAnnotation();
+    localStorage.setItem(annotationStorageKey("thread"), JSON.stringify([annotation]));
+    mockThreadConnection(api, summary, { turns: [completedAgentTurn()] });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByText("Сеть недоступна")).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(annotationStorageKey("thread"))!)).toEqual([annotation]);
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
+
+  it("offers annotation actions only on the latest completed agent response", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          ...completedAgentTurn(),
+          id: "older-turn",
+          items: [{ ...completedAgentTurn().items[0]!, id: "older", text: "Старый ответ" }],
+        },
+        {
+          ...completedAgentTurn(),
+          id: "latest-turn",
+          items: [{ ...completedAgentTurn().items[0]!, id: "latest", text: "Новый ответ" }],
+        },
+      ],
+    });
+    renderThread();
+
+    const older = screen.getByText("Старый ответ");
+    selectText(older, 0, 6);
+    fireEvent.pointerUp(older);
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 100)));
+    expect(screen.queryByRole("button", { name: "Аннотация" })).toBeNull();
+
+    const latest = screen.getByText("Новый ответ");
+    selectText(latest, 0, 5);
+    fireEvent.pointerUp(latest);
+    expect(await screen.findByRole("button", { name: "Аннотация" })).toBeInTheDocument();
+  });
+
+  it("queues annotation-only drafts and clears them after queue acceptance", async () => {
+    const api = threadApi();
+    const annotation = pendingAnnotation();
+    localStorage.setItem(annotationStorageKey("thread"), JSON.stringify([annotation]));
+    const running = { ...summary, state: "running" as const, currentTurnId: "running-turn" };
+    mockThreadConnection(api, running, {
+      turns: [
+        completedAgentTurn(),
+        {
+          id: "running-turn",
+          status: "inProgress",
+          startedAt: 3,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [],
+        },
+      ],
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
+
+    await waitFor(() =>
+      expect(api.enqueue).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: expect.stringContaining("### Аннотация 1") }),
+      ),
+    );
+    expect(localStorage.getItem(annotationStorageKey("thread"))).toBeNull();
   });
 
   it("keeps a completed session green until the user finishes it", async () => {
@@ -780,6 +1001,57 @@ describe("Activity", () => {
         clientMessageId: expect.any(String),
       }),
     );
+  });
+
+  it("sends plan annotations as revision feedback and blocks plan acceptance", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    const annotation = pendingAnnotation({
+      messageId: "plan",
+      source: "plan",
+      quote: "Сделать",
+      startOffset: 7,
+      endOffset: 14,
+    });
+    localStorage.setItem(annotationStorageKey("thread"), JSON.stringify([annotation]));
+    mockThreadConnection(api, planThread, {
+      turns: [
+        {
+          id: "plan-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "plan",
+              id: "plan",
+              status: "completed",
+              text: "# План\n\nСделать",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: expect.stringContaining("### Аннотация 1") }),
+      ),
+    );
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
   });
 
   it("shows server-owned queued messages and sends one immediately", async () => {
@@ -1214,6 +1486,42 @@ function mockThreadConnection(
   return value;
 }
 
+function pendingAnnotation(overrides: Partial<PendingAnnotation> = {}): PendingAnnotation {
+  return {
+    id: "annotation",
+    messageId: "agent-answer",
+    source: "agentMessage",
+    quote: "фрагмент ответа",
+    startOffset: 8,
+    endOffset: 23,
+    comment: "Уточни формулировку",
+    createdAt: 1,
+    ...overrides,
+  };
+}
+
+function completedAgentTurn() {
+  return {
+    id: "completed-turn",
+    status: "completed" as const,
+    startedAt: 1,
+    completedAt: 2,
+    durationMs: 1,
+    progress: progress(),
+    items: [
+      {
+        type: "agentMessage" as const,
+        id: "agent-answer",
+        status: "completed" as const,
+        text: "Готовый фрагмент ответа",
+        images: [],
+        timestamp: 2,
+        phase: "final_answer" as const,
+      },
+    ],
+  };
+}
+
 function progress(): TurnProgress {
   return {
     startedAt: 1,
@@ -1223,4 +1531,14 @@ function progress(): TurnProgress {
     additions: 0,
     deletions: 0,
   };
+}
+
+function selectText(element: HTMLElement, start: number, end: number) {
+  const node = element.firstChild!;
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  const selection = window.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
 }

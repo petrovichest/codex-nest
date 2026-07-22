@@ -74,9 +74,17 @@ describe("Composer", () => {
     await waitFor(() => expect(screen.queryByAltText("one.png")).toBeNull());
     expect(screen.getByAltText("two.jpg")).toBeInTheDocument();
   });
+
+  it("enables sending when annotations provide supplemental content", () => {
+    const view = render(<Harness />);
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+
+    view.rerender(<Harness hasSupplementalContent />);
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
 });
 
-function Harness() {
+function Harness({ hasSupplementalContent = false }: { hasSupplementalContent?: boolean }) {
   const [input, setInput] = useState("");
   const [images, setImages] = useState<ComposerImage[]>([]);
   const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
@@ -101,6 +109,7 @@ function Harness() {
       }
       models={models}
       error={null}
+      hasSupplementalContent={hasSupplementalContent}
     />
   );
 }

@@ -1147,7 +1147,8 @@ pre {
   overflow-wrap: anywhere;
 }
 
-.message > :last-child {
+.message-body > :last-child,
+.message-markdown > :last-child {
   margin-bottom: 0;
 }
 
@@ -1280,6 +1281,11 @@ pre {
   width: fit-content;
   max-width: min(78%, 680px);
   margin-left: auto;
+}
+
+.message.userMessage > .message-body {
+  width: fit-content;
+  max-width: 100%;
   padding: 12px 16px;
   border-radius: 18px;
   background: var(--surface-muted);
@@ -1319,6 +1325,7 @@ pre {
   min-height: 24px;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
   margin-top: 5px;
   color: var(--muted);
@@ -1342,16 +1349,130 @@ pre {
   height: 15px;
 }
 
-.message-footer > :last-child {
-  margin-left: auto;
-}
-
 .message-footer time {
   white-space: nowrap;
 }
 
 .message.userMessage .message-footer {
-  margin-bottom: -5px;
+  width: 100%;
+}
+
+.annotation-surface {
+  position: relative;
+}
+
+.selection-actions,
+.annotation-editor {
+  position: absolute;
+  z-index: 30;
+  transform: translateX(-50%);
+  box-shadow: var(--shadow);
+}
+
+.selection-actions {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.selection-actions button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.selection-actions button + button {
+  border-left: 1px solid var(--line);
+}
+
+.annotation-marker {
+  position: absolute;
+  z-index: 20;
+  width: 21px;
+  min-width: 21px;
+  height: 21px;
+  min-height: 21px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, #307ac3 72%, var(--line));
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: #307ac3;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 2px 7px rgb(0 0 0 / 16%);
+}
+
+.annotation-editor {
+  width: min(340px, calc(100vw - 32px));
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--surface-raised);
+}
+
+.annotation-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.annotation-editor-header button {
+  width: 27px;
+  min-width: 27px;
+  height: 27px;
+  min-height: 27px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.annotation-editor-header svg {
+  width: 15px;
+  height: 15px;
+}
+
+.annotation-editor blockquote {
+  max-height: 112px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.annotation-editor label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.annotation-editor textarea {
+  min-height: 82px;
+  resize: vertical;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.annotation-save {
+  min-height: 34px;
+  justify-self: end;
 }
 
 .turn-timing {
@@ -1372,7 +1493,7 @@ pre {
   min-height: 24px;
 }
 
-.user-input-response {
+.user-input-response > .message-body {
   display: grid;
   gap: 12px;
 }
@@ -1976,8 +2097,10 @@ pre {
 }
 
 .queued-message {
+  padding: 6px;
   opacity: 0.82;
   border: 1px dashed var(--line-strong);
+  border-radius: 18px;
 }
 
 .queued-message-footer {
@@ -2789,6 +2912,19 @@ pre {
 
   .message.userMessage {
     max-width: 90%;
+  }
+
+  .annotation-editor {
+    position: fixed;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    left: 10px !important;
+    top: auto !important;
+    z-index: 70;
+    width: auto;
+    max-height: min(72dvh, 560px);
+    overflow: auto;
+    transform: none;
   }
 
   .composer {
