@@ -62,6 +62,20 @@ describe("clientReducer", () => {
     expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
   });
 
+  it("invalidates loaded thread details when the server requires a resync", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    const epoch = state.snapshotEpoch;
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "resync.required" },
+    });
+
+    expect(state.snapshot?.sequence).toBe(5);
+    expect(state.snapshotEpoch).toBe(epoch + 1);
+  });
+
   it("applies task defaults and native goal events without polling", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

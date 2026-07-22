@@ -1530,7 +1530,7 @@ describe("Activity", () => {
     await waitFor(() => expect(scroll.scrollTop).toBe(350));
   });
 
-  it("does not reload history for a reconnect snapshot epoch", async () => {
+  it("reloads the open chat for a reconnect snapshot epoch", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary);
     const view = renderThread();
@@ -1539,7 +1539,7 @@ describe("Activity", () => {
     context.state.snapshotEpoch += 1;
     view.rerender(threadRoute());
 
-    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
   });
 
   it("shows a fallback working row and refreshes only when turn details disagree", async () => {

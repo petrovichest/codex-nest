@@ -165,7 +165,7 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         event.messages,
       );
     case "resync.required":
-      break;
+      return { ...state, snapshot, snapshotEpoch: state.snapshotEpoch + 1 };
   }
   return { ...state, snapshot };
 }

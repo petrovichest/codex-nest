@@ -133,14 +133,28 @@ export function Composer({
       updateKeyboardState();
     }
 
+    function preserveFocusForButton(event: PointerEvent) {
+      const button = event.target instanceof Element ? event.target.closest("button") : null;
+      if (
+        button instanceof HTMLButtonElement &&
+        !button.disabled &&
+        document.activeElement === textarea &&
+        viewportBaselineRef.current - viewportHeight() > KEYBOARD_VIEWPORT_DELTA
+      ) {
+        event.preventDefault();
+      }
+    }
+
     textarea.addEventListener("focus", captureViewportBaseline);
     textarea.addEventListener("blur", updateKeyboardState);
+    document.addEventListener("pointerdown", preserveFocusForButton, true);
     window.addEventListener("resize", updateKeyboardState);
     window.visualViewport?.addEventListener("resize", updateKeyboardState);
     updateKeyboardState();
     return () => {
       textarea.removeEventListener("focus", captureViewportBaseline);
       textarea.removeEventListener("blur", updateKeyboardState);
+      document.removeEventListener("pointerdown", preserveFocusForButton, true);
       window.removeEventListener("resize", updateKeyboardState);
       window.visualViewport?.removeEventListener("resize", updateKeyboardState);
     };
@@ -306,7 +320,6 @@ export function Composer({
               }
               className="composer-action send"
               disabled={!canSubmit}
-              onPointerDown={(event) => event.preventDefault()}
               type="submit"
             >
               <SendIcon />

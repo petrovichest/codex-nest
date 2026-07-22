@@ -180,7 +180,7 @@ export function ThreadPage({ onOpenNavigation }: { onOpenNavigation(): void }) {
 
   useEffect(() => {
     if (threadId) void refreshDetail(threadId).catch((caught: Error) => setError(caught.message));
-  }, [threadId, refreshDetail]);
+  }, [threadId, refreshDetail, state.snapshotEpoch]);
 
   useEffect(() => {
     if (!detail) return;

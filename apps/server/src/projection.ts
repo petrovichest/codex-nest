@@ -73,6 +73,12 @@ export class AppProjection extends EventEmitter {
       });
     });
     attention.on("upserted", (request) => {
+      const cached = request.threadId ? this.threads.get(request.threadId) : undefined;
+      if (cached && request.turnId) {
+        cached.currentTurnId = request.turnId;
+        cached.liveOutcome = undefined;
+        cached.thread.status = { type: "active", activeFlags: [] };
+      }
       this.publish({ type: "attention.upserted", attention: request });
       if (request.threadId) this.publishThread(request.threadId);
     });
@@ -385,11 +391,15 @@ export class AppProjection extends EventEmitter {
     const incoming = new Set<string>();
     for (const { thread, restoredGoalStatus } of active) {
       incoming.add(thread.id);
-      const liveGoalStatus = this.threads.get(thread.id)?.goalStatus;
+      const liveCached = this.threads.get(thread.id);
+      const liveGoalStatus = liveCached?.goalStatus;
+      const resumedTurnId = activeTurnId(thread);
       this.threads.set(thread.id, {
         thread,
         archived: false,
-        currentTurnId: activeTurnId(thread),
+        currentTurnId:
+          resumedTurnId ??
+          (thread.status.type === "active" ? (liveCached?.currentTurnId ?? null) : null),
         goalStatus: liveGoalStatus === undefined ? restoredGoalStatus : liveGoalStatus,
       });
       this.hydrateLiveTurn(thread);

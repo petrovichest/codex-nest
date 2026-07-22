@@ -134,23 +134,22 @@ export function ConnectionProvider({
   }, [api, browserNotifications, generation, settings.token]);
 
   useEffect(() => {
-    const foreground = () => {
-      if (document.visibilityState === "visible") {
-        reconnect();
-        void api
-          .sync()
-          .catch(() => undefined)
-          .finally(reconnect);
-      }
+    const refresh = () => {
+      reconnect();
+      void api.sync().catch(() => undefined);
     };
-    document.addEventListener("visibilitychange", foreground);
+    const foreground = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
     let removeNativeListener: (() => Promise<void>) | undefined;
     if (Capacitor.isNativePlatform()) {
       void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
-        if (isActive) foreground();
+        if (isActive) refresh();
       }).then((handle) => {
         removeNativeListener = () => handle.remove();
       });
+    } else {
+      document.addEventListener("visibilitychange", foreground);
     }
     return () => {
       document.removeEventListener("visibilitychange", foreground);

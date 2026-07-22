@@ -9,7 +9,8 @@ import type { ThreadGoal } from "@codexnest/protocol";
 
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
-import type { ServerNotification } from "./codex/generated/index";
+import type { ServerNotification, ServerRequest } from "./codex/generated/index";
+import type { JsonlTransport } from "./codex/transport";
 import type { Thread } from "./codex/generated/v2/index";
 import { AppProjection, diffStats } from "./projection";
 import { StateStore } from "./state/store";
@@ -438,6 +439,51 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 
+  it("restores a lost active turn from a user-input request and keeps it running after the answer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      attention,
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10, { type: "active", activeFlags: [] }, []));
+
+    const request = attention.receive(
+      {
+        method: "item/tool/requestUserInput",
+        id: 7,
+        params: {
+          threadId: "one",
+          turnId: "question-turn",
+          itemId: "question",
+          autoResolutionMs: null,
+          questions: [],
+        },
+      } as ServerRequest,
+      {
+        respond: vi.fn(),
+        respondError: vi.fn(),
+      } as unknown as JsonlTransport,
+    );
+    expect(projection.summary("one")).toMatchObject({
+      state: "needsAttention",
+      currentTurnId: "question-turn",
+      unread: false,
+    });
+
+    attention.resolve(request.id, { kind: "userInput", answers: {} });
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "question-turn",
+      unread: false,
+    });
+  });
+
   it("keeps an active goal running between turns and releases terminal state when stopped", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -773,6 +819,11 @@ describe("AppProjection", () => {
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/goal/get"),
     ).toHaveLength(1);
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      unread: false,
+    });
 
     bridge.emit("state", "unavailable");
     bridge.emit("state", "ready");

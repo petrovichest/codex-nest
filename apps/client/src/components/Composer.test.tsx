@@ -83,20 +83,41 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
   });
 
-  it("keeps textarea focus through a send press and still submits on click", () => {
-    const view = render(<Harness />);
+  it("keeps textarea focus for buttons across the page while the mobile keyboard is open", () => {
+    const initialHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+    const onExternalClick = vi.fn();
+    const view = render(
+      <>
+        <button type="button" onClick={onExternalClick}>
+          Внешнее действие
+        </button>
+        <Harness />
+      </>,
+    );
     const onSubmit = vi.fn((event: Event) => event.preventDefault());
     view.container.querySelector("form")?.addEventListener("submit", onSubmit);
     const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const external = screen.getByRole("button", { name: "Внешнее действие" });
+    const addImage = screen.getByRole("button", { name: "Добавить изображения" });
     const send = screen.getByRole("button", { name: "Отправить" });
 
     fireEvent.change(textarea, { target: { value: "Сообщение" } });
     textarea.focus();
+    expect(fireEvent.pointerDown(external)).toBe(true);
+
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
+    fireEvent(window, new Event("resize"));
+    expect(fireEvent.pointerDown(external)).toBe(false);
+    expect(fireEvent.pointerDown(addImage)).toBe(false);
     expect(fireEvent.pointerDown(send)).toBe(false);
     expect(textarea).toHaveFocus();
 
+    fireEvent.click(external);
     fireEvent.click(send);
+    expect(onExternalClick).toHaveBeenCalledOnce();
     expect(onSubmit).toHaveBeenCalledOnce();
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: initialHeight });
   });
 
   it("removes the mobile safe-area gap while the keyboard shrinks the viewport", () => {

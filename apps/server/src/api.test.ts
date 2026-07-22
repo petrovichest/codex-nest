@@ -254,7 +254,37 @@ describe("HTTP authentication", () => {
     });
     authorized.send(JSON.stringify({ type: "authenticate", token: "correct" }));
     await expect(snapshot).resolves.toMatchObject({ type: "snapshot" });
+
+    const secondAuthorized = await app.injectWS("/api/v1/events", {
+      headers: { origin: "http://localhost" },
+    });
+    const secondSnapshot = new Promise<Record<string, unknown>>((resolve) => {
+      secondAuthorized.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    secondAuthorized.send(JSON.stringify({ type: "authenticate", token: "correct" }));
+    await expect(secondSnapshot).resolves.toMatchObject({ type: "snapshot" });
+
+    const firstEvent = new Promise<Record<string, unknown>>((resolve) => {
+      authorized.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    const secondEvent = new Promise<Record<string, unknown>>((resolve) => {
+      secondAuthorized.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    projection.upsertThread(testThread("broadcast"));
+    const [firstBroadcast, secondBroadcast] = await Promise.all([firstEvent, secondEvent]);
+    expect(firstBroadcast).toMatchObject({
+      type: "event",
+      event: { type: "thread.upserted" },
+    });
+    expect(secondBroadcast).toEqual(firstBroadcast);
     authorized.terminate();
+    secondAuthorized.terminate();
 
     const unauthorized = await app.injectWS("/api/v1/events", {
       headers: { origin: "http://localhost" },

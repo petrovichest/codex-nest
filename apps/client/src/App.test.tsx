@@ -91,9 +91,11 @@ describe("App routing and navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Разрешить уведомления" }));
 
     await waitFor(() => expect(requestPermission).toHaveBeenCalledOnce());
-    expect(
-      screen.queryByRole("dialog", { name: "Разрешить уведомления?" }),
-    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Разрешить уведомления?" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("does not repeat a dismissed browser notification offer", () => {
