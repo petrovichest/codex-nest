@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 [[ "$(uname -s)" == "Linux" ]] || { printf '%s\n' 'Linux test host required'; exit 0; }
+
+trap 'printf "::error::adoption test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 test_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test_root="$(mktemp -d)"
@@ -86,6 +88,9 @@ EOF
 
 run_adoption() {
   HOME="$case_home" \
+  XDG_CONFIG_HOME="$case_home/.config" \
+  XDG_STATE_HOME="$case_home/.local/state" \
+  CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
   PATH="$case_fake_bin:/usr/bin:/bin" \
   CODEXNEST_HEALTH_ATTEMPTS=1 \
   CODEXNEST_HEALTH_DELAY_SECONDS=0 \
