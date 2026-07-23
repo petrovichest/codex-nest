@@ -1,4 +1,12 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  createContext,
+  type FormEvent,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 
 import type { CodexManagementStatus } from "@codexnest/protocol";
 
@@ -6,24 +14,50 @@ import { useConnection } from "../connection";
 import { ToolIcon } from "./Icons";
 
 type Action = "checking" | "proxy" | "updating" | "restarting" | null;
+type Feedback = { kind: "error" | "success"; message: string } | null;
 
-export function CodexSettingsCard() {
+type CodexSettingsContextValue = {
+  status: CodexManagementStatus | null;
+  loading: boolean;
+  action: Action;
+  proxy: string;
+  showProxy: boolean;
+  loadError: string | null;
+  codexFeedback: Feedback;
+  proxyFeedback: Feedback;
+  activeTurnCount: number;
+  secure: boolean;
+  supported: boolean;
+  busy: boolean;
+  maintenanceDisabled: boolean;
+  setProxy(value: string): void;
+  setShowProxy(value: boolean | ((current: boolean) => boolean)): void;
+  applyProxy(event: FormEvent): Promise<void>;
+  check(): Promise<void>;
+  update(): Promise<void>;
+  restart(): Promise<void>;
+};
+
+const CodexSettingsContext = createContext<CodexSettingsContextValue | null>(null);
+
+export function CodexSettingsProvider({ children }: { children: ReactNode }) {
   const { api, state } = useConnection();
   const [status, setStatus] = useState<CodexManagementStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<Action>(null);
   const [proxy, setProxy] = useState("");
   const [showProxy, setShowProxy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [codexFeedback, setCodexFeedback] = useState<Feedback>(null);
+  const [proxyFeedback, setProxyFeedback] = useState<Feedback>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadError(null);
     try {
       setStatus(await api.readCodexSettings());
     } catch (caught) {
-      setError(errorMessage(caught, "Не удалось загрузить состояние Codex"));
+      setLoadError(errorMessage(caught, "Не удалось загрузить состояние Codex"));
     } finally {
       setLoading(false);
     }
@@ -56,54 +90,121 @@ export function CodexSettingsCard() {
   async function applyProxy(event: FormEvent) {
     event.preventDefault();
     if (!secure || !proxy.trim()) return;
-    await perform("proxy", async () => {
+    await perform("proxy", "proxy", async () => {
       const updated = await api.updateCodexProxy({ proxy });
       setStatus(updated);
       setProxy("");
       setShowProxy(false);
-      setNotice("Прокси проверен и применён. Codex daemon готов к работе.");
+      setProxyFeedback({
+        kind: "success",
+        message: "Прокси проверен и применён. Codex daemon готов к работе.",
+      });
     });
   }
 
   async function check() {
-    await perform("checking", async () => {
+    await perform("checking", "codex", async () => {
       const updated = await api.checkCodex();
       setStatus(updated);
-      setNotice("Проверка Codex и соединения через прокси завершена.");
+      setCodexFeedback({
+        kind: "success",
+        message: "Проверка Codex и соединения через прокси завершена.",
+      });
     });
   }
 
   async function update() {
     if (!window.confirm("Обновить Codex и перезапустить daemon?")) return;
-    await perform("updating", async () => {
+    await perform("updating", "codex", async () => {
       const updated = await api.updateCodex();
       setStatus(updated);
-      setNotice("Codex обновлён, проверен через прокси и перезапущен.");
+      setCodexFeedback({
+        kind: "success",
+        message: "Codex обновлён, проверен через прокси и перезапущен.",
+      });
     });
   }
 
   async function restart() {
     if (!window.confirm("Перезапустить Codex daemon?")) return;
-    await perform("restarting", async () => {
+    await perform("restarting", "codex", async () => {
       const updated = await api.restartCodex();
       setStatus(updated);
-      setNotice("Codex daemon перезапущен.");
+      setCodexFeedback({ kind: "success", message: "Codex daemon перезапущен." });
     });
   }
 
-  async function perform(nextAction: Exclude<Action, null>, task: () => Promise<void>) {
+  async function perform(
+    nextAction: Exclude<Action, null>,
+    target: "codex" | "proxy",
+    task: () => Promise<void>,
+  ) {
     setAction(nextAction);
-    setError(null);
-    setNotice(null);
+    if (target === "codex") setCodexFeedback(null);
+    else setProxyFeedback(null);
     try {
       await task();
     } catch (caught) {
-      setError(errorMessage(caught, "Операция Codex завершилась ошибкой"));
-      await load().catch(() => undefined);
+      const feedback: Feedback = {
+        kind: "error",
+        message: errorMessage(caught, "Операция Codex завершилась ошибкой"),
+      };
+      if (target === "codex") setCodexFeedback(feedback);
+      else setProxyFeedback(feedback);
+      try {
+        setStatus(await api.readCodexSettings());
+      } catch {
+        // Keep the operation error visible when refreshing status also fails.
+      }
     } finally {
       setAction(null);
     }
   }
+
+  return (
+    <CodexSettingsContext.Provider
+      value={{
+        status,
+        loading,
+        action,
+        proxy,
+        showProxy,
+        loadError,
+        codexFeedback,
+        proxyFeedback,
+        activeTurnCount,
+        secure,
+        supported,
+        busy,
+        maintenanceDisabled,
+        setProxy,
+        setShowProxy,
+        applyProxy,
+        check,
+        update,
+        restart,
+      }}
+    >
+      {children}
+    </CodexSettingsContext.Provider>
+  );
+}
+
+export function CodexSettingsCard() {
+  const {
+    status,
+    loading,
+    action,
+    loadError,
+    codexFeedback,
+    activeTurnCount,
+    supported,
+    busy,
+    maintenanceDisabled,
+    check,
+    update,
+    restart,
+  } = useCodexSettings();
 
   return (
     <section className="settings-card codex-settings-card">
@@ -112,8 +213,8 @@ export function CodexSettingsCard() {
           <ToolIcon />
         </span>
         <div>
-          <h2>Codex и прокси</h2>
-          <p>Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.</p>
+          <h2>Codex CLI</h2>
+          <p>Версия и состояние Codex daemon на сервере.</p>
         </div>
       </div>
 
@@ -142,16 +243,6 @@ export function CodexSettingsCard() {
             </div>
           </dl>
 
-          <div className="codex-proxy-summary">
-            <strong>Текущий прокси</strong>
-            <span>{proxySummary(status)}</span>
-          </div>
-
-          {status?.networkStatus === "ok" && (
-            <div className="settings-notice success" role="status">
-              WebSocket ChatGPT/OpenAI доступен через прокси.
-            </div>
-          )}
           {status?.unavailableReason && (
             <div className="settings-notice warning" role="status">
               {status.unavailableReason}
@@ -162,9 +253,88 @@ export function CodexSettingsCard() {
               Дождитесь завершения активных ответов: {activeTurnCount}.
             </div>
           )}
+          {loadError && (
+            <div className="settings-notice danger" role="alert">
+              {loadError}
+            </div>
+          )}
+          <SettingsFeedback feedback={codexFeedback} />
+
+          <div className="settings-actions codex-actions">
+            <button disabled={!supported || busy} type="button" onClick={() => void check()}>
+              {action === "checking" ? "Проверяем…" : "Проверить Codex CLI"}
+            </button>
+            <button
+              disabled={maintenanceDisabled || status?.updateAvailable !== true}
+              type="button"
+              onClick={() => void update()}
+            >
+              {action === "updating" ? "Обновляем…" : "Обновить Codex CLI"}
+            </button>
+            <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
+              {action === "restarting" ? "Перезапускаем…" : "Перезапустить"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+export function ProxySettingsCard() {
+  const {
+    status,
+    loading,
+    action,
+    proxy,
+    showProxy,
+    loadError,
+    proxyFeedback,
+    secure,
+    supported,
+    busy,
+    maintenanceDisabled,
+    setProxy,
+    setShowProxy,
+    applyProxy,
+  } = useCodexSettings();
+
+  return (
+    <section className="settings-card codex-settings-card">
+      <div className="settings-card-heading">
+        <span className="settings-card-icon">
+          <ToolIcon />
+        </span>
+        <div>
+          <h2>Прокси</h2>
+          <p>Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="settings-loading compact">
+          <span className="spinner small" /> Получаем состояние прокси…
+        </div>
+      ) : (
+        <>
+          <div className="codex-proxy-summary">
+            <strong>Текущий прокси</strong>
+            <span>{proxySummary(status)}</span>
+          </div>
+
+          {status?.networkStatus === "ok" && (
+            <div className="settings-notice success" role="status">
+              WebSocket ChatGPT/OpenAI доступен через прокси.
+            </div>
+          )}
           {!secure && (
             <div className="settings-notice danger" role="alert">
               Ввод прокси с паролем доступен только через HTTPS или локальное подключение.
+            </div>
+          )}
+          {loadError && (
+            <div className="settings-notice danger" role="alert">
+              {loadError}
             </div>
           )}
 
@@ -204,35 +374,28 @@ export function CodexSettingsCard() {
             </div>
           </form>
 
-          {error && (
-            <div className="settings-notice danger" role="alert">
-              {error}
-            </div>
-          )}
-          {notice && !error && (
-            <div className="settings-notice success" role="status">
-              {notice}
-            </div>
-          )}
-
-          <div className="settings-actions codex-actions">
-            <button disabled={!supported || busy} type="button" onClick={() => void check()}>
-              {action === "checking" ? "Проверяем…" : "Проверить Codex CLI"}
-            </button>
-            <button
-              disabled={maintenanceDisabled || status?.updateAvailable !== true}
-              type="button"
-              onClick={() => void update()}
-            >
-              {action === "updating" ? "Обновляем…" : "Обновить Codex CLI"}
-            </button>
-            <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
-              {action === "restarting" ? "Перезапускаем…" : "Перезапустить"}
-            </button>
-          </div>
+          <SettingsFeedback feedback={proxyFeedback} />
         </>
       )}
     </section>
+  );
+}
+
+function useCodexSettings(): CodexSettingsContextValue {
+  const value = useContext(CodexSettingsContext);
+  if (!value) throw new Error("Codex settings cards must be inside CodexSettingsProvider");
+  return value;
+}
+
+function SettingsFeedback({ feedback }: { feedback: Feedback }) {
+  if (!feedback) return null;
+  return (
+    <div
+      className={`settings-notice ${feedback.kind === "error" ? "danger" : "success"}`}
+      role={feedback.kind === "error" ? "alert" : "status"}
+    >
+      {feedback.message}
+    </div>
   );
 }
 

@@ -45,6 +45,8 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
+const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
+const LAYOUT_DEFAULTS_VERSION = "1";
 const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
 
 export function App({
@@ -60,11 +62,10 @@ export function App({
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
-  const [sidebarSide, setSidebarSide] = useState<SidebarSide>(() =>
-    localStorage.getItem(SIDEBAR_SIDE_KEY) === "right" ? "right" : "left",
-  );
-  const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(() =>
-    localStorage.getItem(PROJECT_LIST_DIRECTION_KEY) === "top-down" ? "top-down" : "bottom-up",
+  const [initialLayout] = useState(readLayoutPreferences);
+  const [sidebarSide, setSidebarSide] = useState<SidebarSide>(initialLayout.sidebarSide);
+  const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(
+    initialLayout.projectListDirection,
   );
   const [notificationPrompt, setNotificationPrompt] = useState(
     () =>
@@ -301,6 +302,22 @@ function activeTranscriptionProvider(
   config: TranscriptionConfigResponse | null,
 ): "local" | "openai" | null {
   return config?.provider && config.providers.includes(config.provider) ? config.provider : null;
+}
+
+function readLayoutPreferences(): {
+  sidebarSide: SidebarSide;
+  projectListDirection: ProjectListDirection;
+} {
+  if (localStorage.getItem(LAYOUT_DEFAULTS_VERSION_KEY) !== LAYOUT_DEFAULTS_VERSION) {
+    localStorage.setItem(SIDEBAR_SIDE_KEY, "left");
+    localStorage.setItem(PROJECT_LIST_DIRECTION_KEY, "top-down");
+    localStorage.setItem(LAYOUT_DEFAULTS_VERSION_KEY, LAYOUT_DEFAULTS_VERSION);
+  }
+  return {
+    sidebarSide: localStorage.getItem(SIDEBAR_SIDE_KEY) === "right" ? "right" : "left",
+    projectListDirection:
+      localStorage.getItem(PROJECT_LIST_DIRECTION_KEY) === "bottom-up" ? "bottom-up" : "top-down",
+  };
 }
 
 function HomeRoute({

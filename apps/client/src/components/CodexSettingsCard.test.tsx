@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CodexManagementStatus } from "@codexnest/protocol";
 
-import { CodexSettingsCard } from "./CodexSettingsCard";
+import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 
 const connection = vi.hoisted(() => vi.fn());
 
@@ -25,11 +25,17 @@ describe("CodexSettingsCard", () => {
     const api = mockApi(initial, checked);
     connection.mockReturnValue({ api, state: { snapshot: { threads: [] } } });
 
-    render(<CodexSettingsCard />);
+    renderCodexSettings();
 
     expect(await screen.findByText("Не проверялась")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Codex CLI" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Прокси" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Codex CLI" }).closest(".settings-card")).not.toBe(
+      screen.getByRole("heading", { name: "Прокси" }).closest(".settings-card"),
+    );
     expect(screen.getByText("Установленная версия Codex CLI")).toBeInTheDocument();
     expect(screen.getByText("Актуальная версия Codex CLI")).toBeInTheDocument();
+    expect(api.readCodexSettings).toHaveBeenCalledOnce();
     expect(api.checkCodex).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Проверить Codex CLI" }));
 
@@ -42,7 +48,7 @@ describe("CodexSettingsCard", () => {
   it("sends a masked proxy once and clears the secret after applying it", async () => {
     const api = mockApi(managementStatus());
     connection.mockReturnValue({ api, state: { snapshot: { threads: [] } } });
-    render(<CodexSettingsCard />);
+    renderCodexSettings();
 
     const input = await screen.findByLabelText("Новый HTTP/HTTPS-прокси");
     expect(input).toHaveAttribute("type", "password");
@@ -65,7 +71,7 @@ describe("CodexSettingsCard", () => {
       api,
       state: { snapshot: { threads: [{ currentTurnId: "turn" }] } },
     });
-    render(<CodexSettingsCard />);
+    renderCodexSettings();
 
     expect(await screen.findByText(/активных ответов: 1/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Обновить Codex CLI" })).toBeDisabled();
@@ -77,7 +83,7 @@ describe("CodexSettingsCard", () => {
     const api = mockApi(managementStatus({ latestVersion: "0.145.0", updateAvailable: true }));
     connection.mockReturnValue({ api, state: { snapshot: { threads: [] } } });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<CodexSettingsCard />);
+    renderCodexSettings();
 
     await screen.findByText("0.145.0");
     fireEvent.click(screen.getByRole("button", { name: "Обновить Codex CLI" }));
@@ -90,13 +96,22 @@ describe("CodexSettingsCard", () => {
   it("does not send proxy credentials over non-local HTTP", async () => {
     const api = mockApi(managementStatus(), undefined, "http://codexnest.example");
     connection.mockReturnValue({ api, state: { snapshot: { threads: [] } } });
-    render(<CodexSettingsCard />);
+    renderCodexSettings();
 
     expect(await screen.findByText(/только через HTTPS/)).toBeInTheDocument();
     expect(screen.getByLabelText("Новый HTTP/HTTPS-прокси")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Проверить и применить" })).toBeDisabled();
   });
 });
+
+function renderCodexSettings() {
+  return render(
+    <CodexSettingsProvider>
+      <CodexSettingsCard />
+      <ProxySettingsCard />
+    </CodexSettingsProvider>,
+  );
+}
 
 function mockApi(
   initial: CodexManagementStatus,

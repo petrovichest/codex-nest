@@ -19,7 +19,7 @@ import {
 import { useConnection } from "../connection";
 import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
-import { CodexSettingsCard } from "./CodexSettingsCard";
+import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 export type SidebarSide = "left" | "right";
@@ -175,262 +175,266 @@ export function SettingsPage({
     <div className="settings-workspace">
       <WorkspaceHeader
         title="Настройки"
-        subtitle="Глобально для Codex на сервере"
+        subtitle="Интерфейс, Codex и подключение"
         onOpenNavigation={onOpenNavigation}
       />
       <main className="settings-scroll">
-        <div className="settings-stack">
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <SlidersIcon />
-              </span>
-              <div>
-                <h2>Оформление</h2>
-                <p>Настройки интерфейса применяются только на этом устройстве.</p>
+        <CodexSettingsProvider>
+          <div className="settings-stack">
+            <ApplicationSettingsCard />
+
+            <CodexSettingsCard />
+
+            <form className="settings-card" onSubmit={saveTaskDefaults}>
+              <div className="settings-card-heading">
+                <span className="settings-card-icon">
+                  <SlidersIcon />
+                </span>
+                <div>
+                  <h2>Новые задачи</h2>
+                  <p>Эти значения применяются к новым задачам на всех подключённых устройствах.</p>
+                </div>
               </div>
-            </div>
-            <label className="theme-setting">
-              <span>Тема</span>
-              <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
-                <option value="system">Системная тема</option>
-                <option value="light">Светлая тема</option>
-                <option value="dark">Тёмная тема</option>
-              </select>
-            </label>
-            <label className="theme-setting">
-              <span>Боковая панель</span>
-              <select
-                value={sidebarSide}
-                onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
-              >
-                <option value="left">Слева</option>
-                <option value="right">Справа</option>
-              </select>
-            </label>
-            <label className="theme-setting">
-              <span>Порядок проектов</span>
-              <select
-                value={projectListDirection}
-                onChange={(event) =>
-                  onProjectListDirectionChange(event.target.value as ProjectListDirection)
-                }
-              >
-                <option value="bottom-up">Снизу вверх</option>
-                <option value="top-down">Сверху вниз</option>
-              </select>
-            </label>
-          </section>
+              <label className="theme-setting">
+                <span>Service tier</span>
+                <select
+                  disabled={!defaultModel || taskDefaultsSaving}
+                  value={taskDefaults.serviceTier ?? ""}
+                  onChange={(event) =>
+                    setTaskDefaults((current) => ({
+                      ...current,
+                      serviceTier: event.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">По умолчанию</option>
+                  {defaultModel?.serviceTiers.map((tier) => (
+                    <option value={tier.id} key={tier.id}>
+                      {tier.displayName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>Personality</span>
+                <select
+                  disabled={!defaultModel?.supportsPersonality || taskDefaultsSaving}
+                  value={taskDefaults.personality ?? ""}
+                  onChange={(event) =>
+                    setTaskDefaults((current) => ({
+                      ...current,
+                      personality: event.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">По умолчанию</option>
+                  <option value="friendly">Дружелюбная</option>
+                  <option value="pragmatic">Прагматичная</option>
+                  <option value="none">Без personality</option>
+                </select>
+              </label>
+              {taskDefaultsError && (
+                <div className="settings-notice danger" role="alert">
+                  {taskDefaultsError}
+                </div>
+              )}
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  disabled={
+                    taskDefaultsSaving ||
+                    JSON.stringify(taskDefaults) === JSON.stringify(savedTaskDefaults)
+                  }
+                  type="submit"
+                >
+                  {taskDefaultsSaving ? "Сохраняем…" : "Сохранить настройки новых задач"}
+                </button>
+              </div>
+            </form>
 
-          <TranscriptionSettingsCard
-            config={transcriptionConfig}
-            configError={transcriptionConfigError}
-            onChange={onTranscriptionConfigChange}
-          />
+            <form className="settings-card" onSubmit={save}>
+              <div className="settings-card-heading">
+                <span className="settings-card-icon">
+                  <ShieldIcon />
+                </span>
+                <div>
+                  <h2>Разрешения Codex</h2>
+                  <p>Выбранный режим применяется ко всем задачам со следующего хода.</p>
+                </div>
+              </div>
 
-          {!Capacitor.isNativePlatform() && (
+              {loading ? (
+                <div className="settings-loading">
+                  <span className="spinner small" /> Загружаем конфигурацию…
+                </div>
+              ) : (
+                <fieldset className="permission-presets" disabled={saving}>
+                  <legend className="sr-only">Режим разрешений</legend>
+                  {PRESETS.map((preset) => (
+                    <label
+                      className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
+                      key={preset.id}
+                    >
+                      <input
+                        type="radio"
+                        name="permission-preset"
+                        value={preset.id}
+                        checked={selected === preset.id}
+                        onChange={() => setSelected(preset.id)}
+                      />
+                      <span>
+                        <strong>{preset.title}</strong>
+                        <small>{preset.description}</small>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+
+              {!loading && settings?.preset === null && (
+                <div className="settings-notice warning" role="status">
+                  Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.
+                </div>
+              )}
+              {settings?.overridden && (
+                <div className="settings-notice warning" role="status">
+                  {settings.message ?? "Настройка переопределена управляемой политикой Codex."}
+                </div>
+              )}
+              {selected === "full-access" && !loading && (
+                <div className="settings-notice danger" role="alert">
+                  Полный доступ снимает ограничения на файлы и сеть. Используйте его только на
+                  доверенном сервере.
+                </div>
+              )}
+              {error && (
+                <div className="settings-notice danger" role="alert">
+                  {error}
+                </div>
+              )}
+
+              <div className="settings-actions">
+                <button className="primary" disabled={loading || saving || !changed} type="submit">
+                  {saving ? "Сохраняем…" : "Сохранить"}
+                </button>
+              </div>
+            </form>
+
+            <TranscriptionSettingsCard
+              config={transcriptionConfig}
+              configError={transcriptionConfigError}
+              onChange={onTranscriptionConfigChange}
+            />
+
+            {!Capacitor.isNativePlatform() && (
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <span className="settings-card-icon">
+                    <BellIcon />
+                  </span>
+                  <div>
+                    <h2>Уведомления браузера</h2>
+                    <p>События приходят напрямую с вашего сервера, без Google и внешнего push.</p>
+                  </div>
+                </div>
+                {notificationPermission === "granted" && (
+                  <div className="settings-notice success" role="status">
+                    Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.
+                  </div>
+                )}
+                {notificationPermission === "denied" && (
+                  <div className="settings-notice danger" role="alert">
+                    Уведомления заблокированы. Разрешите их в настройках сайта в браузере.
+                  </div>
+                )}
+                {notificationPermission === "unsupported" && (
+                  <div className="settings-notice warning" role="status">
+                    Этот браузер не предоставляет системные уведомления для текущего подключения.
+                    Некоторые браузеры требуют открыть CodexNest по HTTPS.
+                  </div>
+                )}
+                {notificationError && (
+                  <div className="settings-notice danger" role="alert">
+                    {notificationError}
+                  </div>
+                )}
+                {notificationPermission === "default" && (
+                  <div className="settings-actions">
+                    <button
+                      className="primary"
+                      disabled={notificationRequesting}
+                      type="button"
+                      onClick={() => void enableBrowserNotifications()}
+                    >
+                      {notificationRequesting ? "Запрашиваем…" : "Разрешить уведомления"}
+                    </button>
+                  </div>
+                )}
+              </section>
+            )}
+
             <section className="settings-card">
               <div className="settings-card-heading">
                 <span className="settings-card-icon">
-                  <BellIcon />
+                  <SlidersIcon />
                 </span>
                 <div>
-                  <h2>Уведомления браузера</h2>
-                  <p>События приходят напрямую с вашего сервера, без Google и внешнего push.</p>
+                  <h2>Интерфейс</h2>
+                  <p>Настройки интерфейса применяются только на этом устройстве.</p>
                 </div>
               </div>
-              {notificationPermission === "granted" && (
-                <div className="settings-notice success" role="status">
-                  Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.
-                </div>
-              )}
-              {notificationPermission === "denied" && (
-                <div className="settings-notice danger" role="alert">
-                  Уведомления заблокированы. Разрешите их в настройках сайта в браузере.
-                </div>
-              )}
-              {notificationPermission === "unsupported" && (
-                <div className="settings-notice warning" role="status">
-                  Этот браузер не предоставляет системные уведомления для текущего подключения.
-                  Некоторые браузеры требуют открыть CodexNest по HTTPS.
-                </div>
-              )}
-              {notificationError && (
-                <div className="settings-notice danger" role="alert">
-                  {notificationError}
-                </div>
-              )}
-              {notificationPermission === "default" && (
-                <div className="settings-actions">
-                  <button
-                    className="primary"
-                    disabled={notificationRequesting}
-                    type="button"
-                    onClick={() => void enableBrowserNotifications()}
-                  >
-                    {notificationRequesting ? "Запрашиваем…" : "Разрешить уведомления"}
-                  </button>
-                </div>
-              )}
+              <label className="theme-setting">
+                <span>Тема</span>
+                <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
+                  <option value="system">Системная тема</option>
+                  <option value="light">Светлая тема</option>
+                  <option value="dark">Тёмная тема</option>
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>Боковая панель</span>
+                <select
+                  value={sidebarSide}
+                  onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
+                >
+                  <option value="left">Слева</option>
+                  <option value="right">Справа</option>
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>Порядок проектов</span>
+                <select
+                  value={projectListDirection}
+                  onChange={(event) =>
+                    onProjectListDirectionChange(event.target.value as ProjectListDirection)
+                  }
+                >
+                  <option value="top-down">Сверху вниз</option>
+                  <option value="bottom-up">Снизу вверх</option>
+                </select>
+              </label>
             </section>
-          )}
 
-          <form className="settings-card" onSubmit={saveTaskDefaults}>
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <SlidersIcon />
-              </span>
-              <div>
-                <h2>Новые задачи</h2>
-                <p>Эти значения применяются к новым задачам на всех подключённых устройствах.</p>
-              </div>
-            </div>
-            <label className="theme-setting">
-              <span>Service tier</span>
-              <select
-                disabled={!defaultModel || taskDefaultsSaving}
-                value={taskDefaults.serviceTier ?? ""}
-                onChange={(event) =>
-                  setTaskDefaults((current) => ({
-                    ...current,
-                    serviceTier: event.target.value || undefined,
-                  }))
-                }
-              >
-                <option value="">По умолчанию</option>
-                {defaultModel?.serviceTiers.map((tier) => (
-                  <option value={tier.id} key={tier.id}>
-                    {tier.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="theme-setting">
-              <span>Personality</span>
-              <select
-                disabled={!defaultModel?.supportsPersonality || taskDefaultsSaving}
-                value={taskDefaults.personality ?? ""}
-                onChange={(event) =>
-                  setTaskDefaults((current) => ({
-                    ...current,
-                    personality: event.target.value || undefined,
-                  }))
-                }
-              >
-                <option value="">По умолчанию</option>
-                <option value="friendly">Дружелюбная</option>
-                <option value="pragmatic">Прагматичная</option>
-                <option value="none">Без personality</option>
-              </select>
-            </label>
-            {taskDefaultsError && (
-              <div className="settings-notice danger" role="alert">
-                {taskDefaultsError}
-              </div>
-            )}
-            <div className="settings-actions">
-              <button
-                className="primary"
-                disabled={
-                  taskDefaultsSaving ||
-                  JSON.stringify(taskDefaults) === JSON.stringify(savedTaskDefaults)
-                }
-                type="submit"
-              >
-                {taskDefaultsSaving ? "Сохраняем…" : "Сохранить настройки новых задач"}
-              </button>
-            </div>
-          </form>
+            <ProxySettingsCard />
 
-          <form className="settings-card" onSubmit={save}>
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <ShieldIcon />
-              </span>
-              <div>
-                <h2>Разрешения Codex</h2>
-                <p>Выбранный режим применяется ко всем задачам со следующего хода.</p>
+            <section className="settings-card">
+              <div className="settings-card-heading">
+                <span className="settings-card-icon">
+                  <ServerIcon />
+                </span>
+                <div>
+                  <h2>Сервер</h2>
+                  <p>Подключение к CodexNest на этом устройстве.</p>
+                </div>
               </div>
-            </div>
-
-            {loading ? (
-              <div className="settings-loading">
-                <span className="spinner small" /> Загружаем конфигурацию…
+              <div className="settings-actions">
+                <button type="button" onClick={onSwitchServer}>
+                  Сменить сервер
+                </button>
               </div>
-            ) : (
-              <fieldset className="permission-presets" disabled={saving}>
-                <legend className="sr-only">Режим разрешений</legend>
-                {PRESETS.map((preset) => (
-                  <label
-                    className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
-                    key={preset.id}
-                  >
-                    <input
-                      type="radio"
-                      name="permission-preset"
-                      value={preset.id}
-                      checked={selected === preset.id}
-                      onChange={() => setSelected(preset.id)}
-                    />
-                    <span>
-                      <strong>{preset.title}</strong>
-                      <small>{preset.description}</small>
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
-            )}
-
-            {!loading && settings?.preset === null && (
-              <div className="settings-notice warning" role="status">
-                Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.
-              </div>
-            )}
-            {settings?.overridden && (
-              <div className="settings-notice warning" role="status">
-                {settings.message ?? "Настройка переопределена управляемой политикой Codex."}
-              </div>
-            )}
-            {selected === "full-access" && !loading && (
-              <div className="settings-notice danger" role="alert">
-                Полный доступ снимает ограничения на файлы и сеть. Используйте его только на
-                доверенном сервере.
-              </div>
-            )}
-            {error && (
-              <div className="settings-notice danger" role="alert">
-                {error}
-              </div>
-            )}
-
-            <div className="settings-actions">
-              <button className="primary" disabled={loading || saving || !changed} type="submit">
-                {saving ? "Сохраняем…" : "Сохранить"}
-              </button>
-            </div>
-          </form>
-
-          <CodexSettingsCard />
-
-          <ApplicationSettingsCard />
-
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <ServerIcon />
-              </span>
-              <div>
-                <h2>Сервер</h2>
-                <p>Подключение к CodexNest на этом устройстве.</p>
-              </div>
-            </div>
-            <div className="settings-actions">
-              <button type="button" onClick={onSwitchServer}>
-                Сменить сервер
-              </button>
-            </div>
-          </section>
-        </div>
+            </section>
+          </div>
+        </CodexSettingsProvider>
       </main>
     </div>
   );

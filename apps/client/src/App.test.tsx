@@ -300,7 +300,45 @@ describe("App routing and navigation", () => {
     expect(document.documentElement.dataset.theme).toBe("light");
   });
 
+  it("uses conventional interface defaults on a new device", async () => {
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/settings");
+    const frame = view.container.querySelector(".app-frame");
+    const navigation = view.container.querySelector(".thread-nav");
+
+    expect(await screen.findByRole("combobox", { name: "Тема" })).toHaveValue("system");
+    expect(screen.getByRole("combobox", { name: "Боковая панель" })).toHaveValue("left");
+    expect(screen.getByRole("combobox", { name: "Порядок проектов" })).toHaveValue("top-down");
+    expect(frame).toHaveAttribute("data-sidebar-side", "left");
+    expect(navigation).toHaveClass("top-down");
+    expect(localStorage.getItem("codexnest.layoutDefaultsVersion")).toBe("1");
+  });
+
+  it("resets the old layout once and preserves later user choices", async () => {
+    localStorage.setItem("codexnest.sidebarSide", "right");
+    localStorage.setItem("codexnest.projectListDirection", "bottom-up");
+    mockConnection(snapshot([baseThread]));
+
+    const migrated = renderApp("/settings");
+    expect(await screen.findByRole("combobox", { name: "Боковая панель" })).toHaveValue("left");
+    expect(screen.getByRole("combobox", { name: "Порядок проектов" })).toHaveValue("top-down");
+    expect(localStorage.getItem("codexnest.layoutDefaultsVersion")).toBe("1");
+    migrated.unmount();
+
+    localStorage.setItem("codexnest.sidebarSide", "right");
+    localStorage.setItem("codexnest.projectListDirection", "bottom-up");
+    const restored = renderApp("/settings");
+    expect(await screen.findByRole("combobox", { name: "Боковая панель" })).toHaveValue("right");
+    expect(screen.getByRole("combobox", { name: "Порядок проектов" })).toHaveValue("bottom-up");
+    expect(restored.container.querySelector(".app-frame")).toHaveAttribute(
+      "data-sidebar-side",
+      "right",
+    );
+  });
+
   it("restores and persists the sidebar side from the settings page", async () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
     localStorage.setItem("codexnest.sidebarSide", "right");
     mockConnection(snapshot([baseThread]));
 
@@ -341,6 +379,7 @@ describe("App routing and navigation", () => {
   });
 
   it("restores the project flow and scrolls to the bottom when bottom-up is selected", async () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
     localStorage.setItem("codexnest.projectListDirection", "top-down");
     mockConnection(snapshot([baseThread]));
 
@@ -360,6 +399,8 @@ describe("App routing and navigation", () => {
   });
 
   it("reverses only project order while sessions still expand top-down", () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
+    localStorage.setItem("codexnest.projectListDirection", "bottom-up");
     const threads: ThreadSummary[] = [
       { ...baseThread, id: "fresh", title: "Свежая", updatedAt: 60 },
       { ...baseThread, id: "second", title: "Вторая", updatedAt: 50 },
@@ -487,10 +528,10 @@ describe("App routing and navigation", () => {
     const projectGroup = actions.closest(".project-group") as HTMLElement | null;
     expect(projectGroup).not.toBeNull();
     fireEvent.click(actions);
-    const moveUp = within(projectGroup!).getByRole("button", { name: "Переместить выше" });
-    expect(moveUp).toBeEnabled();
-    expect(within(projectGroup!).getByRole("button", { name: "Переместить ниже" })).toBeDisabled();
-    fireEvent.click(moveUp);
+    const moveDown = within(projectGroup!).getByRole("button", { name: "Переместить ниже" });
+    expect(within(projectGroup!).getByRole("button", { name: "Переместить выше" })).toBeDisabled();
+    expect(moveDown).toBeEnabled();
+    fireEvent.click(moveDown);
 
     await waitFor(() =>
       expect(api.moveProject).toHaveBeenCalledWith("project", { direction: "down" }),
@@ -513,7 +554,7 @@ describe("App routing and navigation", () => {
       .getByLabelText("Действия с проектом Проект")
       .closest(".project-group") as HTMLElement;
     fireEvent.click(within(projectGroup).getByLabelText("Действия с проектом Проект"));
-    fireEvent.click(within(projectGroup).getByRole("button", { name: "Переместить выше" }));
+    fireEvent.click(within(projectGroup).getByRole("button", { name: "Переместить ниже" }));
 
     expect(await within(projectGroup).findByRole("alert")).toHaveTextContent("Сервер недоступен");
   });
@@ -619,6 +660,7 @@ describe("App routing and navigation", () => {
   });
 
   it("mirrors mobile drawer gestures when the sidebar is on the right", () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
     localStorage.setItem("codexnest.sidebarSide", "right");
     mockConnection(snapshot([baseThread]));
     mockMobileViewport();

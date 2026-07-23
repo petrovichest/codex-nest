@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+import type { ReactNode } from "react";
 
 import type { TranscriptionConfigResponse } from "@codexnest/protocol";
 
@@ -10,8 +11,26 @@ import { SettingsPage } from "./SettingsPage";
 const connection = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
-vi.mock("./CodexSettingsCard", () => ({ CodexSettingsCard: () => null }));
-vi.mock("./ApplicationSettingsCard", () => ({ ApplicationSettingsCard: () => null }));
+vi.mock("./CodexSettingsCard", () => ({
+  CodexSettingsProvider: ({ children }: { children: ReactNode }) => children,
+  CodexSettingsCard: () => (
+    <section>
+      <h2>Codex CLI</h2>
+    </section>
+  ),
+  ProxySettingsCard: () => (
+    <section>
+      <h2>Прокси</h2>
+    </section>
+  ),
+}));
+vi.mock("./ApplicationSettingsCard", () => ({
+  ApplicationSettingsCard: () => (
+    <section>
+      <h2>Обновление CodexNest</h2>
+    </section>
+  ),
+}));
 
 beforeEach(() => {
   connection.mockReset();
@@ -119,6 +138,41 @@ describe("SettingsPage", () => {
     });
 
     expect(onThemeChange).toHaveBeenCalledWith("dark");
+  });
+
+  it("orders settings by usage frequency in one column", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+
+    const view = renderPage();
+    const stack = view.container.querySelector(".settings-stack");
+
+    expect(stack).not.toBeNull();
+    expect(
+      within(stack as HTMLElement)
+        .getAllByRole("heading", { level: 2 })
+        .map((heading) => heading.textContent),
+    ).toEqual([
+      "Обновление CodexNest",
+      "Codex CLI",
+      "Новые задачи",
+      "Разрешения Codex",
+      "Распознавание речи",
+      "Уведомления браузера",
+      "Интерфейс",
+      "Прокси",
+      "Сервер",
+    ]);
+    expect(screen.queryByRole("navigation", { name: "Разделы настроек" })).not.toBeInTheDocument();
   });
 
   it("changes the local sidebar side immediately", () => {
@@ -364,7 +418,7 @@ function renderPage(
   onSwitchServer = vi.fn(),
   sidebarSide: "left" | "right" = "left",
   onSidebarSideChange = vi.fn(),
-  projectListDirection: "bottom-up" | "top-down" = "bottom-up",
+  projectListDirection: "bottom-up" | "top-down" = "top-down",
   onProjectListDirectionChange = vi.fn(),
   transcription: {
     config: TranscriptionConfigResponse;
