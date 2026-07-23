@@ -25,6 +25,13 @@ import type {
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "./attention";
+import {
+  markThreadRead,
+  markThreadViewed,
+  setThreadDraft,
+  setThreadPinned,
+  setThreadSettings,
+} from "./backends/thread-meta";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
@@ -82,11 +89,9 @@ export class AppProjection extends EventEmitter {
         cached.liveOutcome = undefined;
         cached.thread.status = { type: "active", activeFlags: [] };
       }
-      this.publish({ type: "attention.upserted", attention: request });
       if (request.threadId) this.publishThread(request.threadId);
     });
-    attention.on("removed", (attentionId: string) => {
-      this.publish({ type: "attention.removed", attentionId });
+    attention.on("removed", () => {
       for (const threadId of this.threads.keys()) this.publishThread(threadId);
     });
   }
@@ -206,23 +211,7 @@ export class AppProjection extends EventEmitter {
 
   async setDraft(threadId: string, value: UpdateThreadDraftRequest): Promise<ThreadDraft | null> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
-    const empty =
-      value.input === "" &&
-      value.images.length === 0 &&
-      !value.goalMode &&
-      value.annotations.length === 0;
-    let draft: ThreadDraft | null = null;
-    await this.store.update((state) => {
-      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      if (empty) {
-        delete meta.draft;
-      } else {
-        draft = { ...structuredClone(value), updatedAt: Date.now() };
-        meta.draft = draft;
-      }
-      state.threadMeta[threadId] = meta;
-    });
-    return draft;
+    return setThreadDraft(this.store, threadId, value);
   }
 
   emptyThreadCandidates(
@@ -258,11 +247,7 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
     const safeObserved = Math.min(observedUpdatedAt, cached.thread.updatedAt * 1_000);
-    await this.store.update((state) => {
-      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      meta.lastReadUpdatedAt = Math.max(meta.lastReadUpdatedAt, safeObserved);
-      state.threadMeta[threadId] = meta;
-    });
+    await markThreadRead(this.store, threadId, safeObserved);
     this.publishThread(threadId);
   }
 
@@ -270,31 +255,19 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
     const safeObserved = Math.min(observedUpdatedAt, cached.thread.updatedAt * 1_000);
-    await this.store.update((state) => {
-      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      meta.lastViewedUpdatedAt = Math.max(meta.lastViewedUpdatedAt ?? 0, safeObserved);
-      state.threadMeta[threadId] = meta;
-    });
+    await markThreadViewed(this.store, threadId, safeObserved);
     this.publishThread(threadId);
   }
 
   async setPinned(threadId: string, pinned: boolean): Promise<void> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
-    await this.store.update((state) => {
-      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      meta.pinned = pinned;
-      state.threadMeta[threadId] = meta;
-    });
+    await setThreadPinned(this.store, threadId, pinned);
     this.publishThread(threadId);
   }
 
   async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
-    await this.store.update((state) => {
-      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      meta.settings = settings;
-      state.threadMeta[threadId] = meta;
-    });
+    await setThreadSettings(this.store, threadId, settings);
     this.publishThread(threadId);
     return this.summary(threadId)!;
   }
@@ -1023,6 +996,7 @@ export class AppProjection extends EventEmitter {
     const unread = updatedAt > meta.lastReadUpdatedAt && isTerminal(threadState);
     return {
       id: cached.thread.id,
+      agent: "codex",
       projectId: projectForCwd(state.projects, cached.thread.cwd)?.id ?? null,
       title: cached.thread.name?.trim() || cached.thread.preview.trim() || "Без названия",
       preview: cached.thread.preview,

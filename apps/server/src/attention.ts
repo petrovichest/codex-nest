@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import type {
+  AgentId,
   AttentionRequest,
   AttentionResponse,
   ElicitationSchema,
@@ -10,14 +11,24 @@ import type {
 import type { ServerRequest } from "./codex/generated/index";
 import type { JsonlTransport } from "./codex/transport";
 
-interface PendingAttention {
+interface CodexPendingAttention {
+  agent: AgentId;
   request: AttentionRequest;
   rpcId: number | string;
   method: string;
   transport: JsonlTransport;
   legacy: boolean;
   serverRequest: ServerRequest;
+  settle?: undefined;
 }
+
+interface CallbackPendingAttention {
+  agent: AgentId;
+  request: AttentionRequest;
+  settle: (response: AttentionResponse) => void;
+}
+
+type PendingAttention = CodexPendingAttention | CallbackPendingAttention;
 
 export class AttentionManager extends EventEmitter {
   private readonly pending = new Map<string, PendingAttention>();
@@ -38,6 +49,7 @@ export class AttentionManager extends EventEmitter {
       );
     }
     this.pending.set(id, {
+      agent: "codex",
       request,
       rpcId: serverRequest.id,
       method: serverRequest.method,
@@ -51,9 +63,22 @@ export class AttentionManager extends EventEmitter {
     return request;
   }
 
+  /** Registers a callback-settled attention request (used by non-Codex backends). */
+  add(request: AttentionRequest, settle: (response: AttentionResponse) => void): void {
+    this.pending.set(request.id, { agent: "claude", request, settle });
+    this.emit("upserted", request);
+  }
+
   resolve(id: string, response: AttentionResponse): AttentionRequest | null {
     const pending = this.pending.get(id);
     if (!pending || pending.request.kind === "unsupported") return null;
+    if (pending.settle) {
+      validateAttentionResponse(pending.request, response);
+      this.pending.delete(id);
+      pending.settle(response);
+      this.emit("removed", id);
+      return pending.request;
+    }
     const result = mapResponse(pending.request, response, pending.legacy, pending.serverRequest);
     this.pending.delete(id);
     pending.transport.respond(pending.rpcId, result);
@@ -62,16 +87,65 @@ export class AttentionManager extends EventEmitter {
   }
 
   expireByRpcId(rpcId: number | string): void {
-    const found = [...this.pending.entries()].find(([, item]) => item.rpcId === rpcId);
+    const found = [...this.pending.entries()].find(
+      ([, item]) => !item.settle && item.rpcId === rpcId,
+    );
     if (!found) return;
     this.pending.delete(found[0]);
     this.emit("removed", found[0]);
+  }
+
+  expireAgent(agent: AgentId): void {
+    const ids = [...this.pending.entries()]
+      .filter(([, item]) => item.agent === agent)
+      .map(([id]) => id);
+    for (const id of ids) this.pending.delete(id);
+    for (const id of ids) this.emit("removed", id);
+  }
+
+  expireByThread(threadId: string): void {
+    const ids = [...this.pending.entries()]
+      .filter(([, item]) => item.request.threadId === threadId)
+      .map(([id]) => id);
+    for (const id of ids) this.pending.delete(id);
+    for (const id of ids) this.emit("removed", id);
   }
 
   expireAll(): void {
     const ids = [...this.pending.keys()];
     this.pending.clear();
     for (const id of ids) this.emit("removed", id);
+  }
+}
+
+function validateAttentionResponse(request: AttentionRequest, response: AttentionResponse): void {
+  switch (request.kind) {
+    case "commandApproval":
+    case "fileChangeApproval":
+      if (response.kind === "approvalAmendment") return;
+      if (response.kind !== "approval") {
+        throw new AttentionValidationError("Approval decision expected");
+      }
+      if (!["accept", "acceptForSession", "decline", "cancel"].includes(response.decision)) {
+        throw new AttentionValidationError("Invalid approval decision");
+      }
+      return;
+    case "permissionApproval":
+      if (response.kind !== "permission") {
+        throw new AttentionValidationError("Permission grant expected");
+      }
+      assertSubset(request.permissions, response.permissions);
+      return;
+    case "userInput":
+      if (response.kind !== "userInput") throw new AttentionValidationError("User input expected");
+      return;
+    case "elicitation":
+      if (response.kind !== "elicitation") {
+        throw new AttentionValidationError("Elicitation response expected");
+      }
+      return;
+    case "unsupported":
+      throw new AttentionValidationError("Unsupported request cannot be answered");
   }
 }
 
