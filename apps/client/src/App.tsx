@@ -767,21 +767,6 @@ function Sidebar({
             const cannotMoveBelow = projectIndex === (isBottomUp ? 0 : lastProjectIndex);
             const projectHeader = (
               <div className="project-title">
-                {group.project && (
-                  <span
-                    aria-hidden="true"
-                    className="project-drag-handle"
-                    data-project-drag-handle
-                    onLostPointerCapture={cancelProjectDrag}
-                    onPointerCancel={cancelProjectDrag}
-                    onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
-                    onPointerMove={moveProjectDrag}
-                    onPointerUp={finishProjectDrag}
-                    title={`Перетащить проект ${group.project.displayName}`}
-                  >
-                    <GripVerticalIcon />
-                  </span>
-                )}
                 <button
                   aria-controls={sessionsId}
                   aria-expanded={!groupCollapsed}
@@ -795,6 +780,19 @@ function Sidebar({
                 </button>
                 {group.project && (
                   <>
+                    <span
+                      aria-hidden="true"
+                      className="project-drag-handle"
+                      data-project-drag-handle
+                      onLostPointerCapture={cancelProjectDrag}
+                      onPointerCancel={cancelProjectDrag}
+                      onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
+                      onPointerMove={moveProjectDrag}
+                      onPointerUp={finishProjectDrag}
+                      title={`Перетащить проект ${group.project.displayName}`}
+                    >
+                      <GripVerticalIcon />
+                    </span>
                     <details className="project-action-menu" data-dismiss-on-outside-click>
                       <summary
                         aria-label={`Действия с проектом ${group.project.displayName}`}

@@ -470,7 +470,7 @@ describe("App routing and navigation", () => {
     const toggle = screen.getByRole("button", { name: "Проект" });
     const projectTitle = toggle.closest(".project-title") as HTMLElement;
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(projectTitle.children[0]).toHaveClass("project-drag-handle");
+    expect(projectTitle.children[1]).toHaveClass("project-drag-handle");
     expect(projectTitle.children[2]).toHaveClass("project-action-menu");
     expect(projectTitle.children[3]).toHaveAccessibleName("Создать новую сессию в проекте Проект");
 
