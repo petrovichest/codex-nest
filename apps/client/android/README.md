@@ -1,15 +1,16 @@
 # Android build
 
 CodexNest targets Android 10 (API 29) and newer. The app uses `http://localhost` as its
-Capacitor origin. Network Security Configuration permits the user-selected LAN HTTP
-deployment and trusts both system and user-installed CA certificates without disabling
-normal TLS hostname/IP verification.
+Capacitor origin. Network Security Configuration permits the user-selected LAN/VPN HTTP
+deployment and trusts system CA certificates without disabling normal TLS hostname/IP
+verification.
 
 LAN HTTP does not encrypt the bearer token, session contents, command output, or approval
-decisions. Use it only on a fully trusted private network; do not expose port `4310` to the
-internet or use it on guest/public Wi-Fi. A captured token grants owner-level CodexNest
-access until it is rotated. See the complete HTTP threat model in
-[`deploy/DEPLOYMENT.md`](../../../deploy/DEPLOYMENT.md#вариант-a-http-внутри-доверенной-lan).
+decisions. Prefer HTTP inside a private WireGuard/Tailscale tunnel, or use it only on a
+fully trusted LAN. Do not expose port `4310` to the internet or use direct HTTP on
+guest/public Wi-Fi. A captured token grants owner-level CodexNest access until it is
+rotated. See the complete HTTP threat model in
+[`deploy/DEPLOYMENT.md`](../../../deploy/DEPLOYMENT.md#вариант-a-http-внутри-приватного-vpn-или-доверенной-lan).
 
 Run from the repository root:
 
@@ -18,6 +19,26 @@ npm run build
 npm run android:sync -w @codexnest/client
 cd apps/client/android
 ./gradlew assembleDebug
+```
+
+Android updates must always be signed with the same key as the installed APK.
+CodexNest's existing signing key can continue to be used as long as it has not
+been disclosed. Keep the keystore readable only by its owner (`chmod 600`) and
+store an encrypted offline backup together with its passwords. Losing or
+replacing the key prevents direct updates to existing installations.
+
+For a new distribution that does not already have an established signing key,
+generate a dedicated key once:
+
+```bash
+install -d -m 700 "$HOME/.config/codexnest-signing"
+keytool -genkeypair \
+  -keystore "$HOME/.config/codexnest-signing/codexnest-release.jks" \
+  -alias codexnest \
+  -keyalg RSA \
+  -keysize 4096 \
+  -validity 10000
+chmod 600 "$HOME/.config/codexnest-signing/codexnest-release.jks"
 ```
 
 For a signed release, provide all four values outside the repository:

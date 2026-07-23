@@ -1,5 +1,6 @@
 package com.codexnest.app;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -7,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
@@ -14,6 +16,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
+import androidx.core.content.ContextCompat;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import okhttp3.HttpUrl;
@@ -233,7 +236,7 @@ public class SelfHostedNotificationService extends Service {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build();
         int notificationId = 1_000 + Math.abs(requestCode % 1_000_000);
-        NotificationManagerCompat.from(this).notify(notificationId, notification);
+        notifyIfAllowed(notificationId, notification);
     }
 
     private Notification statusNotification(String status) {
@@ -255,7 +258,22 @@ public class SelfHostedNotificationService extends Service {
     }
 
     private void updateStatus(String status) {
-        NotificationManagerCompat.from(this).notify(SERVICE_NOTIFICATION_ID, statusNotification(status));
+        notifyIfAllowed(SERVICE_NOTIFICATION_ID, statusNotification(status));
+    }
+
+    private void notifyIfAllowed(int notificationId, Notification notification) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+            && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+        ) {
+            return;
+        }
+        try {
+            NotificationManagerCompat.from(this).notify(notificationId, notification);
+        } catch (SecurityException ignored) {
+            // Permission can be revoked between the explicit check and notification delivery.
+        }
     }
 
     private void startAsForeground(Notification notification) {

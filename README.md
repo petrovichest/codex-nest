@@ -11,6 +11,23 @@ for local development.
 Read [START_HERE.md](./START_HERE.md) for the product brief and
 [PLAN.md](./PLAN.md) for the implementation decisions.
 
+## Security boundary
+
+CodexNest is a single-owner, local-first application. The server is intended to
+be reachable only from the host itself, a trusted private LAN, or the owner's
+private WireGuard/Tailscale network. Remote access must stay inside that VPN
+boundary.
+
+Do not expose port `4310` to the public internet through router port forwarding,
+UPnP, a public reverse proxy, a public tunnel, or a cloud firewall rule. The
+owner token grants control over Codex, and CodexNest runs with the same Linux
+user permissions as Codex CLI; leaking the token can therefore expose projects
+and other files available to that user.
+
+Plain HTTP is suitable only inside an encrypted WireGuard/Tailscale tunnel or a
+fully trusted LAN. On a shared or untrusted network, connect through the private
+VPN or use HTTPS that remains restricted to the private LAN/VPN.
+
 ## Requirements
 
 - Node.js 24 LTS
@@ -77,12 +94,18 @@ the private LAN URL. It never installs Codex CLI: when Codex is missing,
 CodexNest starts in diagnostic mode and becomes ready after the user installs
 and signs in to Codex, then runs `codexnest repair`.
 
-The managed install listens on the private LAN by default. Never forward port
-`4310` to the public internet. HTTP is intentionally supported for trusted home
-networks and private WireGuard/Tailscale links, while HTTPS reverse-proxy
-examples remain available under `deploy/`.
+The managed install listens on the private LAN by default. Keep port `4310`
+inside the trusted LAN or private WireGuard/Tailscale network. HTTP is
+intentionally supported for those private environments, while HTTPS
+reverse-proxy examples remain available under `deploy/` for private LAN/VPN
+deployments.
 
 See the [deployment and update guide](./deploy/DEPLOYMENT.md) and
 [Android build instructions](./apps/client/android/README.md). No commit, push,
 deployment, signing secret, Firebase credential, or release APK is produced by
 the normal build.
+
+## Contributing
+
+External contributions are accepted through reviewed pull requests, not direct
+writes to the upstream repository. See [CONTRIBUTING.md](./CONTRIBUTING.md).
