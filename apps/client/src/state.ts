@@ -145,6 +145,15 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "models.changed":
       snapshot.models = event.models;
       break;
+    case "backend.changed": {
+      const backends = snapshot.backends ?? [];
+      const index = backends.findIndex((entry) => entry.agent === event.backend.agent);
+      snapshot.backends =
+        index < 0
+          ? [...backends, event.backend]
+          : backends.map((entry, entryIndex) => (entryIndex === index ? event.backend : entry));
+      break;
+    }
     case "defaultReasoningEffort.changed":
       snapshot.defaultReasoningEffort = event.reasoningEffort ?? undefined;
       break;

@@ -6,6 +6,7 @@ import { clientReducer, initialState, sortThreads } from "./state";
 
 const baseThread: ThreadSummary = {
   id: "one",
+  agent: "codex",
   projectId: null,
   title: "One",
   preview: "",
@@ -108,6 +109,42 @@ describe("clientReducer", () => {
       personality: "friendly",
     });
     expect(state.goals.one).toEqual(goal);
+  });
+
+  it("upserts per-backend status from backend.changed events", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    const codexStatus = {
+      agent: "codex" as const,
+      connection: { state: "ready" as const, message: null, syncedAt: "t1" },
+      models: [],
+    };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "backend.changed", backend: codexStatus },
+    });
+    expect(state.snapshot?.backends).toEqual([codexStatus]);
+
+    const codexUpdated = {
+      ...codexStatus,
+      connection: { state: "unavailable" as const, message: "down", syncedAt: "t1" },
+    };
+    const claudeStatus = {
+      agent: "claude" as const,
+      connection: { state: "ready" as const, message: null, syncedAt: null },
+      models: [],
+    };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: { type: "backend.changed", backend: codexUpdated },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: { type: "backend.changed", backend: claudeStatus },
+    });
+    expect(state.snapshot?.backends).toEqual([codexUpdated, claudeStatus]);
   });
 
   it("replaces an item completion after ordered streaming deltas", () => {

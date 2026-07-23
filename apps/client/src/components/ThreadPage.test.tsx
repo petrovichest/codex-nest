@@ -23,6 +23,7 @@ vi.mock("../downloads", () => ({ openDownloadUrl }));
 
 const summary: ThreadSummary = {
   id: "thread",
+  agent: "codex",
   projectId: "project",
   title: "Тестовая задача",
   preview: "",

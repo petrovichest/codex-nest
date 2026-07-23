@@ -16,6 +16,7 @@ vi.mock("@capacitor/app", () => ({ App: { addListener: addAppListener } }));
 
 const summary: ThreadSummary = {
   id: "thread",
+  agent: "codex",
   projectId: null,
   title: "Thread",
   preview: "",

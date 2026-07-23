@@ -169,6 +169,7 @@ describe("browser notification permission", () => {
 function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary {
   return {
     id: "thread",
+    agent: "codex",
     projectId: "project",
     title: "Тестовая задача",
     preview: "",

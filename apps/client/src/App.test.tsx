@@ -32,6 +32,7 @@ vi.mock("@capacitor/app", () => ({
 
 const baseThread: ThreadSummary = {
   id: "newer",
+  agent: "codex",
   projectId: "project",
   title: "Новая задача в истории",
   preview: "",
