@@ -113,6 +113,24 @@ describe("SessionHub", () => {
     ]);
   });
 
+  it("passes a codex models.changed through as a legacy event plus backend.changed", () => {
+    const codex = new FakeBackend("codex");
+    const hub = new SessionHub([asBackend(codex)], fakeStore(), new AttentionManager(), false);
+    const events: ServerEvent[] = [];
+    hub.on("event", (_sequence: number, event: ServerEvent) => events.push(event));
+
+    codex.models = [model("gpt")];
+    codex.emitEvent({ type: "models.changed", models: codex.models });
+
+    expect(events).toEqual([
+      { type: "models.changed", models: codex.models },
+      {
+        type: "backend.changed",
+        backend: { agent: "codex", connection: codex.connection, models: codex.models },
+      },
+    ]);
+  });
+
   it("never surfaces a non-codex backend's connection/models changes as legacy events", () => {
     const codex = new FakeBackend("codex");
     const claude = new FakeBackend("claude");

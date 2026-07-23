@@ -88,7 +88,6 @@ const codexBackend = new CodexBackend({
   store,
   codexManager,
   threadTitles,
-  log: { warn: (_obj, message) => process.stderr.write(`CodexNest: ${message}\n`) },
 });
 const hub = new SessionHub([codexBackend], store, attention, push.configured);
 projection.on("projectionError", (error: Error) => {
@@ -141,6 +140,7 @@ const app = await buildApp(config, {
   appManager,
   transcription,
 });
+codexBackend.setLogger(app.log);
 await app.listen({ host: config.host, port: config.port });
 void codexBackend.start();
 

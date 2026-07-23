@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 
+import type { FastifyBaseLogger } from "fastify";
+
 import type {
   ModelOption,
   ServerEvent,
@@ -34,7 +36,7 @@ export interface CodexBackendDeps {
   store: StateStore;
   codexManager?: CodexManager;
   threadTitles?: Pick<ThreadTitleGenerator, "generate">;
-  log?: { warn(obj: unknown, msg: string): void };
+  log?: Pick<FastifyBaseLogger, "warn">;
 }
 
 export class CodexBackend extends EventEmitter implements AgentBackend {
@@ -45,7 +47,7 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
   private readonly store: StateStore;
   private readonly codexManager?: CodexManager;
   private readonly threadTitles?: Pick<ThreadTitleGenerator, "generate">;
-  private readonly log?: { warn(obj: unknown, msg: string): void };
+  private log?: Pick<FastifyBaseLogger, "warn">;
   private readonly projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
 
   constructor(deps: CodexBackendDeps) {
@@ -60,6 +62,11 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
     this.projection.on("event", (_sequence: number, event: ServerEvent) =>
       this.emit("event", event),
     );
+  }
+
+  /** Wires the Fastify logger once the app exists, so background failures log via pino. */
+  setLogger(logger: Pick<FastifyBaseLogger, "warn">): void {
+    this.log = logger;
   }
 
   get connection(): ConnectionView {
