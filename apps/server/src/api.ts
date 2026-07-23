@@ -13,6 +13,7 @@ import type {
   CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
+  CreateProjectThreadRequest,
   CreateProjectThreadResponse,
   CreateThreadRequest,
   DeviceRegistrationRequest,
@@ -28,11 +29,8 @@ import type {
   StartTurnRequest,
   SteerTurnRequest,
   TaskDefaults,
-  ThreadGoal,
-  ThreadSummary,
   TranscriptionConfigResponse,
   TranscriptionResponse,
-  TurnStartResult,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
@@ -47,20 +45,16 @@ import type {
 import { AttentionValidationError, type AttentionManager } from "./attention";
 import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
+import { CodexBackend, compact, effectiveModel } from "./backends/codex";
+import type { AgentBackend } from "./backends/backend";
+import { ThreadNotFoundError, UnsupportedForAgentError } from "./backends/backend";
+import type { SessionHub } from "./backends/hub";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
-import type { ThreadResumeResponse } from "./codex/generated/v2/index";
-import {
-  parseAccountRateLimits,
-  parseThreadRead,
-  parseThreadStart,
-  parseTurnStart,
-  parseTurnSteer,
-} from "./codex/guards";
+import { parseAccountRateLimits } from "./codex/guards";
 import { RpcError } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
-import { safeError } from "./logging";
 import {
   assertUniqueProjectPath,
   canonicalProjectPath,
@@ -77,7 +71,6 @@ import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
 import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
 import type { StateStore } from "./state/store";
-import type { ThreadTitleGenerator } from "./thread-title";
 import {
   MAX_TRANSCRIPTION_BYTES,
   normalizeAudioType,
@@ -100,11 +93,12 @@ export interface ApiServices {
   bridge: CodexBridge;
   store: StateStore;
   projection: AppProjection;
+  hub: SessionHub;
+  codexBackend: CodexBackend;
   attention: AttentionManager;
   push: PushNotifier;
   codexManager?: CodexManager;
   appManager?: AppManager;
-  threadTitles?: Pick<ThreadTitleGenerator, "generate">;
   transcription?: Pick<
     TranscriptionService,
     "configuration" | "updateConfiguration" | "transcribe"
@@ -113,189 +107,36 @@ export interface ApiServices {
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention, codexManager, appManager, threadTitles } = services;
+  const { bridge, store, projection, attention, codexManager, appManager, hub, codexBackend } =
+    services;
   const downloadTickets = new Map<string, DownloadTicket>();
-  const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
-  const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
-    if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
-    const model = effectiveModel(summary.settings, projection.availableModels);
-    void threadTitles
-      .generate(input, {
-        cwd: summary.cwd,
-        model: model?.id,
-        effort: model?.reasoningEfforts[0]?.value,
-      })
-      .then(async (name) => {
-        if (projection.hasExplicitName(threadId)) return;
-        await bridge.request("thread/name/set", { threadId, name });
-      })
-      .catch((error: unknown) => {
-        app.log.warn({ err: safeError(error), threadId }, "Failed to generate thread title");
-      });
-  };
-  const startTurnUnlocked = async (
-    threadId: string,
-    input: string,
-    images: string[],
-    clientMessageId: string | null,
-    goal = false,
-  ): Promise<TurnStartResult> => {
-    let summary = projection.summary(threadId);
-    if (!summary) throw new MessageQueueNotFoundError("Thread not found");
-    const shouldGenerateTitle =
-      projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
-    if (goal) {
-      if (summary.settings.collaborationMode === "plan") {
-        summary = await projection.setSettings(threadId, {
-          ...summary.settings,
-          collaborationMode: "default",
-        });
-      }
-      await setThreadGoal(bridge, threadId, { objective: input.trim(), status: "paused" });
-    }
-    let turn;
-    try {
-      if (!projection.isUnmaterialized(threadId)) {
-        await bridge.request<ThreadResumeResponse>(
-          "thread/resume",
-          {
-            threadId,
-            cwd: summary.cwd,
-            excludeTurns: true,
-            ...threadSettings(summary.settings),
-          },
-          30_000,
-        );
-      }
-      turn = parseTurnStart(
-        await bridge.request<unknown>("turn/start", {
-          threadId,
-          clientUserMessageId: clientMessageId,
-          input: messageInput(input, images),
-          ...turnSettings(summary.settings, projection.availableModels),
-        }),
-      );
-    } catch (error) {
-      if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
-      throw error;
-    }
-    await projection.markMaterialized(threadId);
-    await projection.setCurrentTurn(threadId, turn.turn.id);
-    if (clientMessageId) {
-      projection.recordUserMessage(threadId, turn.turn.id, clientMessageId, input, images);
-    }
-    if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
-    if (!goal) return { turnId: turn.turn.id };
-    try {
-      await setThreadGoal(bridge, threadId, { status: "active" });
-      return { turnId: turn.turn.id };
-    } catch {
-      return {
-        turnId: turn.turn.id,
-        goalWarning: "Первый ход начат, но цель осталась на паузе. Продолжите её вручную.",
-      };
-    }
-  };
-  const startTurn = (
-    threadId: string,
-    input: string,
-    images: string[],
-    clientMessageId: string | null,
-    goal = false,
-  ): Promise<TurnStartResult> => {
-    const release = codexManager?.beginTurn();
-    return startTurnUnlocked(threadId, input, images, clientMessageId, goal).finally(() =>
-      release?.(),
-    );
-  };
-
-  async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
-    for (const candidate of projection.emptyThreadCandidates(projectId)) {
-      if (candidate.knownUnmaterialized) return candidate.thread;
-      const detail = await projection.readThread(candidate.thread.id);
-      if (detail.turns.length === 0 && detail.queuedMessages.length === 0) {
-        await projection.markUnmaterialized(candidate.thread.id);
-        return projection.summary(candidate.thread.id) ?? candidate.thread;
-      }
-      await projection.markMaterialized(candidate.thread.id);
-    }
-    return null;
-  }
-
-  function getOrCreateProjectThread(projectId: string): Promise<ThreadSummary> {
-    const current = projectThreadCreations.get(projectId);
-    if (current) return current;
-    const request = (async () => {
-      const existing = await findReusableProjectThread(projectId);
-      if (existing) return existing;
-      codexManager?.assertTurnsAllowed();
-      const project = store.snapshot().projects.find((candidate) => candidate.id === projectId);
-      if (!project) throw new ProjectNotFoundError("Project not found");
-      const settings = projection.newSessionSettings;
-      const started = parseThreadStart(
-        await bridge.request<unknown>("thread/start", {
-          cwd: project.path,
-          ...threadSettings(settings),
-        }),
-      );
-      projection.upsertThread(started.thread);
-      await projection.markUnmaterialized(started.thread.id);
-      return projection.setSettings(started.thread.id, settings);
-    })().finally(() => {
-      if (projectThreadCreations.get(projectId) === request) {
-        projectThreadCreations.delete(projectId);
-      }
-    });
-    projectThreadCreations.set(projectId, request);
-    return request;
-  }
-
-  const steerTurn = async (
-    threadId: string,
-    turnId: string,
-    input: string,
-    images: string[],
-    clientMessageId: string | null,
-  ): Promise<string> => {
-    codexManager?.assertTurnsAllowed();
-    const result = parseTurnSteer(
-      await bridge.request<unknown>("turn/steer", {
-        threadId,
-        expectedTurnId: turnId,
-        clientUserMessageId: clientMessageId,
-        input: messageInput(input, images),
-      }),
-    );
-    if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, result.turnId);
-    if (clientMessageId) {
-      projection.recordUserMessage(threadId, result.turnId, clientMessageId, input, images);
-    }
-    return result.turnId;
-  };
   const queue = new MessageQueue(store, {
-    paused: () => codexManager?.maintenanceActive ?? false,
-    currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
+    paused: (threadId) => hub.backendFor(threadId)?.turnsPaused() ?? false,
+    currentTurnId: (threadId) => hub.backendFor(threadId)?.currentTurnId(threadId) ?? null,
     start: (threadId, message) =>
-      startTurn(threadId, message.text, message.images ?? [], message.id).then(
-        (result) => result.turnId,
-      ),
+      hub
+        .requireBackend(threadId)
+        .startTurn(threadId, {
+          text: message.text,
+          images: message.images ?? [],
+          clientMessageId: message.id,
+        })
+        .then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
-      steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
-    wasDelivered: async (threadId, messageId) => {
-      const result = parseThreadRead(
-        await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
-      );
-      return result.thread.turns.some((turn) =>
-        turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
-      );
-    },
-    publish: (threadId, messages) => projection.publishQueue(threadId, messages),
+      hub.requireBackend(threadId).steerTurn(threadId, turnId, {
+        text: message.text,
+        images: message.images ?? [],
+        clientMessageId: message.id,
+      }),
+    wasDelivered: (threadId, messageId) =>
+      hub.requireBackend(threadId).wasDelivered(threadId, messageId),
+    publish: (threadId, messages) => hub.publishQueue(threadId, messages),
   });
 
-  projection.on("event", (_sequence, event) => {
+  hub.on("event", (_sequence, event) => {
     if (event.type === "resync.required") {
       void queue.recover().catch(() => undefined);
     } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
@@ -323,21 +164,33 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
   });
 
-  app.get("/api/v1/health", async () => ({
-    status: bridge.state === "ready" ? "ok" : "degraded",
-    serverVersion: SERVER_VERSION,
-    appServer: {
-      state: bridge.state,
-      installedVersion: bridge.actualVersion ?? null,
-      message: bridge.state === "ready" ? null : "Codex app-server is unavailable",
-    },
-  }));
+  app.get("/api/v1/health", async () => {
+    const codexReady = bridge.state === "ready";
+    const codexMessage = codexReady ? null : "Codex app-server is unavailable";
+    return {
+      status: codexReady ? "ok" : "degraded",
+      serverVersion: SERVER_VERSION,
+      appServer: {
+        state: bridge.state,
+        installedVersion: bridge.actualVersion ?? null,
+        message: codexMessage,
+      },
+      backends: [
+        {
+          agent: "codex" as const,
+          state: bridge.state,
+          installedVersion: bridge.actualVersion ?? null,
+          message: codexMessage,
+        },
+      ],
+    };
+  });
 
   app.get("/api/v1/summary", async () => ({
-    threadCount: projection.threadCount,
+    threadCount: hub.threadCount,
     projectCount: store.snapshot().projects.length,
     pendingAttentionCount: attention.list().length,
-    syncedAt: projection.lastSyncedAt,
+    syncedAt: hub.lastSyncedAt,
   }));
 
   app.get("/api/v1/transcriptions/config", async (): Promise<TranscriptionConfigResponse> => {
@@ -553,7 +406,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     await store.update((state) => {
       state.projects.push(project);
     });
-    projection.publishProject(project.id);
+    hub.publishProject(project.id);
     return reply.code(201).send(project);
   });
 
@@ -584,7 +437,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           project.id === current.id ? updated : project,
         );
       });
-      projection.publishProject(updated.id);
+      hub.publishProject(updated.id);
       return updated;
     },
   );
@@ -608,7 +461,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           state.projects[index]!,
         ];
       });
-      projection.publishProjectsReordered(updated.projects);
+      hub.publishProjectsReordered(updated.projects);
       return updated.projects;
     },
   );
@@ -620,33 +473,42 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     await store.update((state) => {
       state.projects = state.projects.filter((project) => project.id !== request.params.id);
     });
-    projection.removeProject(request.params.id);
+    hub.removeProject(request.params.id);
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
-    if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
-      return apiError(reply, 404, "not_found", "Project not found");
-    }
-    const thread = await getOrCreateProjectThread(request.params.id);
-    return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
-  });
+  app.post<{ Params: { id: string }; Body: CreateProjectThreadRequest }>(
+    "/api/v1/projects/:id/threads",
+    async (request, reply) => {
+      if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
+        return apiError(reply, 404, "not_found", "Project not found");
+      }
+      const backend = resolveBackend(hub, request.body?.agent, reply);
+      if (!backend) return;
+      if (!(backend instanceof CodexBackend)) {
+        return apiError(reply, 409, "validation_failed", "Этот агент пока не поддерживает проекты");
+      }
+      const thread = await backend.getOrCreateProjectThread(request.params.id);
+      return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
+    },
+  );
 
   app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(
     "/api/v1/threads/:id",
     async (request, reply) => {
-      const observed = projection.summary(request.params.id);
-      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+      const backend = hub.backendFor(request.params.id);
+      const observed = backend?.summary(request.params.id);
+      if (!backend || !observed) return apiError(reply, 404, "not_found", "Thread not found");
       const cursor =
         typeof request.query.cursor === "string" && request.query.cursor.length
           ? request.query.cursor
           : null;
-      const detail = await projection.readThread(request.params.id, cursor);
+      const detail = await backend.readThread(request.params.id, cursor);
       if (cursor === null && observed.unseen) {
-        await projection.markViewed(request.params.id, observed.updatedAt);
+        await backend.markViewed(request.params.id, observed.updatedAt);
         return {
           ...detail,
-          summary: projection.summary(request.params.id) ?? detail.summary,
+          summary: backend.summary(request.params.id) ?? detail.summary,
         };
       }
       return detail;
@@ -657,40 +519,36 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/draft",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
-      if (!projection.summary(request.params.id)) {
-        return apiError(reply, 404, "not_found", "Thread not found");
-      }
-      return projection.setDraft(request.params.id, validateThreadDraft(request.body));
+      const backend = hub.backendFor(request.params.id);
+      if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
+      return backend.setDraft(request.params.id, validateThreadDraft(request.body));
     },
   );
 
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
-    if (!projection.summary(request.params.id)) {
-      return apiError(reply, 404, "not_found", "Thread not found");
-    }
-    return readThreadGoal(bridge, request.params.id);
+    const backend = requireCodexThread(hub, request.params.id, reply);
+    if (!backend) return;
+    return backend.readGoal(request.params.id);
   });
 
   app.patch<{ Params: { id: string }; Body: UpdateThreadGoalRequest }>(
     "/api/v1/threads/:id/goal",
     async (request, reply) => {
-      if (!projection.summary(request.params.id)) {
-        return apiError(reply, 404, "not_found", "Thread not found");
-      }
-      return setThreadGoal(bridge, request.params.id, validateGoalPatch(request.body));
+      const backend = requireCodexThread(hub, request.params.id, reply);
+      if (!backend) return;
+      return backend.setGoal(request.params.id, validateGoalPatch(request.body));
     },
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
-    if (!projection.summary(request.params.id)) {
-      return apiError(reply, 404, "not_found", "Thread not found");
-    }
-    await clearThreadGoal(bridge, request.params.id);
+    const backend = requireCodexThread(hub, request.params.id, reply);
+    if (!backend) return;
+    await backend.clearGoal(request.params.id);
     return reply.code(204).send();
   });
 
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/git-changes", async (request, reply) => {
-    const summary = projection.summary(request.params.id);
+    const summary = hub.summary(request.params.id);
     if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
     return readGitChanges(summary.cwd);
   });
@@ -698,7 +556,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.post<{ Params: { id: string }; Body: { path?: unknown } }>(
     "/api/v1/threads/:id/downloads",
     async (request, reply) => {
-      const summary = projection.summary(request.params.id);
+      const summary = hub.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       const body = requireRecord<{ path?: unknown }>(request.body);
       if (Object.keys(body).some((key) => key !== "path") || typeof body.path !== "string") {
@@ -761,32 +619,28 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         .snapshot()
         .projects.find((candidate) => candidate.id === body.projectId);
       if (!project) return apiError(reply, 404, "not_found", "Project not found");
+      const backend = resolveBackend(hub, body.agent, reply);
+      if (!backend) return;
       const settings = mergeSettings(
-        projection.newSessionSettings,
+        backend.newSessionSettings,
         body.settings ?? {},
-        projection.availableModels,
+        backend.models,
       );
-      const started = parseThreadStart(
-        await bridge.request<unknown>("thread/start", {
-          cwd: project.path,
-          ...threadSettings(settings),
-        }),
-      );
-      projection.upsertThread(started.thread);
-      await projection.markUnmaterialized(started.thread.id);
-      await projection.setSettings(started.thread.id, settings);
-      const result = await startTurn(
-        started.thread.id,
-        body.input,
-        body.images ?? [],
-        body.clientMessageId ?? null,
-        body.goal ?? false,
+      const thread = await backend.createThread(body.projectId, project.path, settings);
+      const result = await backend.startTurn(
+        thread.id,
+        {
+          text: body.input,
+          images: body.images ?? [],
+          clientMessageId: body.clientMessageId ?? null,
+        },
+        { goal: body.goal ?? false },
       );
       if (body.settings?.reasoningEffort !== undefined) {
-        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+        await codexBackend.setDefaultReasoningEffort(settings.reasoningEffort);
       }
       return reply.code(201).send({
-        thread: projection.summary(started.thread.id),
+        thread: backend.summary(thread.id),
         ...result,
       });
     },
@@ -796,34 +650,27 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id",
     async (request, reply) => {
       const body = requireRecord<UpdateThreadRequest>(request.body);
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
+      const backend = hub.backendFor(request.params.id);
+      if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
       if (body.name !== undefined) {
         if (typeof body.name !== "string" || !body.name.trim())
           return apiError(reply, 400, "validation_failed", "name must not be empty");
-        await bridge.request("thread/name/set", {
-          threadId: request.params.id,
-          name: body.name.trim(),
-        });
+        await backend.renameThread(request.params.id, body.name.trim());
       }
       if (body.pinned !== undefined) {
         if (typeof body.pinned !== "boolean")
           return apiError(reply, 400, "validation_failed", "pinned must be boolean");
-        await projection.setPinned(request.params.id, body.pinned);
+        await backend.setPinned(request.params.id, body.pinned);
       }
-      return projection.summary(request.params.id);
+      return backend.summary(request.params.id);
     },
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
-    if (!projection.summary(request.params.id)) {
-      return apiError(reply, 404, "not_found", "Thread not found");
-    }
-    await bridge.request("thread/delete", { threadId: request.params.id });
+    const backend = hub.backendFor(request.params.id);
+    if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
+    await backend.deleteThread(request.params.id);
     await queue.removeThread(request.params.id);
-    await store.update((state) => {
-      delete state.threadMeta[request.params.id];
-    });
     return reply.code(204).send();
   });
 
@@ -834,8 +681,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (Object.keys(patch).length === 0) {
         return apiError(reply, 400, "validation_failed", "At least one setting is required");
       }
-      const summary = projection.summary(request.params.id);
-      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      const backend = hub.backendFor(request.params.id);
+      const summary = backend?.summary(request.params.id);
+      if (!backend || !summary) return apiError(reply, 404, "not_found", "Thread not found");
       if (summary.currentTurnId) {
         return apiError(
           reply,
@@ -844,10 +692,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "Settings cannot be changed while a turn is running",
         );
       }
-      const settings = mergeSettings(summary.settings, patch, projection.availableModels);
-      const thread = await projection.setSettings(request.params.id, settings);
+      const settings = mergeSettings(summary.settings, patch, backend.models);
+      const thread = await backend.setSettings(request.params.id, settings);
       if (patch.reasoningEffort !== undefined) {
-        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+        await codexBackend.setDefaultReasoningEffort(settings.reasoningEffort);
       }
       return thread;
     },
@@ -859,14 +707,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     async (request, reply) => {
       const body = validateStartTurnBody(request.body, reply);
       if (!body) return;
-      const summary = projection.summary(request.params.id);
-      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      const result = await startTurn(
+      const backend = hub.backendFor(request.params.id);
+      if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
+      const result = await backend.startTurn(
         request.params.id,
-        body.input,
-        body.images ?? [],
-        body.clientMessageId ?? null,
-        body.goal ?? false,
+        {
+          text: body.input,
+          images: body.images ?? [],
+          clientMessageId: body.clientMessageId ?? null,
+        },
+        { goal: body.goal ?? false },
       );
       return reply.code(201).send(result);
     },
@@ -885,7 +735,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (body.clientMessageId !== undefined && clientMessageId === null) {
         return apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
       }
-      if (!projection.summary(request.params.id)) {
+      if (!hub.summary(request.params.id)) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
       const message = await queue.enqueue(
@@ -919,7 +769,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         return apiError(reply, 400, "validation_failed", "turnId and input or images are required");
       }
       return {
-        turnId: await steerTurn(request.params.id, body.turnId, body.input, images, null),
+        turnId: await hub
+          .requireBackend(request.params.id)
+          .steerTurn(request.params.id, body.turnId, {
+            text: body.input,
+            images,
+            clientMessageId: null,
+          }),
       };
     },
   );
@@ -930,19 +786,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const body = requireRecord<InterruptTurnRequest>(request.body);
       if (typeof body.turnId !== "string")
         return apiError(reply, 400, "validation_failed", "turnId is required");
-      await bridge.request("turn/interrupt", { threadId: request.params.id, turnId: body.turnId });
+      await hub.requireBackend(request.params.id).interruptTurn(request.params.id, body.turnId);
       return reply.code(204).send();
     },
   );
 
-  for (const [route, method] of [
-    ["archive", "thread/archive"],
-    ["unarchive", "thread/unarchive"],
+  for (const [route, archived] of [
+    ["archive", true],
+    ["unarchive", false],
   ] as const) {
     app.post<{ Params: { id: string } }>(`/api/v1/threads/:id/${route}`, async (request, reply) => {
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
-      await bridge.request(method, { threadId: request.params.id });
+      const backend = hub.backendFor(request.params.id);
+      if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
+      await backend.setArchived(request.params.id, archived);
       return reply.code(204).send();
     });
   }
@@ -953,9 +809,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const body = requireRecord<MarkReadRequest>(request.body);
       if (typeof body.observedUpdatedAt !== "number")
         return apiError(reply, 400, "validation_failed", "observedUpdatedAt is required");
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
-      await projection.markRead(request.params.id, body.observedUpdatedAt);
+      const backend = hub.backendFor(request.params.id);
+      if (!backend) return apiError(reply, 404, "not_found", "Thread not found");
+      await backend.markRead(request.params.id, body.observedUpdatedAt);
       return reply.code(204).send();
     },
   );
@@ -973,7 +829,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "Attention request has already been resolved or expired",
         );
       }
-      await projection.recordAttentionResponse(resolved, body);
+      const backend = resolved.threadId ? hub.backendFor(resolved.threadId) : undefined;
+      await backend?.recordAttentionResponse(resolved, body);
       return reply.code(204).send();
     },
   );
@@ -1010,8 +867,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.post("/api/v1/sync", async (_request, reply) => {
-    await projection.sync();
-    return reply.send(projection.snapshot());
+    await hub.sync();
+    return reply.send(hub.snapshot());
   });
 
   app.setErrorHandler((error: Error, request, reply) => {
@@ -1042,6 +899,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof MessageQueueNotFoundError)
       return apiError(reply, 404, "not_found", error.message);
+    if (error instanceof ThreadNotFoundError)
+      return apiError(reply, 404, "not_found", error.message);
+    if (error instanceof UnsupportedForAgentError)
+      return apiError(reply, 409, "conflict", error.message);
     if (error instanceof MessageQueuePausedError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof CodexManagementError) {
@@ -1076,56 +937,43 @@ function requireAppManager(manager: AppManager | undefined): AppManager {
   return manager;
 }
 
-function threadSettings(settings?: SessionSettings): Record<string, unknown> {
-  if (!settings) return {};
-  return compact({
-    model: settings.model,
-    serviceTier: settings.serviceTier,
-    personality: settings.personality,
-  });
+function resolveBackend(
+  hub: SessionHub,
+  agent: unknown,
+  reply: FastifyReply,
+): AgentBackend | undefined {
+  const resolved = agent === undefined ? "codex" : agent;
+  if (resolved !== "codex" && resolved !== "claude") {
+    apiError(reply, 409, "validation_failed", "Неизвестный агент");
+    return undefined;
+  }
+  const backend = hub.backend(resolved);
+  if (!backend) {
+    apiError(reply, 409, "validation_failed", "Агент недоступен");
+    return undefined;
+  }
+  return backend;
 }
 
-function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<string, unknown> {
-  const model = effectiveModel(settings, models);
-  if (!model) throw new ProjectValidationError("No model is available for collaboration mode");
-  const reasoningEffort =
-    settings.reasoningEffort ??
-    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
-    null;
-  return compact({
-    model: settings.model,
-    serviceTier: settings.serviceTier,
-    effort: settings.reasoningEffort,
-    personality: settings.personality,
-    collaborationMode: {
-      mode: settings.collaborationMode,
-      settings: {
-        model: model.id,
-        reasoning_effort: reasoningEffort,
-        developer_instructions: null,
-      },
-    },
-  });
-}
-
-function compact(value: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
+function requireCodexThread(
+  hub: SessionHub,
+  threadId: string,
+  reply: FastifyReply,
+): CodexBackend | undefined {
+  const backend = hub.backendFor(threadId);
+  if (!backend) {
+    apiError(reply, 404, "not_found", "Thread not found");
+    return undefined;
+  }
+  if (!(backend instanceof CodexBackend)) {
+    apiError(reply, 409, "validation_failed", "Цели доступны только в Codex");
+    return undefined;
+  }
+  return backend;
 }
 
 function isLoopbackAddress(value: string): boolean {
   return value === "127.0.0.1" || value === "::1" || value.startsWith("::ffff:127.");
-}
-
-function messageInput(
-  text: string,
-  images: string[],
-): Array<{ type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }> {
-  const result: Array<
-    { type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }
-  > = [];
-  if (text.trim()) result.push({ type: "text", text: text.trim(), text_elements: [] });
-  result.push(...images.map((url) => ({ type: "image" as const, url })));
-  return result;
 }
 
 function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadRequest | undefined {
@@ -1406,59 +1254,11 @@ function applySettingsPatch(
   return next;
 }
 
-function effectiveModel(settings: SessionSettings, models: ModelOption[]): ModelOption | undefined {
-  if (settings.model) return models.find((model) => model.id === settings.model);
-  return models.find((model) => model.isDefault) ?? models[0];
-}
-
 function requireRecord<T>(value: unknown): T {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ProjectValidationError("JSON object expected");
   }
   return value as T;
-}
-
-async function readThreadGoal(bridge: CodexBridge, threadId: string): Promise<ThreadGoal | null> {
-  const response = await bridge.request<unknown>("thread/goal/get", { threadId });
-  if (!isRecord(response) || !(response.goal === null || isThreadGoal(response.goal))) {
-    throw new ProjectValidationError("Invalid thread goal response");
-  }
-  return response.goal;
-}
-
-async function setThreadGoal(
-  bridge: CodexBridge,
-  threadId: string,
-  patch: UpdateThreadGoalRequest,
-): Promise<ThreadGoal> {
-  const response = await bridge.request<unknown>("thread/goal/set", {
-    threadId,
-    ...patch,
-  });
-  if (!isRecord(response) || !isThreadGoal(response.goal)) {
-    throw new ProjectValidationError("Invalid thread goal response");
-  }
-  return response.goal;
-}
-
-async function clearThreadGoal(bridge: CodexBridge, threadId: string): Promise<void> {
-  await bridge.request("thread/goal/clear", { threadId });
-}
-
-function isThreadGoal(value: unknown): value is ThreadGoal {
-  return (
-    isRecord(value) &&
-    typeof value.threadId === "string" &&
-    typeof value.objective === "string" &&
-    ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"].includes(
-      String(value.status),
-    ) &&
-    (value.tokenBudget === null || typeof value.tokenBudget === "number") &&
-    typeof value.tokensUsed === "number" &&
-    typeof value.timeUsedSeconds === "number" &&
-    typeof value.createdAt === "number" &&
-    typeof value.updatedAt === "number"
-  );
 }
 
 const PERMISSION_PRESETS: Record<

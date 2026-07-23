@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app";
 import type { AppManager } from "./app-management";
+import { CodexBackend } from "./backends/codex";
+import { SessionHub } from "./backends/hub";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
@@ -18,7 +20,26 @@ import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
+import type { ThreadTitleGenerator } from "./thread-title";
 import { TranscriptionError } from "./transcription";
+import type { ApiServices } from "./api";
+
+type CodexServicesBase = Omit<ApiServices, "hub" | "codexBackend"> & {
+  threadTitles?: Pick<ThreadTitleGenerator, "generate">;
+};
+
+function codexServices(base: CodexServicesBase): ApiServices {
+  const { threadTitles, ...rest } = base;
+  const codexBackend = new CodexBackend({
+    projection: base.projection,
+    bridge: base.bridge,
+    store: base.store,
+    codexManager: base.codexManager,
+    threadTitles,
+  });
+  const hub = new SessionHub([codexBackend], base.store, base.attention, base.push.configured);
+  return { ...rest, codexBackend, hub };
+}
 
 const directories: string[] = [];
 afterEach(async () =>
@@ -54,7 +75,7 @@ describe("HTTP authentication", () => {
       allowedOrigins: new Set(["http://localhost"]),
       websocketAuthTimeoutMs: 25,
     });
-    const app = await buildApp(config, {
+    const services = codexServices({
       bridge,
       store,
       projection,
@@ -62,6 +83,7 @@ describe("HTTP authentication", () => {
       push,
       projectRoot: directory,
     });
+    const app = await buildApp(config, services);
 
     const health = await app.inject({ url: "/api/v1/health" });
     expect(health.statusCode).toBe(200);
@@ -174,10 +196,10 @@ describe("HTTP authentication", () => {
     const reorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
       const listener = (_sequence: number, event: Record<string, unknown>) => {
         if (event.type !== "projects.reordered") return;
-        projection.off("event", listener);
+        services.hub.off("event", listener);
         resolve(event);
       };
-      projection.on("event", listener);
+      services.hub.on("event", listener);
     });
     const movedProject = await app.inject({
       method: "POST",
@@ -412,14 +434,14 @@ describe("audio transcriptions", () => {
         clientDist: join(directory, "missing"),
         allowedOrigins: new Set(["http://localhost"]),
       }),
-      {
+      codexServices({
         bridge: bridge as unknown as CodexBridge,
         store,
         projection,
         attention,
         push: new PushNotifier(store),
         transcription,
-      },
+      }),
     );
     const authorization = { authorization: "Bearer correct" };
 
@@ -543,14 +565,14 @@ describe("file downloads", () => {
         clientDist: join(directory, "missing"),
         allowedOrigins: new Set(["http://localhost"]),
       }),
-      {
+      codexServices({
         bridge: bridge as unknown as CodexBridge,
         store,
         projection,
         attention,
         push: new PushNotifier(store),
         projectRoot: directory,
-      },
+      }),
     );
     const headers = { authorization: "Bearer correct" };
     const issue = (path: string, requestHeaders: Record<string, string> = headers) =>
@@ -664,15 +686,18 @@ describe("thread settings", () => {
       allowedOrigins: new Set(["http://localhost"]),
       websocketAuthTimeoutMs: 25,
     });
-    const app = await buildApp(config, {
-      bridge: bridge as unknown as CodexBridge,
-      store,
-      projection,
-      attention,
-      push: new PushNotifier(store),
-      threadTitles,
-      projectRoot: directory,
-    });
+    const app = await buildApp(
+      config,
+      codexServices({
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        threadTitles,
+        projectRoot: directory,
+      }),
+    );
     const headers = { authorization: "Bearer correct" };
 
     await store.update((state) => {
@@ -1207,7 +1232,7 @@ describe("thread settings", () => {
         allowedOrigins: new Set(["http://localhost"]),
         websocketAuthTimeoutMs: 25,
       }),
-      {
+      codexServices({
         bridge: bridge as unknown as CodexBridge,
         store,
         projection,
@@ -1216,7 +1241,7 @@ describe("thread settings", () => {
         codexManager,
         appManager,
         projectRoot: directory,
-      },
+      }),
     );
     const headers = { authorization: "Bearer correct" };
 

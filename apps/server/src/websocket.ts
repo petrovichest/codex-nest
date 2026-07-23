@@ -4,13 +4,15 @@ import type { WebSocket } from "ws";
 import { isClientFrame, type ServerFrame } from "@codexnest/protocol";
 
 import { verifyToken } from "./auth";
+import type { SessionHub } from "./backends/hub";
 import { isAllowedRequestOrigin } from "./origin";
-import type { AppProjection } from "./projection";
 import type { StateStore } from "./state/store";
+
+type EventsHub = Pick<SessionHub, "on" | "off" | "snapshot">;
 
 export function registerEventsWebSocket(
   app: FastifyInstance,
-  projection: AppProjection,
+  hub: EventsHub,
   store: StateStore,
   allowedOrigins: Set<string>,
   authTimeoutMs = 5_000,
@@ -59,15 +61,15 @@ export function registerEventsWebSocket(
         }
         authenticated = true;
         clearTimeout(timeout);
-        projection.on("event", eventListener);
-        send(socket, { type: "snapshot", snapshot: projection.snapshot() });
+        hub.on("event", eventListener);
+        send(socket, { type: "snapshot", snapshot: hub.snapshot() });
         return;
       }
       if (frame.type === "ping") send(socket, { type: "pong" });
     });
     socket.on("close", () => {
       clearTimeout(timeout);
-      projection.off("event", eventListener);
+      hub.off("event", eventListener);
       sockets.delete(socket);
     });
   });

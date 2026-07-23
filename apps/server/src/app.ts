@@ -76,7 +76,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
   registerApi(app, services);
   registerEventsWebSocket(
     app,
-    services.projection,
+    services.hub,
     services.store,
     config.allowedOrigins,
     config.websocketAuthTimeoutMs,

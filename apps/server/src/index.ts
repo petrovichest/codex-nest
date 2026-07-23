@@ -6,6 +6,8 @@ import { basename, dirname, resolve } from "node:path";
 import { buildApp } from "./app";
 import { AttentionManager } from "./attention";
 import { AppManager } from "./app-management";
+import { CodexBackend } from "./backends/codex";
+import { SessionHub } from "./backends/hub";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
@@ -80,6 +82,15 @@ const appManager = new AppManager({
   statusPath: config.updateStatusPath,
   managementCli: config.managementCli,
 });
+const codexBackend = new CodexBackend({
+  projection,
+  bridge,
+  store,
+  codexManager,
+  threadTitles,
+  log: { warn: (_obj, message) => process.stderr.write(`CodexNest: ${message}\n`) },
+});
+const hub = new SessionHub([codexBackend], store, attention, push.configured);
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
@@ -93,15 +104,15 @@ bridge.on("request", (request, transport) => {
 });
 bridge.on("state", (state) => {
   if (state === "ready") {
-    void projection.sync().catch((error: Error) => {
+    void codexBackend.sync().catch((error: Error) => {
       process.stderr.write(`CodexNest initial sync failed (${error.name})\n`);
     });
   } else if (state === "unavailable") {
-    attention.expireAll();
+    attention.expireAgent("codex");
   }
 });
 const pushedTerminal = new Map<string, string>();
-projection.on("event", (_sequence, event) => {
+hub.on("event", (_sequence, event) => {
   if (event.type === "attention.upserted" && event.attention.threadId) {
     void push.send(event.attention.threadId, "attention").catch(() => undefined);
   }
@@ -122,20 +133,21 @@ const app = await buildApp(config, {
   bridge,
   store,
   projection,
+  hub,
+  codexBackend,
   attention,
   push,
   codexManager,
   appManager,
-  threadTitles,
   transcription,
 });
 await app.listen({ host: config.host, port: config.port });
-void bridge.start();
+void codexBackend.start();
 
 async function shutdown(): Promise<void> {
   stateWatcher.close();
   if (authRefreshTimer) clearTimeout(authRefreshTimer);
-  bridge.stop();
+  codexBackend.stop();
   await store.flushed();
   await app.close();
 }
