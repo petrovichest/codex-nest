@@ -169,16 +169,16 @@ export function ThreadPage({
   }
 
   function persistPendingDraft(targetThreadId: string, keepalive = false): Promise<void> {
-    const pending = pendingDraftsRef.current.get(targetThreadId);
-    if (!pending) return draftSaveChainRef.current;
+    if (!pendingDraftsRef.current.has(targetThreadId)) return draftSaveChainRef.current;
     const request = draftSaveChainRef.current
       .catch(() => undefined)
       .then(async () => {
+        const pending = pendingDraftsRef.current.get(targetThreadId);
+        if (!pending) return;
         try {
           const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
-          if (pendingDraftsRef.current.get(targetThreadId)?.revision === pending.revision) {
-            pendingDraftsRef.current.delete(targetThreadId);
-          }
+          if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
+          pendingDraftsRef.current.delete(targetThreadId);
           dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
           if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
             try {
@@ -188,7 +188,7 @@ export function ThreadPage({
             }
           }
         } catch (caught) {
-          if (targetThreadId === threadId) {
+          if (composerDraftRef.current.threadId === targetThreadId) {
             setError(caught instanceof Error ? caught.message : "Не удалось сохранить черновик");
           }
         }
@@ -203,7 +203,7 @@ export function ThreadPage({
     immediate: boolean,
   ): void {
     const revision = ++draftRevisionRef.current;
-    pendingDraftsRef.current.set(targetThreadId, { revision, value: structuredClone(value) });
+    pendingDraftsRef.current.set(targetThreadId, { revision, value });
     if (draftTimerRef.current) {
       window.clearTimeout(draftTimerRef.current.timer);
       draftTimerRef.current = null;

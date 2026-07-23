@@ -13,12 +13,15 @@ import {
   useState,
 } from "react";
 
-import { isServerFrame, type ThreadDetail } from "@codexnest/protocol";
+import { isServerFrame, type AppSnapshot, type ThreadDetail } from "@codexnest/protocol";
 
 import { ApiClient } from "./api";
 import { BrowserNotificationTracker } from "./browser-notifications";
 import { clientReducer, initialState, type ClientAction, type ClientState } from "./state";
 import type { ConnectionSettings } from "./storage";
+
+const HEARTBEAT_IDLE_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 interface ConnectionContextValue {
   api: ApiClient;
@@ -26,7 +29,7 @@ interface ConnectionContextValue {
   dispatch: Dispatch<ClientAction>;
   refreshDetail(threadId: string, options?: { force?: boolean }): Promise<ThreadDetail>;
   loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
-  reconnect(): void;
+  reconnect(): number;
 }
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -38,7 +41,10 @@ export function ConnectionProvider({
   const api = useMemo(() => new ApiClient(settings), [settings]);
   const [state, dispatch] = useReducer(clientReducer, initialState);
   const [generation, setGeneration] = useState(0);
-  const sequence = useRef<number | null>(null);
+  const generationRef = useRef(0);
+  const streamSequence = useRef<number | null>(null);
+  const appliedSequence = useRef<number | null>(null);
+  const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
   const detailRequestVersions = useRef(new Map<string, number>());
   const browserNotifications = useMemo(
@@ -46,7 +52,28 @@ export function ConnectionProvider({
     [],
   );
 
-  const reconnect = useCallback(() => setGeneration((value) => value + 1), []);
+  const reconnect = useCallback(() => {
+    const next = generationRef.current + 1;
+    generationRef.current = next;
+    setGeneration(next);
+    return next;
+  }, []);
+  const acceptSyncedSnapshot = useCallback(
+    (snapshot: AppSnapshot, targetGeneration: number) => {
+      if (generationRef.current !== targetGeneration) return;
+      if (appliedSequence.current !== null && snapshot.sequence < appliedSequence.current) {
+        return;
+      }
+      appliedSequence.current = snapshot.sequence;
+      syncedSnapshotFloor.current = {
+        generation: targetGeneration,
+        sequence: snapshot.sequence,
+      };
+      browserNotifications?.acceptSnapshot(snapshot);
+      dispatch({ type: "snapshot", snapshot });
+    },
+    [browserNotifications],
+  );
   const readDetail = useCallback(
     (threadId: string, cursor?: string, force = false) => {
       const key = JSON.stringify([threadId, cursor ?? null]);
@@ -84,68 +111,119 @@ export function ConnectionProvider({
     let stopped = false;
     let socket: WebSocket | undefined;
     let retryTimer: number | undefined;
+    let heartbeatTimer: number | undefined;
+    let heartbeatTimeout: number | undefined;
     let retry = 0;
     const delays = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+    const clearHeartbeat = () => {
+      if (heartbeatTimer !== undefined) window.clearTimeout(heartbeatTimer);
+      if (heartbeatTimeout !== undefined) window.clearTimeout(heartbeatTimeout);
+      heartbeatTimer = undefined;
+      heartbeatTimeout = undefined;
+    };
+
+    const scheduleHeartbeat = (candidate: WebSocket) => {
+      clearHeartbeat();
+      if (stopped || socket !== candidate) return;
+      heartbeatTimer = window.setTimeout(() => {
+        heartbeatTimer = undefined;
+        if (stopped || socket !== candidate || candidate.readyState !== WebSocket.OPEN) return;
+        candidate.send(JSON.stringify({ type: "ping" }));
+        heartbeatTimeout = window.setTimeout(() => {
+          heartbeatTimeout = undefined;
+          if (!stopped && socket === candidate) candidate.close();
+        }, HEARTBEAT_TIMEOUT_MS);
+      }, HEARTBEAT_IDLE_MS);
+    };
 
     const connect = () => {
       if (stopped) return;
       dispatch({ type: "network", network: "connecting" });
-      socket = new WebSocket(api.webSocketUrl());
-      socket.addEventListener("open", () => {
-        socket?.send(JSON.stringify({ type: "authenticate", token: settings.token }));
+      const candidate = new WebSocket(api.webSocketUrl());
+      socket = candidate;
+      candidate.addEventListener("open", () => {
+        if (stopped || socket !== candidate) return;
+        candidate.send(JSON.stringify({ type: "authenticate", token: settings.token }));
       });
-      socket.addEventListener("message", (message) => {
+      candidate.addEventListener("message", (message) => {
+        if (stopped || socket !== candidate) return;
         let frame: unknown;
         try {
           frame = JSON.parse(String(message.data));
         } catch {
-          socket?.close();
+          candidate.close();
           return;
         }
         if (!isServerFrame(frame)) {
-          socket?.close();
+          candidate.close();
           return;
         }
+        scheduleHeartbeat(candidate);
         if (frame.type === "snapshot") {
           retry = 0;
-          sequence.current = frame.snapshot.sequence;
+          streamSequence.current = frame.snapshot.sequence;
+          const floor = syncedSnapshotFloor.current;
+          if (floor?.generation === generation && frame.snapshot.sequence < floor.sequence) {
+            return;
+          }
+          if (floor?.generation === generation) syncedSnapshotFloor.current = null;
+          appliedSequence.current = frame.snapshot.sequence;
           browserNotifications?.acceptSnapshot(frame.snapshot);
           dispatch({ type: "snapshot", snapshot: frame.snapshot });
         } else if (frame.type === "event") {
-          if (sequence.current === null || frame.sequence !== sequence.current + 1) {
-            socket?.close();
+          if (streamSequence.current === null || frame.sequence !== streamSequence.current + 1) {
+            candidate.close();
             return;
           }
-          sequence.current = frame.sequence;
+          streamSequence.current = frame.sequence;
+          if (appliedSequence.current !== null && frame.sequence <= appliedSequence.current) {
+            const floor = syncedSnapshotFloor.current;
+            if (floor?.generation === generation && frame.sequence >= floor.sequence) {
+              syncedSnapshotFloor.current = null;
+            }
+            return;
+          }
+          appliedSequence.current = frame.sequence;
+          if (syncedSnapshotFloor.current?.generation === generation) {
+            syncedSnapshotFloor.current = null;
+          }
           browserNotifications?.acceptEvent(frame.event);
           dispatch({ type: "event", sequence: frame.sequence, event: frame.event });
         } else if (frame.type === "error") {
           dispatch({ type: "network", network: "offline", error: frame.error.message });
         }
       });
-      socket.addEventListener("close", () => {
-        if (stopped) return;
-        sequence.current = null;
+      candidate.addEventListener("close", () => {
+        if (stopped || socket !== candidate) return;
+        socket = undefined;
+        clearHeartbeat();
+        streamSequence.current = null;
         dispatch({ type: "network", network: "offline", error: "Связь с сервером потеряна" });
         const delay = delays[Math.min(retry, delays.length - 1)] ?? 15_000;
         retry += 1;
         retryTimer = window.setTimeout(connect, delay);
       });
-      socket.addEventListener("error", () => socket?.close());
+      candidate.addEventListener("error", () => candidate.close());
     };
 
     connect();
     return () => {
       stopped = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      clearHeartbeat();
+      streamSequence.current = null;
       socket?.close();
     };
   }, [api, browserNotifications, generation, settings.token]);
 
   useEffect(() => {
     const refresh = () => {
-      reconnect();
-      void api.sync().catch(() => undefined);
+      const targetGeneration = reconnect();
+      void api
+        .sync()
+        .then((snapshot) => acceptSyncedSnapshot(snapshot, targetGeneration))
+        .catch(() => undefined);
     };
     const foreground = () => {
       if (document.visibilityState === "visible") refresh();
@@ -164,7 +242,7 @@ export function ConnectionProvider({
       document.removeEventListener("visibilitychange", foreground);
       void removeNativeListener?.();
     };
-  }, [api, reconnect]);
+  }, [acceptSyncedSnapshot, api, reconnect]);
 
   const value = useMemo(
     () => ({ api, state, dispatch, refreshDetail, loadOlderDetail, reconnect }),

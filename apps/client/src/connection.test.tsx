@@ -1,8 +1,8 @@
 import { useEffect } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ThreadDetail, ThreadSummary } from "@codexnest/protocol";
+import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
 import { ConnectionProvider, useConnection } from "./connection";
 
@@ -36,7 +36,10 @@ describe("ConnectionProvider", () => {
   beforeEach(() => {
     capacitor.native = false;
     addAppListener.mockReset();
+    FakeWebSocket.instances = [];
   });
+
+  afterEach(() => vi.useRealTimers());
 
   it("deduplicates concurrent reads of the same thread page", async () => {
     const detail: ThreadDetail = {
@@ -157,27 +160,16 @@ describe("ConnectionProvider", () => {
       appStateListener = listener;
       return Promise.resolve({ remove: vi.fn().mockResolvedValue(undefined) });
     });
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          sequence: 1,
-          connection: { state: "ready", message: null, syncedAt: null },
-          projects: [],
-          threads: [],
-          attention: [],
-          models: [],
-          pushConfigured: false,
-        }),
-        { status: 200 },
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(snapshot(1, [])), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
 
     const view = render(
       <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
-        <div />
+        <SnapshotProbe />
       </ConnectionProvider>,
     );
     await waitFor(() =>
@@ -192,15 +184,154 @@ describe("ConnectionProvider", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
+    expect(await screen.findByText("snapshot:1")).toBeInTheDocument();
     view.unmount();
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
+
+  it("closes an unresponsive socket after a heartbeat and isolates its late events", () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <SnapshotProbe />
+      </ConnectionProvider>,
+    );
+    const first = FakeWebSocket.instances[0]!;
+
+    act(() => {
+      first.open();
+      first.receive({ type: "snapshot", snapshot: snapshot(1) });
+    });
+    expect(first.sent).toContain(JSON.stringify({ type: "authenticate", token: "token" }));
+
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(first.sent.at(-1)).toBe(JSON.stringify({ type: "ping" }));
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(first.readyState).toBe(FakeWebSocket.CLOSED);
+
+    act(() => vi.advanceTimersByTime(1_000));
+    const second = FakeWebSocket.instances[1]!;
+    act(() => {
+      second.open();
+      second.receive({ type: "snapshot", snapshot: snapshot(2) });
+      first.receive({ invalid: true });
+    });
+    expect(second.readyState).toBe(FakeWebSocket.OPEN);
+    expect(screen.getByText("snapshot:2")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("keeps a synced snapshot ahead of buffered events from the current stream", async () => {
+    capacitor.native = true;
+    let appStateListener: ((state: { isActive: boolean }) => void) | undefined;
+    let resolveSync: ((response: Response) => void) | undefined;
+    addAppListener.mockImplementation((_event, listener) => {
+      appStateListener = listener;
+      return Promise.resolve({ remove: vi.fn().mockResolvedValue(undefined) });
+    });
+    const synced = { ...summary, title: "Синхронизировано" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSync = resolve;
+          }),
+      ),
+    );
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ThreadTitleProbe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1) });
+    });
+    await waitFor(() =>
+      expect(addAppListener).toHaveBeenCalledWith("appStateChange", expect.any(Function)),
+    );
+
+    act(() => appStateListener?.({ isActive: true }));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const resumedSocket = FakeWebSocket.instances[1]!;
+    act(() => {
+      resolveSync?.(new Response(JSON.stringify(snapshot(3, [synced])), { status: 200 }));
+    });
+    expect(await screen.findByText("Синхронизировано")).toBeInTheDocument();
+    act(() => {
+      resumedSocket.open();
+      resumedSocket.receive({ type: "snapshot", snapshot: snapshot(1) });
+      resumedSocket.receive({
+        type: "event",
+        sequence: 2,
+        event: { type: "thread.upserted", thread: { ...summary, title: "Устарело" } },
+      });
+    });
+
+    expect(screen.getByText("Синхронизировано")).toBeInTheDocument();
+    expect(screen.queryByText("Устарело")).toBeNull();
+    view.unmount();
+  });
 });
 
-class FakeWebSocket {
-  readyState = 0;
+function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSnapshot {
+  return {
+    sequence,
+    connection: { state: "ready", message: null, syncedAt: null },
+    projects: [],
+    threads,
+    attention: [],
+    models: [],
+    pushConfigured: false,
+  };
+}
 
-  addEventListener(): void {}
-  send(): void {}
-  close(): void {}
+function SnapshotProbe() {
+  const { state } = useConnection();
+  return <span>snapshot:{state.snapshot?.sequence ?? "none"}</span>;
+}
+
+function ThreadTitleProbe() {
+  const { state } = useConnection();
+  return <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>;
+}
+
+class FakeWebSocket extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+  static instances: FakeWebSocket[] = [];
+
+  readyState = FakeWebSocket.CONNECTING;
+  readonly sent: string[] = [];
+
+  constructor(readonly url: string) {
+    super();
+    FakeWebSocket.instances.push(this);
+  }
+
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.dispatchEvent(new Event("open"));
+  }
+
+  receive(frame: unknown): void {
+    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(frame) }));
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    if (this.readyState === FakeWebSocket.CLOSED) return;
+    this.readyState = FakeWebSocket.CLOSED;
+    this.dispatchEvent(new Event("close"));
+  }
 }

@@ -82,6 +82,37 @@ describe("Composer", () => {
     expect(screen.getByAltText("two.jpg")).toBeInTheDocument();
   });
 
+  it("attaches pasted clipboard images without cancelling ordinary paste behavior", async () => {
+    render(<Harness />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const png = new File(["clipboard-one"], "", { type: "image/png" });
+    const jpeg = new File(["clipboard-two"], "screen.jpg", { type: "image/jpeg" });
+
+    expect(
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          items: [
+            { kind: "file", type: "image/png", getAsFile: () => png },
+            { kind: "file", type: "image/jpeg", getAsFile: () => jpeg },
+          ],
+          files: [],
+        },
+      }),
+    ).toBe(true);
+
+    expect(await screen.findByAltText("pasted-image-1.png")).toBeInTheDocument();
+    expect(screen.getByAltText("screen.jpg")).toBeInTheDocument();
+    expect(
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          items: [{ kind: "string", type: "text/plain", getAsFile: () => null }],
+          files: [],
+        },
+      }),
+    ).toBe(true);
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+  });
+
   it("enables sending when annotations provide supplemental content", () => {
     const view = render(<Harness />);
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();

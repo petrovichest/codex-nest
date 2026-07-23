@@ -1,4 +1,5 @@
 import {
+  type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
   useEffect,
@@ -221,14 +222,15 @@ export function Composer({
     }
   }
 
-  async function addImages(files: FileList | null) {
-    if (!files?.length) return;
+  async function addImages(files: readonly File[]) {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
     setAttachmentError(null);
     try {
       const added = await Promise.all(
-        Array.from(files).map(async (file) => ({
+        imageFiles.map(async (file, index) => ({
           id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-          name: file.name,
+          name: file.name.trim() || pastedImageName(file.type, index),
           url: await readImage(file),
         })),
       );
@@ -238,6 +240,11 @@ export function Composer({
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  }
+
+  function pasteImages(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = clipboardImageFiles(event.clipboardData);
+    if (files.length) void addImages(files);
   }
 
   function captureInsertionPoint() {
@@ -458,6 +465,7 @@ export function Composer({
           aria-busy={speechBusy}
           value={input}
           onChange={(event) => onInput(event.target.value)}
+          onPaste={pasteImages}
           onSelect={captureInsertionPoint}
           onKeyDown={keyboardSubmit}
           placeholder={
@@ -476,7 +484,7 @@ export function Composer({
               accept="image/*"
               multiple
               hidden
-              onChange={(event) => void addImages(event.target.files)}
+              onChange={(event) => void addImages(Array.from(event.target.files ?? []))}
             />
             <button
               aria-label="Добавить изображения"
@@ -602,6 +610,22 @@ function readImage(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("read failed"));
     reader.readAsDataURL(file);
   });
+}
+
+function clipboardImageFiles(data: DataTransfer): File[] {
+  const itemFiles = Array.from(data.items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .flatMap((item) => {
+      const file = item.getAsFile();
+      return file ? [file] : [];
+    });
+  if (itemFiles.length) return itemFiles;
+  return Array.from(data.files).filter((file) => file.type.startsWith("image/"));
+}
+
+function pastedImageName(mimeType: string, index: number): string {
+  const extension = mimeType.split("/")[1]?.replace(/[^a-z0-9.+-]/gi, "") || "png";
+  return `pasted-image-${index + 1}.${extension}`;
 }
 
 function microphoneUnavailableReason(

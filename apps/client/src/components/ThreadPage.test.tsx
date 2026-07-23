@@ -5,8 +5,10 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type {
   AttentionRequest,
   ThreadDetail,
+  ThreadDraft,
   ThreadSummary,
   TurnProgress,
+  UpdateThreadDraftRequest,
 } from "@codexnest/protocol";
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
@@ -1121,6 +1123,58 @@ describe("Activity", () => {
         { keepalive: false },
       ),
     );
+  });
+
+  it("coalesces draft revisions queued behind a slow save", async () => {
+    const api = threadApi();
+    const saves: Array<{
+      draft: UpdateThreadDraftRequest;
+      resolve(value: ThreadDraft | null): void;
+    }> = [];
+    api.updateThreadDraft.mockImplementation(
+      (_id, draft) =>
+        new Promise<ThreadDraft | null>((resolve) => {
+          saves.push({ draft, resolve });
+        }),
+    );
+    const context = mockThreadConnection(api, summary);
+    renderThread();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textbox, { target: { value: "Первая версия" } });
+    await new Promise((resolve) => window.setTimeout(resolve, 520));
+    await waitFor(() => expect(saves).toHaveLength(1));
+
+    fireEvent.change(textbox, { target: { value: "Вторая версия" } });
+    await new Promise((resolve) => window.setTimeout(resolve, 520));
+    fireEvent.change(textbox, { target: { value: "Последняя версия" } });
+    await new Promise((resolve) => window.setTimeout(resolve, 520));
+    expect(saves).toHaveLength(1);
+
+    await act(async () => {
+      saves[0]!.resolve({ ...saves[0]!.draft, updatedAt: 10 });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]!.draft.input).toBe("Последняя версия");
+    expect(
+      context.dispatch.mock.calls.some(
+        ([action]) => action.type === "draft" && action.draft?.input === "Первая версия",
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      saves[1]!.resolve({ ...saves[1]!.draft, updatedAt: 20 });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(context.dispatch).toHaveBeenCalledWith({
+        type: "draft",
+        threadId: "thread",
+        draft: expect.objectContaining({ input: "Последняя версия" }),
+      }),
+    );
+    expect(saves).toHaveLength(2);
   });
 
   it("sends image-only messages, keeps attachments after errors, and clears them after success", async () => {
