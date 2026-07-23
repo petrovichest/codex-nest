@@ -123,15 +123,27 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the empty chat when only archived tasks exist", async () => {
+  it("shows project-only session creation when only archived tasks exist", async () => {
     mockConnection(snapshot([{ ...baseThread, archived: true }]));
 
     renderApp("/");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
+      await screen.findByRole("heading", { level: 1, name: "Нет открытых сессий" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Что поручим Codex?")).toBeInTheDocument();
+    expect(screen.getByText("Создайте сессию в проекте")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
+  });
+
+  it("redirects the removed /new flow to the project-only empty screen", async () => {
+    mockConnection(snapshot([]));
+
+    renderApp("/new");
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Нет открытых сессий" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
   });
 
   it("removes the sidebar toolbar and keeps the project session action", () => {
@@ -750,7 +762,7 @@ describe("App routing and navigation", () => {
     mockConnection(snapshot([baseThread]));
     mockMobileViewport();
 
-    renderApp("/new");
+    renderApp("/settings");
     await act(async () => Promise.resolve());
 
     expect(capacitor.addListener).not.toHaveBeenCalled();
@@ -881,6 +893,7 @@ function mockConnection(
       error: null,
       snapshotEpoch: 1,
     },
+    dispatch: vi.fn(),
     reconnect: vi.fn(),
     refreshDetail: vi.fn().mockImplementation(async (id: string) => ({
       summary: appSnapshot.threads.find((thread) => thread.id === id),

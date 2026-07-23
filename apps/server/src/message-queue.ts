@@ -53,9 +53,13 @@ export class MessageQueue {
       const existing = queue.find((candidate) => candidate.id === messageId);
       if (existing) {
         stored = existing;
+        const meta = state.threadMeta[threadId];
+        if (meta) delete meta.draft;
         return;
       }
       queue.push(message);
+      const meta = state.threadMeta[threadId];
+      if (meta) delete meta.draft;
     });
     this.publish(threadId);
     void this.drain(threadId).catch(() => undefined);

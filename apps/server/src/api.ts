@@ -37,6 +37,7 @@ import type {
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateTaskDefaultsRequest,
+  UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
@@ -114,6 +115,7 @@ export interface ApiServices {
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const { bridge, store, projection, attention, codexManager, appManager, threadTitles } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
+  const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
@@ -180,7 +182,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
       throw error;
     }
-    projection.markMaterialized(threadId);
+    await projection.markMaterialized(threadId);
     await projection.setCurrentTurn(threadId, turn.turn.id);
     if (clientMessageId) {
       projection.recordUserMessage(threadId, turn.turn.id, clientMessageId, input, images);
@@ -209,6 +211,48 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       release?.(),
     );
   };
+
+  async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
+    for (const candidate of projection.emptyThreadCandidates(projectId)) {
+      if (candidate.knownUnmaterialized) return candidate.thread;
+      const detail = await projection.readThread(candidate.thread.id);
+      if (detail.turns.length === 0 && detail.queuedMessages.length === 0) {
+        await projection.markUnmaterialized(candidate.thread.id);
+        return projection.summary(candidate.thread.id) ?? candidate.thread;
+      }
+      await projection.markMaterialized(candidate.thread.id);
+    }
+    return null;
+  }
+
+  function getOrCreateProjectThread(projectId: string): Promise<ThreadSummary> {
+    const current = projectThreadCreations.get(projectId);
+    if (current) return current;
+    const request = (async () => {
+      const existing = await findReusableProjectThread(projectId);
+      if (existing) return existing;
+      codexManager?.assertTurnsAllowed();
+      const project = store.snapshot().projects.find((candidate) => candidate.id === projectId);
+      if (!project) throw new ProjectNotFoundError("Project not found");
+      const settings = projection.newSessionSettings;
+      const started = parseThreadStart(
+        await bridge.request<unknown>("thread/start", {
+          cwd: project.path,
+          ...threadSettings(settings),
+        }),
+      );
+      projection.upsertThread(started.thread);
+      await projection.markUnmaterialized(started.thread.id);
+      return projection.setSettings(started.thread.id, settings);
+    })().finally(() => {
+      if (projectThreadCreations.get(projectId) === request) {
+        projectThreadCreations.delete(projectId);
+      }
+    });
+    projectThreadCreations.set(projectId, request);
+    return request;
+  }
+
   const steerTurn = async (
     threadId: string,
     turnId: string,
@@ -581,21 +625,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 
   app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
-    codexManager?.assertTurnsAllowed();
-    const project = store
-      .snapshot()
-      .projects.find((candidate) => candidate.id === request.params.id);
-    if (!project) return apiError(reply, 404, "not_found", "Project not found");
-    const settings = projection.newSessionSettings;
-    const started = parseThreadStart(
-      await bridge.request<unknown>("thread/start", {
-        cwd: project.path,
-        ...threadSettings(settings),
-      }),
-    );
-    projection.upsertThread(started.thread);
-    projection.markUnmaterialized(started.thread.id);
-    const thread = await projection.setSettings(started.thread.id, settings);
+    if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
+      return apiError(reply, 404, "not_found", "Project not found");
+    }
+    const thread = await getOrCreateProjectThread(request.params.id);
     return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
   });
 
@@ -609,6 +642,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           ? request.query.cursor
           : null;
       return projection.readThread(request.params.id, cursor);
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: UpdateThreadDraftRequest }>(
+    "/api/v1/threads/:id/draft",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (!projection.summary(request.params.id)) {
+        return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      return projection.setDraft(request.params.id, validateThreadDraft(request.body));
     },
   );
 
@@ -721,7 +765,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         }),
       );
       projection.upsertThread(started.thread);
-      projection.markUnmaterialized(started.thread.id);
+      await projection.markUnmaterialized(started.thread.id);
       await projection.setSettings(started.thread.id, settings);
       const result = await startTurn(
         started.thread.id,
@@ -1150,6 +1194,67 @@ function validateImages(value: unknown): string[] {
     throw new ProjectValidationError("images must contain inline image data URLs");
   }
   return value;
+}
+
+function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
+  const body = requireRecord<UpdateThreadDraftRequest>(value);
+  if (
+    Object.keys(body).some(
+      (key) => !["input", "images", "goalMode", "annotations"].includes(key),
+    ) ||
+    typeof body.input !== "string" ||
+    typeof body.goalMode !== "boolean" ||
+    !Array.isArray(body.images) ||
+    !Array.isArray(body.annotations)
+  ) {
+    throw new ProjectValidationError("Invalid thread draft");
+  }
+  const images = body.images.map((image) => {
+    if (
+      !isRecord(image) ||
+      typeof image.id !== "string" ||
+      !image.id ||
+      typeof image.name !== "string" ||
+      !image.name ||
+      !isInlineImage(image.url)
+    ) {
+      throw new ProjectValidationError("Invalid draft image");
+    }
+    return { id: image.id, name: image.name, url: image.url };
+  });
+  const annotations = body.annotations.map((annotation) => {
+    if (
+      !isRecord(annotation) ||
+      typeof annotation.id !== "string" ||
+      !annotation.id ||
+      typeof annotation.messageId !== "string" ||
+      !annotation.messageId ||
+      !["agentMessage", "plan"].includes(String(annotation.source)) ||
+      typeof annotation.quote !== "string" ||
+      !annotation.quote.trim() ||
+      !Number.isInteger(annotation.startOffset) ||
+      annotation.startOffset < 0 ||
+      !Number.isInteger(annotation.endOffset) ||
+      annotation.endOffset <= annotation.startOffset ||
+      typeof annotation.comment !== "string" ||
+      !annotation.comment.trim() ||
+      typeof annotation.createdAt !== "number" ||
+      !Number.isFinite(annotation.createdAt)
+    ) {
+      throw new ProjectValidationError("Invalid draft annotation");
+    }
+    return {
+      id: annotation.id,
+      messageId: annotation.messageId,
+      source: annotation.source as "agentMessage" | "plan",
+      quote: annotation.quote,
+      startOffset: annotation.startOffset,
+      endOffset: annotation.endOffset,
+      comment: annotation.comment,
+      createdAt: annotation.createdAt,
+    };
+  });
+  return { input: body.input, images, goalMode: body.goalMode, annotations };
 }
 
 function isInlineImage(value: unknown): value is string {

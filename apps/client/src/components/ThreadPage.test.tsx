@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import type { AttentionRequest, ThreadSummary, TurnProgress } from "@codexnest/protocol";
+import type {
+  AttentionRequest,
+  ThreadDetail,
+  ThreadSummary,
+  TurnProgress,
+} from "@codexnest/protocol";
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
 import type { OptimisticMessage } from "../state";
@@ -702,7 +707,7 @@ describe("Activity", () => {
     await waitFor(() => expect(localStorage.getItem(annotationStorageKey("thread"))).toBeNull());
   });
 
-  it("persists a comment closed outside and restores it from the numbered marker", async () => {
+  it("persists a comment on the server and restores it from the numbered marker", async () => {
     const api = threadApi();
     mockThreadConnection(api, summary, { turns: [completedAgentTurn()] });
     renderThread();
@@ -717,8 +722,14 @@ describe("Activity", () => {
     fireEvent.pointerDown(document.body);
 
     const marker = await screen.findByRole("button", { name: "Аннотация 1" });
-    expect(JSON.parse(localStorage.getItem(annotationStorageKey("thread"))!)[0].comment).toBe(
-      "Локальный комментарий",
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          annotations: [expect.objectContaining({ comment: "Локальный комментарий" })],
+        }),
+        { keepalive: false },
+      ),
     );
     fireEvent.click(marker);
     expect(screen.getByRole("textbox", { name: "Комментарий к выделенному тексту" })).toHaveValue(
@@ -726,7 +737,7 @@ describe("Activity", () => {
     );
   });
 
-  it("keeps local annotations when sending fails", async () => {
+  it("keeps server-backed annotations when sending fails", async () => {
     const api = threadApi();
     api.startTurn.mockRejectedValueOnce(new Error("Сеть недоступна"));
     const annotation = pendingAnnotation();
@@ -737,7 +748,12 @@ describe("Activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
     expect(await screen.findByText("Сеть недоступна")).toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem(annotationStorageKey("thread"))!)).toEqual([annotation]);
+    expect(api.updateThreadDraft).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({ annotations: [annotation] }),
+      { keepalive: false },
+    );
+    expect(screen.getByRole("button", { name: "Аннотация 1" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
   });
 
@@ -1057,6 +1073,53 @@ describe("Activity", () => {
     expect(api.interrupt).toHaveBeenCalledWith("thread", "turn");
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeDisabled();
+  });
+
+  it("restores the complete server draft and debounces text autosave", async () => {
+    const api = threadApi();
+    const annotation = pendingAnnotation();
+    mockThreadConnection(api, summary, {
+      turns: [completedAgentTurn()],
+      draft: {
+        input: "Сохранённый текст",
+        images: [
+          {
+            id: "draft-image",
+            name: "draft.png",
+            url: "data:image/png;base64,AA==",
+          },
+        ],
+        goalMode: true,
+        annotations: [annotation],
+        updatedAt: 10,
+      },
+    });
+    renderThread();
+
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(textbox).toHaveValue("Сохранённый текст");
+    expect(screen.getByAltText("draft.png")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выключить режим цели" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Аннотация 1" })).toBeInTheDocument();
+
+    fireEvent.change(textbox, { target: { value: "Обновлённый текст" } });
+    expect(api.updateThreadDraft).not.toHaveBeenCalled();
+    await new Promise((resolve) => window.setTimeout(resolve, 520));
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          input: "Обновлённый текст",
+          images: [expect.objectContaining({ name: "draft.png" })],
+          goalMode: true,
+          annotations: [annotation],
+        }),
+        { keepalive: false },
+      ),
+    );
   });
 
   it("sends image-only messages, keeps attachments after errors, and clears them after success", async () => {
@@ -1642,7 +1705,7 @@ function threadRoute(state?: Record<string, unknown>) {
           path="/threads/:threadId"
           element={<ThreadPage onOpenNavigation={() => undefined} />}
         />
-        <Route path="/new" element={<div>Новая сессия</div>} />
+        <Route path="/" element={<div>Нет открытых сессий</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -1656,6 +1719,15 @@ function threadApi() {
       expiresAt: Date.now() + 60_000,
     }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
+    updateThreadDraft: vi
+      .fn()
+      .mockImplementation((_id, draft) =>
+        Promise.resolve(
+          draft.input || draft.images.length || draft.goalMode || draft.annotations.length
+            ? { ...draft, updatedAt: Date.now() }
+            : null,
+        ),
+      ),
     enqueue: vi.fn().mockResolvedValue({ id: "queued" }),
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
@@ -1700,6 +1772,7 @@ function mockThreadConnection(
       status: "queued" | "dispatching";
     }>;
     olderTurnsCursor: string | null;
+    draft: ThreadDetail["draft"];
     attention: AttentionRequest[];
   }> = {},
 ) {
@@ -1708,6 +1781,7 @@ function mockThreadConnection(
     turns: detailPatch.turns ?? [],
     queuedMessages: detailPatch.queuedMessages ?? [],
     olderTurnsCursor: detailPatch.olderTurnsCursor ?? null,
+    draft: detailPatch.draft ?? null,
   };
   const value = {
     api,

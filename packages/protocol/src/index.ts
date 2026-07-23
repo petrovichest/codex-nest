@@ -270,11 +270,40 @@ export type TurnView = {
   items: ActivityItem[];
 };
 
+export type ThreadDraftImage = {
+  id: string;
+  name: string;
+  url: string;
+};
+
+export type ThreadDraftAnnotation = {
+  id: string;
+  messageId: string;
+  source: "agentMessage" | "plan";
+  quote: string;
+  startOffset: number;
+  endOffset: number;
+  comment: string;
+  createdAt: number;
+};
+
+export type UpdateThreadDraftRequest = {
+  input: string;
+  images: ThreadDraftImage[];
+  goalMode: boolean;
+  annotations: ThreadDraftAnnotation[];
+};
+
+export type ThreadDraft = UpdateThreadDraftRequest & {
+  updatedAt: number;
+};
+
 export type ThreadDetail = {
   summary: ThreadSummary;
   turns: TurnView[];
   queuedMessages: QueuedMessage[];
   olderTurnsCursor: string | null;
+  draft?: ThreadDraft | null;
 };
 
 export type ModelOption = {

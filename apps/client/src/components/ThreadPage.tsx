@@ -16,10 +16,12 @@ import type {
   GitChangesSummary,
   QueuedMessage,
   ThreadDetail,
+  ThreadDraft,
   TranscriptionConfigResponse,
   TranscriptionProvider,
   TurnProgress,
   TurnView,
+  UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
@@ -56,6 +58,15 @@ import {
 import { SessionInspector, type GitChangesView } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
+type ComposerDraftState = {
+  threadId: string;
+  value: UpdateThreadDraftRequest;
+};
+
+function emptyComposerDraft(): UpdateThreadDraftRequest {
+  return { input: "", images: [], goalMode: false, annotations: [] };
+}
+
 export function ThreadPage({
   transcriptionConfig = null,
   transcriptionProvider = null,
@@ -73,9 +84,13 @@ export function ThreadPage({
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const detail = state.details[threadId];
-  const [input, setInput] = useState("");
-  const [images, setImages] = useState<ComposerImage[]>([]);
-  const [goalMode, setGoalMode] = useState(false);
+  const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
+    threadId,
+    value: emptyComposerDraft(),
+  }));
+  const activeComposerDraft =
+    composerDraftState.threadId === threadId ? composerDraftState.value : emptyComposerDraft();
+  const { input, images, goalMode, annotations } = activeComposerDraft;
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
@@ -83,10 +98,6 @@ export function ThreadPage({
   const [deleting, setDeleting] = useState(false);
   const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [annotationState, setAnnotationState] = useState<{
-    threadId: string;
-    items: PendingAnnotation[];
-  }>(() => ({ threadId, items: loadPendingAnnotations(threadId) }));
   const [renaming, setRenaming] = useState(false);
   const [attentionJump, setAttentionJump] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -109,6 +120,16 @@ export function ThreadPage({
     value: GitChangesView;
   } | null>(null);
   const gitChangesRequest = useRef(0);
+  const composerDraftRef = useRef<ComposerDraftState>(composerDraftState);
+  const draftTimerRef = useRef<{ threadId: string; timer: number } | null>(null);
+  const pendingDraftsRef = useRef(
+    new Map<string, { revision: number; value: UpdateThreadDraftRequest }>(),
+  );
+  const draftRevisionRef = useRef(0);
+  const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const draftTouchedThreadsRef = useRef(new Set<string>());
+  const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
+  const legacyAnnotationThreadsRef = useRef(new Set<string>());
   const attention = useMemo(
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
@@ -121,7 +142,6 @@ export function ThreadPage({
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
   );
-  const annotations = annotationState.threadId === threadId ? annotationState.items : [];
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
     : undefined;
@@ -142,12 +162,139 @@ export function ThreadPage({
     [api, threadId],
   );
 
+  function currentComposerDraft(): UpdateThreadDraftRequest {
+    return composerDraftRef.current.threadId === threadId
+      ? composerDraftRef.current.value
+      : emptyComposerDraft();
+  }
+
+  function persistPendingDraft(targetThreadId: string, keepalive = false): Promise<void> {
+    const pending = pendingDraftsRef.current.get(targetThreadId);
+    if (!pending) return draftSaveChainRef.current;
+    const request = draftSaveChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
+          if (pendingDraftsRef.current.get(targetThreadId)?.revision === pending.revision) {
+            pendingDraftsRef.current.delete(targetThreadId);
+          }
+          dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
+          if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
+            try {
+              savePendingAnnotations(targetThreadId, []);
+            } catch {
+              // The server copy is authoritative once it has been accepted.
+            }
+          }
+        } catch (caught) {
+          if (targetThreadId === threadId) {
+            setError(caught instanceof Error ? caught.message : "Не удалось сохранить черновик");
+          }
+        }
+      });
+    draftSaveChainRef.current = request;
+    return request;
+  }
+
+  function scheduleDraftSave(
+    targetThreadId: string,
+    value: UpdateThreadDraftRequest,
+    immediate: boolean,
+  ): void {
+    const revision = ++draftRevisionRef.current;
+    pendingDraftsRef.current.set(targetThreadId, { revision, value: structuredClone(value) });
+    if (draftTimerRef.current) {
+      window.clearTimeout(draftTimerRef.current.timer);
+      draftTimerRef.current = null;
+    }
+    if (immediate) {
+      void persistPendingDraft(targetThreadId);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (draftTimerRef.current?.timer === timer) draftTimerRef.current = null;
+      void persistPendingDraft(targetThreadId);
+    }, 500);
+    draftTimerRef.current = { threadId: targetThreadId, timer };
+  }
+
+  function replaceComposerDraft(
+    value: UpdateThreadDraftRequest,
+    persistence: "debounced" | "immediate" | false,
+  ): void {
+    const next = { threadId, value };
+    composerDraftRef.current = next;
+    setComposerDraftState(next);
+    if (!persistence) return;
+    draftTouchedThreadsRef.current.add(threadId);
+    scheduleDraftSave(threadId, value, persistence === "immediate");
+  }
+
+  function setInput(value: string): void {
+    replaceComposerDraft({ ...currentComposerDraft(), input: value }, "debounced");
+  }
+
+  function setImages(value: ComposerImage[]): void {
+    replaceComposerDraft({ ...currentComposerDraft(), images: value }, "immediate");
+  }
+
+  function setGoalMode(value: boolean): void {
+    const current = currentComposerDraft();
+    if (current.goalMode === value) return;
+    replaceComposerDraft({ ...current, goalMode: value }, "immediate");
+  }
+
+  function flushDraft(targetThreadId = threadId, keepalive = false): Promise<void> {
+    if (draftTimerRef.current?.threadId === targetThreadId) {
+      window.clearTimeout(draftTimerRef.current.timer);
+      draftTimerRef.current = null;
+    }
+    return persistPendingDraft(targetThreadId, keepalive);
+  }
+
   useEffect(() => {
     if (goal) setGoalMode(false);
   }, [goal]);
 
   useEffect(() => {
-    setAnnotationState({ threadId, items: loadPendingAnnotations(threadId) });
+    draftTouchedThreadsRef.current.delete(threadId);
+    hydratedDraftSourcesRef.current.delete(threadId);
+    return () => {
+      void flushDraft(threadId);
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!detail || draftTouchedThreadsRef.current.has(threadId)) return;
+    const detailDraft = detail.draft ?? null;
+    if (hydratedDraftSourcesRef.current.get(threadId) === detailDraft) return;
+    const localAnnotations = loadPendingAnnotations(threadId);
+    const serverDraft = detailDraft
+      ? {
+          input: detailDraft.input,
+          images: detailDraft.images,
+          goalMode: detailDraft.goalMode,
+          annotations: detailDraft.annotations,
+        }
+      : emptyComposerDraft();
+    const knownIds = new Set(serverDraft.annotations.map((annotation) => annotation.id));
+    const mergedAnnotations = [
+      ...serverDraft.annotations,
+      ...localAnnotations.filter((annotation) => !knownIds.has(annotation.id)),
+    ].sort((a, b) => a.createdAt - b.createdAt);
+    const next = { ...serverDraft, annotations: mergedAnnotations };
+    hydratedDraftSourcesRef.current.set(threadId, detailDraft);
+    replaceComposerDraft(next, localAnnotations.length ? "immediate" : false);
+    if (localAnnotations.length) legacyAnnotationThreadsRef.current.add(threadId);
+  }, [detail, threadId]);
+
+  useEffect(() => {
+    const flushBeforePageExit = () => {
+      void flushDraft(threadId, true);
+    };
+    window.addEventListener("pagehide", flushBeforePageExit);
+    return () => window.removeEventListener("pagehide", flushBeforePageExit);
   }, [threadId]);
 
   useEffect(() => {
@@ -304,18 +451,15 @@ export function ThreadPage({
     );
 
   function persistAnnotations(next: PendingAnnotation[]): boolean {
-    try {
-      savePendingAnnotations(threadId, next);
-      setAnnotationState({ threadId, items: next });
-      return true;
-    } catch {
-      setError("Не удалось сохранить аннотации локально");
-      return false;
-    }
+    replaceComposerDraft(
+      { ...currentComposerDraft(), annotations: next, ...(next.length ? { goalMode: false } : {}) },
+      "immediate",
+    );
+    return true;
   }
 
   function createAnnotation(draft: AnnotationDraft): boolean {
-    const saved = persistAnnotations([
+    return persistAnnotations([
       ...annotations,
       {
         ...draft,
@@ -323,8 +467,6 @@ export function ThreadPage({
         createdAt: Date.now(),
       },
     ]);
-    if (saved && goalMode) setGoalMode(false);
-    return saved;
   }
 
   function updateAnnotation(annotationId: string, comment: string): boolean {
@@ -338,16 +480,13 @@ export function ThreadPage({
     return persistAnnotations(annotations.filter((annotation) => annotation.id !== annotationId));
   }
 
-  function clearSentAnnotations(sent: PendingAnnotation[]) {
-    if (!sent.length) return;
-    const sentIds = new Set(sent.map((annotation) => annotation.id));
-    const next = annotations.filter((annotation) => !sentIds.has(annotation.id));
+  function clearLegacyAnnotations() {
     try {
-      savePendingAnnotations(threadId, next);
+      savePendingAnnotations(threadId, []);
     } catch {
-      setError("Сообщение отправлено, но локальный черновик аннотаций не удалось очистить");
+      // The sent server draft is already authoritative.
     }
-    setAnnotationState({ threadId, items: next });
+    legacyAnnotationThreadsRef.current.delete(threadId);
   }
 
   async function submit(event: FormEvent) {
@@ -358,6 +497,7 @@ export function ThreadPage({
     if ((!submittedInput.trim() && !images.length) || (goalMode && !input.trim())) return;
     const submittedImages = images;
     const submittedGoalMode = goalMode;
+    const submittedDraft = structuredClone(activeComposerDraft);
     const clientMessageId = createClientMessageId();
     const optimisticMessage: OptimisticMessage = {
       id: clientMessageId,
@@ -372,9 +512,8 @@ export function ThreadPage({
     setError(null);
     scrollTargetMessageId.current = clientMessageId;
     dispatch({ type: "optimistic.add", message: optimisticMessage });
-    setInput("");
-    setImages([]);
-    setGoalMode(false);
+    replaceComposerDraft(emptyComposerDraft(), false);
+    await flushDraft();
     try {
       if (summary!.currentTurnId) {
         await api.enqueue(threadId, {
@@ -382,7 +521,6 @@ export function ThreadPage({
           ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
           clientMessageId,
         });
-        clearSentAnnotations(submittedAnnotations);
       } else {
         const result = await api.startTurn(threadId, {
           input: submittedInput,
@@ -396,14 +534,14 @@ export function ThreadPage({
           messageId: clientMessageId,
           turnId: result.turnId,
         });
-        clearSentAnnotations(submittedAnnotations);
         if (result.goalWarning) setError(result.goalWarning);
       }
+      pendingDraftsRef.current.delete(threadId);
+      dispatch({ type: "draft", threadId, draft: null });
+      clearLegacyAnnotations();
     } catch (caught) {
       dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
-      setInput(submittedComposerInput);
-      setImages(submittedImages);
-      setGoalMode(submittedGoalMode);
+      replaceComposerDraft(submittedDraft, false);
       setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
     } finally {
       setBusy(false);
@@ -492,7 +630,8 @@ export function ThreadPage({
     setError(null);
     try {
       await api.deleteThread(threadId);
-      navigate("/new", { replace: true });
+      dispatch({ type: "thread.remove", threadId });
+      navigate("/", { replace: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось удалить сессию");
       setDeleting(false);

@@ -107,6 +107,55 @@ describe("StateStore", () => {
     ]);
   });
 
+  it("reloads unmaterialized sessions and complete server drafts", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        unmaterialized: true,
+        draft: {
+          input: "Черновик",
+          images: [
+            {
+              id: "image",
+              name: "draft.png",
+              url: "data:image/png;base64,AA==",
+            },
+          ],
+          goalMode: true,
+          annotations: [
+            {
+              id: "annotation",
+              messageId: "message",
+              source: "agentMessage",
+              quote: "Цитата",
+              startOffset: 0,
+              endOffset: 6,
+              comment: "Комментарий",
+              createdAt: 1,
+            },
+          ],
+          updatedAt: 2,
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.thread).toMatchObject({
+      unmaterialized: true,
+      draft: {
+        input: "Черновик",
+        images: [{ name: "draft.png" }],
+        goalMode: true,
+        annotations: [{ comment: "Комментарий" }],
+      },
+    });
+  });
+
   it("reloads an externally rotated verifier and emits revocation", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

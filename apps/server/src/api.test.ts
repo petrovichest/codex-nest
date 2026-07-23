@@ -694,12 +694,23 @@ describe("thread settings", () => {
     const turnsBeforeEmptyThread = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/start",
     ).length;
-    const emptyCreated = await app.inject({
-      method: "POST",
-      url: "/api/v1/projects/project/threads",
-      headers,
-    });
+    const threadStartsBeforeEmptyThread = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/start",
+    ).length;
+    const [emptyCreated, emptyReopened] = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+        }),
+      ),
+    );
     expect(emptyCreated.statusCode).toBe(201);
+    expect(emptyReopened.json().thread.id).toBe(emptyCreated.json().thread.id);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+      threadStartsBeforeEmptyThread + 1,
+    );
     expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "default" });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
@@ -713,6 +724,49 @@ describe("thread settings", () => {
     });
     expect(emptyDetail.statusCode).toBe(200);
     expect(emptyDetail.json().turns).toEqual([]);
+    expect(emptyDetail.json().draft).toBeNull();
+    const savedDraft = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/created/draft",
+      headers,
+      payload: {
+        input: "  Черновик без обрезки  ",
+        images: [
+          {
+            id: "image",
+            name: "example.png",
+            url: "data:image/png;base64,AA==",
+          },
+        ],
+        goalMode: true,
+        annotations: [
+          {
+            id: "annotation",
+            messageId: "agent",
+            source: "agentMessage",
+            quote: "Фрагмент",
+            startOffset: 0,
+            endOffset: 8,
+            comment: "Комментарий",
+            createdAt: 1,
+          },
+        ],
+      },
+    });
+    expect(savedDraft.statusCode).toBe(200);
+    expect(savedDraft.json()).toMatchObject({
+      input: "  Черновик без обрезки  ",
+      goalMode: true,
+      updatedAt: expect.any(Number),
+    });
+    expect(
+      (
+        await app.inject({
+          url: "/api/v1/threads/created",
+          headers,
+        })
+      ).json().draft,
+    ).toEqual(savedDraft.json());
     const resumesBeforeFirstTurn = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/resume",
     ).length;
@@ -726,6 +780,8 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       resumesBeforeFirstTurn,
     );
+    expect(store.snapshot().threadMeta.created?.unmaterialized).toBe(false);
+    expect(store.snapshot().threadMeta.created?.draft).toBeUndefined();
     await vi.waitFor(() =>
       expect(threadTitles.generate).toHaveBeenCalledWith("Первое сообщение", {
         cwd: "/work",
@@ -865,6 +921,13 @@ describe("thread settings", () => {
       item: { type: "userMessage", id: "client-started", text: "Составь план" },
     });
 
+    await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: { input: "Черновик очереди", images: [], goalMode: false, annotations: [] },
+    });
+    expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Черновик очереди");
     const queued = await app.inject({
       method: "POST",
       url: "/api/v1/threads/thread/queue",
@@ -872,6 +935,7 @@ describe("thread settings", () => {
       payload: { input: "Поставь в очередь", clientMessageId: "client-queued" },
     });
     expect(queued.statusCode).toBe(202);
+    expect(store.snapshot().threadMeta.thread?.draft).toBeUndefined();
     expect(store.snapshot().messageQueues?.thread).toEqual([
       expect.objectContaining({
         id: "client-queued",
@@ -1046,6 +1110,12 @@ describe("thread settings", () => {
     ).toBe(204);
 
     bridge.failNextTurnStart = true;
+    await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: { input: "Черновик ошибки", images: [], goalMode: true, annotations: [] },
+    });
     const activityCountBeforeFailure = activityEvents.length;
     const failedFirstTurn = await app.inject({
       method: "POST",
@@ -1060,6 +1130,7 @@ describe("thread settings", () => {
     expect(failedFirstTurn.statusCode).toBe(500);
     expect(bridge.goal).toBeNull();
     expect(activityEvents).toHaveLength(activityCountBeforeFailure);
+    expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Черновик ошибки");
 
     bridge.failNextGoalActivation = true;
     const failedActivation = await app.inject({
@@ -1071,6 +1142,7 @@ describe("thread settings", () => {
     expect(failedActivation.statusCode).toBe(201);
     expect(failedActivation.json().goalWarning).toMatch(/осталась на паузе/i);
     expect(bridge.goal).toMatchObject({ status: "paused" });
+    expect(store.snapshot().threadMeta.thread?.draft).toBeUndefined();
 
     const deleted = await app.inject({
       method: "DELETE",

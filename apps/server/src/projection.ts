@@ -14,6 +14,8 @@ import type {
   ServerEvent,
   TaskDefaults,
   ThreadDetail,
+  ThreadDraft,
+  UpdateThreadDraftRequest,
   ThreadGoal,
   ThreadOutcome,
   ThreadState,
@@ -156,12 +158,14 @@ export class AppProjection extends EventEmitter {
 
   async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
-    if (local && this.unmaterializedThreads.has(id)) {
+    if (local && this.isUnmaterialized(id)) {
+      const state = this.store.snapshot();
       return {
         summary: this.toSummary(local),
         turns: [],
-        queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
+        queuedMessages: state.messageQueues?.[id] ?? [],
         olderTurnsCursor: null,
+        draft: state.threadMeta[id]?.draft ?? null,
       };
     }
     const page = parseTurnsList(
@@ -179,7 +183,8 @@ export class AppProjection extends EventEmitter {
     );
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
-    const artifacts = this.store.snapshot().threadMeta[id]?.timelineArtifacts ?? {};
+    const state = this.store.snapshot();
+    const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
     return {
       summary: this.toSummary(cached),
       turns: page.data
@@ -193,9 +198,60 @@ export class AppProjection extends EventEmitter {
             artifacts[turn.id] ?? [],
           ),
         ),
-      queuedMessages: this.store.snapshot().messageQueues?.[id] ?? [],
+      queuedMessages: state.messageQueues?.[id] ?? [],
       olderTurnsCursor: page.nextCursor,
+      draft: state.threadMeta[id]?.draft ?? null,
     };
+  }
+
+  async setDraft(threadId: string, value: UpdateThreadDraftRequest): Promise<ThreadDraft | null> {
+    if (!this.threads.has(threadId)) throw new Error("Thread not found");
+    const empty =
+      value.input === "" &&
+      value.images.length === 0 &&
+      !value.goalMode &&
+      value.annotations.length === 0;
+    let draft: ThreadDraft | null = null;
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      if (empty) {
+        delete meta.draft;
+      } else {
+        draft = { ...structuredClone(value), updatedAt: Date.now() };
+        meta.draft = draft;
+      }
+      state.threadMeta[threadId] = meta;
+    });
+    return draft;
+  }
+
+  emptyThreadCandidates(
+    projectId: string,
+  ): Array<{ thread: ThreadSummary; knownUnmaterialized: boolean }> {
+    const state = this.store.snapshot();
+    return [...this.threads.values()]
+      .filter((cached) => {
+        const summary = this.toSummary(cached);
+        const unmaterialized = state.threadMeta[cached.thread.id]?.unmaterialized;
+        return (
+          !cached.archived &&
+          summary.projectId === projectId &&
+          cached.currentTurnId === null &&
+          !cached.thread.name?.trim() &&
+          (unmaterialized === true || !cached.thread.preview.trim()) &&
+          (state.messageQueues?.[cached.thread.id]?.length ?? 0) === 0 &&
+          unmaterialized !== false
+        );
+      })
+      .sort((a, b) => {
+        const aKnown = state.threadMeta[a.thread.id]?.unmaterialized === true ? 1 : 0;
+        const bKnown = state.threadMeta[b.thread.id]?.unmaterialized === true ? 1 : 0;
+        return bKnown - aKnown || b.thread.updatedAt - a.thread.updatedAt;
+      })
+      .map((cached) => ({
+        thread: this.toSummary(cached),
+        knownUnmaterialized: state.threadMeta[cached.thread.id]?.unmaterialized === true,
+      }));
   }
 
   async markRead(threadId: string, observedUpdatedAt: number): Promise<void> {
@@ -283,17 +339,31 @@ export class AppProjection extends EventEmitter {
     return this.toSummary(cached);
   }
 
-  markUnmaterialized(threadId: string): void {
+  async markUnmaterialized(threadId: string): Promise<void> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
     this.unmaterializedThreads.add(threadId);
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.unmaterialized = true;
+      state.threadMeta[threadId] = meta;
+    });
   }
 
   isUnmaterialized(threadId: string): boolean {
-    return this.unmaterializedThreads.has(threadId);
+    return (
+      this.unmaterializedThreads.has(threadId) ||
+      this.store.snapshot().threadMeta[threadId]?.unmaterialized === true
+    );
   }
 
-  markMaterialized(threadId: string): void {
+  async markMaterialized(threadId: string): Promise<void> {
     this.unmaterializedThreads.delete(threadId);
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.unmaterialized = false;
+      delete meta.draft;
+      state.threadMeta[threadId] = meta;
+    });
   }
 
   async setCurrentTurn(threadId: string, turnId: string): Promise<void> {

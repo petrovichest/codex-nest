@@ -9,6 +9,7 @@ import type {
   QueuedMessage,
   SessionSettings,
   TaskDefaults,
+  ThreadDraft,
   ThreadOutcome,
 } from "@codexnest/protocol";
 
@@ -26,6 +27,8 @@ export interface ThreadMetaState {
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
+  unmaterialized?: boolean;
+  draft?: ThreadDraft;
 }
 
 export interface DeviceState {
@@ -189,7 +192,9 @@ function validateState(value: unknown): CodexNestState {
       (meta.settings !== undefined && !isSessionSettings(meta.settings)) ||
       (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
-      (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts))
+      (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
+      (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
+      (meta.draft !== undefined && !isThreadDraft(meta.draft))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
@@ -290,6 +295,54 @@ function isTaskDefaults(value: unknown): value is TaskDefaults {
 
 function isInlineImage(value: unknown): value is string {
   return typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value);
+}
+
+function isThreadDraft(value: unknown): value is ThreadDraft {
+  if (
+    !isRecord(value) ||
+    typeof value.input !== "string" ||
+    typeof value.goalMode !== "boolean" ||
+    typeof value.updatedAt !== "number" ||
+    !Number.isFinite(value.updatedAt) ||
+    !Array.isArray(value.images) ||
+    !Array.isArray(value.annotations)
+  ) {
+    return false;
+  }
+  return (
+    value.images.every(
+      (image) =>
+        isRecord(image) &&
+        typeof image.id === "string" &&
+        Boolean(image.id) &&
+        typeof image.name === "string" &&
+        Boolean(image.name) &&
+        isInlineImage(image.url),
+    ) && value.annotations.every(isThreadDraftAnnotation)
+  );
+}
+
+function isThreadDraftAnnotation(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    Boolean(value.id) &&
+    typeof value.messageId === "string" &&
+    Boolean(value.messageId) &&
+    ["agentMessage", "plan"].includes(String(value.source)) &&
+    typeof value.quote === "string" &&
+    Boolean(value.quote.trim()) &&
+    typeof value.startOffset === "number" &&
+    Number.isInteger(value.startOffset) &&
+    value.startOffset >= 0 &&
+    typeof value.endOffset === "number" &&
+    Number.isInteger(value.endOffset) &&
+    value.endOffset > value.startOffset &&
+    typeof value.comment === "string" &&
+    Boolean(value.comment.trim()) &&
+    typeof value.createdAt === "number" &&
+    Number.isFinite(value.createdAt)
+  );
 }
 
 function isSessionSettings(value: unknown): value is SessionSettings {

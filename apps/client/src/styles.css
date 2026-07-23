@@ -1382,6 +1382,10 @@ pre {
   width: 100%;
 }
 
+.message.agentMessage .message-footer {
+  justify-content: flex-start;
+}
+
 .annotation-surface {
   position: relative;
 }

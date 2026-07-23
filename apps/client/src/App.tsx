@@ -25,10 +25,10 @@ import {
   FolderIcon,
   GaugeIcon,
   MoreIcon,
+  NewTaskIcon,
   PlusIcon,
   SlidersIcon,
 } from "./components/Icons";
-import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
 import {
   SettingsPage,
@@ -36,6 +36,7 @@ import {
   type SidebarSide,
 } from "./components/SettingsPage";
 import { ThreadPage } from "./components/ThreadPage";
+import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { useConnection } from "./connection";
 import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
@@ -200,19 +201,13 @@ export function App({
           </div>
         ) : (
           <Routes>
-            <Route path="/" element={<HomeRedirect threads={snapshot.threads} />} />
             <Route
-              path="/new"
+              path="/"
               element={
-                <NewSession
-                  projects={snapshot.projects}
-                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
-                  transcriptionConfig={transcriptionConfig}
-                  onOpenNavigation={() => setDrawer(true)}
-                  onNewProject={() => setNewProject(true)}
-                />
+                <HomeRoute threads={snapshot.threads} onOpenNavigation={() => setDrawer(true)} />
               }
             />
+            <Route path="/new" element={<Navigate to="/" replace />} />
             <Route
               path="/threads/:threadId"
               element={
@@ -308,14 +303,33 @@ function activeTranscriptionProvider(
   return config?.provider && config.providers.includes(config.provider) ? config.provider : null;
 }
 
-function HomeRedirect({ threads }: { threads: ThreadSummary[] }) {
+function HomeRoute({
+  threads,
+  onOpenNavigation,
+}: {
+  threads: ThreadSummary[];
+  onOpenNavigation(): void;
+}) {
   const latest = [...threads]
     .filter((thread) => !thread.archived)
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  return latest ? (
-    <Navigate to={`/threads/${encodeURIComponent(latest.id)}`} replace />
-  ) : (
-    <Navigate to="/new" replace />
+  if (latest) return <Navigate to={`/threads/${encodeURIComponent(latest.id)}`} replace />;
+  return (
+    <div className="thread-workspace">
+      <div className="conversation-pane">
+        <WorkspaceHeader title="Нет открытых сессий" onOpenNavigation={onOpenNavigation} />
+        <div className="new-session-empty">
+          <span className="new-session-glyph">
+            <NewTaskIcon />
+          </span>
+          <h2>Создайте сессию в проекте</h2>
+          <p>Откройте список проектов и нажмите + рядом с нужным проектом.</p>
+          <button type="button" onClick={onOpenNavigation}>
+            Открыть проекты
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -332,7 +346,7 @@ function Sidebar({
   onNewProject(): void;
   projectListDirection: ProjectListDirection;
 }) {
-  const { api, state } = useConnection();
+  const { api, state, dispatch } = useConnection();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
@@ -440,6 +454,7 @@ function Sidebar({
     setCreateError(null);
     try {
       const result = await api.createProjectThread(projectId);
+      dispatch({ type: "thread", thread: result.thread });
       onClose();
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
         state: { focusComposer: true },

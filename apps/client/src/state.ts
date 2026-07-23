@@ -5,6 +5,7 @@ import type {
   QueuedMessage,
   ServerEvent,
   ThreadDetail,
+  ThreadDraft,
   ThreadGoal,
   ThreadSummary,
 } from "@codexnest/protocol";
@@ -35,7 +36,9 @@ export type ClientAction =
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
   | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" }
+  | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
+  | { type: "thread.remove"; threadId: string }
   | { type: "goal"; threadId: string; goal: ThreadGoal | null }
   | { type: "optimistic.add"; message: OptimisticMessage }
   | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
@@ -69,8 +72,21 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       };
     case "detail":
       return applyDetail(state, action.detail, action.page);
+    case "draft": {
+      const detail = state.details[action.threadId];
+      if (!detail) return state;
+      return {
+        ...state,
+        details: {
+          ...state.details,
+          [action.threadId]: { ...detail, draft: action.draft },
+        },
+      };
+    }
     case "thread":
       return applyThreadSummary(state, action.thread);
+    case "thread.remove":
+      return removeThreadState(state, action.threadId);
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
     case "optimistic.add":
@@ -119,17 +135,7 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       snapshot.threads = sortThreads(upsert(snapshot.threads, event.thread));
       return applyThreadSummary({ ...state, snapshot }, event.thread);
     case "thread.removed":
-      snapshot.threads = snapshot.threads.filter((thread) => thread.id !== event.threadId);
-      return {
-        ...state,
-        snapshot,
-        details: withoutKey(state.details, event.threadId),
-        expandedHistory: withoutKey(state.expandedHistory, event.threadId),
-        optimisticMessages: withoutKey(state.optimisticMessages, event.threadId),
-        goals: Object.fromEntries(
-          Object.entries(state.goals).filter(([threadId]) => threadId !== event.threadId),
-        ),
-      };
+      return removeThreadState({ ...state, snapshot }, event.threadId);
     case "attention.upserted":
       snapshot.attention = upsert(snapshot.attention, event.attention);
       break;
@@ -169,6 +175,24 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       return { ...state, snapshot, snapshotEpoch: state.snapshotEpoch + 1 };
   }
   return { ...state, snapshot };
+}
+
+function removeThreadState(state: ClientState, threadId: string): ClientState {
+  return {
+    ...state,
+    snapshot: state.snapshot
+      ? {
+          ...state.snapshot,
+          threads: state.snapshot.threads.filter((thread) => thread.id !== threadId),
+        }
+      : null,
+    details: withoutKey(state.details, threadId),
+    expandedHistory: withoutKey(state.expandedHistory, threadId),
+    optimisticMessages: withoutKey(state.optimisticMessages, threadId),
+    goals: Object.fromEntries(
+      Object.entries(state.goals).filter(([candidateId]) => candidateId !== threadId),
+    ),
+  };
 }
 
 function applyDetail(

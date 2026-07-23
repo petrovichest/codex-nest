@@ -1,13 +1,6 @@
-export type PendingAnnotation = {
-  id: string;
-  messageId: string;
-  source: "agentMessage" | "plan";
-  quote: string;
-  startOffset: number;
-  endOffset: number;
-  comment: string;
-  createdAt: number;
-};
+import type { ThreadDraftAnnotation } from "@codexnest/protocol";
+
+export type PendingAnnotation = ThreadDraftAnnotation;
 
 export type AnnotationDraft = Omit<PendingAnnotation, "id" | "createdAt">;
 

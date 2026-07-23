@@ -23,6 +23,7 @@ import type {
   SteerTurnRequest,
   SummaryResponse,
   ThreadDetail,
+  ThreadDraft,
   ThreadGoal,
   ThreadSummary,
   TranscriptionConfigResponse,
@@ -33,6 +34,7 @@ import type {
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateTaskDefaultsRequest,
+  UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
@@ -168,6 +170,18 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`);
   }
 
+  updateThreadDraft(
+    id: string,
+    body: UpdateThreadDraftRequest,
+    options?: { keepalive?: boolean },
+  ): Promise<ThreadDraft | null> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/draft`, {
+      method: "PUT",
+      body,
+      keepalive: options?.keepalive,
+    });
+  }
+
   readGitChanges(id: string): Promise<GitChangesSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
   }
@@ -296,6 +310,7 @@ export class ApiClient {
       contentType?: string;
       authenticated?: boolean;
       timeoutMs?: number | null;
+      keepalive?: boolean;
     } = {},
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
@@ -320,6 +335,7 @@ export class ApiClient {
           options.rawBody ??
           (options.body === undefined ? undefined : JSON.stringify(options.body)),
         signal: controller.signal,
+        keepalive: options.keepalive,
       });
     } catch {
       throw new ApiClientError("connection_failed", "Не удалось подключиться к серверу");
