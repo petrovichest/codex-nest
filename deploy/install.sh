@@ -168,6 +168,7 @@ if [[ ! -f "$codexnest_config" ]]; then
     printf 'CODEXNEST_MANAGED_INSTALL=true\n'
     printf 'CODEXNEST_MANAGEMENT_CLI=%s/.local/bin/codexnest\n' "$HOME"
     printf 'CODEXNEST_UPDATE_STATUS_PATH=%s/update.json\n' "$codexnest_state_root"
+    printf 'CODEXNEST_UPDATE_CHANNEL=rolling\n'
     printf 'CODEXNEST_VERSION=%s\n' "${codexnest_requested_version#v}"
   } > "$codexnest_config"
   chmod 600 "$codexnest_config"
@@ -201,6 +202,7 @@ codexnest_set_env_value CODEXNEST_CLIENT_DIST "$codexnest_root/current/apps/clie
 codexnest_set_env_value CODEXNEST_MANAGED_INSTALL true
 codexnest_set_env_value CODEXNEST_MANAGEMENT_CLI "$HOME/.local/bin/codexnest"
 codexnest_set_env_value CODEXNEST_UPDATE_STATUS_PATH "$codexnest_state_root/update.json"
+codexnest_ensure_env_value CODEXNEST_UPDATE_CHANNEL rolling
 codexnest_set_env_value CODEXNEST_VERSION "${codexnest_requested_version#v}"
 
 install -m 0755 "$codexnest_release/deploy/codexnest" "$HOME/.local/bin/codexnest"

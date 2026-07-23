@@ -82,6 +82,16 @@ exit 0
 EOF
   cat > "$case_fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == *CodexNest-latest.json* ]]; then
+  if [[ -f "$HOME/invalid-manifest" ]]; then
+    printf '%s\n' '{"schemaVersion":1,"version":"invalid","commit":"invalid"}'
+    exit 0
+  fi
+  commit="$(git -C "$CODEXNEST_REPOSITORY_URL" rev-parse codex/mvp)"
+  printf '{"schemaVersion":1,"version":"0.1.1-%s","commit":"%s"}\n' \
+    "${commit:0:7}" "$commit"
+  exit 0
+fi
 if [[ "$*" == *api.github.com* ]]; then
   tag=v0.1.0
   if [[ "$*" == *'/releases/latest'* ]]; then tag=v0.1.1; fi
@@ -91,7 +101,8 @@ fi
 if [[ -f "$HOME/fail-health" ]]; then exit 22; fi
 current="$(readlink -f "$HOME/.local/share/codexnest/current" 2>/dev/null || true)"
 version="${current##*/v}"
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || version=0.1.0
+if [[ -f "$HOME/fail-rolling-health" && "$version" =~ -[0-9a-f]{7}$ ]]; then exit 22; fi
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7})?$ ]] || version=0.1.0
 printf '{"status":"ok","serverVersion":"%s"}\n' "$version"
 EOF
   chmod 0755 "$case_fake_bin/systemctl" "$case_fake_bin/curl"
@@ -115,6 +126,7 @@ run_cli() {
   XDG_STATE_HOME="$case_home/.local/state" \
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
   CODEXNEST_REPOSITORY_URL="$case_repo" \
+  CODEXNEST_UPDATE_CHANNEL="${CODEXNEST_UPDATE_CHANNEL:-}" \
   PATH="$case_fake_bin:/usr/bin:/bin" \
     "$case_home/.local/bin/codexnest" "$@"
 }
@@ -125,16 +137,27 @@ run_adoption >/dev/null
 run_adoption >/dev/null
 grep -q '^CUSTOM_SETTING=keep$' "$case_home/.config/codexnest/server.env"
 grep -q '^CODEXNEST_MANAGED_INSTALL=true$' "$case_home/.config/codexnest/server.env"
+grep -q '^CODEXNEST_UPDATE_CHANNEL=rolling$' "$case_home/.config/codexnest/server.env"
 grep -q 'Environment=PRESERVED_DROP_IN=true' \
   "$case_home/.config/systemd/user/codexnest.service.d/preserved.conf"
 test -x "$case_home/.local/bin/codexnest"
 test -f "$case_home/.config/systemd/user/codexnest-update.service"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
 test -z "$(find "$case_home/.local/state/codexnest" -maxdepth 1 -name 'adoption-backup.*' -print -quit)"
+success_commit="$(git -C "$case_repo" rev-parse codex/mvp)"
+success_version="0.1.1-${success_commit:0:7}"
 run_cli update-worker >/dev/null
-test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.1
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = "v$success_version"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/previous")")" = v0.1.0
+test "$(cat "$case_home/.local/share/codexnest/current/.codexnest-built")" = "$success_commit"
 grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
+run_cli check-update | grep -q '"updateAvailable":false'
+
+prepare_case stable_channel
+run_adoption >/dev/null
+CODEXNEST_UPDATE_CHANNEL=stable run_cli update-worker >/dev/null
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.1
+grep -q '"latestVersion":"0.1.1"' "$case_home/.local/state/codexnest/update.json"
 
 prepare_case build_failure
 run_adoption >/dev/null
@@ -145,6 +168,25 @@ if run_cli update-worker >/dev/null 2>&1; then
 fi
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
 grep -q '"result":"failed"' "$case_home/.local/state/codexnest/update.json"
+
+prepare_case invalid_manifest
+run_adoption >/dev/null
+touch "$case_home/invalid-manifest"
+if run_cli check-update >/dev/null 2>&1; then
+  printf '%s\n' 'Expected invalid rolling manifest failure' >&2
+  exit 1
+fi
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+
+prepare_case rolling_rollback
+run_adoption >/dev/null
+touch "$case_home/fail-rolling-health"
+if run_cli update-worker >/dev/null 2>&1; then
+  printf '%s\n' 'Expected rolling update health failure' >&2
+  exit 1
+fi
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+grep -q '"result":"rolled_back"' "$case_home/.local/state/codexnest/update.json"
 
 prepare_case rollback
 cp "$case_home/.config/codexnest/server.env" "$test_root/rollback-env"

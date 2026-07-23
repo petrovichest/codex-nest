@@ -12,6 +12,7 @@ codexnest_config="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest/server.env"
 codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
 codexnest_update_status="$codexnest_state_root/update.json"
 codexnest_service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+codexnest_rolling_manifest_url="https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.json"
 
 codexnest_die() {
   printf 'codexnest: %s\n' "$1" >&2
@@ -23,6 +24,37 @@ codexnest_current_version() {
   target="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
   [[ -n "$target" ]] || codexnest_die "managed installation is not available"
   basename "$target" | sed 's/^v//'
+}
+
+codexnest_current_commit() {
+  local target
+  target="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
+  [[ -n "$target" ]] || codexnest_die "managed installation is not available"
+  git -C "$target" rev-parse HEAD 2>/dev/null
+}
+
+codexnest_config_value() {
+  local key="$1"
+  [[ -f "$codexnest_config" ]] || return 1
+  awk -F= -v key="$key" '
+    $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$codexnest_config"
+}
+
+codexnest_update_channel() {
+  local channel="${CODEXNEST_UPDATE_CHANNEL:-}"
+  if [[ -z "$channel" ]]; then
+    channel="$(codexnest_config_value CODEXNEST_UPDATE_CHANNEL || true)"
+  fi
+  channel="${channel:-rolling}"
+  case "$channel" in
+    rolling|stable) printf '%s\n' "$channel" ;;
+    *) codexnest_die "CODEXNEST_UPDATE_CHANNEL must be rolling or stable" ;;
+  esac
 }
 
 codexnest_latest_tag() {
@@ -41,8 +73,46 @@ codexnest_latest_tag() {
       '
 }
 
+codexnest_latest_candidate() {
+  local channel="$1" node_bin tag
+  if [[ "$channel" == stable ]]; then
+    tag="$(codexnest_latest_tag)"
+    printf '%s\t%s\n' "${tag#v}" "$tag"
+    return
+  fi
+  node_bin="$codexnest_root/runtime/current/bin/node"
+  [[ -x "$node_bin" ]] || codexnest_die "managed Node.js runtime is missing"
+  curl -fsSL \
+    -H 'Cache-Control: no-cache' \
+    "$codexnest_rolling_manifest_url" \
+    | "$node_bin" -e '
+        const fs = require("node:fs");
+        const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
+        const version = typeof manifest.version === "string" ? manifest.version : "";
+        const commit = typeof manifest.commit === "string" ? manifest.commit : "";
+        if (
+          manifest.schemaVersion !== 1 ||
+          !/^\d+\.\d+\.\d+-[0-9a-f]{7}$/.test(version) ||
+          !/^[0-9a-f]{40}$/.test(commit) ||
+          !version.endsWith(`-${commit.slice(0, 7)}`)
+        ) {
+          process.exit(1);
+        }
+        process.stdout.write(`${version}\t${commit}`);
+      '
+}
+
 codexnest_version_greater() {
   [[ "$(printf '%s\n%s\n' "$1" "$2" | sed 's/^v//' | sort -V | tail -n 1)" == "${1#v}" && "${1#v}" != "${2#v}" ]]
+}
+
+codexnest_candidate_available() {
+  local channel="$1" latest_version="$2" latest_ref="$3"
+  if [[ "$channel" == rolling ]]; then
+    [[ "$(codexnest_current_commit)" != "$latest_ref" ]]
+  else
+    codexnest_version_greater "$latest_version" "$(codexnest_current_version)"
+  fi
 }
 
 codexnest_json_escape() {
@@ -68,16 +138,20 @@ codexnest_write_status() {
 }
 
 codexnest_print_check_json() {
-  local current latest available timestamp
+  local current channel candidate latest_version latest_ref available timestamp
   current="$(codexnest_current_version)"
-  latest="$(codexnest_latest_tag)"
-  [[ -n "$latest" ]] || codexnest_die "no stable release tags are available"
+  channel="$(codexnest_update_channel)"
+  candidate="$(codexnest_latest_candidate "$channel")"
+  IFS=$'\t' read -r latest_version latest_ref <<< "$candidate"
+  [[ -n "$latest_version" && -n "$latest_ref" ]] || codexnest_die "no CodexNest updates are available"
   available=false
-  if codexnest_version_greater "$latest" "$current"; then available=true; fi
-  codexnest_write_status idle none "Update check completed" "$latest" "$available"
+  if codexnest_candidate_available "$channel" "$latest_version" "$latest_ref"; then
+    available=true
+  fi
+  codexnest_write_status idle none "Update check completed" "$latest_version" "$available"
   timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   printf '{"supported":true,"currentVersion":"%s","latestVersion":"%s","updateAvailable":%s,"operation":"idle","result":"none","message":"Update check completed","checkedAt":"%s","updatedAt":"%s"}\n' \
-    "$current" "${latest#v}" "$available" "$timestamp" "$timestamp"
+    "$current" "$latest_version" "$available" "$timestamp" "$timestamp"
 }
 
 codexnest_set_env_value() {
@@ -125,28 +199,31 @@ codexnest_health_ok() {
 }
 
 codexnest_build_release() {
-  local tag="$1" target node_bin
-  target="$codexnest_releases/$tag"
+  local ref="$1" version="$2" target node_bin resolved_ref
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7})?$ ]] || return 1
+  target="$codexnest_releases/v$version"
   [[ "$target" == "$codexnest_releases"/v* ]] || codexnest_die "invalid release path"
+  git -C "$codexnest_source" remote set-url origin "$codexnest_repository" || return 1
+  git -C "$codexnest_source" fetch --tags --prune origin || return 1
+  resolved_ref="$(git -C "$codexnest_source" rev-parse "$ref^{commit}" 2>/dev/null)" || return 1
   if [[ -f "$target/.codexnest-built" && \
+        "$(cat "$target/.codexnest-built")" == "$resolved_ref" && \
         -f "$target/apps/server/dist/index.js" && \
         -f "$target/apps/client/dist/index.html" ]]; then
     return
   fi
-  git -C "$codexnest_source" remote set-url origin "$codexnest_repository" || return 1
-  git -C "$codexnest_source" fetch --tags --prune origin || return 1
   git -C "$codexnest_source" worktree remove --force "$target" 2>/dev/null || true
   if [[ -e "$target" ]]; then
     rm -rf -- "$target"
   fi
   git -C "$codexnest_source" worktree prune || return 1
-  git -C "$codexnest_source" worktree add --detach "$target" "$tag" || return 1
+  git -C "$codexnest_source" worktree add --detach "$target" "$resolved_ref" || return 1
   node_bin="$codexnest_root/runtime/current/bin"
   if ! (
     cd "$target" &&
     PATH="$node_bin:$PATH" "$node_bin/npm" ci &&
-    PATH="$node_bin:$PATH" CODEXNEST_VERSION="${tag#v}" "$node_bin/npm" run build &&
-    printf '%s\n' "$tag" > .codexnest-built
+    PATH="$node_bin:$PATH" CODEXNEST_VERSION="$version" "$node_bin/npm" run build &&
+    printf '%s\n' "$resolved_ref" > .codexnest-built
   ); then
     git -C "$codexnest_source" worktree remove --force "$target" || true
     return 1
@@ -167,46 +244,51 @@ codexnest_restore_release() {
 }
 
 codexnest_update_worker() {
-  local current_version latest target old_target old_version
-  current_version="$(codexnest_current_version)"
-  if ! latest="$(codexnest_latest_tag)" || [[ -z "$latest" ]]; then
-    codexnest_write_status idle failed "Failed to discover stable CodexNest releases" "" false
+  local channel candidate latest_version latest_ref target old_target old_version
+  channel="$(codexnest_update_channel)"
+  if ! candidate="$(codexnest_latest_candidate "$channel")"; then
+    codexnest_write_status idle failed "Failed to discover CodexNest updates" "" false
     return 1
   fi
-  if ! codexnest_version_greater "$latest" "$current_version"; then
-    codexnest_write_status idle none "CodexNest is already up to date" "$latest" false
+  IFS=$'\t' read -r latest_version latest_ref <<< "$candidate"
+  if [[ -z "$latest_version" || -z "$latest_ref" ]]; then
+    codexnest_write_status idle failed "Failed to validate the CodexNest update" "" false
+    return 1
+  fi
+  if ! codexnest_candidate_available "$channel" "$latest_version" "$latest_ref"; then
+    codexnest_write_status idle none "CodexNest is already up to date" "$latest_version" false
     return
   fi
-  codexnest_write_status preparing none "Preparing CodexNest $latest" "$latest" true
-  target="$codexnest_releases/$latest"
-  codexnest_write_status building none "Building CodexNest $latest" "$latest" true
-  codexnest_build_release "$latest" || {
-    codexnest_write_status idle failed "Failed to build CodexNest $latest" "$latest" true
+  codexnest_write_status preparing none "Preparing CodexNest $latest_version" "$latest_version" true
+  target="$codexnest_releases/v$latest_version"
+  codexnest_write_status building none "Building CodexNest $latest_version" "$latest_version" true
+  codexnest_build_release "$latest_ref" "$latest_version" || {
+    codexnest_write_status idle failed "Failed to build CodexNest $latest_version" "$latest_version" true
     return 1
   }
-  codexnest_write_status switching none "Switching to CodexNest $latest" "$latest" true
+  codexnest_write_status switching none "Switching to CodexNest $latest_version" "$latest_version" true
   old_target="$(readlink -f "$codexnest_current")"
   [[ "$old_target" == "$codexnest_releases"/* ]] || codexnest_die "invalid current release path"
   old_version="$(basename "$old_target" | sed 's/^v//')"
   if ! ln -sfn "$old_target" "$codexnest_previous"; then
-    codexnest_write_status idle failed "Failed to prepare rollback for CodexNest $latest" "$latest" true
+    codexnest_write_status idle failed "Failed to prepare rollback for CodexNest $latest_version" "$latest_version" true
     return 1
   fi
   if ! codexnest_switch_release "$target" || \
-     ! codexnest_set_env_value CODEXNEST_VERSION "${latest#v}" || \
+     ! codexnest_set_env_value CODEXNEST_VERSION "$latest_version" || \
      ! codexnest_install_assets "$target" || \
-     ! codexnest_write_status restarting none "Restarting CodexNest $latest" "$latest" true || \
+     ! codexnest_write_status restarting none "Restarting CodexNest $latest_version" "$latest_version" true || \
      ! systemctl --user restart codexnest.service; then
-    codexnest_restore_release "$old_target" "$old_version" "$latest" \
-      "Failed to activate CodexNest $latest"
+    codexnest_restore_release "$old_target" "$old_version" "$latest_version" \
+      "Failed to activate CodexNest $latest_version"
     return 1
   fi
-  if codexnest_health_ok "${latest#v}"; then
-    codexnest_write_status idle updated "CodexNest was updated successfully" "$latest" false
+  if codexnest_health_ok "$latest_version"; then
+    codexnest_write_status idle updated "CodexNest was updated successfully" "$latest_version" false
     return
   fi
-  codexnest_restore_release "$old_target" "$old_version" "$latest" \
-    "CodexNest $latest failed its health check"
+  codexnest_restore_release "$old_target" "$old_version" "$latest_version" \
+    "CodexNest $latest_version failed its health check"
   return 1
 }
 

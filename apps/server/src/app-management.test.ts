@@ -11,8 +11,8 @@ describe("AppManager", () => {
     const runCommand = vi.fn(async () => ({
       stdout: JSON.stringify({
         supported: true,
-        currentVersion: "0.1.0",
-        latestVersion: "0.2.0",
+        currentVersion: "0.1.4-1111111",
+        latestVersion: "0.1.4-2222222",
         updateAvailable: true,
         operation: "idle",
         result: "none",
@@ -36,7 +36,7 @@ describe("AppManager", () => {
     });
     expect(runCommand).not.toHaveBeenCalled();
     await expect(manager.check()).resolves.toMatchObject({
-      latestVersion: "0.2.0",
+      latestVersion: "0.1.4-2222222",
       updateAvailable: true,
     });
     expect(runCommand).toHaveBeenCalledWith(

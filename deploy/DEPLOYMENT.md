@@ -50,10 +50,12 @@ Managed install слушает `0.0.0.0:4310`. Собственный origin б�
 динамически для LAN/VPN IP и приватного DNS. Installer не меняет firewall, не
 настраивает VPN или HTTPS и не предназначен для публичного port forwarding.
 
-UI проверяет обновления только по явному действию пользователя и читает последний
-стабильный GitHub Release. Отдельный `codexnest-update.service` собирает его тег
-рядом с текущей версией, атомарно переключает `current`, перезапускает приложение
-и возвращает `previous`, если health-check не прошёл.
+UI проверяет обновления только по явному действию пользователя. По умолчанию
+updater читает manifest последней успешной CI-сборки ветки `codex/mvp`, собирает
+указанный commit рядом с текущей версией, атомарно переключает `current`,
+перезапускает приложение и возвращает `previous`, если health-check не прошёл.
+Для обновлений только по стабильным semver-релизам установите
+`CODEXNEST_UPDATE_CHANNEL=stable` в `server.env`.
 
 Оставшаяся часть документа описывает ручную и расширенную установку, включая
 proxy, speech-to-text и reverse proxy.
@@ -351,6 +353,7 @@ accept-all certificate handler).
 | `CODEXNEST_SERVER_ENV_FILE`      | Env-файл, обновляемый серверными настройками      | `~/.config/codexnest/server.env`              |
 | `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
 | `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
+| `CODEXNEST_UPDATE_CHANNEL`       | Канал обновлений: `rolling` или `stable`          | `rolling`                                     |
 | `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
 | `CODEXNEST_STT_PROVIDER`         | Глобальный режим: `local` или `openai`            | первый настроенный провайдер                  |
 | `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |

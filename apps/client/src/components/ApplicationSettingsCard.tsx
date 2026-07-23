@@ -95,7 +95,7 @@ export function ApplicationSettingsCard() {
         </span>
         <div>
           <h2>Обновление CodexNest</h2>
-          <p>Стабильные версии устанавливаются из GitHub Releases с автоматическим откатом.</p>
+          <p>Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.</p>
         </div>
       </div>
 
@@ -111,7 +111,7 @@ export function ApplicationSettingsCard() {
               <dd>{status?.currentVersion ?? "—"}</dd>
             </div>
             <div>
-              <dt>Последняя версия</dt>
+              <dt>Последняя rolling-версия</dt>
               <dd>{status?.latestVersion ?? "Не проверялась"}</dd>
             </div>
             <div>

@@ -30,6 +30,10 @@ export CODEXNEST_KEY_PASSWORD=...
 ./gradlew assembleRelease
 ```
 
+Every successful push to `codex/mvp` publishes the signed rolling build as
+`CodexNest-latest.apk` together with `CodexNest-latest.json`. The manifest pins
+the server updater and APK to the same tested commit.
+
 Notifications do not use Firebase, Google Play Services, or a third-party push provider.
 The Android app starts a `remoteMessaging` foreground service that keeps an authenticated
 WebSocket connection to the configured CodexNest server. Android displays a permanent,

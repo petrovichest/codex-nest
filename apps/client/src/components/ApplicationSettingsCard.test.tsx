@@ -21,7 +21,7 @@ beforeEach(() => {
 describe("ApplicationSettingsCard", () => {
   it("checks GitHub only after an explicit click", async () => {
     const initial = updateStatus();
-    const checked = updateStatus({ latestVersion: "0.2.0", updateAvailable: true });
+    const checked = updateStatus({ latestVersion: "0.1.4-abcdef0", updateAvailable: true });
     const api = {
       readAppSettings: vi.fn(async () => initial),
       checkAppUpdate: vi.fn(async () => checked),
@@ -35,15 +35,21 @@ describe("ApplicationSettingsCard", () => {
     expect(api.checkAppUpdate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
 
-    expect(await screen.findByText("0.2.0")).toBeInTheDocument();
+    expect(await screen.findByText("0.1.4-abcdef0")).toBeInTheDocument();
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Обновить CodexNest" })).toBeEnabled();
+    expect(screen.getByText("Последняя rolling-версия")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("requires confirmation before handing the update to systemd", async () => {
-    const current = updateStatus({ latestVersion: "0.2.0", updateAvailable: true });
+    const current = updateStatus({ latestVersion: "0.1.4-abcdef0", updateAvailable: true });
     const queued = updateStatus({
-      latestVersion: "0.2.0",
+      latestVersion: "0.1.4-abcdef0",
       updateAvailable: true,
       operation: "preparing",
     });
@@ -56,11 +62,11 @@ describe("ApplicationSettingsCard", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<ApplicationSettingsCard />);
-    await screen.findByText("0.2.0");
+    await screen.findByText("0.1.4-abcdef0");
     fireEvent.click(screen.getByRole("button", { name: "Обновить CodexNest" }));
 
     await waitFor(() => expect(api.updateApp).toHaveBeenCalledOnce());
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("до версии 0.2.0"));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("до версии 0.1.4-abcdef0"));
   });
 
   it("explains when the current checkout is not managed", async () => {

@@ -64,7 +64,7 @@ jobs:
 
   android-latest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/mvp'
-    needs: [verify, android-debug]
+    needs: [verify, installer-dry-run, android-debug]
     runs-on: ubuntu-latest
     concurrency:
       group: android-latest
@@ -73,19 +73,35 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Check rolling branch head
+        id: head
+        run: |
+          latest_sha="$(git ls-remote origin refs/heads/codex/mvp | cut -f1)"
+          if [[ "$latest_sha" == "$GITHUB_SHA" ]]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale rolling build for $GITHUB_SHA; branch is at $latest_sha."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v4
+        if: steps.head.outputs.current == 'true'
         with:
           node-version: 24
           cache: npm
       - uses: actions/setup-java@v4
+        if: steps.head.outputs.current == 'true'
         with:
           distribution: temurin
           java-version: 21
           cache: gradle
-      - run: npm ci
-      - run: npm run build
-      - run: npm run android:sync -w @codexnest/client
+      - if: steps.head.outputs.current == 'true'
+        run: npm ci
+      - if: steps.head.outputs.current == 'true'
+        run: npm run build
+      - if: steps.head.outputs.current == 'true'
+        run: npm run android:sync -w @codexnest/client
       - name: Validate Android signing secrets
+        if: steps.head.outputs.current == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_BASE64 }}
           KEY_ALIAS: ${{ secrets.CODEXNEST_ANDROID_KEY_ALIAS }}
@@ -97,12 +113,14 @@ jobs:
           test -n "$KEYSTORE_PASSWORD"
           test -n "$KEY_PASSWORD"
       - name: Prepare Android signing key
+        if: steps.head.outputs.current == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_BASE64 }}
         run: |
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/codexnest.jks"
           chmod 0600 "$RUNNER_TEMP/codexnest.jks"
       - name: Build signed rolling APK
+        if: steps.head.outputs.current == 'true'
         id: apk
         env:
           CODEXNEST_KEYSTORE_PATH: ${{ runner.temp }}/codexnest.jks
@@ -118,9 +136,24 @@ jobs:
           test -s app/build/outputs/apk/release/app-release.apk
           mkdir -p ../../../release
           cp app/build/outputs/apk/release/app-release.apk ../../../release/CodexNest-latest.apk
+          printf '{"schemaVersion":1,"version":"%s","commit":"%s"}\n' \
+            "$CODEXNEST_ANDROID_VERSION_NAME" "$GITHUB_SHA" \
+            > ../../../release/CodexNest-latest.json
           printf 'version=%s\n' "$CODEXNEST_ANDROID_VERSION_NAME" >> "$GITHUB_OUTPUT"
         working-directory: apps/client/android
+      - name: Check rolling branch head before publish
+        if: steps.head.outputs.current == 'true'
+        id: publish
+        run: |
+          latest_sha="$(git ls-remote origin refs/heads/codex/mvp | cut -f1)"
+          if [[ "$latest_sha" == "$GITHUB_SHA" ]]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale rolling publish for $GITHUB_SHA; branch is at $latest_sha."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish rolling Android prerelease
+        if: steps.publish.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           APK_VERSION: ${{ steps.apk.outputs.version }}
@@ -129,16 +162,17 @@ jobs:
           if gh release view android-latest >/dev/null 2>&1; then
             gh release edit android-latest \
               --prerelease \
-              --title "Latest Android build" \
+              --title "Latest CodexNest build" \
               --notes "$notes"
           else
             gh release create android-latest \
               --prerelease \
               --target "$GITHUB_SHA" \
-              --title "Latest Android build" \
+              --title "Latest CodexNest build" \
               --notes "$notes"
           fi
           gh release upload android-latest release/CodexNest-latest.apk --clobber
+          gh release upload android-latest release/CodexNest-latest.json --clobber
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

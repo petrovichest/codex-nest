@@ -234,6 +234,8 @@ adopt_set_env CODEXNEST_CLIENT_DIST "$adopt_root/current/apps/client/dist"
 adopt_set_env CODEXNEST_MANAGED_INSTALL true
 adopt_set_env CODEXNEST_MANAGEMENT_CLI "$HOME/.local/bin/codexnest"
 adopt_set_env CODEXNEST_UPDATE_STATUS_PATH "$adopt_state_root/update.json"
+grep -q '^CODEXNEST_UPDATE_CHANNEL=' "$adopt_config" \
+  || adopt_set_env CODEXNEST_UPDATE_CHANNEL rolling
 adopt_set_env CODEXNEST_VERSION "$adopt_version"
 install -m 0644 "$adopt_release/deploy/systemd/codexnest-managed.service" "$adopt_service"
 systemctl --user daemon-reload

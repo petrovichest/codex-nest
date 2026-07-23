@@ -1,5 +1,5 @@
 [Unit]
-Description=Update CodexNest to the latest stable release
+Description=Update CodexNest to the latest published release
 After=network-online.target
 Wants=network-online.target
 
