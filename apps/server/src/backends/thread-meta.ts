@@ -77,3 +77,9 @@ export async function setThreadDraft(
   });
   return draft;
 }
+
+export async function deleteThreadMeta(store: StateStore, threadId: string): Promise<void> {
+  await store.update((state) => {
+    delete state.threadMeta[threadId];
+  });
+}

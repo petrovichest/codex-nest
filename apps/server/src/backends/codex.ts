@@ -28,6 +28,7 @@ import type { AppProjection } from "../projection";
 import { ProjectNotFoundError, ProjectValidationError } from "../projects";
 import type { StateStore } from "../state/store";
 import type { ThreadTitleGenerator } from "../thread-title";
+import { deleteThreadMeta } from "./thread-meta";
 import type { AgentBackend, TurnInput } from "./backend";
 
 export interface CodexBackendDeps {
@@ -175,9 +176,7 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
 
   async deleteThread(threadId: string): Promise<void> {
     await this.bridge.request("thread/delete", { threadId });
-    await this.store.update((state) => {
-      delete state.threadMeta[threadId];
-    });
+    await deleteThreadMeta(this.store, threadId);
   }
 
   async setArchived(threadId: string, archived: boolean): Promise<void> {

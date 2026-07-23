@@ -1,8 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { AttentionRequest, AttentionResponse } from "@codexnest/protocol";
+
 import type { ServerRequest } from "./codex/generated/index";
 import type { JsonlTransport } from "./codex/transport";
 import { AttentionManager, AttentionValidationError } from "./attention";
+
+function userInputRequest(id: string, threadId: string): AttentionRequest {
+  return {
+    id,
+    kind: "userInput",
+    threadId,
+    turnId: "turn",
+    itemId: "item",
+    createdAt: 1,
+    autoResolutionMs: null,
+    questions: [],
+  };
+}
+
+function codexApproval(manager: AttentionManager, id: number, threadId: string): AttentionRequest {
+  return manager.receive(
+    {
+      method: "item/commandExecution/requestApproval",
+      id,
+      params: {
+        threadId,
+        turnId: "turn",
+        itemId: "item",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "ls",
+        cwd: "/work",
+        availableDecisions: ["accept", "decline"],
+      },
+    } as ServerRequest,
+    fakeTransport(),
+  );
+}
 
 function fakeTransport() {
   return {
@@ -214,5 +249,90 @@ describe("AttentionManager", () => {
       -32601,
       expect.stringContaining("not supported"),
     );
+  });
+
+  it("settles a callback-registered request and validates its response kind", () => {
+    const manager = new AttentionManager();
+    const request = userInputRequest("cb-1", "thread");
+    const upserts: AttentionRequest[] = [];
+    const removed: string[] = [];
+    manager.on("upserted", (value: AttentionRequest) => upserts.push(value));
+    manager.on("removed", (id: string) => removed.push(id));
+    const settled: AttentionResponse[] = [];
+    manager.add(request, (response) => settled.push(response), "claude");
+
+    expect(upserts).toEqual([request]);
+    expect(manager.list()).toEqual([request]);
+
+    // Wrong response kind is rejected before the entry is settled or removed.
+    expect(() => manager.resolve("cb-1", { kind: "approval", decision: "accept" })).toThrow(
+      AttentionValidationError,
+    );
+    expect(settled).toEqual([]);
+    expect(removed).toEqual([]);
+    expect(manager.list()).toEqual([request]);
+
+    const answer: AttentionResponse = { kind: "userInput", answers: { q: ["a"] } };
+    expect(manager.resolve("cb-1", answer)).toBe(request);
+    expect(settled).toEqual([answer]);
+    expect(removed).toEqual(["cb-1"]);
+    expect(manager.list()).toEqual([]);
+  });
+
+  it("enforces the permission subset rule on a callback-registered request", () => {
+    const manager = new AttentionManager();
+    let settled = false;
+    const request: AttentionRequest = {
+      id: "cb-perm",
+      kind: "permissionApproval",
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "item",
+      createdAt: 1,
+      cwd: "/work",
+      reason: null,
+      permissions: { fileSystem: { read: ["/work"] } },
+    };
+    manager.add(request, () => (settled = true), "claude");
+    expect(() =>
+      manager.resolve("cb-perm", {
+        kind: "permission",
+        permissions: { fileSystem: { read: ["/etc"] } },
+        scope: "turn",
+      }),
+    ).toThrow(AttentionValidationError);
+    expect(settled).toBe(false);
+    expect(manager.list()).toEqual([request]);
+  });
+
+  it("expires only the named agent's entries and leaves callback entries settle-free", () => {
+    const manager = new AttentionManager();
+    const codex = codexApproval(manager, 1, "thread");
+    let claudeSettled = false;
+    const claude = userInputRequest("cb", "thread-2");
+    manager.add(claude, () => (claudeSettled = true), "claude");
+    const removed: string[] = [];
+    manager.on("removed", (id: string) => removed.push(id));
+
+    manager.expireAgent("codex");
+
+    // Only the codex entry expires; the callback entry survives and is NOT settled.
+    expect(removed).toEqual([codex.id]);
+    expect(claudeSettled).toBe(false);
+    expect(manager.list()).toEqual([claude]);
+  });
+
+  it("expires attention entries by thread across agents", () => {
+    const manager = new AttentionManager();
+    const codex = codexApproval(manager, 2, "shared");
+    manager.add(userInputRequest("cb-shared", "shared"), () => undefined, "claude");
+    manager.add(userInputRequest("cb-other", "other"), () => undefined, "claude");
+    const removed: string[] = [];
+    manager.on("removed", (id: string) => removed.push(id));
+
+    manager.expireByThread("shared");
+
+    expect(removed.sort()).toEqual([codex.id, "cb-shared"].sort());
+    expect(manager.list().map((entry) => entry.id)).toEqual(["cb-other"]);
   });
 });

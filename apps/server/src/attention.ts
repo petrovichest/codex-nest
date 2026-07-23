@@ -64,8 +64,12 @@ export class AttentionManager extends EventEmitter {
   }
 
   /** Registers a callback-settled attention request (used by non-Codex backends). */
-  add(request: AttentionRequest, settle: (response: AttentionResponse) => void): void {
-    this.pending.set(request.id, { agent: "claude", request, settle });
+  add(
+    request: AttentionRequest,
+    settle: (response: AttentionResponse) => void,
+    agent: AgentId,
+  ): void {
+    this.pending.set(request.id, { agent, request, settle });
     this.emit("upserted", request);
   }
 

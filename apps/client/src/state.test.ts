@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
+import type { AppSnapshot, ServerEvent, ThreadSummary } from "@codexnest/protocol";
 
 import { clientReducer, initialState, sortThreads } from "./state";
 
@@ -109,6 +109,21 @@ describe("clientReducer", () => {
       personality: "friendly",
     });
     expect(state.goals.one).toEqual(goal);
+  });
+
+  it("tolerates unknown event types by advancing only the sequence", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    const before = state.snapshot!;
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 99,
+      event: { type: "future.event", payload: 1 } as unknown as ServerEvent,
+    });
+    expect(state.snapshot?.sequence).toBe(99);
+    expect(state.snapshot?.threads).toBe(before.threads);
+    expect(state.snapshot?.projects).toBe(before.projects);
+    expect(state.snapshot?.attention).toBe(before.attention);
+    expect(state.snapshot?.models).toBe(before.models);
   });
 
   it("upserts per-backend status from backend.changed events", () => {

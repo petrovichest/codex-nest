@@ -37,6 +37,13 @@ export class SessionHub extends EventEmitter {
     for (const backend of backends) {
       backend.on("event", (event: ServerEvent) => this.handleBackendEvent(backend, event));
     }
+    // Listener order is load-bearing for the public event stream: AppProjection
+    // subscribes to AttentionManager in its own constructor (before this hub is
+    // built), so on an attention upsert the projection's publishThread side effect
+    // fires first — thread.upserted precedes attention.upserted on the wire. The
+    // client reducer is order-independent here, but reordering these subscriptions
+    // (e.g. constructing the hub before the projection) would change the observable
+    // ordering, so keep the projection-before-hub construction order.
     this.attention.on("upserted", (request: AttentionRequest) =>
       this.publish({ type: "attention.upserted", attention: request }),
     );

@@ -6,6 +6,7 @@ import type {
   AttentionResponse,
   ConnectionView,
   ModelOption,
+  ServerEvent,
   SessionSettings,
   ThreadDetail,
   ThreadDraft,
@@ -31,6 +32,12 @@ export interface AgentBackend extends EventEmitter {
   readonly models: ModelOption[];
   readonly newSessionSettings: SessionSettings;
 
+  // Typed "event" channel so payload drift fails at compile time. Other EventEmitter
+  // events keep their inherited (untyped) signatures.
+  on(event: "event", listener: (payload: ServerEvent) => void): this;
+  off(event: "event", listener: (payload: ServerEvent) => void): this;
+  emit(event: "event", payload: ServerEvent): boolean;
+
   start(): Promise<void>;
   stop(): void;
   sync(): Promise<void>;
@@ -41,6 +48,7 @@ export interface AgentBackend extends EventEmitter {
   readThread(threadId: string, cursor?: string | null): Promise<ThreadDetail>;
 
   createThread(projectId: string, cwd: string, settings: SessionSettings): Promise<ThreadSummary>;
+  /** Starts a turn. `options.goal` is Codex-only; non-codex backends must reject it. */
   startTurn(
     threadId: string,
     input: TurnInput,
