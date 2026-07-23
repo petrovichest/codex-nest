@@ -569,9 +569,8 @@ export type UpdateProjectRequest = {
   path?: string;
 };
 
-export type MoveProjectRequest = {
-  direction: "up" | "down";
-};
+export type MoveProjectRequest =
+  { direction: "up" | "down"; targetIndex?: never } | { direction?: never; targetIndex: number };
 
 export type CreateDirectoryRequest = {
   parentPath: string;

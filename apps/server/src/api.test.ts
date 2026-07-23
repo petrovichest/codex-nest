@@ -198,9 +198,36 @@ describe("HTTP authentication", () => {
       "new-project",
     ]);
 
+    const targetReorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
+      const listener = (_sequence: number, event: Record<string, unknown>) => {
+        if (event.type !== "projects.reordered") return;
+        projection.off("event", listener);
+        resolve(event);
+      };
+      projection.on("event", listener);
+    });
+    const targetMovedProject = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${legacyProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { targetIndex: 1 },
+    });
+    expect(targetMovedProject.statusCode).toBe(200);
+    expect(
+      targetMovedProject.json().map((project: { displayName: string }) => project.displayName),
+    ).toEqual(["new-project", "legacy-project"]);
+    await expect(targetReorderedEvent).resolves.toMatchObject({
+      type: "projects.reordered",
+      projects: [{ displayName: "new-project" }, { displayName: "legacy-project" }],
+    });
+    expect(store.snapshot().projects.map((project) => project.displayName)).toEqual([
+      "new-project",
+      "legacy-project",
+    ]);
+
     const boundaryMove = await app.inject({
       method: "POST",
-      url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+      url: `/api/v1/projects/${legacyProject.json().id as string}/move`,
       headers: authorization,
       payload: { direction: "down" },
     });
@@ -228,6 +255,38 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(400);
+    const publishProjectsReordered = vi.spyOn(projection, "publishProjectsReordered");
+    const unchangedTargetMove = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { targetIndex: 0 },
+    });
+    expect(unchangedTargetMove.statusCode).toBe(200);
+    expect(
+      unchangedTargetMove.json().map((project: { displayName: string }) => project.displayName),
+    ).toEqual(["new-project", "legacy-project"]);
+    expect(publishProjectsReordered).not.toHaveBeenCalled();
+
+    for (const payload of [
+      {},
+      { direction: "up", targetIndex: 0 },
+      { targetIndex: -1 },
+      { targetIndex: 0.5 },
+      { targetIndex: null },
+      { targetIndex: 2 },
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+            headers: authorization,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
 
     const outside = await app.inject({
       url: `/api/v1/directories?path=${encodeURIComponent(join(directory, ".."))}`,

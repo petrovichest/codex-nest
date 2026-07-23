@@ -1,9 +1,16 @@
-import { type RefObject, useEffect, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import type {
   CodexRateLimitWindow,
   CodexRateLimitsResponse,
+  MoveProjectRequest,
   ThreadSummary,
   TranscriptionConfigResponse,
 } from "@codexnest/protocol";
@@ -24,6 +31,7 @@ import {
   CopyIcon,
   FolderIcon,
   GaugeIcon,
+  GripVerticalIcon,
   MoreIcon,
   NewTaskIcon,
   PlusIcon,
@@ -49,6 +57,28 @@ const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
 const LAYOUT_DEFAULTS_VERSION = "1";
 const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
+const PROJECT_DRAG_START_DISTANCE = 6;
+const PROJECT_DRAG_SCROLL_EDGE = 48;
+const PROJECT_DRAG_SCROLL_SPEED = 12;
+
+type ProjectDragGesture = {
+  active: boolean;
+  clientY: number;
+  direction: ProjectListDirection;
+  displayProjectIds: string[];
+  element: HTMLElement;
+  frameId: number | null;
+  insertionIndex: number;
+  pointerId: number;
+  projectId: string;
+  startX: number;
+  startY: number;
+};
+
+type ProjectDragView = {
+  insertionIndex: number;
+  projectId: string;
+};
 
 export function App({
   settings,
@@ -370,11 +400,13 @@ function Sidebar({
   const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
+  const [projectDrag, setProjectDrag] = useState<ProjectDragView | null>(null);
   const [projectNotice, setProjectNotice] = useState<{
     projectId: string;
     kind: "success" | "error";
     message: string;
   } | null>(null);
+  const projectDragRef = useRef<ProjectDragGesture | null>(null);
   const noticeTimerRef = useRef<number | undefined>(undefined);
   const threadNavRef = useRef<HTMLElement>(null);
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
@@ -388,6 +420,9 @@ function Sidebar({
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
+  const displayedProjectIds = orderedGroups.flatMap((group) =>
+    group.project ? [group.project.id] : [],
+  );
   const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
 
   useEffect(() => {
@@ -399,9 +434,42 @@ function Sidebar({
   useEffect(
     () => () => {
       if (noticeTimerRef.current !== undefined) window.clearTimeout(noticeTimerRef.current);
+      const gesture = projectDragRef.current;
+      if (gesture?.frameId !== null && gesture?.frameId !== undefined) {
+        window.cancelAnimationFrame(gesture.frameId);
+      }
+      projectDragRef.current = null;
     },
     [],
   );
+
+  useEffect(() => {
+    function cancelWithEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      const gesture = projectDragRef.current;
+      if (!gesture) return;
+      if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
+      if (gesture.element.hasPointerCapture?.(gesture.pointerId)) {
+        gesture.element.releasePointerCapture(gesture.pointerId);
+      }
+      projectDragRef.current = null;
+      setProjectDrag(null);
+    }
+
+    window.addEventListener("keydown", cancelWithEscape);
+    return () => window.removeEventListener("keydown", cancelWithEscape);
+  }, []);
+
+  useEffect(() => {
+    const gesture = projectDragRef.current;
+    if (!gesture) return;
+    if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
+    if (gesture.element.hasPointerCapture?.(gesture.pointerId)) {
+      gesture.element.releasePointerCapture(gesture.pointerId);
+    }
+    projectDragRef.current = null;
+    setProjectDrag(null);
+  }, [projectOrderKey]);
 
   function toggleCollapsed(key: string) {
     setCollapsed((current) => {
@@ -446,14 +514,14 @@ function Sidebar({
 
   async function moveProject(
     projectId: string,
-    direction: "up" | "down",
+    move: MoveProjectRequest,
     menu: HTMLDetailsElement | null,
   ) {
     if (movingProjectId) return;
     setMovingProjectId(projectId);
     setProjectNotice(null);
     try {
-      await api.moveProject(projectId, { direction });
+      await api.moveProject(projectId, move);
       menu?.removeAttribute("open");
     } catch (caught) {
       showProjectNotice(
@@ -464,6 +532,133 @@ function Sidebar({
     } finally {
       setMovingProjectId(null);
     }
+  }
+
+  function projectInsertionIndex(gesture: ProjectDragGesture): number {
+    const navigation = threadNavRef.current;
+    if (!navigation) return gesture.insertionIndex;
+    const groups = Array.from(
+      navigation.querySelectorAll<HTMLElement>(".project-group[data-project-id]"),
+    ).filter((group) => group.dataset.projectId !== gesture.projectId);
+    const insertionIndex = groups.findIndex((group) => {
+      const header = group.querySelector<HTMLElement>(".project-title");
+      if (!header) return false;
+      const bounds = header.getBoundingClientRect();
+      return gesture.clientY < bounds.top + bounds.height / 2;
+    });
+    return insertionIndex < 0 ? groups.length : insertionIndex;
+  }
+
+  function updateProjectDragTarget(gesture: ProjectDragGesture) {
+    const insertionIndex = projectInsertionIndex(gesture);
+    if (insertionIndex === gesture.insertionIndex) return;
+    gesture.insertionIndex = insertionIndex;
+    setProjectDrag({ projectId: gesture.projectId, insertionIndex });
+  }
+
+  function scheduleProjectDragFrame(gesture: ProjectDragGesture) {
+    if (gesture.frameId !== null) return;
+    gesture.frameId = window.requestAnimationFrame(() => {
+      gesture.frameId = null;
+      if (projectDragRef.current !== gesture || !gesture.active) return;
+      updateProjectDragTarget(gesture);
+
+      const navigation = threadNavRef.current;
+      if (!navigation) return;
+      const bounds = navigation.getBoundingClientRect();
+      if (bounds.height <= 0) return;
+      const topPressure = Math.max(
+        0,
+        Math.min(
+          1,
+          (bounds.top + PROJECT_DRAG_SCROLL_EDGE - gesture.clientY) / PROJECT_DRAG_SCROLL_EDGE,
+        ),
+      );
+      const bottomPressure = Math.max(
+        0,
+        Math.min(
+          1,
+          (gesture.clientY - (bounds.bottom - PROJECT_DRAG_SCROLL_EDGE)) / PROJECT_DRAG_SCROLL_EDGE,
+        ),
+      );
+      const scrollDelta = Math.round(PROJECT_DRAG_SCROLL_SPEED * (bottomPressure - topPressure));
+      if (!scrollDelta) return;
+      const previousScrollTop = navigation.scrollTop;
+      navigation.scrollTop += scrollDelta;
+      if (navigation.scrollTop === previousScrollTop) return;
+      updateProjectDragTarget(gesture);
+      scheduleProjectDragFrame(gesture);
+    });
+  }
+
+  function beginProjectDrag(event: ReactPointerEvent<HTMLElement>, projectId: string) {
+    if (movingProjectId || !event.isPrimary || event.button !== 0) return;
+    const displayIndex = displayedProjectIds.indexOf(projectId);
+    if (displayIndex < 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    projectDragRef.current = {
+      active: false,
+      clientY: event.clientY,
+      direction: projectListDirection,
+      displayProjectIds: displayedProjectIds,
+      element: event.currentTarget,
+      frameId: null,
+      insertionIndex: displayIndex,
+      pointerId: event.pointerId,
+      projectId,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    setProjectNotice(null);
+  }
+
+  function moveProjectDrag(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = projectDragRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    gesture.clientY = event.clientY;
+    if (!gesture.active) {
+      const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+      if (distance < PROJECT_DRAG_START_DISTANCE) return;
+      gesture.active = true;
+      setProjectDrag({
+        projectId: gesture.projectId,
+        insertionIndex: gesture.insertionIndex,
+      });
+    }
+    event.preventDefault();
+    updateProjectDragTarget(gesture);
+    scheduleProjectDragFrame(gesture);
+  }
+
+  function clearProjectDrag(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = projectDragRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+    if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
+    if (event.currentTarget.hasPointerCapture?.(gesture.pointerId)) {
+      event.currentTarget.releasePointerCapture(gesture.pointerId);
+    }
+    projectDragRef.current = null;
+    setProjectDrag(null);
+    return gesture;
+  }
+
+  function cancelProjectDrag(event: ReactPointerEvent<HTMLElement>) {
+    clearProjectDrag(event);
+  }
+
+  function finishProjectDrag(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = clearProjectDrag(event);
+    if (!gesture?.active) return;
+    const remainingIds = gesture.displayProjectIds.filter((id) => id !== gesture.projectId);
+    const desiredDisplayIds = [...remainingIds];
+    desiredDisplayIds.splice(gesture.insertionIndex, 0, gesture.projectId);
+    if (desiredDisplayIds.every((id, index) => id === gesture.displayProjectIds[index])) return;
+    const desiredServerIds =
+      gesture.direction === "bottom-up" ? [...desiredDisplayIds].reverse() : desiredDisplayIds;
+    const targetIndex = desiredServerIds.indexOf(gesture.projectId);
+    if (targetIndex < 0) return;
+    void moveProject(gesture.projectId, { targetIndex }, null);
   }
 
   async function createProjectThread(projectId: string) {
@@ -502,6 +697,14 @@ function Sidebar({
   }
 
   const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError);
+  const projectDragTargets = projectDrag
+    ? displayedProjectIds.filter((projectId) => projectId !== projectDrag.projectId)
+    : [];
+  const dropBeforeProjectId = projectDrag
+    ? (projectDragTargets[projectDrag.insertionIndex] ?? null)
+    : null;
+  const dropAfterProjectId =
+    projectDrag && dropBeforeProjectId === null ? (projectDragTargets.at(-1) ?? null) : null;
   const archive = archivedThreads.length > 0 && (
     <details className="archive-group">
       <summary>
@@ -545,7 +748,7 @@ function Sidebar({
         </button>
       </div>
       <nav className={`thread-nav ${projectListDirection}`} aria-label="Задачи" ref={threadNavRef}>
-        <div className="project-list">
+        <div className={`project-list${projectDrag ? " project-list-dragging" : ""}`}>
           {projectListDirection === "bottom-up" && archive}
           {orderedGroups.map((group) => {
             const key = group.project?.id ?? "ungrouped";
@@ -564,6 +767,21 @@ function Sidebar({
             const cannotMoveBelow = projectIndex === (isBottomUp ? 0 : lastProjectIndex);
             const projectHeader = (
               <div className="project-title">
+                {group.project && (
+                  <span
+                    aria-hidden="true"
+                    className="project-drag-handle"
+                    data-project-drag-handle
+                    onLostPointerCapture={cancelProjectDrag}
+                    onPointerCancel={cancelProjectDrag}
+                    onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
+                    onPointerMove={moveProjectDrag}
+                    onPointerUp={finishProjectDrag}
+                    title={`Перетащить проект ${group.project.displayName}`}
+                  >
+                    <GripVerticalIcon />
+                  </span>
+                )}
                 <button
                   aria-controls={sessionsId}
                   aria-expanded={!groupCollapsed}
@@ -603,7 +821,7 @@ function Sidebar({
                           onClick={(event) =>
                             void moveProject(
                               group.project!.id,
-                              moveAboveDirection,
+                              { direction: moveAboveDirection },
                               event.currentTarget.closest("details"),
                             )
                           }
@@ -616,7 +834,7 @@ function Sidebar({
                           onClick={(event) =>
                             void moveProject(
                               group.project!.id,
-                              moveBelowDirection,
+                              { direction: moveBelowDirection },
                               event.currentTarget.closest("details"),
                             )
                           }
@@ -673,8 +891,20 @@ function Sidebar({
                 {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
               </div>
             );
+            const projectGroupClasses = [
+              "project-group",
+              group.project?.id === projectDrag?.projectId ? "project-group-dragging" : "",
+              group.project?.id === dropBeforeProjectId ? "project-drop-before" : "",
+              group.project?.id === dropAfterProjectId ? "project-drop-after" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
             return (
-              <section className="project-group" key={key}>
+              <section
+                className={projectGroupClasses}
+                data-project-id={group.project?.id}
+                key={key}
+              >
                 {projectHeader}
                 {feedback}
                 {sessions}

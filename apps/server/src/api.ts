@@ -593,20 +593,53 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/projects/:id/move",
     async (request, reply) => {
       const body = requireRecord<MoveProjectRequest>(request.body);
-      if (body.direction !== "up" && body.direction !== "down") {
+      const hasDirection = body.direction !== undefined;
+      const hasTargetIndex = body.targetIndex !== undefined;
+      if (hasDirection === hasTargetIndex) {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "exactly one of direction or targetIndex is required",
+        );
+      }
+      if (hasDirection && body.direction !== "up" && body.direction !== "down") {
         return apiError(reply, 400, "validation_failed", "direction must be up or down");
       }
       const projects = store.snapshot().projects;
       const index = projects.findIndex((project) => project.id === request.params.id);
       if (index < 0) return apiError(reply, 404, "not_found", "Project not found");
-      const targetIndex = body.direction === "up" ? index - 1 : index + 1;
+      let targetIndex: number;
+      if (hasTargetIndex) {
+        if (
+          typeof body.targetIndex !== "number" ||
+          !Number.isInteger(body.targetIndex) ||
+          body.targetIndex < 0
+        ) {
+          return apiError(
+            reply,
+            400,
+            "validation_failed",
+            "targetIndex must be a non-negative integer",
+          );
+        }
+        targetIndex = body.targetIndex;
+      } else {
+        targetIndex = body.direction === "up" ? index - 1 : index + 1;
+      }
+      if (hasTargetIndex && targetIndex >= projects.length) {
+        return apiError(reply, 400, "validation_failed", "targetIndex is outside the project list");
+      }
       if (targetIndex < 0 || targetIndex >= projects.length) return projects;
+      if (targetIndex === index) return projects;
 
       const updated = await store.update((state) => {
-        [state.projects[index], state.projects[targetIndex]] = [
-          state.projects[targetIndex]!,
-          state.projects[index]!,
-        ];
+        const currentIndex = state.projects.findIndex(
+          (project) => project.id === request.params.id,
+        );
+        if (currentIndex < 0) throw new ProjectNotFoundError("Project not found");
+        const [project] = state.projects.splice(currentIndex, 1);
+        state.projects.splice(targetIndex, 0, project!);
       });
       projection.publishProjectsReordered(updated.projects);
       return updated.projects;

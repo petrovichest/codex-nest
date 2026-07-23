@@ -323,6 +323,16 @@ pre {
   min-height: 100%;
 }
 
+.project-list-dragging {
+  user-select: none;
+}
+
+.project-list-dragging .project-sessions,
+.project-list-dragging .project-action-notice,
+.project-list-dragging .project-create-error {
+  display: none;
+}
+
 .thread-nav.bottom-up .project-list {
   display: flex;
   flex-direction: column;
@@ -333,7 +343,33 @@ pre {
 }
 
 .project-group {
+  position: relative;
   margin-top: 10px;
+}
+
+.project-group.project-drop-before::before,
+.project-group.project-drop-after::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  left: 4px;
+  z-index: 2;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.project-group.project-drop-before::before {
+  top: -6px;
+}
+
+.project-group.project-drop-after::after {
+  bottom: -6px;
+}
+
+.project-group-dragging .project-title {
+  opacity: 0.46;
 }
 
 .project-title {
@@ -346,6 +382,28 @@ pre {
   color: var(--muted-strong);
   font-size: 13px;
   font-weight: 600;
+}
+
+.project-drag-handle {
+  width: 26px;
+  min-width: 26px;
+  height: 31px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  cursor: grab;
+  touch-action: none;
+}
+
+.project-drag-handle svg {
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+}
+
+.project-group-dragging .project-drag-handle {
+  cursor: grabbing;
 }
 
 .project-title:hover,
