@@ -2,8 +2,9 @@
 
 CodexNest targets Android 10 (API 29) and newer. The app uses `http://localhost` as its
 Capacitor origin. Network Security Configuration permits the user-selected LAN/VPN HTTP
-deployment and trusts system CA certificates without disabling normal TLS hostname/IP
-verification.
+deployment and trusts system CA certificates plus CA certificates explicitly installed
+by the device owner, without disabling normal TLS hostname/IP verification. Install only
+a private CA that you control and use it only for trusted LAN/VPN services.
 
 LAN HTTP does not encrypt the bearer token, session contents, command output, or approval
 decisions. Prefer HTTP inside a private WireGuard/Tailscale tunnel, or use it only on a
