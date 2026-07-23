@@ -342,9 +342,16 @@ pre {
   align-items: center;
   gap: 2px;
   padding: 0 4px;
+  border-radius: 7px;
   color: var(--muted-strong);
   font-size: 13px;
   font-weight: 600;
+}
+
+.project-title:hover,
+.project-title:focus-within {
+  color: var(--text);
+  background: var(--sidebar-hover);
 }
 
 .project-toggle {
@@ -363,11 +370,11 @@ pre {
   font: inherit;
 }
 
-.project-toggle:hover,
+.project-toggle:hover:not(:disabled),
 .project-toggle:focus-visible {
   border-color: transparent;
-  color: var(--text);
-  background: var(--sidebar-hover);
+  color: inherit;
+  background: transparent;
 }
 
 .project-toggle svg {
