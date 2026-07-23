@@ -3,6 +3,8 @@ export const EVENTS_PATH = `${API_PREFIX}/events`;
 
 export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
 
+export type AgentId = "codex" | "claude";
+
 export type HealthResponse = {
   status: "ok" | "degraded";
   serverVersion: string;
@@ -11,6 +13,12 @@ export type HealthResponse = {
     installedVersion: string | null;
     message: string | null;
   };
+  backends?: Array<{
+    agent: AgentId;
+    state: AppServerState;
+    installedVersion: string | null;
+    message: string | null;
+  }>;
 };
 
 export type SummaryResponse = {
@@ -94,6 +102,13 @@ export type CodexManagementStatus = {
   proxy: CodexProxyStatus;
 };
 
+export type ClaudeManagementStatus = {
+  supported: boolean;
+  unavailableReason: string | null;
+  cliVersion: string | null;
+  path: string | null;
+};
+
 export type AppUpdateOperation =
   "idle" | "checking" | "preparing" | "building" | "switching" | "restarting";
 
@@ -160,6 +175,7 @@ export type ThreadState = "needsAttention" | "running" | ThreadOutcome | "idle" 
 
 export type ThreadSummary = {
   id: string;
+  agent: AgentId;
   projectId: string | null;
   title: string;
   preview: string;
@@ -346,6 +362,7 @@ export type SessionSettings = {
   reasoningEffort?: string;
   serviceTier?: string;
   personality?: string;
+  permissionPreset?: PermissionPreset;
 };
 
 export type TaskDefaults = {
@@ -522,6 +539,12 @@ export type ConnectionView = {
   syncedAt: string | null;
 };
 
+export type BackendStatus = {
+  agent: AgentId;
+  connection: ConnectionView;
+  models: ModelOption[];
+};
+
 export type AppSnapshot = {
   sequence: number;
   connection: ConnectionView;
@@ -532,6 +555,7 @@ export type AppSnapshot = {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   pushConfigured: boolean;
+  backends?: BackendStatus[];
 };
 
 export type ServerEvent =
@@ -547,6 +571,7 @@ export type ServerEvent =
   | { type: "attention.upserted"; attention: AttentionRequest }
   | { type: "attention.removed"; attentionId: string }
   | { type: "models.changed"; models: ModelOption[] }
+  | { type: "backend.changed"; backend: BackendStatus }
   | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
   | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
   | { type: "goal.changed"; threadId: string; goal: ThreadGoal | null }
@@ -585,6 +610,11 @@ export type CreateThreadRequest = {
   goal?: boolean;
   settings?: UpdateThreadSettingsRequest;
   clientMessageId?: string;
+  agent?: AgentId;
+};
+
+export type CreateProjectThreadRequest = {
+  agent?: AgentId;
 };
 
 export type CreateProjectThreadResponse = {
