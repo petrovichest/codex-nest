@@ -166,6 +166,7 @@ export type ThreadSummary = {
   cwd: string;
   state: ThreadState;
   unread: boolean;
+  unseen: boolean;
   pinned: boolean;
   archived: boolean;
   createdAt: number;

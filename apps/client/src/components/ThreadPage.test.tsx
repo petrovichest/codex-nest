@@ -27,6 +27,7 @@ const summary: ThreadSummary = {
   cwd: "/work/project",
   state: "idle",
   unread: false,
+  unseen: false,
   pinned: false,
   archived: false,
   createdAt: 1,

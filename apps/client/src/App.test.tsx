@@ -38,6 +38,7 @@ const baseThread: ThreadSummary = {
   cwd: "/work/project",
   state: "idle",
   unread: false,
+  unseen: false,
   pinned: false,
   archived: false,
   createdAt: 1,
@@ -244,23 +245,39 @@ describe("App routing and navigation", () => {
     ).toHaveTextContent("Повторить лимиты");
   });
 
-  it("uses one status indicator and dims acknowledged interruptions", () => {
+  it("pulses unseen outcomes and dims acknowledged sessions", () => {
     const threads: ThreadSummary[] = [
       { ...baseThread, id: "completed-read", title: "Прочитана", state: "completed" },
+      {
+        ...baseThread,
+        id: "completed-seen",
+        title: "Ответ просмотрен",
+        state: "completed",
+        unread: true,
+      },
       {
         ...baseThread,
         id: "completed-unread",
         title: "Новый результат",
         state: "completed",
         unread: true,
+        unseen: true,
       },
-      { ...baseThread, id: "failed", title: "Ошибка", state: "failed", unread: true },
+      {
+        ...baseThread,
+        id: "failed",
+        title: "Ошибка",
+        state: "failed",
+        unread: true,
+        unseen: true,
+      },
       {
         ...baseThread,
         id: "interrupted-unread",
         title: "Прервана",
         state: "interrupted",
         unread: true,
+        unseen: true,
       },
       {
         ...baseThread,
@@ -276,13 +293,15 @@ describe("App routing and navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: /Показать ещё/ }));
 
     expect(statusFor("Прочитана")).toHaveClass("status-completed");
-    expect(statusFor("Новый результат")).toHaveClass("status-completed-unread");
-    expect(statusFor("Ошибка")).toHaveClass("status-failed");
-    expect(statusFor("Прервана")).toHaveClass("status-interrupted");
+    expect(statusFor("Ответ просмотрен")).toHaveClass("status-completed-unread");
+    expect(statusFor("Ответ просмотрен")).not.toHaveClass("status-unseen");
+    expect(statusFor("Новый результат")).toHaveClass("status-completed-unread", "status-unseen");
+    expect(statusFor("Ошибка")).toHaveClass("status-failed", "status-unseen");
+    expect(statusFor("Прервана")).toHaveClass("status-interrupted", "status-unseen");
     expect(statusFor("Прерывание прочитано")).toHaveClass("status-interrupted-read");
     expect(statusFor("Выполняется")).toHaveClass("status-running");
     expect(statusFor("Нужно внимание")).toHaveClass("status-needsAttention");
-    expect(container.querySelectorAll(".thread-link .status")).toHaveLength(7);
+    expect(container.querySelectorAll(".thread-link .status")).toHaveLength(8);
     expect(container.querySelector(".unread")).toBeNull();
   });
 

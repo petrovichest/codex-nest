@@ -635,13 +635,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(
     "/api/v1/threads/:id",
     async (request, reply) => {
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
+      const observed = projection.summary(request.params.id);
+      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
       const cursor =
         typeof request.query.cursor === "string" && request.query.cursor.length
           ? request.query.cursor
           : null;
-      return projection.readThread(request.params.id, cursor);
+      const detail = await projection.readThread(request.params.id, cursor);
+      if (cursor === null && observed.unseen) {
+        await projection.markViewed(request.params.id, observed.updatedAt);
+        return {
+          ...detail,
+          summary: projection.summary(request.params.id) ?? detail.summary,
+        };
+      }
+      return detail;
     },
   );
 

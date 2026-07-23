@@ -266,6 +266,18 @@ export class AppProjection extends EventEmitter {
     this.publishThread(threadId);
   }
 
+  async markViewed(threadId: string, observedUpdatedAt: number): Promise<void> {
+    const cached = this.threads.get(threadId);
+    if (!cached) throw new Error("Thread not found");
+    const safeObserved = Math.min(observedUpdatedAt, cached.thread.updatedAt * 1_000);
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.lastViewedUpdatedAt = Math.max(meta.lastViewedUpdatedAt ?? 0, safeObserved);
+      state.threadMeta[threadId] = meta;
+    });
+    this.publishThread(threadId);
+  }
+
   async setPinned(threadId: string, pinned: boolean): Promise<void> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
     await this.store.update((state) => {
@@ -1007,16 +1019,17 @@ export class AppProjection extends EventEmitter {
     const state = this.store.snapshot();
     const meta = state.threadMeta[cached.thread.id] ?? { pinned: false, lastReadUpdatedAt: 0 };
     const updatedAt = cached.thread.updatedAt * 1_000;
+    const threadState = this.threadState(cached, meta.lastOutcome);
+    const unread = updatedAt > meta.lastReadUpdatedAt && isTerminal(threadState);
     return {
       id: cached.thread.id,
       projectId: projectForCwd(state.projects, cached.thread.cwd)?.id ?? null,
       title: cached.thread.name?.trim() || cached.thread.preview.trim() || "Без названия",
       preview: cached.thread.preview,
       cwd: cached.thread.cwd,
-      state: this.threadState(cached, meta.lastOutcome),
-      unread:
-        updatedAt > meta.lastReadUpdatedAt &&
-        isTerminal(this.threadState(cached, meta.lastOutcome)),
+      state: threadState,
+      unread,
+      unseen: unread && updatedAt > (meta.lastViewedUpdatedAt ?? 0),
       pinned: meta.pinned,
       archived: cached.archived,
       createdAt: cached.thread.createdAt * 1_000,

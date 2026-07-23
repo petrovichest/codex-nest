@@ -196,16 +196,30 @@ describe("AppProjection", () => {
     );
     projection.upsertThread(thread("one", "/work", 10));
 
-    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      unread: true,
+      unseen: true,
+    });
+
+    await projection.markViewed("one", 5_000);
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: true });
 
     await projection.markRead("one", 5_000);
     expect(projection.summary("one")?.unread).toBe(true);
 
+    await projection.markViewed("one", 10_000);
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+
     await projection.markRead("one", 10_000);
-    expect(projection.summary("one")?.unread).toBe(false);
+    expect(projection.summary("one")).toMatchObject({ unread: false, unseen: false });
 
     projection.upsertThread(thread("one", "/work", 11));
-    expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      unread: true,
+      unseen: true,
+    });
   });
 
   it("paginates exact thread count, reconciles outcomes once, and updates live terminal state", async () => {

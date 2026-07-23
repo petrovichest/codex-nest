@@ -12,6 +12,7 @@ const baseThread: ThreadSummary = {
   cwd: "/work",
   state: "running",
   unread: false,
+  unseen: false,
   pinned: false,
   archived: false,
   createdAt: 1,

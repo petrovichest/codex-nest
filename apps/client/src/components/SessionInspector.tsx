@@ -1,5 +1,6 @@
 import type { GitChangesSummary, Project, ThreadSummary } from "@codexnest/protocol";
 
+import { threadStatusClasses } from "../thread-status";
 import {
   ArchiveIcon,
   ClockIcon,
@@ -41,7 +42,7 @@ export function SessionInspector({
       <dl className="inspector-list">
         <InspectorRow icon={<ServerIcon />} label="Статус">
           <span className={`status-label status-label-${summary.state}`}>
-            <span className={`status status-${summary.state}`} />
+            <span className={threadStatusClasses(summary)} />
             {stateLabel(summary.state)}
           </span>
         </InspectorRow>

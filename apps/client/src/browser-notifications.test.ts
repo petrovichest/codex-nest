@@ -175,6 +175,7 @@ function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary
     cwd: "/work/project",
     state,
     unread: false,
+    unseen: false,
     pinned: false,
     archived: false,
     createdAt: 1,

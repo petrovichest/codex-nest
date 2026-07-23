@@ -675,6 +675,37 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    await store.update((state) => {
+      state.threadMeta.viewed = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 2_000,
+      };
+    });
+    projection.upsertThread({ ...testThread("viewed"), status: { type: "idle" } });
+    expect(projection.summary("viewed")).toMatchObject({ unread: true, unseen: true });
+
+    const viewed = await app.inject({ url: "/api/v1/threads/viewed", headers });
+    expect(viewed.statusCode).toBe(200);
+    expect(viewed.json().summary).toMatchObject({ unread: true, unseen: false });
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBe(2_000);
+
+    projection.upsertThread({
+      ...testThread("viewed"),
+      updatedAt: 3,
+      recencyAt: 3,
+      status: { type: "idle" },
+    });
+    expect(projection.summary("viewed")?.unseen).toBe(true);
+    const olderViewed = await app.inject({
+      url: "/api/v1/threads/viewed?cursor=older",
+      headers,
+    });
+    expect(olderViewed.statusCode).toBe(200);
+    expect(projection.summary("viewed")?.unseen).toBe(true);
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBe(2_000);
+
     const missingGitChanges = await app.inject({
       url: "/api/v1/threads/missing/git-changes",
       headers,
@@ -1416,6 +1447,9 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/resume") return {};
     if (method === "thread/name/set") return {};
     if (method === "thread/delete") return {};
+    if (method === "thread/turns/list") {
+      return { data: [], nextCursor: null, backwardsCursor: null };
+    }
     if (method === "turn/start") {
       if (this.failNextTurnStart) {
         this.failNextTurnStart = false;

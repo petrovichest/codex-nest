@@ -41,6 +41,7 @@ import { useConnection } from "./connection";
 import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
+import { threadStatusClasses } from "./thread-status";
 import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
@@ -688,12 +689,6 @@ function Sidebar({
 }
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
-  const statusClass =
-    thread.state === "completed" && thread.unread
-      ? "status-completed-unread"
-      : thread.state === "interrupted" && !thread.unread
-        ? "status-interrupted-read"
-        : `status-${thread.state}`;
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
@@ -701,7 +696,7 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
       onClick={onNavigate}
     >
       <span className="thread-link-title">{thread.title}</span>
-      <span className={`status ${statusClass}`} title={thread.state} />
+      <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );
 }

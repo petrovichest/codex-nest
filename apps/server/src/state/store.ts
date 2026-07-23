@@ -21,6 +21,7 @@ export type TimelineArtifact = Extract<
 export interface ThreadMetaState {
   pinned: boolean;
   lastReadUpdatedAt: number;
+  lastViewedUpdatedAt?: number;
   lastOutcome?: ThreadOutcome;
   outcomeUpdatedAt?: number;
   settings?: SessionSettings;
@@ -186,6 +187,7 @@ function validateState(value: unknown): CodexNestState {
       !isRecord(meta) ||
       typeof meta.pinned !== "boolean" ||
       typeof meta.lastReadUpdatedAt !== "number" ||
+      (meta.lastViewedUpdatedAt !== undefined && typeof meta.lastViewedUpdatedAt !== "number") ||
       (meta.lastOutcome !== undefined &&
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
       (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||

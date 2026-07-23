@@ -52,6 +52,7 @@ describe("StateStore", () => {
       state.threadMeta.configured = {
         pinned: false,
         lastReadUpdatedAt: 2,
+        lastViewedUpdatedAt: 2,
         settings: {
           collaborationMode: "plan",
           model: "gpt",
@@ -66,6 +67,7 @@ describe("StateStore", () => {
     await reloaded.load();
     expect(reloaded.snapshot().defaultReasoningEffort).toBe("high");
     expect(reloaded.snapshot().threadMeta.legacy?.settings).toBeUndefined();
+    expect(reloaded.snapshot().threadMeta.configured?.lastViewedUpdatedAt).toBe(2);
     expect(reloaded.snapshot().threadMeta.configured?.settings).toEqual({
       collaborationMode: "plan",
       model: "gpt",

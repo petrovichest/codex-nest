@@ -13,6 +13,7 @@ const summary: ThreadSummary = {
   cwd: "/work/project",
   state: "idle",
   unread: false,
+  unseen: false,
   pinned: false,
   archived: false,
   createdAt: 1,
@@ -63,13 +64,45 @@ describe("SessionInspector", () => {
     expect(screen.queryByText("Среда")).not.toBeInTheDocument();
     expect(screen.queryByText("Локальный сервер готов")).not.toBeInTheDocument();
   });
+
+  it("uses the same pulsing outcome status as the session list", () => {
+    const unseen = {
+      ...summary,
+      state: "interrupted" as const,
+      unread: true,
+      unseen: true,
+    };
+    const view = renderInspector(
+      { state: "clean", filesChanged: 0, additions: 0, deletions: 0 },
+      unseen,
+    );
+
+    expect(view.container.querySelector(".status")).toHaveClass(
+      "status-interrupted",
+      "status-unseen",
+    );
+
+    view.rerender(
+      <SessionInspector
+        open
+        summary={{ ...unseen, unseen: false }}
+        project={project}
+        gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
+        onClose={() => undefined}
+        onPin={vi.fn()}
+        onArchive={vi.fn()}
+      />,
+    );
+    expect(view.container.querySelector(".status")).toHaveClass("status-interrupted");
+    expect(view.container.querySelector(".status")).not.toHaveClass("status-unseen");
+  });
 });
 
-function renderInspector(gitChanges: GitChangesView) {
+function renderInspector(gitChanges: GitChangesView, thread = summary) {
   return render(
     <SessionInspector
       open
-      summary={summary}
+      summary={thread}
       project={project}
       gitChanges={gitChanges}
       onClose={() => undefined}

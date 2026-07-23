@@ -534,17 +534,49 @@ pre {
   background: var(--success);
 }
 
+.status-completed-unread {
+  --status-pulse-color: var(--success);
+}
+
 .status-failed,
 .connection-dot.offline {
   background: var(--danger);
 }
 
+.status-failed {
+  --status-pulse-color: var(--danger);
+}
+
 .status-interrupted {
+  --status-pulse-color: #9974db;
   background: #9974db;
 }
 
 .status-interrupted-read {
   background: #a0a39d;
+}
+
+.status-unseen {
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-pulse-color, #a0a39d) 42%, transparent);
+  }
+
+  50% {
+    transform: scale(1.18);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--status-pulse-color, #a0a39d) 8%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-unseen {
+    animation: none;
+  }
 }
 
 .show-more {
