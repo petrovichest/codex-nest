@@ -6,11 +6,15 @@ import type { AppUpdateStatus } from "@codexnest/protocol";
 import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 
 const connection = vi.hoisted(() => vi.fn());
+const openDownloadUrl = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
+vi.mock("../downloads", () => ({ openDownloadUrl }));
 
 beforeEach(() => {
   connection.mockReset();
+  openDownloadUrl.mockReset();
+  openDownloadUrl.mockResolvedValue(undefined);
   vi.restoreAllMocks();
 });
 
@@ -73,6 +77,45 @@ describe("ApplicationSettingsCard", () => {
 
     expect(await screen.findByText("Managed installer is required")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Проверить обновления" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Скачать свежий APK" })).toBeEnabled();
+  });
+
+  it("opens the rolling APK download without another API request", async () => {
+    const api = {
+      settings: { baseUrl: "https://codex.home.arpa" },
+      readAppSettings: vi.fn(async () => updateStatus({ supported: false })),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Скачать свежий APK" }));
+
+    await waitFor(() =>
+      expect(openDownloadUrl).toHaveBeenCalledWith(
+        "https://codex.home.arpa",
+        "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk",
+      ),
+    );
+    expect(api.checkAppUpdate).not.toHaveBeenCalled();
+    expect(api.updateApp).not.toHaveBeenCalled();
+  });
+
+  it("shows an error when the APK download cannot be opened", async () => {
+    openDownloadUrl.mockRejectedValueOnce(new Error("browser failed"));
+    const api = {
+      settings: { baseUrl: "https://codex.home.arpa" },
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Скачать свежий APK" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось открыть загрузку APK");
   });
 
   it("keeps polling across a restart and shows the final updater result", async () => {

@@ -62,6 +62,84 @@ jobs:
       - run: ./gradlew assembleDebug
         working-directory: apps/client/android
 
+  android-latest:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/mvp'
+    needs: [verify, android-debug]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: android-latest
+      cancel-in-progress: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - run: npm ci
+      - run: npm run build
+      - run: npm run android:sync -w @codexnest/client
+      - name: Validate Android signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.CODEXNEST_ANDROID_KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEY_ALIAS"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+      - name: Prepare Android signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/codexnest.jks"
+          chmod 0600 "$RUNNER_TEMP/codexnest.jks"
+      - name: Build signed rolling APK
+        id: apk
+        env:
+          CODEXNEST_KEYSTORE_PATH: ${{ runner.temp }}/codexnest.jks
+          CODEXNEST_KEY_ALIAS: ${{ secrets.CODEXNEST_ANDROID_KEY_ALIAS }}
+          CODEXNEST_KEYSTORE_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_PASSWORD }}
+          CODEXNEST_KEY_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEY_PASSWORD }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          short_sha="${GITHUB_SHA::7}"
+          export CODEXNEST_ANDROID_VERSION_NAME="$package_version-$short_sha"
+          export CODEXNEST_ANDROID_VERSION_CODE="$((1000000 + GITHUB_RUN_NUMBER))"
+          ./gradlew assembleRelease
+          test -s app/build/outputs/apk/release/app-release.apk
+          mkdir -p ../../../release
+          cp app/build/outputs/apk/release/app-release.apk ../../../release/CodexNest-latest.apk
+          printf 'version=%s\n' "$CODEXNEST_ANDROID_VERSION_NAME" >> "$GITHUB_OUTPUT"
+        working-directory: apps/client/android
+      - name: Publish rolling Android prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK_VERSION: ${{ steps.apk.outputs.version }}
+        run: |
+          notes="Signed Android build $APK_VERSION from commit $GITHUB_SHA."
+          if gh release view android-latest >/dev/null 2>&1; then
+            gh release edit android-latest \
+              --prerelease \
+              --title "Latest Android build" \
+              --notes "$notes"
+          else
+            gh release create android-latest \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Latest Android build" \
+              --notes "$notes"
+          fi
+          gh release upload android-latest release/CodexNest-latest.apk --clobber
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [verify, installer-dry-run, android-debug]

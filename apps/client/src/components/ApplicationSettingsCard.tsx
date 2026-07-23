@@ -3,9 +3,13 @@ import { useCallback, useEffect, useState } from "react";
 import type { AppUpdateStatus } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { openDownloadUrl } from "../downloads";
 import { ServerIcon } from "./Icons";
 
 type Action = "checking" | "updating" | null;
+
+const LATEST_ANDROID_APK_URL =
+  "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk";
 
 export function ApplicationSettingsCard() {
   const { api, state } = useConnection();
@@ -72,6 +76,15 @@ export function ApplicationSettingsCard() {
     }
   }
 
+  async function downloadApk() {
+    setError(null);
+    try {
+      await openDownloadUrl(api.settings.baseUrl, LATEST_ANDROID_APK_URL);
+    } catch {
+      setError("Не удалось открыть загрузку APK");
+    }
+  }
+
   const busy = action !== null || (status !== null && status.operation !== "idle");
 
   return (
@@ -131,6 +144,9 @@ export function ApplicationSettingsCard() {
           )}
 
           <div className="settings-actions codex-actions">
+            <button type="button" onClick={() => void downloadApk()}>
+              Скачать свежий APK
+            </button>
             <button
               disabled={!status?.supported || busy}
               type="button"

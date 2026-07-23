@@ -1,4 +1,12 @@
+import groovy.json.JsonSlurper
+
 apply plugin: 'com.android.application'
+
+def packageVersion = new JsonSlurper().parse(file('../../../../package.json')).version as String
+def codexNestVersionName = System.getenv('CODEXNEST_ANDROID_VERSION_NAME') ?: packageVersion
+def codexNestVersionCode = Integer.parseInt(
+    System.getenv('CODEXNEST_ANDROID_VERSION_CODE') ?: '2'
+)
 
 android {
     namespace = "com.codexnest.app"
@@ -7,8 +15,8 @@ android {
         applicationId "com.codexnest.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "0.1.1"
+        versionCode codexNestVersionCode
+        versionName codexNestVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
