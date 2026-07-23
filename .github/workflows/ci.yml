@@ -110,7 +110,7 @@ jobs:
           CODEXNEST_KEYSTORE_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEYSTORE_PASSWORD }}
           CODEXNEST_KEY_PASSWORD: ${{ secrets.CODEXNEST_ANDROID_KEY_PASSWORD }}
         run: |
-          package_version="$(node -p "require('./package.json').version")"
+          package_version="$(node -p "require('../../../package.json').version")"
           short_sha="${GITHUB_SHA::7}"
           export CODEXNEST_ANDROID_VERSION_NAME="$package_version-$short_sha"
           export CODEXNEST_ANDROID_VERSION_CODE="$((1000000 + GITHUB_RUN_NUMBER))"
