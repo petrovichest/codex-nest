@@ -28,13 +28,15 @@ describe("CodexSettingsCard", () => {
     render(<CodexSettingsCard />);
 
     expect(await screen.findByText("Не проверялась")).toBeInTheDocument();
+    expect(screen.getByText("Установленная версия Codex CLI")).toBeInTheDocument();
+    expect(screen.getByText("Актуальная версия Codex CLI")).toBeInTheDocument();
     expect(api.checkCodex).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Проверить версию" }));
+    fireEvent.click(screen.getByRole("button", { name: "Проверить Codex CLI" }));
 
     expect(await screen.findByText("0.145.0")).toBeInTheDocument();
     expect(screen.getByText(/WebSocket ChatGPT\/OpenAI доступен/)).toBeInTheDocument();
     expect(api.checkCodex).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Обновить Codex" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Обновить Codex CLI" })).toBeEnabled();
   });
 
   it("sends a masked proxy once and clears the secret after applying it", async () => {
@@ -66,9 +68,9 @@ describe("CodexSettingsCard", () => {
     render(<CodexSettingsCard />);
 
     expect(await screen.findByText(/активных ответов: 1/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Обновить Codex" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Обновить Codex CLI" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Перезапустить" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Проверить версию" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Проверить Codex CLI" })).toBeEnabled();
   });
 
   it("requires confirmation before update and restart", async () => {
@@ -78,7 +80,7 @@ describe("CodexSettingsCard", () => {
     render(<CodexSettingsCard />);
 
     await screen.findByText("0.145.0");
-    fireEvent.click(screen.getByRole("button", { name: "Обновить Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Обновить Codex CLI" }));
     await waitFor(() => expect(api.updateCodex).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("button", { name: "Перезапустить" }));
     await waitFor(() => expect(api.restartCodex).toHaveBeenCalledOnce());

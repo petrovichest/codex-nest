@@ -7,14 +7,21 @@ import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 
 const connection = vi.hoisted(() => vi.fn());
 const openDownloadUrl = vi.hoisted(() => vi.fn());
+const isNativePlatform = vi.hoisted(() => vi.fn());
+const getAppInfo = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../downloads", () => ({ openDownloadUrl }));
+vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform } }));
+vi.mock("@capacitor/app", () => ({ App: { getInfo: getAppInfo } }));
 
 beforeEach(() => {
   connection.mockReset();
   openDownloadUrl.mockReset();
   openDownloadUrl.mockResolvedValue(undefined);
+  isNativePlatform.mockReset();
+  isNativePlatform.mockReturnValue(false);
+  getAppInfo.mockReset();
   vi.restoreAllMocks();
 });
 
@@ -38,12 +45,52 @@ describe("ApplicationSettingsCard", () => {
     expect(await screen.findByText("0.1.4-abcdef0")).toBeInTheDocument();
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Обновить CodexNest" })).toBeEnabled();
-    expect(screen.getByText("Последняя rolling-версия")).toBeInTheDocument();
+    expect(screen.getByText("Установлено на сервере")).toBeInTheDocument();
+    expect(screen.getByText("Актуальная версия в GitHub")).toBeInTheDocument();
+    expect(screen.getByText("APK на этом устройстве")).toBeInTheDocument();
+    expect(screen.getByText("Только в Android")).toBeInTheDocument();
+    expect(getAppInfo).not.toHaveBeenCalled();
     expect(
       screen.getByText(
         "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("shows the installed Android APK version and version code", async () => {
+    isNativePlatform.mockReturnValue(true);
+    getAppInfo.mockResolvedValue({
+      name: "CodexNest",
+      id: "com.codexnest.app",
+      version: "0.1.4-abcdef0",
+      build: "1000078",
+    });
+    const api = {
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+
+    expect(await screen.findByText("0.1.4-abcdef0 (1000078)")).toBeInTheDocument();
+    expect(getAppInfo).toHaveBeenCalledOnce();
+  });
+
+  it("handles an unavailable Android APK version", async () => {
+    isNativePlatform.mockReturnValue(true);
+    getAppInfo.mockRejectedValue(new Error("unavailable"));
+    const api = {
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+
+    expect(await screen.findByText("Не удалось определить")).toBeInTheDocument();
   });
 
   it("requires confirmation before handing the update to systemd", async () => {

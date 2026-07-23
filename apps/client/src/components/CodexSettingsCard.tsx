@@ -125,7 +125,7 @@ export function CodexSettingsCard() {
         <>
           <dl className="codex-status-grid">
             <div>
-              <dt>CLI</dt>
+              <dt>Установленная версия Codex CLI</dt>
               <dd>{status?.cliVersion ?? "—"}</dd>
             </div>
             <div>
@@ -137,7 +137,7 @@ export function CodexSettingsCard() {
               <dd>{daemonLabel(status?.daemonStatus)}</dd>
             </div>
             <div>
-              <dt>Последняя версия</dt>
+              <dt>Актуальная версия Codex CLI</dt>
               <dd>{status?.latestVersion ?? "Не проверялась"}</dd>
             </div>
           </dl>
@@ -217,14 +217,14 @@ export function CodexSettingsCard() {
 
           <div className="settings-actions codex-actions">
             <button disabled={!supported || busy} type="button" onClick={() => void check()}>
-              {action === "checking" ? "Проверяем…" : "Проверить версию"}
+              {action === "checking" ? "Проверяем…" : "Проверить Codex CLI"}
             </button>
             <button
               disabled={maintenanceDisabled || status?.updateAvailable !== true}
               type="button"
               onClick={() => void update()}
             >
-              {action === "updating" ? "Обновляем…" : "Обновить Codex"}
+              {action === "updating" ? "Обновляем…" : "Обновить Codex CLI"}
             </button>
             <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
               {action === "restarting" ? "Перезапускаем…" : "Перезапустить"}

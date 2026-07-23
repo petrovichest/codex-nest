@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { App as CapacitorApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 import type { AppUpdateStatus } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
@@ -17,6 +19,9 @@ export function ApplicationSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<Action>(null);
   const [error, setError] = useState<string | null>(null);
+  const [apkVersion, setApkVersion] = useState(
+    Capacitor.isNativePlatform() ? "Определяем…" : "Только в Android",
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -34,6 +39,21 @@ export function ApplicationSettingsCard() {
     if (state.network !== "connected") return;
     void load();
   }, [load, state.network]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let active = true;
+    void CapacitorApp.getInfo()
+      .then((info) => {
+        if (active) setApkVersion(`${info.version} (${info.build})`);
+      })
+      .catch(() => {
+        if (active) setApkVersion("Не удалось определить");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!status || status.operation === "idle") return;
@@ -107,12 +127,16 @@ export function ApplicationSettingsCard() {
         <>
           <dl className="codex-status-grid">
             <div>
-              <dt>Текущая версия</dt>
+              <dt>Установлено на сервере</dt>
               <dd>{status?.currentVersion ?? "—"}</dd>
             </div>
             <div>
-              <dt>Последняя rolling-версия</dt>
+              <dt>Актуальная версия в GitHub</dt>
               <dd>{status?.latestVersion ?? "Не проверялась"}</dd>
+            </div>
+            <div>
+              <dt>APK на этом устройстве</dt>
+              <dd>{apkVersion}</dd>
             </div>
             <div>
               <dt>Состояние</dt>
