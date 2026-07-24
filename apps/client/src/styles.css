@@ -739,6 +739,10 @@ pre {
   white-space: nowrap;
 }
 
+.codex-limits:disabled {
+  opacity: 1;
+}
+
 .server-status {
   min-height: 36px;
   display: flex;
