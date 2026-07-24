@@ -888,6 +888,32 @@ describe("App dual-agent sidebar", () => {
     await waitFor(() => expect(api.createProjectThread).toHaveBeenCalled());
     expect(api.createProjectThread.mock.calls[0].slice(0, 2)).toEqual(["project", "claude"]);
   });
+
+  it("disables an unavailable backend in the per-project create menu with its message", () => {
+    mockConnection({
+      ...snapshot([{ ...baseThread, agent: "claude" }]),
+      backends: [
+        {
+          agent: "codex",
+          connection: {
+            state: "unavailable",
+            message: "Codex app-server is unavailable",
+            syncedAt: null,
+          },
+          models: [],
+        },
+        backend("claude", "ready"),
+      ],
+    });
+
+    renderApp("/threads/newer");
+
+    expect(screen.getByRole("button", { name: "Codex" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Claude Code" })).toBeEnabled();
+    expect(document.querySelector(".new-session-agent-note")?.textContent).toContain(
+      "Codex app-server is unavailable",
+    );
+  });
 });
 
 function renderApp(path: string, onDisconnected = () => undefined) {

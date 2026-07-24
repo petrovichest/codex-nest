@@ -658,22 +658,35 @@ function Sidebar({
                           )}
                         </summary>
                         <div className="project-action-popover">
-                          {backends.map((entry) => (
-                            <button
-                              key={entry.agent}
-                              disabled={creatingProjectId !== null}
-                              type="button"
-                              onClick={(event) =>
-                                void createProjectThread(
-                                  group.project!.id,
-                                  entry.agent,
-                                  event.currentTarget.closest("details"),
-                                )
-                              }
-                            >
-                              <PlusIcon /> {agentLabel(entry.agent)}
-                            </button>
-                          ))}
+                          {backends.map((entry) => {
+                            const ready = entry.connection.state === "ready";
+                            return (
+                              <div className="new-session-agent" key={entry.agent}>
+                                <button
+                                  disabled={!ready || creatingProjectId !== null}
+                                  title={
+                                    ready ? undefined : (entry.connection.message ?? undefined)
+                                  }
+                                  type="button"
+                                  onClick={(event) =>
+                                    void createProjectThread(
+                                      group.project!.id,
+                                      entry.agent,
+                                      event.currentTarget.closest("details"),
+                                    )
+                                  }
+                                >
+                                  <PlusIcon /> {agentLabel(entry.agent)}
+                                </button>
+                                {!ready && (
+                                  <small className="new-session-agent-note">
+                                    {entry.connection.message ??
+                                      `${agentLabel(entry.agent)} недоступен`}
+                                  </small>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </details>
                     ) : (

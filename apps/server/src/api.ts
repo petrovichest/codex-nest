@@ -662,6 +662,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         .projects.find((candidate) => candidate.id === body.projectId);
       if (!project) return apiError(reply, 404, "not_found", "Project not found");
       const backend = resolveBackend(hub, body.agent);
+      assertSettingsAllowedForBackend(backend, body.settings);
       // Codex maintenance only gates Codex thread creation — never Claude's.
       if (backend instanceof CodexBackend) codexManager?.assertTurnsAllowed();
       const settings = mergeSettings(
@@ -735,6 +736,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "Settings cannot be changed while a turn is running",
         );
       }
+      assertSettingsAllowedForBackend(backend, patch);
       const settings = mergeSettings(summary.settings, patch, backend.models);
       const thread = await backend.setSettings(request.params.id, settings);
       if (backend instanceof CodexBackend && patch.reasoningEffort !== undefined) {
@@ -997,6 +999,19 @@ function resolveBackend(hub: SessionHub, agent: unknown): AgentBackend {
   const backend = hub.backend((agent === undefined ? "codex" : agent) as AgentId);
   if (!backend) throw new UnsupportedForAgentError("Выбранный агент недоступен");
   return backend;
+}
+
+/**
+ * The per-session permission preset is Claude-only (Codex keeps its global config preset),
+ * so reject it on any non-Claude thread. Matches the mergeSettings validation style (400).
+ */
+function assertSettingsAllowedForBackend(
+  backend: AgentBackend,
+  settings: UpdateThreadSettingsRequest | undefined,
+): void {
+  if (settings?.permissionPreset !== undefined && backend.agent !== "claude") {
+    throw new ProjectValidationError("permissionPreset is only supported for Claude threads");
+  }
 }
 
 function requireCodexThread(hub: SessionHub, threadId: string): CodexBackend {

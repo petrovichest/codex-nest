@@ -1727,4 +1727,37 @@ describe("project threads route (dual backend)", () => {
     });
     expect(created.statusCode).toBe(409);
   });
+
+  it("rejects a Claude-only permissionPreset when creating a Codex thread", async () => {
+    const { app } = await dualBackendApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers: { authorization: "Bearer correct" },
+      // Agent omitted → Codex; the preset is Claude-only and must be rejected up front.
+      payload: { projectId: "project", input: "hi", settings: { permissionPreset: "auto" } },
+    });
+    expect(created.statusCode).toBe(400);
+  });
+
+  it("accepts and persists permissionPreset on a Claude thread's settings", async () => {
+    const { app } = await dualBackendApp();
+    const headers = { authorization: "Bearer correct" };
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+      payload: { agent: "claude" },
+    });
+    const threadId = created.json().thread.id;
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/${threadId}/settings`,
+      headers,
+      payload: { permissionPreset: "full-access" },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().settings.permissionPreset).toBe("full-access");
+  });
 });
