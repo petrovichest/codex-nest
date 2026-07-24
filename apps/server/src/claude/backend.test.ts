@@ -440,6 +440,9 @@ describe("ClaudeBackend wasDelivered", () => {
       images: [],
       clientMessageId: "msg-1",
     });
+    // Deterministic from the message id, and a valid RFC-4122 v4 (version + variant bits set)
+    // so a future CLI uuid-format check can't reject it.
+    expect(turnId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     // The SDK persisted a user message stamped with our deterministic turn uuid.
     (sdk.getSessionMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
       {

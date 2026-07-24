@@ -695,14 +695,19 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
 }
 
 /**
- * Derives a stable, UUID-shaped turn id from the queue message id, so a crash mid-dispatch
- * lets `wasDelivered` recompute the same id and look it up in the transcript without a
- * durable field on the queue record. Direct turns with no client id get a random id.
+ * Derives a stable, RFC-4122-valid v4 turn id from the queue message id, so a crash
+ * mid-dispatch lets `wasDelivered` recompute the same id and look it up in the transcript
+ * without a durable field on the queue record. The version (4) and variant (10xx) nibbles
+ * are set so a future CLI uuid-format validation cannot reject it. Direct turns with no
+ * client id get a random id.
  */
 function turnUuidFor(clientMessageId: string | null): string {
   if (!clientMessageId) return randomUUID();
-  const hash = createHash("sha256").update(clientMessageId).digest("hex");
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+  const hex = createHash("sha256").update(clientMessageId).digest("hex").slice(0, 32).split("");
+  hex[12] = "4"; // version 4
+  hex[16] = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16); // variant 10xx
+  const h = hex.join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 /** Inserts timeline artifacts into a turn's items after their anchor (or at the end). */

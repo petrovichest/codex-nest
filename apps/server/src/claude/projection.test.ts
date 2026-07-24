@@ -637,6 +637,32 @@ describe("ClaudeLiveTurn", () => {
       expect(collection.some((item) => item.type === "tool" && item.title === "Task")).toBe(true);
     }
   });
+
+  it("gives multiple unsupported blocks distinct ids, converging live↔transcript", () => {
+    const turnId = "turn-unsupported";
+    const transcript: ClaudeTranscriptMessage[] = [
+      msg("user", turnId, [{ type: "text", text: "hi" }]),
+      msg(
+        "assistant",
+        "a1",
+        [{ type: "mystery_block_a" }, { type: "mystery_block_b" }],
+        "end_turn",
+      ),
+    ];
+    const transcriptTurn = buildClaudeTurns(transcript, "/work")[0]!;
+    const unsupported = transcriptTurn.items.filter((item) => item.type === "unsupported");
+    expect(unsupported).toHaveLength(2);
+    // Distinct ids — two unsupported blocks in one turn must not collide on `${turnId}:x0`.
+    expect(unsupported.map((item) => item.id)).toEqual([`${turnId}:x0`, `${turnId}:x1`]);
+
+    const live = new ClaudeLiveTurn(turnId, "/work");
+    live.prompt("hi", []);
+    live.ingestAssistant(transcript[1]!);
+    expect(live.items.map((item) => item.id)).toEqual(transcriptTurn.items.map((item) => item.id));
+    expect(live.items.map((item) => item.type)).toEqual(
+      transcriptTurn.items.map((item) => item.type),
+    );
+  });
 });
 
 describe("interrupt markers (real transcript fixture)", () => {

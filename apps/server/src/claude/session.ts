@@ -158,6 +158,9 @@ export class ClaudeSession {
     this.state = "interrupting";
     this.armWatchdog();
     try {
+      // The interrupt() receipt resolving does NOT clear the watchdog by design — only the
+      // error_during_execution result arriving (→ finishTurn) does. The watchdog is the
+      // force-close backstop for the case where that result never comes.
       await this.query?.interrupt();
     } catch {
       // Interrupt control-request failed; the watchdog force-aborts.

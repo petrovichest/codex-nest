@@ -154,6 +154,7 @@ export function buildTurnItems(
 /** Assigns block ids: an incrementing ordinal for text-like blocks, the id for tools. */
 class OrdinalCounter {
   private ordinal = 0;
+  private unsupported = 0;
   constructor(private readonly turnId: string) {}
 
   idFor(block: ClaudeContentBlock): string {
@@ -163,7 +164,12 @@ class OrdinalCounter {
       return id;
     }
     if (block.type === "tool_use") return (block as ToolUseBlock).id;
-    return `${this.turnId}:x${this.ordinal}`;
+    // Unsupported blocks get their own running index so several in one turn never collide
+    // on a single id (and don't perturb text ordinals). Both projection halves count them
+    // identically, so live and transcript stay converged.
+    const id = `${this.turnId}:x${this.unsupported}`;
+    this.unsupported += 1;
+    return id;
   }
 }
 

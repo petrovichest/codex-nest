@@ -87,6 +87,13 @@ function assistantMessage(uuid: string, content: unknown[], stopReason: string |
 function resultMessage(subtype: string, errors: string[] = []) {
   return { type: "result", subtype, session_id: "s", errors };
 }
+function streamTextDelta(text: string) {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: null,
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+  };
+}
 
 function makeSession(overrides: Partial<ClaudeSessionOptions> = {}) {
   const fake = new FakeQuery();
@@ -171,6 +178,39 @@ describe("ClaudeSession lifecycle", () => {
     const turnId = session.startTurn("hello", []);
     const prompt = events.activities.find((a) => a.item.type === "userMessage");
     expect(prompt?.item).toMatchObject({ type: "userMessage", text: "hello", id: `${turnId}:0` });
+  });
+
+  it("streams text deltas under a stable id that the finalizing message completes", async () => {
+    const { session, fake, events } = makeSession();
+    track(session);
+    const turnId = session.startTurn("hi", []);
+    fake.emit(initMessage());
+    fake.emit(streamTextDelta("Hel"));
+    fake.emit(streamTextDelta("lo"));
+    await flush();
+
+    const streamed = events.activities.filter((a) => a.item.type === "agentMessage");
+    // One activity per delta, growing text, all inProgress under the same stable id.
+    expect(streamed.map((a) => (a.item.type === "agentMessage" ? a.item.text : ""))).toEqual([
+      "Hel",
+      "Hello",
+    ]);
+    expect(streamed.every((a) => a.item.status === "inProgress")).toBe(true);
+    const streamId = streamed[0]!.item.id;
+    expect(streamId).toBe(`${turnId}:1`);
+    expect(streamed.every((a) => a.item.id === streamId)).toBe(true);
+
+    // The finalizing assistant message completes the SAME id (no provisional→canonical switch).
+    fake.emit(assistantMessage("a1", [{ type: "text", text: "Hello" }], "end_turn"));
+    fake.emit(resultMessage("success"));
+    await flush();
+    const finalAgent = events.activities.filter((a) => a.item.type === "agentMessage").at(-1);
+    expect(finalAgent!.item.id).toBe(streamId);
+    expect(finalAgent!.item).toMatchObject({
+      status: "completed",
+      text: "Hello",
+      phase: "final_answer",
+    });
   });
 
   it("closes cleanly after the idle timeout ends the input generator", async () => {
