@@ -96,4 +96,41 @@ describe("loadConfig", () => {
     expect(childProcessEnvironment({ EXTRA_VALUE: "kept" })).toMatchObject({ EXTRA_VALUE: "kept" });
     expect(childProcessEnvironment()).not.toHaveProperty("CODEXNEST_STT_OPENAI_API_KEY");
   });
+
+  it("defaults the Claude backend to auto with the bundled binary name", () => {
+    vi.stubEnv("CODEXNEST_CLAUDE_ENABLED", "");
+    vi.stubEnv("CODEXNEST_CLAUDE_BIN", "");
+    vi.stubEnv("CODEXNEST_CLAUDE_MODELS", "");
+    expect(loadConfig()).toMatchObject({
+      claudeBin: "claude",
+      claudeEnabled: "auto",
+      claudeIdleTimeoutMs: 300_000,
+      claudeMaxSessions: 3,
+      claudeModels: undefined,
+    });
+  });
+
+  it("accepts explicit Claude enablement modes and rejects unknown ones", () => {
+    vi.stubEnv("CODEXNEST_CLAUDE_ENABLED", "true");
+    expect(loadConfig().claudeEnabled).toBe("true");
+    vi.stubEnv("CODEXNEST_CLAUDE_ENABLED", "false");
+    expect(loadConfig().claudeEnabled).toBe("false");
+    vi.stubEnv("CODEXNEST_CLAUDE_ENABLED", "maybe");
+    expect(() => loadConfig()).toThrow("CODEXNEST_CLAUDE_ENABLED");
+  });
+
+  it("validates the Claude idle timeout and session cap", () => {
+    vi.stubEnv("CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS", "500");
+    expect(() => loadConfig()).toThrow("CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS");
+    vi.stubEnv("CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS", "60000");
+    vi.stubEnv("CODEXNEST_CLAUDE_MAX_SESSIONS", "0");
+    expect(() => loadConfig()).toThrow("CODEXNEST_CLAUDE_MAX_SESSIONS");
+    vi.stubEnv("CODEXNEST_CLAUDE_MAX_SESSIONS", "5");
+    expect(loadConfig()).toMatchObject({ claudeIdleTimeoutMs: 60_000, claudeMaxSessions: 5 });
+  });
+
+  it("carries the raw Claude models override for downstream validation", () => {
+    vi.stubEnv("CODEXNEST_CLAUDE_MODELS", '[{"id":"sonnet"}]');
+    expect(loadConfig().claudeModels).toBe('[{"id":"sonnet"}]');
+  });
 });

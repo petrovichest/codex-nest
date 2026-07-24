@@ -31,6 +31,11 @@ export interface AppConfig {
   managedInstall: boolean;
   updateStatusPath: string;
   managementCli: string;
+  claudeBin: string;
+  claudeEnabled: "auto" | "true" | "false";
+  claudeIdleTimeoutMs: number;
+  claudeMaxSessions: number;
+  claudeModels?: string;
 }
 
 function env(name: string): string | undefined {
@@ -76,6 +81,19 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const sttProvider =
     configuredSttProvider ?? (sttLocalUrl ? "local" : sttOpenAiApiKey ? "openai" : undefined);
 
+  const claudeEnabled = env("CODEXNEST_CLAUDE_ENABLED") ?? "auto";
+  if (claudeEnabled !== "auto" && claudeEnabled !== "true" && claudeEnabled !== "false") {
+    throw new Error("CODEXNEST_CLAUDE_ENABLED must be auto, true, or false");
+  }
+  const claudeIdleTimeoutMs = Number(env("CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS") ?? 300_000);
+  if (!Number.isInteger(claudeIdleTimeoutMs) || claudeIdleTimeoutMs < 1_000) {
+    throw new Error("CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS must be an integer of at least 1000");
+  }
+  const claudeMaxSessions = Number(env("CODEXNEST_CLAUDE_MAX_SESSIONS") ?? 3);
+  if (!Number.isInteger(claudeMaxSessions) || claudeMaxSessions < 1) {
+    throw new Error("CODEXNEST_CLAUDE_MAX_SESSIONS must be an integer of at least 1");
+  }
+
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
     port,
@@ -110,6 +128,11 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     updateStatusPath:
       env("CODEXNEST_UPDATE_STATUS_PATH") ?? resolve(stateRoot, "codexnest/update.json"),
     managementCli: env("CODEXNEST_MANAGEMENT_CLI") ?? resolve(homedir(), ".local/bin/codexnest"),
+    claudeBin: env("CODEXNEST_CLAUDE_BIN") ?? "claude",
+    claudeEnabled,
+    claudeIdleTimeoutMs,
+    claudeMaxSessions,
+    claudeModels: env("CODEXNEST_CLAUDE_MODELS"),
     ...overrides,
   };
 }

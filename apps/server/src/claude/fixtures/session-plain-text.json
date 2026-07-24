@@ -1,0 +1,141 @@
+{
+  "info": {
+    "sessionId": "890e55f3-edaa-4412-aa27-c0ec351ee0c5",
+    "summary": "Acknowledge request",
+    "lastModified": 1784839400126,
+    "fileSize": 13424,
+    "customTitle": "Acknowledge request",
+    "firstPrompt": "Reply with exactly: ok",
+    "gitBranch": "HEAD",
+    "cwd": "/private/tmp/claude-1938894507/-Users-oryuro-Desktop-codex-nest/bd971c14-a99d-4773-848a-84d84fc48a83/scratchpad/spike/sandbox",
+    "createdAt": 1784839398724
+  },
+  "messages": [
+    {
+      "type": "user",
+      "uuid": "209b2bb2-79ad-4281-a798-9ae52b3a8909",
+      "session_id": "890e55f3-edaa-4412-aa27-c0ec351ee0c5",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reply with exactly: ok"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "parent_agent_id": null,
+      "timestamp": "2026-07-23T20:43:18.731Z"
+    },
+    {
+      "type": "assistant",
+      "uuid": "62f01fae-b9f2-4f48-8493-d5bc86f20c94",
+      "session_id": "890e55f3-edaa-4412-aa27-c0ec351ee0c5",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CdKe54T2zEynrE3jpkBWa",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to reply with exactly: ok\n\nThis is a simple request. I should just respond with \"ok\" as instructed.",
+            "signature": "EvACCpMBCBAYAipAp4zzATmxqAgU88l1XUP6AsMEsB7HwntGRHRltX2NaF4t7exNbYi4npSSUsZqHHZDiPuI27ljzyhIK4QTrDbMcjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okY2U4MzJhZDItMTFlNi00NmYyLTkyYzAtZjBmZDY1YzBiMWYxEgy5l2BBKo1g2WtbL8oaDD0V1SSLzuRgI3XEyCIw/Enn7tm/fc042NIcDbwxpxjydbRgVlyF2QNJmfNhSs4tH9AYJad36KcuguUblSFqKokB6BXEBGcLh36STwLsKMnetSZr0Jk3gXq+vO1/ikBv1SpZUUToGxf4UTOXvCrFJ4hK+sjOomyiMSLgbIGs7m5NvX2EoqcbHZI9BtLb9diZ2da8aSgeC7O3rWqIP7ysudQE7kEdoivdvXnQD/EgtHAut8VEScafAvQHNxuUSV5p/A6u1RgcDm0N7lsYAQ=="
+          }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 18145,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 42,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 18145,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 10,
+              "output_tokens": 42,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 18145,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 18145
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "diagnostics": null
+      },
+      "parent_tool_use_id": null,
+      "parent_agent_id": null,
+      "timestamp": "2026-07-23T20:43:20.070Z"
+    },
+    {
+      "type": "assistant",
+      "uuid": "d9e70390-624a-4fe1-b6cf-785173c53320",
+      "session_id": "890e55f3-edaa-4412-aa27-c0ec351ee0c5",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CdKe54T2zEynrE3jpkBWa",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 18145,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 42,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 18145,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 10,
+              "output_tokens": 42,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 18145,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 18145
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "diagnostics": null
+      },
+      "parent_tool_use_id": null,
+      "parent_agent_id": null,
+      "timestamp": "2026-07-23T20:43:20.094Z"
+    }
+  ]
+}

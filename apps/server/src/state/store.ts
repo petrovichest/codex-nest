@@ -37,6 +37,19 @@ export interface DeviceState {
   updatedAt: number;
 }
 
+/** Registry entry for a Claude thread, keyed by the CodexNest threadId (uuid). */
+export interface ClaudeSessionState {
+  /** SDK session id; null until the first turn materializes it (Stage 3). */
+  sessionId: string | null;
+  cwd: string;
+  projectId: string;
+  createdAt: number;
+  title: string | null;
+  /** First user message text, shown in list rows. */
+  preview: string;
+  archived: boolean;
+}
+
 export interface CodexNestState {
   schemaVersion: 1;
   auth: { tokenSha256?: string };
@@ -46,6 +59,7 @@ export interface CodexNestState {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
+  claudeSessions?: Record<string, ClaudeSessionState>;
 }
 
 export function emptyState(): CodexNestState {
@@ -170,6 +184,16 @@ function validateState(value: unknown): CodexNestState {
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
   }
+  if (value.claudeSessions !== undefined) {
+    if (!isRecord(value.claudeSessions)) {
+      throw new Error("Corrupt Claude sessions in CodexNest state");
+    }
+    for (const session of Object.values(value.claudeSessions)) {
+      if (!isClaudeSessionState(session)) {
+        throw new Error("Corrupt Claude session in CodexNest state");
+      }
+    }
+  }
   if (
     value.defaultReasoningEffort !== undefined &&
     (typeof value.defaultReasoningEffort !== "string" || !value.defaultReasoningEffort.trim())
@@ -226,6 +250,19 @@ function validateState(value: unknown): CodexNestState {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
   return value as unknown as CodexNestState;
+}
+
+function isClaudeSessionState(value: unknown): value is ClaudeSessionState {
+  return (
+    isRecord(value) &&
+    (value.sessionId === null || typeof value.sessionId === "string") &&
+    typeof value.cwd === "string" &&
+    typeof value.projectId === "string" &&
+    typeof value.createdAt === "number" &&
+    (value.title === null || typeof value.title === "string") &&
+    typeof value.preview === "string" &&
+    typeof value.archived === "boolean"
+  );
 }
 
 function isTimelineArtifacts(value: unknown): value is Record<string, TimelineArtifact[]> {

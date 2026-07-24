@@ -42,6 +42,62 @@ describe("StateStore", () => {
     await expect(new StateStore(path).load()).rejects.toThrow("Unsupported or corrupt");
   });
 
+  it("round-trips the Claude session registry", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.claudeSessions = {
+        "thread-1": {
+          sessionId: null,
+          cwd: "/work",
+          projectId: "p",
+          createdAt: 10,
+          title: null,
+          preview: "",
+          archived: false,
+        },
+        "thread-2": {
+          sessionId: "session-abc",
+          cwd: "/work",
+          projectId: "p",
+          createdAt: 20,
+          title: "Named",
+          preview: "hi",
+          archived: true,
+        },
+      };
+    });
+    await store.flushed();
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().claudeSessions?.["thread-2"]).toMatchObject({
+      sessionId: "session-abc",
+      title: "Named",
+      archived: true,
+    });
+  });
+
+  it("rejects a corrupt Claude session entry", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await expect(
+      store.update((state) => {
+        (state as { claudeSessions: Record<string, unknown> }).claudeSessions = {
+          bad: {
+            sessionId: 5,
+            cwd: "/work",
+            projectId: "p",
+            createdAt: 1,
+            preview: "",
+            archived: false,
+          },
+        };
+      }),
+    ).rejects.toThrow("Corrupt Claude session");
+  });
+
   it("accepts legacy permission fields for backward-compatible state loading", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
