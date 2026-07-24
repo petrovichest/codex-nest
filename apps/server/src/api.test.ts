@@ -389,6 +389,20 @@ describe("HTTP authentication", () => {
       event: { type: "thread.upserted" },
     });
     expect(secondBroadcast).toEqual(firstBroadcast);
+
+    const resynced = new Promise<Record<string, unknown>>((resolve) => {
+      authorized.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    projection.emit("event", 999, { type: "resync.required" });
+    await expect(resynced).resolves.toMatchObject({
+      type: "snapshot",
+      snapshot: {
+        threads: [expect.objectContaining({ id: "broadcast" })],
+      },
+    });
+
     authorized.terminate();
     secondAuthorized.terminate();
 
