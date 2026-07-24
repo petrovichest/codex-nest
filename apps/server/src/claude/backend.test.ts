@@ -770,4 +770,82 @@ describe("ClaudeBackend setSettings", () => {
     });
     expect(queries[0]!.permissionModes).toEqual(["bypassPermissions"]);
   });
+
+  it("closes an idle pooled session on a model change so the next turn rebuilds the query", async () => {
+    const models: Array<string | undefined> = [];
+    const created: FakeQuery[] = [];
+    const { backend } = await setup({
+      sdk: {
+        query: (params) => {
+          models.push((params.options as { model?: string }).model);
+          const query = new FakeQuery();
+          created.push(query);
+          return query as unknown as ClaudeQuery;
+        },
+      },
+    });
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", {
+      collaborationMode: "default",
+      model: "sonnet",
+    });
+
+    // First turn parks the session idle in the pool, its query fixed to the "sonnet" model.
+    await backend.startTurn(id, { text: "hi", images: [], clientMessageId: null });
+    created[0]!.emit(initMsg());
+    created[0]!.emit(resultMsg("success"));
+    await waitFor(() => backend.currentTurnId(id) === null);
+    expect(backend.openSessionCount).toBe(1);
+    expect(models).toEqual(["sonnet"]);
+
+    // Changing the model must close the stale idle session — model is baked into the query.
+    await backend.setSettings(id, { collaborationMode: "default", model: "opus" });
+    expect(backend.openSessionCount).toBe(0);
+
+    // The next turn builds a FRESH query carrying the new model.
+    await backend.startTurn(id, { text: "again", images: [], clientMessageId: null });
+    expect(created).toHaveLength(2);
+    expect(models).toEqual(["sonnet", "opus"]);
+    expect(backend.openSessionCount).toBe(1);
+  });
+
+  it("closes an idle pooled session on a reasoning-effort change", async () => {
+    const { backend, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", {
+      collaborationMode: "default",
+      model: "sonnet",
+      reasoningEffort: "medium",
+    });
+    await backend.startTurn(id, { text: "hi", images: [], clientMessageId: null });
+    queries[0]!.emit(initMsg());
+    queries[0]!.emit(resultMsg("success"));
+    await waitFor(() => backend.currentTurnId(id) === null);
+    expect(backend.openSessionCount).toBe(1);
+
+    await backend.setSettings(id, {
+      collaborationMode: "default",
+      model: "sonnet",
+      reasoningEffort: "high",
+    });
+    expect(backend.openSessionCount).toBe(0);
+  });
+
+  it("keeps a busy session alive when settings change (applies on the next resume)", async () => {
+    const { backend, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", {
+      collaborationMode: "default",
+      model: "sonnet",
+    });
+    // Leave the turn running (no result) → the session is busy.
+    await backend.startTurn(id, { text: "hi", images: [], clientMessageId: null });
+    queries[0]!.emit(initMsg());
+    await flush();
+    expect(backend.openSessionCount).toBe(1);
+
+    await backend.setSettings(id, { collaborationMode: "default", model: "opus" });
+    // A busy session is left alone rather than torn down mid-turn.
+    expect(backend.openSessionCount).toBe(1);
+  });
 });

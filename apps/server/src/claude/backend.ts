@@ -368,10 +368,23 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
 
   async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
     this.assertOwned(threadId);
+    const previous = this.store.snapshot().threadMeta[threadId]?.settings;
     await setThreadSettings(this.store, threadId, settings);
-    // A live (idle-pooled) session picks up a permission-preset change immediately; the api
-    // layer only permits settings edits between turns, so this never races a running turn.
-    this.sessions.get(threadId)?.session.setPermissionMode(permissionModeFor(settings));
+    const pooled = this.sessions.get(threadId);
+    const queryOptionsChanged =
+      previous?.model !== settings.model || previous?.reasoningEffort !== settings.reasoningEffort;
+    // model/effort are baked into the SDK query options when the session's query is built, so
+    // an idle-pooled session would keep running the OLD model/effort on the next turn. When
+    // either actually changed, close the (non-busy) session so the next turn starts a fresh
+    // query with the new options. A busy session is left alone — it picks up the change on the
+    // next resume, matching the permission-mode semantics below.
+    if (pooled && queryOptionsChanged && !pooled.session.busy) {
+      pooled.session.close("settings-changed");
+    } else {
+      // A live (idle-pooled) session picks up a permission-preset change immediately; the api
+      // layer only permits settings edits between turns, so this never races a running turn.
+      pooled?.session.setPermissionMode(permissionModeFor(settings));
+    }
     this.publishThread(threadId);
     return this.summary(threadId)!;
   }

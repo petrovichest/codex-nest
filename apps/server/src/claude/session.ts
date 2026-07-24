@@ -24,6 +24,7 @@ const INTERRUPT_WATCHDOG_MS = 10_000;
  */
 const AUTH_ERROR = /login|log in|authenticat|unauthor|api key|anthropic_api_key|oauth|credential/i;
 const AUTH_MESSAGE = "Выполните `claude login` на сервере";
+const PERMISSION_DENIED = "Инструмент отклонён настройками разрешений";
 
 export type ClaudeSessionState =
   "idle" | "starting" | "streaming" | "awaiting-idle" | "interrupting" | "closed";
@@ -261,6 +262,8 @@ export class ClaudeSession {
         if (message.subtype === "init" && typeof message.session_id === "string") {
           this.sessionId = message.session_id;
           this.options.callbacks.onInit(message.session_id);
+        } else if (message.subtype === "permission_denied") {
+          this.handlePermissionDenied(message);
         }
         return;
       case "assistant":
@@ -296,6 +299,18 @@ export class ClaudeSession {
       item = this.liveTurnProjector.streamDelta("thinking", delta.thinking);
     }
     if (item) this.options.callbacks.onActivity(item, this.currentTurnId);
+  }
+
+  /**
+   * A tool call the SDK auto-rejected by the permission settings (it never reached
+   * canUseTool). Surface it as an error item on the active turn so the user sees the block;
+   * dropped if it arrives outside a turn — there is no turn to attach it to.
+   */
+  private handlePermissionDenied(message: SdkMessage): void {
+    if (!this.currentTurnId) return;
+    const tool = typeof message.tool_name === "string" ? message.tool_name.trim() : "";
+    const detail = tool ? `${PERMISSION_DENIED}: ${tool}` : PERMISSION_DENIED;
+    this.options.callbacks.onActivity(errorItem(this.currentTurnId, detail), this.currentTurnId);
   }
 
   private ingestStructural(items: ActivityItem[] | undefined): void {
@@ -387,6 +402,7 @@ interface SdkMessage {
   type: string;
   subtype?: string;
   session_id?: string;
+  tool_name?: string;
   uuid?: string;
   parent_tool_use_id?: string | null;
   isReplay?: boolean;

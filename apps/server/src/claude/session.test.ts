@@ -345,6 +345,68 @@ describe("ClaudeSession failures", () => {
   });
 });
 
+describe("ClaudeSession permission_denied", () => {
+  it("surfaces a permission-denied system message as an error item on the active turn", async () => {
+    const { session, fake, events } = makeSession();
+    track(session);
+    const turnId = session.startTurn("do it", []);
+    fake.emit(initMessage());
+    fake.emit({
+      type: "system",
+      subtype: "permission_denied",
+      tool_name: "Bash",
+      tool_use_id: "tu-1",
+    });
+    await flush();
+
+    const error = events.activities.find((a) => a.item.type === "error");
+    expect(error?.turnId).toBe(turnId);
+    expect(error?.item).toMatchObject({
+      type: "error",
+      status: "failed",
+      message: "Инструмент отклонён настройками разрешений: Bash",
+    });
+    // The block does not end the turn — the session keeps streaming.
+    expect(session.currentState).toBe("streaming");
+  });
+
+  it("omits the tool name when the message carries none", async () => {
+    const { session, fake, events } = makeSession();
+    track(session);
+    session.startTurn("do it", []);
+    fake.emit(initMessage());
+    fake.emit({ type: "system", subtype: "permission_denied", tool_use_id: "tu-1" });
+    await flush();
+
+    const error = events.activities.find((a) => a.item.type === "error");
+    expect(error?.item).toMatchObject({
+      type: "error",
+      message: "Инструмент отклонён настройками разрешений",
+    });
+  });
+
+  it("drops a permission-denied message that arrives outside a turn", async () => {
+    const { session, fake, events } = makeSession();
+    track(session);
+    session.startTurn("do it", []);
+    fake.emit(initMessage());
+    fake.emit(resultMessage("success"));
+    await flush();
+    expect(session.currentState).toBe("idle");
+    expect(session.activeTurnId).toBeNull();
+
+    // No active turn to attach to → dropped, no error item surfaces.
+    fake.emit({
+      type: "system",
+      subtype: "permission_denied",
+      tool_name: "Bash",
+      tool_use_id: "tu-2",
+    });
+    await flush();
+    expect(events.activities.some((a) => a.item.type === "error")).toBe(false);
+  });
+});
+
 describe("ClaudeSession permission mode", () => {
   it("starts the query with the configured permission mode", () => {
     const { session, captured } = makeSession({ permissionMode: "acceptEdits" });

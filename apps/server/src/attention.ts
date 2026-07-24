@@ -126,7 +126,13 @@ function validateAttentionResponse(request: AttentionRequest, response: Attentio
   switch (request.kind) {
     case "commandApproval":
     case "fileChangeApproval":
-      if (response.kind === "approvalAmendment") return;
+      // This validator only runs for callback-settled (non-Codex) entries. Those have no
+      // policy-amendment path — ClaudeAttention.mapResponse would map an amendment to a
+      // silent deny — so reject it here, leaving the entry resolvable. Codex approvals never
+      // reach this validator; their amendments are handled in mapResponse.
+      if (response.kind === "approvalAmendment") {
+        throw new AttentionValidationError("Policy amendment is not available for this request");
+      }
       if (response.kind !== "approval") {
         throw new AttentionValidationError("Approval decision expected");
       }

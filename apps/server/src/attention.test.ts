@@ -305,6 +305,39 @@ describe("AttentionManager", () => {
     expect(manager.list()).toEqual([request]);
   });
 
+  it("rejects a policy amendment on a callback-registered approval, keeping it resolvable", () => {
+    const manager = new AttentionManager();
+    let settled = false;
+    const request: AttentionRequest = {
+      id: "cb-cmd",
+      kind: "commandApproval",
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "item",
+      createdAt: 1,
+      command: "ls",
+      cwd: "/work",
+      reason: null,
+      networkHost: null,
+      canAcceptForSession: true,
+      proposedPolicyChanges: [],
+    };
+    manager.add(request, () => (settled = true), "claude");
+
+    // Callback-settled (Claude) approvals have no amendment path — the mapper would map an
+    // amendment to a silent deny, so it is rejected and the entry stays resolvable.
+    expect(() =>
+      manager.resolve("cb-cmd", { kind: "approvalAmendment", amendmentId: "exec" }),
+    ).toThrow(AttentionValidationError);
+    expect(settled).toBe(false);
+    expect(manager.list()).toEqual([request]);
+
+    // A normal decision still settles it.
+    expect(manager.resolve("cb-cmd", { kind: "approval", decision: "accept" })).toBe(request);
+    expect(settled).toBe(true);
+    expect(manager.list()).toEqual([]);
+  });
+
   it("expires only the named agent's entries and leaves callback entries settle-free", () => {
     const manager = new AttentionManager();
     const codex = codexApproval(manager, 1, "thread");
