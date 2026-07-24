@@ -74,10 +74,54 @@ The real app-server smoke test is opt-in:
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
 ```
 
+The Claude Code smoke test is opt-in as well. `RUN_CLAUDE_INTEGRATION=1` runs
+cheap real-CLI checks that make no model calls (a version probe and a transcript
+projection read); adding `RUN_CLAUDE_INTEGRATION_TURN=1` also runs one tiny haiku
+turn against the signed-in CLI:
+
+```bash
+RUN_CLAUDE_INTEGRATION=1 npm run test:integration:claude -w @codexnest/server
+RUN_CLAUDE_INTEGRATION=1 RUN_CLAUDE_INTEGRATION_TURN=1 \
+  npm run test:integration:claude -w @codexnest/server
+```
+
 CodexNest records the installed CLI version for diagnostics but does not require
 an exact version at runtime. `npm run protocol:generate` remains pinned to
 `apps/server/src/codex/PROTOCOL_VERSION` so generated TypeScript types stay
 reproducible.
+
+## Claude Code backend (optional)
+
+CodexNest can run the Claude Code CLI as a second agent backend alongside Codex,
+selected per session. It is optional: when Claude Code is absent, CodexNest runs
+Codex exactly as before.
+
+Requirement: install Claude Code on the server host and sign it in as the service
+user (`claude login`, subscription OAuth), or provide `ANTHROPIC_API_KEY` in the
+service environment. CodexNest never stores Anthropic credentials — it reuses the
+CLI's own login — and the same single-owner token guards both backends.
+
+Configuration is all optional environment variables:
+
+| Variable                           | Purpose                                     | Default                |
+| ---------------------------------- | ------------------------------------------- | ---------------------- |
+| `CODEXNEST_CLAUDE_BIN`             | Path to the Claude Code CLI                 | `claude` (from `PATH`) |
+| `CODEXNEST_CLAUDE_ENABLED`         | Backend gate: `auto`, `true`, or `false`    | `auto`                 |
+| `CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS` | Idle session eviction timeout (ms)          | `300000`               |
+| `CODEXNEST_CLAUDE_MAX_SESSIONS`    | Max concurrent live Claude sessions         | `3`                    |
+| `CODEXNEST_CLAUDE_MODELS`          | JSON array replacing the offered model list | built-in list          |
+
+`CODEXNEST_CLAUDE_ENABLED=auto` probes for the CLI once at server startup. A CLI
+installed **after** startup is not detected until the server restarts (or until
+`CODEXNEST_CLAUDE_ENABLED=true`, which enables the backend and probes at startup);
+`false` disables it entirely.
+
+Limitations: Claude runs without a managed daemon, so an active Claude turn is
+aborted if CodexNest restarts. The session stays resumable and the turn renders as
+interrupted, but — unlike Codex's daemon transport, which keeps active turns alive
+across a restart — the Claude turn does not survive it. Claude also has no mid-turn
+steer: a message sent while a turn is running is queued and delivered at the next
+turn boundary.
 
 ## Production
 

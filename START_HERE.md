@@ -167,6 +167,21 @@ CLI environment on the server. CodexNest must preserve the configured child
 environment, must not implement a second OpenAI login, and must never log tokens,
 proxy credentials, or the complete process environment.
 
+## Claude Code backend (second agent)
+
+CodexNest also runs the Claude Code CLI as an optional second agent backend,
+chosen per session; Codex stays the default and remains the sole backend when
+Claude Code is not installed. The two backends aim for UX parity — live turns,
+approvals, queue, interrupt, and resume — with two deliberate differences. Claude
+has no managed daemon, so an active Claude turn is aborted if CodexNest restarts
+(the session stays resumable and the turn renders as interrupted), whereas a Codex
+daemon turn survives the restart. Claude also has no mid-turn steer: a message sent
+while a turn is running is queued and delivered at the next turn boundary.
+
+As with Codex, CodexNest never reimplements Claude authentication: it reuses the
+host's Claude Code login (or `ANTHROPIC_API_KEY` in the service environment) and
+stores no Anthropic credentials.
+
 ## Authentication and network security
 
 Even on a private network, require client authentication.
@@ -227,7 +242,7 @@ References:
 - Git worktree orchestration
 - Voice transcription beyond the Android keyboard
 - iOS packaging
-- Reimplementation of Codex authentication
+- Reimplementation of Codex or Claude Code authentication
 - A duplicate database containing complete Codex conversation history
 - Automatic approval bypass inside CodexNest
 

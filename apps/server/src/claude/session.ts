@@ -15,7 +15,13 @@ import type { ClaudeQuery, ClaudeSdk, ClaudeTranscriptMessage } from "./sdk";
 
 /** Watchdog after `interrupt()` before we force-abort the process. */
 const INTERRUPT_WATCHDOG_MS = 10_000;
-/** Pragmatic auth-failure detection over the error text / captured stderr. */
+/**
+ * Pragmatic auth-failure detection over the error text / captured stderr. This is a
+ * heuristic keyed on wording, so it can false-positive on unrelated errors that merely
+ * mention these words; it only sets a connection hint and never blocks a turn. Its match
+ * against the real Claude CLI's auth-failure output is a documented Linux-host verification
+ * step (see the "Claude Code" section of deploy/DEPLOYMENT.md); do not tune it without that.
+ */
 const AUTH_ERROR = /login|log in|authenticat|unauthor|api key|anthropic_api_key|oauth|credential/i;
 const AUTH_MESSAGE = "Выполните `claude login` на сервере";
 

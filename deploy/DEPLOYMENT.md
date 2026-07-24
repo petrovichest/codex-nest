@@ -357,28 +357,33 @@ accept-all certificate handler). Android-клиент доверяет сист�
 
 ### Переменные окружения
 
-| Переменная                       | Назначение                                        | Значение по умолчанию                         |
-| -------------------------------- | ------------------------------------------------- | --------------------------------------------- |
-| `CODEXNEST_HOST`                 | Адрес прослушивания                               | `127.0.0.1`                                   |
-| `CODEXNEST_PORT`                 | HTTP/API порт                                     | `4310`                                        |
-| `CODEXNEST_ALLOWED_ORIGINS`      | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
-| `CODEXNEST_STATE_PATH`           | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
-| `CODEXNEST_CODEX_BIN`            | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
-| `CODEXNEST_CODEX_MANAGEMENT_BIN` | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
-| `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
-| `CODEXNEST_SERVER_ENV_FILE`      | Env-файл, обновляемый серверными настройками      | `~/.config/codexnest/server.env`              |
-| `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
-| `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
-| `CODEXNEST_UPDATE_CHANNEL`       | Канал обновлений: `rolling` или `stable`          | `rolling`                                     |
-| `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
-| `CODEXNEST_STT_PROVIDER`         | Глобальный режим: `local` или `openai`            | первый настроенный провайдер                  |
-| `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |
-| `CODEXNEST_STT_OPENAI_API_KEY`   | Отдельный API-ключ OpenAI для транскрипции        | OpenAI-провайдер выключен                     |
-| `CODEXNEST_STT_OPENAI_MODEL`     | Модель OpenAI speech-to-text                      | `gpt-4o-transcribe`                           |
-| `CODEXNEST_STT_LANGUAGE`         | ISO-код языка записи                              | `ru`                                          |
-| `CODEXNEST_STT_REFINE_LOCAL`     | Улучшать локальный текст через Codex              | `true`                                        |
-| `CODEXNEST_STT_REFINEMENT_MODEL` | Модель улучшения локального текста                | `gpt-5.6-luna`                                |
-| `CODEXNEST_STT_TIMEOUT_MS`       | Timeout одного распознавания                      | `600000`                                      |
+| Переменная                         | Назначение                                        | Значение по умолчанию                         |
+| ---------------------------------- | ------------------------------------------------- | --------------------------------------------- |
+| `CODEXNEST_HOST`                   | Адрес прослушивания                               | `127.0.0.1`                                   |
+| `CODEXNEST_PORT`                   | HTTP/API порт                                     | `4310`                                        |
+| `CODEXNEST_ALLOWED_ORIGINS`        | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
+| `CODEXNEST_STATE_PATH`             | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
+| `CODEXNEST_CODEX_BIN`              | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
+| `CODEXNEST_CODEX_MANAGEMENT_BIN`   | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
+| `CODEXNEST_CODEX_PROXY_ENV_FILE`   | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
+| `CODEXNEST_SERVER_ENV_FILE`        | Env-файл, обновляемый серверными настройками      | `~/.config/codexnest/server.env`              |
+| `CODEXNEST_CODEX_TRANSPORT`        | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
+| `CODEXNEST_CLIENT_DIST`            | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
+| `CODEXNEST_UPDATE_CHANNEL`         | Канал обновлений: `rolling` или `stable`          | `rolling`                                     |
+| `CODEXNEST_LOG_LEVEL`              | Уровень логов Fastify                             | `info`                                        |
+| `CODEXNEST_CLAUDE_BIN`             | Путь к Claude Code CLI (второй backend)           | `claude` из `PATH`                            |
+| `CODEXNEST_CLAUDE_ENABLED`         | Backend Claude: `auto`, `true` или `false`        | `auto`                                        |
+| `CODEXNEST_CLAUDE_IDLE_TIMEOUT_MS` | Таймаут простоя до закрытия Claude-сессии (мс)    | `300000`                                      |
+| `CODEXNEST_CLAUDE_MAX_SESSIONS`    | Максимум одновременных Claude-сессий              | `3`                                           |
+| `CODEXNEST_CLAUDE_MODELS`          | JSON-массив, заменяющий список моделей Claude     | встроенный список                             |
+| `CODEXNEST_STT_PROVIDER`           | Глобальный режим: `local` или `openai`            | первый настроенный провайдер                  |
+| `CODEXNEST_STT_LOCAL_URL`          | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |
+| `CODEXNEST_STT_OPENAI_API_KEY`     | Отдельный API-ключ OpenAI для транскрипции        | OpenAI-провайдер выключен                     |
+| `CODEXNEST_STT_OPENAI_MODEL`       | Модель OpenAI speech-to-text                      | `gpt-4o-transcribe`                           |
+| `CODEXNEST_STT_LANGUAGE`           | ISO-код языка записи                              | `ru`                                          |
+| `CODEXNEST_STT_REFINE_LOCAL`       | Улучшать локальный текст через Codex              | `true`                                        |
+| `CODEXNEST_STT_REFINEMENT_MODEL`   | Модель улучшения локального текста                | `gpt-5.6-luna`                                |
+| `CODEXNEST_STT_TIMEOUT_MS`         | Timeout одного распознавания                      | `600000`                                      |
 
 ### Speech-to-text
 
@@ -459,6 +464,45 @@ CodexNest не блокирует уведомления при HTTP-
 часть браузеров разрешает его только по HTTPS. Внешний push-провайдер не
 используется, поэтому вкладка должна оставаться открытой или свёрнутой; после
 полного закрытия браузера доставка не гарантируется.
+
+### Claude Code (второй backend)
+
+CodexNest может использовать Claude Code CLI как второй backend агента, выбираемый
+для каждой сессии отдельно. Он необязателен: без Claude Code сервер продолжает
+работать только с Codex.
+
+Установите Claude Code и авторизуйте его от того же пользователя, от которого
+работает сервис (`claude login`, подписочный OAuth), либо задайте
+`ANTHROPIC_API_KEY` в окружении сервиса. Где именно CLI хранит OAuth-данные — его
+внутреннее дело; CodexNest не хранит учётные данные Anthropic и не реализует
+собственный вход. Один и тот же owner token защищает оба backend-а.
+
+Переменные `CODEXNEST_CLAUDE_*` (см. таблицу выше) добавляются в тот же
+`server.env`. `CODEXNEST_CLAUDE_ENABLED=auto` определяет наличие CLI один раз при
+старте сервера: CLI, установленный уже после старта, не будет обнаружен до
+перезапуска `codexnest.service` (либо задайте `CODEXNEST_CLAUDE_ENABLED=true`,
+чтобы backend включался и проверял CLI при старте; `false` полностью отключает
+его).
+
+Для managed-установки `codexnest doctor` показывает строку `Claude Code CLI` с
+версией и путём — или подсказку об установке и `claude login`, если CLI нет — и
+текущий смысл `CODEXNEST_CLAUDE_ENABLED`. Отсутствие Claude Code не считается
+ошибкой и не меняет код возврата: это информационная строка. `codexnest repair`
+сообщает о Claude тем же способом и ничего для него не поднимает — daemon у Claude
+нет.
+
+Ограничение: у Claude нет управляемого daemon, поэтому активный Claude-turn
+прерывается при перезапуске CodexNest (сессия остаётся возобновляемой, turn
+отображается как «прервано»), тогда как turn Codex в режиме daemon переживает
+перезапуск. У Claude также нет промежуточного steer: сообщение, отправленное во
+время выполнения turn, ставится в очередь и доставляется на границе следующего
+turn.
+
+Авторизация Claude проверена headless на macOS. На Linux-хосте сервиса
+дополнительно убедитесь, что вход выполнен от пользователя сервиса и что при
+отсутствии входа CodexNest показывает подсказку «Выполните `claude login` на
+сервере» (эвристическое определение ошибки авторизации — см. комментарий у
+`AUTH_ERROR` в `apps/server/src/claude/session.ts`).
 
 ## 4. Создание access token
 
@@ -572,6 +616,11 @@ curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health
 или `server.env`, обновите их отдельно из соответствующих `.example`, проверьте
 локальные значения и выполните `systemctl --user daemon-reload` перед restart.
 
+Перезапуск `codexnest.service` прерывает активные Claude-turn: у Claude нет daemon,
+поэтому его turn не переживает рестарт, в отличие от turn Codex в режиме daemon.
+Сессии остаются возобновляемыми. По возможности обновляйтесь и перезапускайте
+сервис, когда активных Claude-turn нет.
+
 ## 8. Резервная копия
 
 Остановите сервис и скопируйте файл `CODEXNEST_STATE_PATH`:
@@ -605,6 +654,11 @@ systemctl --user start codexnest.service
   и быть доступным пользователю, от которого работает сервис.
 - **Codex видит другой логин или конфигурацию.** Повторите `codex login status` от
   того же пользователя. CodexNest использует его `~/.codex` и окружение.
+- **Claude не появляется как backend.** Выполните `codexnest doctor`: строка
+  `Claude Code CLI` должна показывать версию и путь. В режиме
+  `CODEXNEST_CLAUDE_ENABLED=auto` сервер определяет CLI только при старте —
+  перезапустите `codexnest.service` после установки CLI. При ошибке авторизации
+  выполните `claude login` от пользователя сервиса или задайте `ANTHROPIC_API_KEY`.
 
 ## Android release
 
