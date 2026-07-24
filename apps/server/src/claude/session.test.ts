@@ -272,6 +272,36 @@ describe("ClaudeSession interrupt", () => {
     // A live turn interrupted by the watchdog still reports an outcome.
     expect(events.outcomes).toEqual([{ outcome: "interrupted", turnId, detail: undefined }]);
   });
+
+  it("keeps the watchdog armed after the interrupt result so a never-throwing iterator still closes", async () => {
+    const { session, fake, events } = makeSession({ watchdogMs: 20 });
+    track(session);
+    const turnId = session.startTurn("sleep", []);
+    fake.emit(initMessage());
+    fake.emit(
+      assistantMessage(
+        "a1",
+        [{ type: "tool_use", id: "t", name: "Bash", input: { command: "sleep 99" } }],
+        "tool_use",
+      ),
+    );
+    await flush();
+
+    // The interrupt result arrives (finishTurn runs) but the iterator NEVER throws — the
+    // session parks in awaiting-idle. finishTurn must keep the watchdog armed, otherwise the
+    // session would sit there forever with no timer.
+    await session.interrupt();
+    fake.emit(resultMessage("error_during_execution", ["interrupted"]));
+    await flush();
+    expect(session.currentState).toBe("awaiting-idle");
+    expect(events.outcomes).toEqual([{ outcome: "interrupted", turnId, detail: undefined }]);
+
+    // The retained watchdog fires and force-closes the session.
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    await flush();
+    expect(session.currentState).toBe("closed");
+    expect(events.closed).toContain("interrupt-watchdog");
+  });
 });
 
 describe("ClaudeSession failures", () => {
