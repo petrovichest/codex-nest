@@ -100,6 +100,32 @@ describe("Activity", () => {
     expect(screen.queryByText("Ход работы")).not.toBeInTheDocument();
   });
 
+  it("stops animating unfinished steps when their checklist is no longer active", () => {
+    const item = {
+      type: "planChecklist" as const,
+      id: "checklist",
+      status: "inProgress" as const,
+      explanation: "Проверяю",
+      steps: [
+        { step: "Готово", status: "completed" as const },
+        { step: "Остановлено", status: "inProgress" as const },
+        { step: "Позже", status: "pending" as const },
+      ],
+      timestamp: 1,
+      afterItemId: null,
+    };
+    const view = render(<Activity item={item} />);
+
+    expect(screen.getByText("Остановлено").closest("li")).toHaveClass("inProgress");
+    expect(view.container.querySelector(".plan-checklist .spinner")).not.toBeNull();
+
+    view.rerender(<Activity item={{ ...item, status: "completed" }} />);
+
+    expect(screen.getByText("Готово").closest("li")).toHaveClass("completed");
+    expect(screen.getByText("Остановлено").closest("li")).toHaveClass("pending");
+    expect(view.container.querySelector(".plan-checklist .spinner")).toBeNull();
+  });
+
   it("renders GFM tables and task lists", () => {
     const view = render(
       <Activity

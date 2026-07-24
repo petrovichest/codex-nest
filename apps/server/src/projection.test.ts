@@ -803,6 +803,135 @@ describe("AppProjection", () => {
     expect(store.snapshot().threadMeta.one?.awaitingPlanResponse).toBe(false);
   });
 
+  it("uses only the latest checklist to detect an incomplete successful turn", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("finished-plan", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "finished-plan",
+        explanation: "Начинаю",
+        plan: [
+          { step: "Первый", status: "inProgress" },
+          { step: "Второй", status: "pending" },
+        ],
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "finished-plan",
+        explanation: "Готово",
+        plan: [
+          { step: "Первый", status: "completed" },
+          { step: "Второй", status: "completed" },
+        ],
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["finished-plan"]).toHaveLength(2),
+    );
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("finished-plan", "completed") },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() => {
+      expect(projection.summary("one")?.state).toBe("completed");
+      expect(store.snapshot().threadMeta.one?.awaitingPlanResponse).toBe(false);
+    });
+
+    await projection.setCurrentTurn("one", "unfinished-plan");
+    bridge.emit("notification", {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "one",
+        turnId: "unfinished-plan",
+        explanation: "Нужно решение",
+        plan: [
+          { step: "Первый", status: "completed" },
+          { step: "Второй", status: "inProgress" },
+          { step: "Третий", status: "pending" },
+        ],
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.["unfinished-plan"]).toHaveLength(
+        1,
+      ),
+    );
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("unfinished-plan", "completed") },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("needsAttention"));
+    expect(projection.summary("one")?.currentTurnId).toBeNull();
+    expect(store.snapshot().threadMeta.one?.awaitingPlanResponse).toBe(true);
+  });
+
+  it.each(["failed", "interrupted"] as const)(
+    "keeps the %s outcome when its latest checklist is incomplete",
+    async (outcome) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      const bridge = new FakeBridge();
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+        false,
+      );
+      projection.upsertThread(thread("one", "/work", 10));
+      await projection.setCurrentTurn("one", `${outcome}-plan`);
+      bridge.emit("notification", {
+        method: "turn/plan/updated",
+        params: {
+          threadId: "one",
+          turnId: `${outcome}-plan`,
+          explanation: "Не закончено",
+          plan: [{ step: "Проверить", status: "inProgress" }],
+        },
+      } satisfies ServerNotification);
+      await vi.waitFor(() =>
+        expect(
+          store.snapshot().threadMeta.one?.timelineArtifacts?.[`${outcome}-plan`],
+        ).toHaveLength(1),
+      );
+      bridge.emit("notification", {
+        method: "turn/completed",
+        params: {
+          threadId: "one",
+          turn: { ...testTurn(`${outcome}-plan`, "completed"), status: outcome },
+        },
+      } satisfies ServerNotification);
+
+      await vi.waitFor(() => {
+        expect(projection.summary("one")?.state).toBe(outcome);
+        expect(store.snapshot().threadMeta.one?.awaitingPlanResponse).toBe(false);
+      });
+    },
+  );
+
   it("does not report a phantom active thread without an in-progress turn as running", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

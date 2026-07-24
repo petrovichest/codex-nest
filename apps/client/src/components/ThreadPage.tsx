@@ -1248,19 +1248,23 @@ export function Activity({
         <div className="activity-label">{t("Ход работы")}</div>
         {item.explanation && <p>{item.explanation}</p>}
         <ol>
-          {item.steps.map((step, index) => (
-            <li className={step.status} key={`${index}:${step.step}`}>
-              <input
-                aria-label={step.status === "completed" ? t("Выполнено") : t("Не выполнено")}
-                checked={step.status === "completed"}
-                readOnly
-                tabIndex={-1}
-                type="checkbox"
-              />
-              <span>{step.step}</span>
-              {step.status === "inProgress" && <span className="spinner small" />}
-            </li>
-          ))}
+          {item.steps.map((step, index) => {
+            const status =
+              item.status === "inProgress" || step.status === "completed" ? step.status : "pending";
+            return (
+              <li className={status} key={`${index}:${step.step}`}>
+                <input
+                  aria-label={status === "completed" ? t("Выполнено") : t("Не выполнено")}
+                  checked={status === "completed"}
+                  readOnly
+                  tabIndex={-1}
+                  type="checkbox"
+                />
+                <span>{step.step}</span>
+                {status === "inProgress" && <span className="spinner small" />}
+              </li>
+            );
+          })}
         </ol>
       </article>
     );

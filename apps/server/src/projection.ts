@@ -822,9 +822,11 @@ export class AppProjection extends EventEmitter {
             };
             meta.lastOutcome = outcome;
             meta.outcomeUpdatedAt = updatedAt;
-            meta.awaitingPlanResponse =
-              outcome === "completed" && meta.settings?.collaborationMode === "plan" && hasPlan;
             const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
+            meta.awaitingPlanResponse =
+              outcome === "completed" &&
+              ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
+                latestPlanChecklistIsIncomplete(artifacts));
             if (artifacts) {
               meta.timelineArtifacts![notification.params.turn.id] = artifacts.map((item) =>
                 item.type === "planChecklist"
@@ -1407,6 +1409,17 @@ function isTimelineArtifact(item: ActivityItem): item is TimelineArtifact {
 
 function turnContainsPlan(turn: Turn): boolean {
   return turn.items.some((item) => item.type === "plan" && item.text.trim());
+}
+
+function latestPlanChecklistIsIncomplete(items: TimelineArtifact[] | undefined): boolean {
+  if (!items) return false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.type === "planChecklist") {
+      return item.steps.some((step) => step.status !== "completed");
+    }
+  }
+  return false;
 }
 
 function commandKind(actions: Array<{ type: string }>): "read" | "search" | "command" {
