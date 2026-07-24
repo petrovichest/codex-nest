@@ -1,6 +1,8 @@
 import { Capacitor } from "@capacitor/core";
 
-import type { AppSnapshot, ServerEvent } from "@codexnest/protocol";
+import type { AppSnapshot, ServerEvent, UiLanguage } from "@codexnest/protocol";
+
+import { localizeKnownServerText, translate } from "./i18n";
 
 export type BrowserNotificationPermission = NotificationPermission | "unsupported";
 
@@ -23,7 +25,15 @@ export class BrowserNotificationTracker {
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
 
+  constructor(private language: UiLanguage = "ru") {}
+
+  setLanguage(language: UiLanguage): void {
+    this.language = language;
+  }
+
   acceptSnapshot(snapshot: AppSnapshot): void {
+    this.language =
+      snapshot.uiLanguage === "en" || snapshot.uiLanguage === "ru" ? snapshot.uiLanguage : "ru";
     const cutoff = this.lastObservedAt;
     const firstConnection = cutoff === 0;
     let newest = cutoff;
@@ -58,7 +68,7 @@ export class BrowserNotificationTracker {
     }
     for (const attention of missedAttention) {
       this.show(
-        "Codex ждёт решения",
+        translate(this.language, "Codex ждёт решения"),
         this.titleFor(attention.threadId),
         `attention:${attention.id}`,
         attention.threadId,
@@ -68,7 +78,9 @@ export class BrowserNotificationTracker {
   }
 
   acceptEvent(event: ServerEvent): void {
-    if (event.type === "thread.upserted") {
+    if (event.type === "uiLanguage.changed") {
+      this.language = event.language;
+    } else if (event.type === "thread.upserted") {
       const previous = this.threadStates.get(event.thread.id);
       this.threadStates.set(event.thread.id, event.thread.state);
       this.threadTitles.set(event.thread.id, event.thread.title);
@@ -87,7 +99,7 @@ export class BrowserNotificationTracker {
           this.threadStates.get(event.attention.threadId) !== "needsAttention"
         ) {
           this.show(
-            "Codex ждёт решения",
+            translate(this.language, "Codex ждёт решения"),
             this.titleFor(event.attention.threadId),
             `attention:${event.attention.id}`,
             event.attention.threadId,
@@ -102,11 +114,26 @@ export class BrowserNotificationTracker {
 
   private showThreadState(state: string, threadId: string, threadTitle: string): void {
     if (state === "completed") {
-      this.show("Задача завершена", threadTitle, `completed:${threadId}`, threadId);
+      this.show(
+        translate(this.language, "Задача завершена"),
+        this.displayThreadTitle(threadTitle),
+        `completed:${threadId}`,
+        threadId,
+      );
     } else if (state === "failed") {
-      this.show("Задача завершилась с ошибкой", threadTitle, `failed:${threadId}`, threadId);
+      this.show(
+        translate(this.language, "Задача завершилась с ошибкой"),
+        this.displayThreadTitle(threadTitle),
+        `failed:${threadId}`,
+        threadId,
+      );
     } else if (state === "needsAttention" && !this.hasAttentionForThread(threadId)) {
-      this.show("Codex ждёт решения", threadTitle, `needs-attention:${threadId}`, threadId);
+      this.show(
+        translate(this.language, "Codex ждёт решения"),
+        this.displayThreadTitle(threadTitle),
+        `needs-attention:${threadId}`,
+        threadId,
+      );
     }
   }
 
@@ -115,8 +142,13 @@ export class BrowserNotificationTracker {
   }
 
   private titleFor(threadId: string | null): string {
-    if (!threadId) return "Откройте CodexNest для подробностей";
-    return this.threadTitles.get(threadId) ?? "Задача Codex";
+    if (!threadId) return translate(this.language, "Откройте CodexNest для подробностей");
+    const title = this.threadTitles.get(threadId);
+    return title ? this.displayThreadTitle(title) : translate(this.language, "Задача Codex");
+  }
+
+  private displayThreadTitle(title: string): string {
+    return localizeKnownServerText(this.language, title) ?? title;
   }
 
   private show(title: string, body: string, tag: string, threadId: string | null): void {

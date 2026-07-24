@@ -1,14 +1,18 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DirectoryListing } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { ArrowLeftIcon, ChevronRightIcon, FolderIcon, PlusIcon, XIcon } from "./Icons";
 
 type Operation = "loading" | "creating" | "selecting" | null;
 
 export function ProjectDialog({ onClose }: { onClose(): void }) {
   const { api } = useConnection();
+  const { language, t } = useI18n();
+  const localizationRef = useRef({ language, t });
+  localizationRef.current = { language, t };
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [operation, setOperation] = useState<Operation>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +30,10 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
         setShowCreate(false);
         setDirectoryName("");
       } catch (caught) {
-        setError(messageFor(caught, "Не удалось открыть папку"));
+        const localization = localizationRef.current;
+        setError(
+          messageFor(caught, localization.t("Не удалось открыть папку"), localization.language),
+        );
       } finally {
         setOperation(null);
       }
@@ -57,7 +64,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
       setShowCreate(false);
       setDirectoryName("");
     } catch (caught) {
-      setError(messageFor(caught, "Не удалось создать папку"));
+      setError(messageFor(caught, t("Не удалось создать папку"), language));
     } finally {
       setOperation(null);
     }
@@ -71,7 +78,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
       await api.createProject({ path: listing.path });
       onClose();
     } catch (caught) {
-      setError(messageFor(caught, "Не удалось добавить проект"));
+      setError(messageFor(caught, t("Не удалось добавить проект"), language));
       setOperation(null);
     }
   }
@@ -91,13 +98,13 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
       >
         <div className="row-between">
           <div>
-            <span className="dialog-eyebrow">Рабочая папка на сервере</span>
-            <h2 id="project-dialog-title">Добавить проект</h2>
+            <span className="dialog-eyebrow">{t("Рабочая папка на сервере")}</span>
+            <h2 id="project-dialog-title">{t("Добавить проект")}</h2>
           </div>
           <button
             type="button"
             className="icon-button"
-            aria-label="Закрыть"
+            aria-label={t("Закрыть")}
             disabled={busy}
             onClick={onClose}
           >
@@ -109,15 +116,15 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
           <button
             type="button"
             className="icon-button"
-            aria-label="На уровень выше"
+            aria-label={t("На уровень выше")}
             disabled={busy || !listing?.parentPath}
             onClick={() => void openDirectory(listing?.parentPath ?? undefined)}
           >
             <ArrowLeftIcon />
           </button>
-          <nav className="project-breadcrumbs" aria-label="Путь к папке">
+          <nav className="project-breadcrumbs" aria-label={t("Путь к папке")}>
             {listing ? (
-              breadcrumbs(listing).map((item, index, items) => (
+              breadcrumbs(listing, t).map((item, index, items) => (
                 <span className="project-breadcrumb" key={item.path}>
                   {index > 0 && <ChevronRightIcon />}
                   <button
@@ -130,10 +137,10 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
                 </span>
               ))
             ) : (
-              <span className="project-breadcrumb-placeholder">Домашняя папка</span>
+              <span className="project-breadcrumb-placeholder">{t("Домашняя папка")}</span>
             )}
           </nav>
-          {operation === "loading" && <div className="spinner small" aria-label="Загрузка" />}
+          {operation === "loading" && <div className="spinner small" aria-label={t("Загрузка")} />}
         </div>
 
         <div className="project-browser-controls">
@@ -146,7 +153,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
               setError(null);
             }}
           >
-            <PlusIcon /> Новая папка
+            <PlusIcon /> {t("Новая папка")}
           </button>
           <label className="project-hidden-toggle">
             <input
@@ -155,7 +162,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
               disabled={busy}
               onChange={(event) => setShowHidden(event.target.checked)}
             />
-            Показывать скрытые
+            {t("Показывать скрытые")}
           </label>
         </div>
 
@@ -163,14 +170,14 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
           <form className="project-directory-create" onSubmit={createNewDirectory}>
             <input
               autoFocus
-              aria-label="Название новой папки"
+              aria-label={t("Название новой папки")}
               value={directoryName}
               disabled={busy}
-              placeholder="Название новой папки"
+              placeholder={t("Название новой папки")}
               onChange={(event) => setDirectoryName(event.target.value)}
             />
             <button type="submit" className="primary" disabled={busy || !directoryName.trim()}>
-              {operation === "creating" ? "Создаём…" : "Создать"}
+              {operation === "creating" ? t("Создаём…") : t("Создать")}
             </button>
             <button
               type="button"
@@ -180,7 +187,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
                 setDirectoryName("");
               }}
             >
-              Отмена
+              {t("Отмена")}
             </button>
           </form>
         )}
@@ -190,17 +197,17 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
             <span>{error}</span>
             {!listing && (
               <button type="button" disabled={busy} onClick={() => void openDirectory()}>
-                Повторить
+                {t("Повторить")}
               </button>
             )}
           </div>
         )}
 
-        <div className="project-directory-list" aria-label="Папки">
+        <div className="project-directory-list" aria-label={t("Папки")}>
           {!listing && operation === "loading" && (
             <div className="project-directory-empty">
               <div className="spinner" />
-              <span>Получаем папки с сервера…</span>
+              <span>{t("Получаем папки с сервера…")}</span>
             </div>
           )}
           {listing && visibleDirectories.length === 0 && (
@@ -208,8 +215,8 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
               <FolderIcon />
               <span>
                 {listing.directories.length > 0
-                  ? "Скрытые папки не показаны"
-                  : "В этой папке нет других папок"}
+                  ? t("Скрытые папки не показаны")
+                  : t("В этой папке нет других папок")}
               </span>
             </div>
           )}
@@ -230,7 +237,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
 
         <div className="dialog-actions project-browser-actions">
           <button type="button" disabled={busy} onClick={onClose}>
-            Отмена
+            {t("Отмена")}
           </button>
           <button
             type="button"
@@ -238,7 +245,7 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
             disabled={busy || !listing}
             onClick={() => void selectDirectory()}
           >
-            <FolderIcon /> {operation === "selecting" ? "Добавляем…" : "Выбрать эту папку"}
+            <FolderIcon /> {operation === "selecting" ? t("Добавляем…") : t("Выбрать эту папку")}
           </button>
         </div>
       </div>
@@ -246,8 +253,11 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
   );
 }
 
-function breadcrumbs(listing: DirectoryListing): Array<{ label: string; path: string }> {
-  const result = [{ label: "Домашняя", path: listing.rootPath }];
+function breadcrumbs(
+  listing: DirectoryListing,
+  t: Translate,
+): Array<{ label: string; path: string }> {
+  const result = [{ label: t("Домашняя"), path: listing.rootPath }];
   const suffix = listing.path.slice(listing.rootPath.length);
   let path = listing.rootPath;
   for (const segment of suffix.split("/").filter(Boolean)) {
@@ -257,6 +267,8 @@ function breadcrumbs(listing: DirectoryListing): Array<{ label: string; path: st
   return result;
 }
 
-function messageFor(caught: unknown, fallback: string): string {
-  return caught instanceof Error && caught.message ? caught.message : fallback;
+function messageFor(caught: unknown, fallback: string, language: "en" | "ru"): string {
+  return caught instanceof Error && caught.message
+    ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+    : fallback;
 }

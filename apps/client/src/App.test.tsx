@@ -1073,6 +1073,7 @@ function defaultProject(): Project {
 function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProject()]): AppSnapshot {
   return {
     sequence: 1,
+    uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: null },
     projects,
     threads,

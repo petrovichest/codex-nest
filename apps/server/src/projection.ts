@@ -22,6 +22,7 @@ import type {
   ThreadSummary,
   TurnProgress,
   TurnView,
+  UiLanguage,
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "./attention";
@@ -100,10 +101,12 @@ export class AppProjection extends EventEmitter {
   }
 
   snapshot(): AppSnapshot {
+    const state = this.store.snapshot();
     return {
       sequence: this.sequence,
+      uiLanguage: state.uiLanguage,
       connection: this.connection,
-      projects: this.store.snapshot().projects,
+      projects: state.projects,
       threads: this.sortedThreads(),
       attention: this.attention.list(),
       models: this.models,
@@ -316,6 +319,13 @@ export class AppProjection extends EventEmitter {
       else delete state.taskDefaults;
     });
     this.publish({ type: "taskDefaults.changed", taskDefaults });
+  }
+
+  async setUiLanguage(language: UiLanguage): Promise<void> {
+    await this.store.update((state) => {
+      state.uiLanguage = language;
+    });
+    this.publish({ type: "uiLanguage.changed", language });
   }
 
   publishProject(projectId: string): void {

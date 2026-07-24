@@ -24,6 +24,7 @@ const baseThread: ThreadSummary = {
 
 const snapshot: AppSnapshot = {
   sequence: 4,
+  uiLanguage: "ru",
   connection: { state: "ready", message: null, syncedAt: null },
   projects: [],
   threads: [baseThread],
@@ -61,6 +62,17 @@ describe("clientReducer", () => {
       event: { type: "defaultReasoningEffort.changed", reasoningEffort: null },
     });
     expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
+  });
+
+  it("applies the server-synchronized interface language", () => {
+    const state = clientReducer(clientReducer(initialState, { type: "snapshot", snapshot }), {
+      type: "event",
+      sequence: 5,
+      event: { type: "uiLanguage.changed", language: "en" },
+    });
+
+    expect(state.snapshot?.uiLanguage).toBe("en");
+    expect(state.snapshot?.sequence).toBe(5);
   });
 
   it("invalidates loaded thread details when the server requires a resync", () => {

@@ -13,6 +13,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n } from "../i18n";
 import type { OptimisticMessage } from "../state";
 import { Composer, type ComposerImage } from "./Composer";
 import { NewTaskIcon } from "./Icons";
@@ -33,6 +34,7 @@ export function NewSession({
   onNewProject(): void;
 }) {
   const { api, state, dispatch } = useConnection();
+  const { language, t } = useI18n();
   const navigate = useNavigate();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
@@ -95,11 +97,19 @@ export function NewSession({
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
         state: {
           focusComposer: true,
-          ...(result.goalWarning ? { notice: result.goalWarning } : {}),
+          ...(result.goalWarning
+            ? {
+                notice: localizeKnownServerText(language, result.goalWarning) ?? result.goalWarning,
+              }
+            : {}),
         },
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось создать задачу");
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось создать задачу"),
+      );
     } finally {
       setBusy(false);
     }
@@ -109,8 +119,8 @@ export function NewSession({
     <div className="thread-workspace new-session-page">
       <div className="conversation-pane">
         <WorkspaceHeader
-          title="Новая задача"
-          subtitle={project?.displayName ?? "Выберите проект"}
+          title={t("Новая задача")}
+          subtitle={project?.displayName ?? t("Выберите проект")}
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
         />
@@ -118,8 +128,10 @@ export function NewSession({
           <span className="new-session-glyph">
             <NewTaskIcon />
           </span>
-          <h2>Что поручим Codex?</h2>
-          <p>Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.</p>
+          <h2>{t("Что поручим Codex?")}</h2>
+          <p>
+            {t("Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.")}
+          </p>
         </div>
         <Composer
           autoFocus
@@ -144,7 +156,9 @@ export function NewSession({
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
           onTranscribe={async (audio) => {
-            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
+            if (!transcriptionProvider) {
+              throw new Error(t("Распознавание речи не настроено"));
+            }
             return (await api.transcribe(audio)).text;
           }}
           error={error}
@@ -158,7 +172,7 @@ export function NewSession({
       {inspectorOpen && (
         <button
           className="inspector-backdrop"
-          aria-label="Закрыть сведения"
+          aria-label={t("Закрыть сведения")}
           onClick={() => setInspectorOpen(false)}
         />
       )}

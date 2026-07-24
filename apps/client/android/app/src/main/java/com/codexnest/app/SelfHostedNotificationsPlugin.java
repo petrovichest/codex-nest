@@ -76,6 +76,17 @@ public class SelfHostedNotificationsPlugin extends Plugin {
         call.resolve();
     }
 
+    @PluginMethod
+    public void setLanguage(PluginCall call) {
+        String language = call.getString("language");
+        if (!"en".equals(language) && !"ru".equals(language)) {
+            call.reject("Unsupported language");
+            return;
+        }
+        SelfHostedNotificationService.setUiLanguage(getContext(), language);
+        call.resolve();
+    }
+
     @Override
     protected void handleOnNewIntent(Intent intent) {
         String threadId = intent.getStringExtra(MainActivity.EXTRA_THREAD_ID);

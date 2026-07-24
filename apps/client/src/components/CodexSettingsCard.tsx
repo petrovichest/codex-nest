@@ -5,12 +5,14 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
 import type { CodexManagementStatus } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { ToolIcon } from "./Icons";
 
 type Action = "checking" | "proxy" | "updating" | "restarting" | null;
@@ -42,6 +44,9 @@ const CodexSettingsContext = createContext<CodexSettingsContextValue | null>(nul
 
 export function CodexSettingsProvider({ children }: { children: ReactNode }) {
   const { api, state } = useConnection();
+  const { language, t } = useI18n();
+  const localizationRef = useRef({ language, t });
+  localizationRef.current = { language, t };
   const [status, setStatus] = useState<CodexManagementStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<Action>(null);
@@ -57,7 +62,14 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
     try {
       setStatus(await api.readCodexSettings());
     } catch (caught) {
-      setLoadError(errorMessage(caught, "Не удалось загрузить состояние Codex"));
+      const localization = localizationRef.current;
+      setLoadError(
+        errorMessage(
+          caught,
+          localization.t("Не удалось загрузить состояние Codex"),
+          localization.language,
+        ),
+      );
     } finally {
       setLoading(false);
     }
@@ -97,7 +109,7 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
       setShowProxy(false);
       setProxyFeedback({
         kind: "success",
-        message: "Прокси проверен и применён. Codex daemon готов к работе.",
+        message: t("Прокси проверен и применён. Codex daemon готов к работе."),
       });
     });
   }
@@ -108,29 +120,29 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
       setStatus(updated);
       setCodexFeedback({
         kind: "success",
-        message: "Проверка Codex и соединения через прокси завершена.",
+        message: t("Проверка Codex и соединения через прокси завершена."),
       });
     });
   }
 
   async function update() {
-    if (!window.confirm("Обновить Codex и перезапустить daemon?")) return;
+    if (!window.confirm(t("Обновить Codex и перезапустить daemon?"))) return;
     await perform("updating", "codex", async () => {
       const updated = await api.updateCodex();
       setStatus(updated);
       setCodexFeedback({
         kind: "success",
-        message: "Codex обновлён, проверен через прокси и перезапущен.",
+        message: t("Codex обновлён, проверен через прокси и перезапущен."),
       });
     });
   }
 
   async function restart() {
-    if (!window.confirm("Перезапустить Codex daemon?")) return;
+    if (!window.confirm(t("Перезапустить Codex daemon?"))) return;
     await perform("restarting", "codex", async () => {
       const updated = await api.restartCodex();
       setStatus(updated);
-      setCodexFeedback({ kind: "success", message: "Codex daemon перезапущен." });
+      setCodexFeedback({ kind: "success", message: t("Codex daemon перезапущен.") });
     });
   }
 
@@ -147,7 +159,7 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
     } catch (caught) {
       const feedback: Feedback = {
         kind: "error",
-        message: errorMessage(caught, "Операция Codex завершилась ошибкой"),
+        message: errorMessage(caught, t("Операция Codex завершилась ошибкой"), language),
       };
       if (target === "codex") setCodexFeedback(feedback);
       else setProxyFeedback(feedback);
@@ -191,6 +203,7 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
 }
 
 export function CodexSettingsCard() {
+  const { language, t } = useI18n();
   const {
     status,
     loading,
@@ -214,19 +227,19 @@ export function CodexSettingsCard() {
         </span>
         <div>
           <h2>Codex CLI</h2>
-          <p>Версия и состояние Codex daemon на сервере.</p>
+          <p>{t("Версия и состояние Codex daemon на сервере.")}</p>
         </div>
       </div>
 
       {loading ? (
         <div className="settings-loading compact">
-          <span className="spinner small" /> Получаем состояние Codex…
+          <span className="spinner small" /> {t("Получаем состояние Codex…")}
         </div>
       ) : (
         <>
           <dl className="codex-status-grid">
             <div>
-              <dt>Установленная версия Codex CLI</dt>
+              <dt>{t("Установленная версия Codex CLI")}</dt>
               <dd>{status?.cliVersion ?? "—"}</dd>
             </div>
             <div>
@@ -234,23 +247,26 @@ export function CodexSettingsCard() {
               <dd>{status?.appServerVersion ?? "—"}</dd>
             </div>
             <div>
-              <dt>Состояние</dt>
-              <dd>{daemonLabel(status?.daemonStatus)}</dd>
+              <dt>{t("Состояние")}</dt>
+              <dd>{daemonLabel(status?.daemonStatus, t)}</dd>
             </div>
             <div>
-              <dt>Актуальная версия Codex CLI</dt>
-              <dd>{status?.latestVersion ?? "Не проверялась"}</dd>
+              <dt>{t("Актуальная версия Codex CLI")}</dt>
+              <dd>{status?.latestVersion ?? t("Не проверялась")}</dd>
             </div>
           </dl>
 
           {status?.unavailableReason && (
             <div className="settings-notice warning" role="status">
-              {status.unavailableReason}
+              {localizeKnownServerText(language, status.unavailableReason) ??
+                status.unavailableReason}
             </div>
           )}
           {activeTurnCount > 0 && (
             <div className="settings-notice warning" role="status">
-              Дождитесь завершения активных ответов: {activeTurnCount}.
+              {t("Дождитесь завершения активных ответов: {{count}}.", {
+                count: activeTurnCount,
+              })}
             </div>
           )}
           {loadError && (
@@ -262,17 +278,17 @@ export function CodexSettingsCard() {
 
           <div className="settings-actions codex-actions">
             <button disabled={!supported || busy} type="button" onClick={() => void check()}>
-              {action === "checking" ? "Проверяем…" : "Проверить Codex CLI"}
+              {action === "checking" ? t("Проверяем…") : t("Проверить Codex CLI")}
             </button>
             <button
               disabled={maintenanceDisabled || status?.updateAvailable !== true}
               type="button"
               onClick={() => void update()}
             >
-              {action === "updating" ? "Обновляем…" : "Обновить Codex CLI"}
+              {action === "updating" ? t("Обновляем…") : t("Обновить Codex CLI")}
             </button>
             <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
-              {action === "restarting" ? "Перезапускаем…" : "Перезапустить"}
+              {action === "restarting" ? t("Перезапускаем…") : t("Перезапустить")}
             </button>
           </div>
         </>
@@ -282,6 +298,7 @@ export function CodexSettingsCard() {
 }
 
 export function ProxySettingsCard() {
+  const { language, t } = useI18n();
   const {
     status,
     loading,
@@ -306,30 +323,34 @@ export function ProxySettingsCard() {
           <ToolIcon />
         </span>
         <div>
-          <h2>Прокси</h2>
-          <p>Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.</p>
+          <h2>{t("Прокси")}</h2>
+          <p>
+            {t(
+              "Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.",
+            )}
+          </p>
         </div>
       </div>
 
       {loading ? (
         <div className="settings-loading compact">
-          <span className="spinner small" /> Получаем состояние прокси…
+          <span className="spinner small" /> {t("Получаем состояние прокси…")}
         </div>
       ) : (
         <>
           <div className="codex-proxy-summary">
-            <strong>Текущий прокси</strong>
-            <span>{proxySummary(status)}</span>
+            <strong>{t("Текущий прокси")}</strong>
+            <span>{proxySummary(status, language, t)}</span>
           </div>
 
           {status?.networkStatus === "ok" && (
             <div className="settings-notice success" role="status">
-              WebSocket ChatGPT/OpenAI доступен через прокси.
+              {t("WebSocket ChatGPT/OpenAI доступен через прокси.")}
             </div>
           )}
           {!secure && (
             <div className="settings-notice danger" role="alert">
-              Ввод прокси с паролем доступен только через HTTPS или локальное подключение.
+              {t("Ввод прокси с паролем доступен только через HTTPS или локальное подключение.")}
             </div>
           )}
           {loadError && (
@@ -340,7 +361,7 @@ export function ProxySettingsCard() {
 
           <form className="codex-proxy-form" onSubmit={applyProxy}>
             <label>
-              <span>Новый HTTP/HTTPS-прокси</span>
+              <span>{t("Новый HTTP/HTTPS-прокси")}</span>
               <span className="codex-proxy-input">
                 <input
                   autoComplete="off"
@@ -356,12 +377,14 @@ export function ProxySettingsCard() {
                   type="button"
                   onClick={() => setShowProxy((current) => !current)}
                 >
-                  {showProxy ? "Скрыть" : "Показать"}
+                  {showProxy ? t("Скрыть") : t("Показать")}
                 </button>
               </span>
             </label>
             <small>
-              Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.
+              {t(
+                "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.",
+              )}
             </small>
             <div className="settings-actions codex-actions">
               <button
@@ -369,7 +392,7 @@ export function ProxySettingsCard() {
                 disabled={maintenanceDisabled || !secure || !proxy.trim()}
                 type="submit"
               >
-                {action === "proxy" ? "Проверяем и применяем…" : "Проверить и применить"}
+                {action === "proxy" ? t("Проверяем и применяем…") : t("Проверить и применить")}
               </button>
             </div>
           </form>
@@ -399,20 +422,24 @@ function SettingsFeedback({ feedback }: { feedback: Feedback }) {
   );
 }
 
-function proxySummary(status: CodexManagementStatus | null): string {
+function proxySummary(
+  status: CodexManagementStatus | null,
+  language: "en" | "ru",
+  t: Translate,
+): string {
   const proxy = status?.proxy;
   if (!proxy) return "—";
-  if (proxy.error) return proxy.error;
-  if (!proxy.configured) return "Не настроен";
+  if (proxy.error) return localizeKnownServerText(language, proxy.error) ?? proxy.error;
+  if (!proxy.configured) return t("Не настроен");
   const user = proxy.username ? ` · ${proxy.username}` : "";
-  const password = proxy.hasPassword ? " · пароль сохранён" : "";
+  const password = proxy.hasPassword ? t(" · пароль сохранён") : "";
   return `${proxy.protocol}://${proxy.host}:${proxy.port}${user}${password}`;
 }
 
-function daemonLabel(value: string | undefined): string {
-  if (value === "running") return "Работает";
-  if (value === "unsupported") return "Не поддерживается";
-  if (!value || value === "unavailable") return "Недоступен";
+function daemonLabel(value: string | undefined, t: Translate): string {
+  if (value === "running") return t("Работает");
+  if (value === "unsupported") return t("Не поддерживается");
+  if (!value || value === "unavailable") return t("Недоступен");
   return value;
 }
 
@@ -431,6 +458,8 @@ function secureServerUrl(value: string): boolean {
   }
 }
 
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+function errorMessage(error: unknown, fallback: string, language: "en" | "ru"): string {
+  return error instanceof Error
+    ? (localizeKnownServerText(language, error.message) ?? error.message)
+    : fallback;
 }

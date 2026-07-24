@@ -114,6 +114,39 @@ describe("HTTP authentication", () => {
     ).toBe(200);
 
     const authorization = { authorization: "Bearer correct" };
+    const languageChanged = new Promise<Record<string, unknown>>((resolve) => {
+      const listener = (_sequence: number, event: Record<string, unknown>) => {
+        if (event.type !== "uiLanguage.changed") return;
+        projection.off("event", listener);
+        resolve(event);
+      };
+      projection.on("event", listener);
+    });
+    const languageUpdate = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/ui-language",
+      headers: authorization,
+      payload: { language: "ru" },
+    });
+    expect(languageUpdate.statusCode).toBe(200);
+    expect(languageUpdate.json()).toEqual({ language: "ru" });
+    expect(store.snapshot().uiLanguage).toBe("ru");
+    expect(projection.snapshot().uiLanguage).toBe("ru");
+    await expect(languageChanged).resolves.toEqual({
+      type: "uiLanguage.changed",
+      language: "ru",
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/settings/ui-language",
+          headers: authorization,
+          payload: { language: "de" },
+        })
+      ).statusCode,
+    ).toBe(400);
+
     const workspace = join(directory, "workspace");
     await mkdir(workspace);
     const listing = await app.inject({ url: "/api/v1/directories", headers: authorization });

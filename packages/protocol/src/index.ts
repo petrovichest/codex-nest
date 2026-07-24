@@ -22,6 +22,14 @@ export type SummaryResponse = {
 
 export type TranscriptionProvider = "local" | "openai";
 
+export type UiLanguage = "en" | "ru";
+
+export type UiLanguageSettings = {
+  language: UiLanguage;
+};
+
+export type UpdateUiLanguageRequest = UiLanguageSettings;
+
 export type TranscriptionConfigResponse = {
   providers: TranscriptionProvider[];
   provider: TranscriptionProvider | null;
@@ -524,6 +532,7 @@ export type ConnectionView = {
 
 export type AppSnapshot = {
   sequence: number;
+  uiLanguage: UiLanguage;
   connection: ConnectionView;
   projects: Project[];
   threads: ThreadSummary[];
@@ -549,6 +558,7 @@ export type ServerEvent =
   | { type: "models.changed"; models: ModelOption[] }
   | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
   | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
+  | { type: "uiLanguage.changed"; language: UiLanguage }
   | { type: "goal.changed"; threadId: string; goal: ThreadGoal | null }
   | { type: "resync.required" };
 

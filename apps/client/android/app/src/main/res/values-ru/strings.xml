@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CodexNest</string>
+    <string name="title_activity_main">CodexNest</string>
+    <string name="package_name">com.codexnest.app</string>
+    <string name="custom_url_scheme">com.codexnest.app</string>
+    <string name="notification_channel_connection">Подключение CodexNest</string>
+    <string name="notification_channel_connection_description">Постоянное подключение к домашнему серверу</string>
+    <string name="notification_channel_events">События CodexNest</string>
+    <string name="notification_channel_events_description">Завершение задач и запросы решения</string>
+    <string name="notification_status_connecting">Подключение…</string>
+    <string name="notification_status_open_app">Откройте приложение для настройки</string>
+    <string name="notification_status_app_open">Приложение открыто</string>
+    <string name="notification_status_reconnecting">Нет связи, переподключение…</string>
+    <string name="notification_status_authenticating">Авторизация…</string>
+    <string name="notification_status_connected">Подключено</string>
+    <string name="notification_task_completed">Задача завершена</string>
+    <string name="notification_task_failed">Задача завершилась с ошибкой</string>
+    <string name="notification_attention">Codex ждёт решения</string>
+    <string name="notification_default_task">Задача Codex</string>
+    <string name="notification_untitled_task">Без названия</string>
+    <string name="notification_open_details">Откройте CodexNest для подробностей</string>
+</resources>

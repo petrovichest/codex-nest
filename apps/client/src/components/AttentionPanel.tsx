@@ -9,12 +9,14 @@ import type {
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { AlertIcon } from "./Icons";
 
 export function AttentionPanel({ requests }: { requests: AttentionRequest[] }) {
+  const { t } = useI18n();
   if (!requests.length) return null;
   return (
-    <section className="attention-stack" aria-label="Требуется внимание">
+    <section className="attention-stack" aria-label={t("Требуется внимание")}>
       {requests.map((request) => (
         <AttentionCard request={request} key={request.id} />
       ))}
@@ -24,6 +26,7 @@ export function AttentionPanel({ requests }: { requests: AttentionRequest[] }) {
 
 function AttentionCard({ request }: { request: AttentionRequest }) {
   const { api } = useConnection();
+  const { language, t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,7 +36,11 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
     try {
       await api.respond(request.id, response);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Запрос уже закрыт");
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Запрос уже закрыт"),
+      );
     } finally {
       setBusy(false);
     }
@@ -43,18 +50,20 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
     <article className="attention-card">
       <div className="attention-heading">
         <AlertIcon />
-        Требуется внимание
+        {t("Требуется внимание")}
       </div>
       {request.kind === "commandApproval" && (
         <>
-          <h3>Разрешить команду?</h3>
+          <h3>{t("Разрешить команду?")}</h3>
           {request.reason && <p>{request.reason}</p>}
-          <pre>{request.command ?? "Команда не указана"}</pre>
+          <pre>{request.command ?? t("Команда не указана")}</pre>
           {request.cwd && <div className="path">{request.cwd}</div>}
-          {request.networkHost && <div className="path">Сетевой host: {request.networkHost}</div>}
+          {request.networkHost && (
+            <div className="path">{t("Сетевой host: {{host}}", { host: request.networkHost })}</div>
+          )}
           {!!request.proposedPolicyChanges.length && (
             <div className="policy-change">
-              <strong>Отдельные изменения policy</strong>
+              <strong>{t("Отдельные изменения policy")}</strong>
               {request.proposedPolicyChanges.map((change) => (
                 <button
                   key={change.id}
@@ -63,10 +72,10 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
                     void respond({ kind: "approvalAmendment", amendmentId: change.id })
                   }
                 >
-                  {change.label}
+                  {localizeKnownServerText(language, change.label) ?? change.label}
                 </button>
               ))}
-              <small>Обычное подтверждение эти правила не применяет.</small>
+              <small>{t("Обычное подтверждение эти правила не применяет.")}</small>
             </div>
           )}
           <ApprovalButtons busy={busy} canSession={request.canAcceptForSession} respond={respond} />
@@ -74,9 +83,13 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
       )}
       {request.kind === "fileChangeApproval" && (
         <>
-          <h3>Разрешить изменения файлов?</h3>
+          <h3>{t("Разрешить изменения файлов?")}</h3>
           {request.reason && <p>{request.reason}</p>}
-          {request.grantRoot && <div className="path">Запрошенный корень: {request.grantRoot}</div>}
+          {request.grantRoot && (
+            <div className="path">
+              {t("Запрошенный корень: {{root}}", { root: request.grantRoot })}
+            </div>
+          )}
           <ApprovalButtons busy={busy} canSession={request.canAcceptForSession} respond={respond} />
         </>
       )}
@@ -91,8 +104,8 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
       )}
       {request.kind === "unsupported" && (
         <>
-          <h3>Несовместимое действие</h3>
-          <p>{request.message}</p>
+          <h3>{t("Несовместимое действие")}</h3>
+          <p>{localizeKnownServerText(language, request.message) ?? request.message}</p>
           <code>{request.method}</code>
         </>
       )}
@@ -110,23 +123,24 @@ function ApprovalButtons({
   canSession: boolean;
   respond(response: AttentionResponse): Promise<void>;
 }) {
+  const { t } = useI18n();
   const decision = (value: "accept" | "acceptForSession" | "decline" | "cancel") =>
     void respond({ kind: "approval", decision: value });
   return (
     <div className="button-row">
       <button className="primary" disabled={busy} onClick={() => decision("accept")}>
-        Разрешить один раз
+        {t("Разрешить один раз")}
       </button>
       {canSession && (
         <button disabled={busy} onClick={() => decision("acceptForSession")}>
-          На сессию
+          {t("На сессию")}
         </button>
       )}
       <button className="danger" disabled={busy} onClick={() => decision("decline")}>
-        Отказать
+        {t("Отказать")}
       </button>
       <button disabled={busy} onClick={() => decision("cancel")}>
-        Отменить turn
+        {t("Отменить turn")}
       </button>
     </div>
   );
@@ -141,6 +155,7 @@ function PermissionForm({
   busy: boolean;
   respond(response: AttentionResponse): Promise<void>;
 }) {
+  const { t } = useI18n();
   const [grant, setGrant] = useState<PermissionGrant>({});
   const paths = [
     ...(request.permissions.fileSystem?.read ?? []).map((path) => ({
@@ -164,7 +179,7 @@ function PermissionForm({
   }
   return (
     <>
-      <h3>Дополнительные разрешения</h3>
+      <h3>{t("Дополнительные разрешения")}</h3>
       {request.reason && <p>{request.reason}</p>}
       <div className="path">{request.cwd}</div>
       {request.permissions.network?.enabled && (
@@ -174,7 +189,7 @@ function PermissionForm({
             checked={grant.network?.enabled ?? false}
             onChange={(event) => setGrant({ ...grant, network: { enabled: event.target.checked } })}
           />
-          Сеть
+          {t("Сеть")}
         </label>
       )}
       {paths.map(({ mode, path }) => (
@@ -184,7 +199,7 @@ function PermissionForm({
             checked={grant.fileSystem?.[mode]?.includes(path) ?? false}
             onChange={(event) => togglePath(mode, path, event.target.checked)}
           />
-          {mode === "read" ? "Чтение" : "Запись"}: {path}
+          {mode === "read" ? t("Чтение") : t("Запись")}: {path}
         </label>
       ))}
       <div className="button-row">
@@ -193,20 +208,20 @@ function PermissionForm({
           disabled={busy}
           onClick={() => void respond({ kind: "permission", permissions: grant, scope: "turn" })}
         >
-          Выдать на turn
+          {t("Выдать на turn")}
         </button>
         <button
           disabled={busy}
           onClick={() => void respond({ kind: "permission", permissions: grant, scope: "session" })}
         >
-          На сессию
+          {t("На сессию")}
         </button>
         <button
           className="danger"
           disabled={busy}
           onClick={() => void respond({ kind: "permission", permissions: {}, scope: "turn" })}
         >
-          Отказать
+          {t("Отказать")}
         </button>
       </div>
     </>
@@ -222,6 +237,7 @@ function UserInputForm({
   busy: boolean;
   respond(response: AttentionResponse): Promise<void>;
 }) {
+  const { t } = useI18n();
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const [questionIndex, setQuestionIndex] = useState(0);
   const question = request.questions[questionIndex];
@@ -244,14 +260,17 @@ function UserInputForm({
         void respond({ kind: "userInput", answers });
       }}
     >
-      <h3>Codex просит уточнение</h3>
+      <h3>{t("Codex просит уточнение")}</h3>
       {request.autoResolutionMs !== null && (
         <Countdown deadline={request.createdAt + request.autoResolutionMs} />
       )}
       {question && (
         <>
           <div className="user-input-progress">
-            Вопрос {questionIndex + 1} из {request.questions.length}
+            {t("Вопрос {{current}} из {{total}}", {
+              current: questionIndex + 1,
+              total: request.questions.length,
+            })}
           </div>
           <fieldset key={question.id}>
             <legend>{question.header}</legend>
@@ -275,7 +294,7 @@ function UserInputForm({
             {(question.isOther || !question.options) && (
               <input
                 type={question.isSecret ? "password" : "text"}
-                placeholder="Свой ответ"
+                placeholder={t("Свой ответ")}
                 value={
                   question.options?.some((option) => option.label === answers[question.id]?.[0])
                     ? ""
@@ -288,7 +307,7 @@ function UserInputForm({
           </fieldset>
           <div className="user-input-actions">
             <button className="primary" disabled={busy || !currentAnswer}>
-              {isLastQuestion ? "Отправить ответы" : "Далее"}
+              {isLastQuestion ? t("Отправить ответы") : t("Далее")}
             </button>
           </div>
         </>
@@ -298,6 +317,7 @@ function UserInputForm({
 }
 
 function Countdown({ deadline }: { deadline: number }) {
+  const { t } = useI18n();
   const [seconds, setSeconds] = useState(() =>
     Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)),
   );
@@ -309,7 +329,9 @@ function Countdown({ deadline }: { deadline: number }) {
   }, [deadline]);
   return (
     <div className="timer">
-      {seconds > 0 ? `Автовыбор через ${seconds} сек.` : "Время автовыбора истекло"}
+      {seconds > 0
+        ? t("Автовыбор через {{seconds}} сек.", { seconds })
+        : t("Время автовыбора истекло")}
     </div>
   );
 }
@@ -323,12 +345,13 @@ function ElicitationForm({
   busy: boolean;
   respond(response: AttentionResponse): Promise<void>;
 }) {
+  const { t } = useI18n();
   const [content, setContent] = useState<Record<string, unknown>>({});
   const [validationError, setValidationError] = useState<string | null>(null);
   if (request.mode === "url") {
     return (
       <>
-        <h3>Действие во внешнем сервисе</h3>
+        <h3>{t("Действие во внешнем сервисе")}</h3>
         <p>{request.message}</p>
         <div className="button-row">
           <button
@@ -336,27 +359,27 @@ function ElicitationForm({
             disabled={!request.url}
             onClick={() => request.url && void Browser.open({ url: request.url })}
           >
-            Открыть в браузере
+            {t("Открыть в браузере")}
           </button>
           <button
             className="danger"
             disabled={busy}
             onClick={() => void respond({ kind: "elicitation", action: "decline", content: null })}
           >
-            Отказать
+            {t("Отказать")}
           </button>
           <button
             disabled={busy}
             onClick={() => void respond({ kind: "elicitation", action: "cancel", content: null })}
           >
-            Отменить
+            {t("Отменить")}
           </button>
         </div>
       </>
     );
   }
   function submitForm() {
-    const message = request.schema ? validateElicitation(request.schema, content) : null;
+    const message = request.schema ? validateElicitation(request.schema, content, t) : null;
     if (message) {
       setValidationError(message);
       return;
@@ -370,7 +393,7 @@ function ElicitationForm({
         submitForm();
       }}
     >
-      <h3>Форма инструмента</h3>
+      <h3>{t("Форма инструмента")}</h3>
       <p>{request.message}</p>
       {request.schema &&
         Object.entries(request.schema.properties).map(([name, schema]) => (
@@ -386,7 +409,7 @@ function ElicitationForm({
       {validationError && <div className="error-banner">{validationError}</div>}
       <div className="button-row">
         <button className="primary" disabled={busy}>
-          Отправить
+          {t("Отправить")}
         </button>
         <button
           type="button"
@@ -394,7 +417,7 @@ function ElicitationForm({
           disabled={busy}
           onClick={() => void respond({ kind: "elicitation", action: "decline", content: null })}
         >
-          Отказать
+          {t("Отказать")}
         </button>
       </div>
     </form>
@@ -414,6 +437,7 @@ function ElicitationField({
   value: unknown;
   onChange(value: unknown): void;
 }) {
+  const { t } = useI18n();
   const label = schema.title ?? name;
   if (schema.type === "boolean") {
     return (
@@ -460,7 +484,7 @@ function ElicitationField({
           value={String(value ?? schema.default ?? "")}
           onChange={(event) => onChange(event.target.value)}
         >
-          <option value="">Выберите</option>
+          <option value="">{t("Выберите")}</option>
           {schema.enum.map((option) => (
             <option key={option}>{option}</option>
           ))}
@@ -492,21 +516,28 @@ function ElicitationField({
 function validateElicitation(
   schema: NonNullable<Extract<AttentionRequest, { kind: "elicitation" }>["schema"]>,
   content: Record<string, unknown>,
+  t: Translate,
 ): string | null {
   for (const name of schema.required) {
     const field = schema.properties[name];
     const value = content[name] ?? (field ? elicitationDefault(field) : undefined);
     if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) {
-      return `Заполните обязательное поле «${schema.properties[name]?.title ?? name}»`;
+      return t("Заполните обязательное поле «{{field}}»", {
+        field: schema.properties[name]?.title ?? name,
+      });
     }
   }
   for (const [name, field] of Object.entries(schema.properties)) {
     const value = content[name] ?? elicitationDefault(field);
     if (field.type === "array" && Array.isArray(value)) {
       if (field.minItems !== undefined && value.length < field.minItems)
-        return `Выберите больше значений в поле «${field.title ?? name}»`;
+        return t("Выберите больше значений в поле «{{field}}»", {
+          field: field.title ?? name,
+        });
       if (field.maxItems !== undefined && value.length > field.maxItems)
-        return `Выберите меньше значений в поле «${field.title ?? name}»`;
+        return t("Выберите меньше значений в поле «{{field}}»", {
+          field: field.title ?? name,
+        });
     }
   }
   return null;

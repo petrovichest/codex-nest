@@ -30,6 +30,7 @@ import type {
   TranscriptionResponse,
   UpdateTranscriptionSettingsRequest,
   TurnStartResult,
+  UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
@@ -38,10 +39,12 @@ import type {
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
+  UpdateUiLanguageRequest,
   TaskDefaults,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
+import { readInitialLanguage, translate } from "./i18n";
 
 export class ApiClient {
   constructor(public readonly settings: ConnectionSettings) {}
@@ -129,6 +132,10 @@ export class ApiClient {
 
   updateTaskDefaults(body: UpdateTaskDefaultsRequest): Promise<TaskDefaults> {
     return this.request("/api/v1/settings/task-defaults", { method: "PUT", body });
+  }
+
+  updateUiLanguage(body: UpdateUiLanguageRequest): Promise<UiLanguageSettings> {
+    return this.request("/api/v1/settings/ui-language", { method: "PUT", body });
   }
 
   listDirectories(path?: string): Promise<DirectoryListing> {
@@ -338,7 +345,10 @@ export class ApiClient {
         keepalive: options.keepalive,
       });
     } catch {
-      throw new ApiClientError("connection_failed", "Не удалось подключиться к серверу");
+      throw new ApiClientError(
+        "connection_failed",
+        translate(readInitialLanguage(), "Не удалось подключиться к серверу"),
+      );
     } finally {
       if (timeout !== null) window.clearTimeout(timeout);
     }

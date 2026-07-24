@@ -33,6 +33,7 @@ import type {
   TranscriptionConfigResponse,
   TranscriptionResponse,
   TurnStartResult,
+  UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
@@ -42,6 +43,7 @@ import type {
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
   UpdateTranscriptionSettingsRequest,
+  UpdateUiLanguageRequest,
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
@@ -470,6 +472,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       };
       await projection.setTaskDefaults(taskDefaults);
       return taskDefaults;
+    },
+  );
+
+  app.put<{ Body: UpdateUiLanguageRequest }>(
+    "/api/v1/settings/ui-language",
+    async (request): Promise<UiLanguageSettings> => {
+      const body = requireRecord<Record<string, unknown>>(request.body);
+      if (
+        Object.keys(body).some((key) => key !== "language") ||
+        !["en", "ru"].includes(String(body.language))
+      ) {
+        throw new ProjectValidationError("language must be en or ru");
+      }
+      const language = body.language as UiLanguageSettings["language"];
+      await projection.setUiLanguage(language);
+      return { language };
     },
   );
 

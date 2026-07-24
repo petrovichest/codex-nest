@@ -283,6 +283,7 @@ describe("ConnectionProvider", () => {
 function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSnapshot {
   return {
     sequence,
+    uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],
     threads,

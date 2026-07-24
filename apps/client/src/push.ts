@@ -1,7 +1,8 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { NavigateFunction } from "react-router-dom";
+import type { UiLanguage } from "@codexnest/protocol";
 
 const PENDING_THREAD_KEY = "codexnest.pendingThreadId";
 
@@ -14,6 +15,7 @@ interface SelfHostedNotificationsPlugin {
   ): Promise<{ remove(): Promise<void> }>;
   checkPermissions(): Promise<{ receive: PermissionState }>;
   requestPermissions(): Promise<{ receive: PermissionState }>;
+  setLanguage(options: { language: UiLanguage }): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -21,13 +23,26 @@ interface SelfHostedNotificationsPlugin {
 const SelfHostedNotifications =
   registerPlugin<SelfHostedNotificationsPlugin>("SelfHostedNotifications");
 
-export function usePushNotifications(navigate: NavigateFunction): void {
+export function usePushNotifications(navigate: NavigateFunction, language: UiLanguage): void {
+  const initialLanguage = useRef(language);
+  const languageInitialized = useRef(false);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    if (!languageInitialized.current) {
+      languageInitialized.current = true;
+      return;
+    }
+    void SelfHostedNotifications.setLanguage({ language }).catch(() => undefined);
+  }, [language]);
+
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     let active = true;
     let handle: { remove(): Promise<void> } | undefined;
 
     void (async () => {
+      await SelfHostedNotifications.setLanguage({ language: initialLanguage.current });
       handle = await SelfHostedNotifications.addListener(
         "notificationActionPerformed",
         ({ threadId }) => {

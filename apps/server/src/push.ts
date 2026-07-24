@@ -21,17 +21,30 @@ export class PushNotifier {
   async send(threadId: string, eventType: "completed" | "failed" | "attention"): Promise<void> {
     if (!this.credentialPath) return;
     await this.initialize();
-    const registrations = Object.entries(this.store.snapshot().devices);
+    const state = this.store.snapshot();
+    const registrations = Object.entries(state.devices);
     if (!registrations.length) return;
+    const english = state.uiLanguage === "en";
     const result = await getMessaging().sendEachForMulticast({
       tokens: registrations.map(([, device]) => device.fcmToken),
       data: { threadId, eventType },
       notification: {
-        title: eventType === "attention" ? "Codex ждёт решения" : "Сессия Codex завершена",
+        title:
+          eventType === "attention"
+            ? english
+              ? "Codex needs your decision"
+              : "Codex ждёт решения"
+            : english
+              ? "Codex session finished"
+              : "Сессия Codex завершена",
         body:
           eventType === "failed"
-            ? "Сессия завершилась с ошибкой"
-            : "Откройте CodexNest для подробностей",
+            ? english
+              ? "The session finished with an error"
+              : "Сессия завершилась с ошибкой"
+            : english
+              ? "Open CodexNest for details"
+              : "Откройте CodexNest для подробностей",
       },
       android: { priority: "high" },
     });

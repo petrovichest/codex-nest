@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import type { AppUpdateStatus } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { openDownloadUrl } from "../downloads";
 import { ServerIcon } from "./Icons";
 
@@ -15,13 +16,19 @@ const LATEST_ANDROID_APK_URL =
 
 export function ApplicationSettingsCard() {
   const { api, state } = useConnection();
+  const { language, t } = useI18n();
+  const localizationRef = useRef({ language, t });
+  localizationRef.current = { language, t };
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<Action>(null);
   const [error, setError] = useState<string | null>(null);
-  const [apkVersion, setApkVersion] = useState(
-    Capacitor.isNativePlatform() ? "Определяем…" : "Только в Android",
-  );
+  const [apkVersion, setApkVersion] = useState<string | null>(null);
+  const [apkVersionFailed, setApkVersionFailed] = useState(false);
+  const nativePlatform = Capacitor.isNativePlatform();
+  const apkVersionLabel = nativePlatform
+    ? (apkVersion ?? (apkVersionFailed ? t("Не удалось определить") : t("Определяем…")))
+    : t("Только в Android");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -29,7 +36,14 @@ export function ApplicationSettingsCard() {
       setStatus(await api.readAppSettings());
       setError(null);
     } catch (caught) {
-      setError(message(caught, "Не удалось получить состояние CodexNest"));
+      const localization = localizationRef.current;
+      setError(
+        message(
+          caught,
+          localization.t("Не удалось получить состояние CodexNest"),
+          localization.language,
+        ),
+      );
     } finally {
       setLoading(false);
     }
@@ -41,19 +55,19 @@ export function ApplicationSettingsCard() {
   }, [load, state.network]);
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
+    if (!nativePlatform) return;
     let active = true;
     void CapacitorApp.getInfo()
       .then((info) => {
         if (active) setApkVersion(`${info.version} (${info.build})`);
       })
       .catch(() => {
-        if (active) setApkVersion("Не удалось определить");
+        if (active) setApkVersionFailed(true);
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [nativePlatform]);
 
   useEffect(() => {
     if (!status || status.operation === "idle") return;
@@ -75,15 +89,21 @@ export function ApplicationSettingsCard() {
     try {
       setStatus(await api.checkAppUpdate());
     } catch (caught) {
-      setError(message(caught, "Не удалось проверить обновления CodexNest"));
+      setError(message(caught, t("Не удалось проверить обновления CodexNest"), language));
     } finally {
       setAction(null);
     }
   }
 
   async function update() {
-    const target = status?.latestVersion ? ` до версии ${status.latestVersion}` : "";
-    if (!window.confirm(`Обновить CodexNest${target}? Интерфейс ненадолго переподключится.`)) {
+    const target = status?.latestVersion
+      ? t(" до версии {{version}}", { version: status.latestVersion })
+      : "";
+    if (
+      !window.confirm(
+        t("Обновить CodexNest{{target}}? Интерфейс ненадолго переподключится.", { target }),
+      )
+    ) {
       return;
     }
     setAction("updating");
@@ -92,7 +112,7 @@ export function ApplicationSettingsCard() {
       setStatus(await api.updateApp());
     } catch (caught) {
       setAction(null);
-      setError(message(caught, "Не удалось запустить обновление CodexNest"));
+      setError(message(caught, t("Не удалось запустить обновление CodexNest"), language));
     }
   }
 
@@ -101,7 +121,7 @@ export function ApplicationSettingsCard() {
     try {
       await openDownloadUrl(api.settings.baseUrl, LATEST_ANDROID_APK_URL);
     } catch {
-      setError("Не удалось открыть загрузку APK");
+      setError(t("Не удалось открыть загрузку APK"));
     }
   }
 
@@ -114,43 +134,47 @@ export function ApplicationSettingsCard() {
           <ServerIcon />
         </span>
         <div>
-          <h2>Обновление CodexNest</h2>
-          <p>Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.</p>
+          <h2>{t("Обновление CodexNest")}</h2>
+          <p>
+            {t("Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.")}
+          </p>
         </div>
       </div>
 
       {loading ? (
         <div className="settings-loading compact">
-          <span className="spinner small" /> Получаем версию CodexNest…
+          <span className="spinner small" /> {t("Получаем версию CodexNest…")}
         </div>
       ) : (
         <>
           <dl className="codex-status-grid">
             <div>
-              <dt>Установлено на сервере</dt>
+              <dt>{t("Установлено на сервере")}</dt>
               <dd>{status?.currentVersion ?? "—"}</dd>
             </div>
             <div>
-              <dt>Актуальная версия в GitHub</dt>
-              <dd>{status?.latestVersion ?? "Не проверялась"}</dd>
+              <dt>{t("Актуальная версия в GitHub")}</dt>
+              <dd>{status?.latestVersion ?? t("Не проверялась")}</dd>
             </div>
             <div>
-              <dt>APK на этом устройстве</dt>
-              <dd>{apkVersion}</dd>
+              <dt>{t("APK на этом устройстве")}</dt>
+              <dd>{apkVersionLabel}</dd>
             </div>
             <div>
-              <dt>Состояние</dt>
-              <dd>{operationLabel(status?.operation)}</dd>
+              <dt>{t("Состояние")}</dt>
+              <dd>{operationLabel(status?.operation, t)}</dd>
             </div>
             <div>
-              <dt>Результат</dt>
-              <dd>{resultLabel(status?.result)}</dd>
+              <dt>{t("Результат")}</dt>
+              <dd>{resultLabel(status?.result, t)}</dd>
             </div>
           </dl>
 
           {!status?.supported && (
             <div className="settings-notice warning" role="status">
-              {status?.message ?? "Обновления доступны только для установки через install.sh."}
+              {status?.message
+                ? (localizeKnownServerText(language, status.message) ?? status.message)
+                : t("Обновления доступны только для установки через install.sh.")}
             </div>
           )}
           {status?.supported && status.message && (
@@ -158,7 +182,7 @@ export function ApplicationSettingsCard() {
               className={`settings-notice ${status.result === "failed" ? "danger" : "success"}`}
               role={status.result === "failed" ? "alert" : "status"}
             >
-              {status.message}
+              {localizeKnownServerText(language, status.message) ?? status.message}
             </div>
           )}
           {error && (
@@ -169,14 +193,14 @@ export function ApplicationSettingsCard() {
 
           <div className="settings-actions codex-actions">
             <button type="button" onClick={() => void downloadApk()}>
-              Скачать свежий APK
+              {t("Скачать свежий APK")}
             </button>
             <button
               disabled={!status?.supported || busy}
               type="button"
               onClick={() => void check()}
             >
-              {action === "checking" ? "Проверяем…" : "Проверить обновления"}
+              {action === "checking" ? t("Проверяем…") : t("Проверить обновления")}
             </button>
             <button
               className="primary"
@@ -185,8 +209,8 @@ export function ApplicationSettingsCard() {
               onClick={() => void update()}
             >
               {action === "updating" || (status !== null && status.operation !== "idle")
-                ? "Обновляем…"
-                : "Обновить CodexNest"}
+                ? t("Обновляем…")
+                : t("Обновить CodexNest")}
             </button>
           </div>
         </>
@@ -195,22 +219,24 @@ export function ApplicationSettingsCard() {
   );
 }
 
-function operationLabel(operation: AppUpdateStatus["operation"] | undefined): string {
-  if (!operation || operation === "idle") return "Готово";
-  if (operation === "checking") return "Проверка";
-  if (operation === "preparing") return "Подготовка";
-  if (operation === "building") return "Сборка";
-  if (operation === "switching") return "Переключение версии";
-  return "Перезапуск";
+function operationLabel(operation: AppUpdateStatus["operation"] | undefined, t: Translate): string {
+  if (!operation || operation === "idle") return t("Готово");
+  if (operation === "checking") return t("Проверка");
+  if (operation === "preparing") return t("Подготовка");
+  if (operation === "building") return t("Сборка");
+  if (operation === "switching") return t("Переключение версии");
+  return t("Перезапуск");
 }
 
-function resultLabel(result: AppUpdateStatus["result"] | undefined): string {
-  if (result === "updated") return "Обновлено";
-  if (result === "rolled_back") return "Выполнен откат";
-  if (result === "failed") return "Ошибка";
+function resultLabel(result: AppUpdateStatus["result"] | undefined, t: Translate): string {
+  if (result === "updated") return t("Обновлено");
+  if (result === "rolled_back") return t("Выполнен откат");
+  if (result === "failed") return t("Ошибка");
   return "—";
 }
 
-function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+function message(error: unknown, fallback: string, language: "en" | "ru"): string {
+  return error instanceof Error
+    ? (localizeKnownServerText(language, error.message) ?? error.message)
+    : fallback;
 }

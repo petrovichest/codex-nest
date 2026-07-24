@@ -1,4 +1,4 @@
-import type { ThreadDraftAnnotation } from "@codexnest/protocol";
+import type { ThreadDraftAnnotation, UiLanguage } from "@codexnest/protocol";
 
 export type PendingAnnotation = ThreadDraftAnnotation;
 
@@ -33,20 +33,31 @@ export function annotationStorageKey(threadId: string): string {
   return storageKey(threadId);
 }
 
-export function formatAnnotatedMessage(input: string, annotations: PendingAnnotation[]): string {
+export function formatAnnotatedMessage(
+  input: string,
+  annotations: PendingAnnotation[],
+  language: UiLanguage = "ru",
+): string {
   const sections: string[] = [];
   const message = input.trim();
   if (message) sections.push(message);
   if (annotations.length) {
+    const title =
+      language === "en"
+        ? "## Annotations for the agent's previous response"
+        : "## Аннотации к предыдущему ответу агента";
+    const annotationLabel = language === "en" ? "Annotation" : "Аннотация";
+    const quoteLabel = language === "en" ? "Selected text:" : "Выделенный текст:";
+    const commentLabel = language === "en" ? "Comment:" : "Комментарий:";
     sections.push(
       [
-        "## Аннотации к предыдущему ответу агента",
+        title,
         ...annotations.map((annotation, index) =>
           [
-            `### Аннотация ${index + 1}`,
-            "Выделенный текст:",
+            `### ${annotationLabel} ${index + 1}`,
+            quoteLabel,
             markdownQuote(annotation.quote),
-            "Комментарий:",
+            commentLabel,
             annotation.comment.trim(),
           ].join("\n\n"),
         ),

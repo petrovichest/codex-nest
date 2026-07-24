@@ -46,6 +46,7 @@ import {
 import { ThreadPage } from "./components/ThreadPage";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { useConnection } from "./connection";
+import { localizeKnownServerText, useI18n, type Translate } from "./i18n";
 import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
@@ -88,6 +89,7 @@ export function App({
   onDisconnected(): void;
 }) {
   const { api, state, reconnect } = useConnection();
+  const { language, setLanguage, t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
   const [drawer, setDrawer] = useState(false);
@@ -119,7 +121,14 @@ export function App({
     side: sidebarSide,
     setOpen: setDrawer,
   });
-  usePushNotifications(navigate);
+  usePushNotifications(navigate, language);
+  const localizationRef = useRef({ language, t });
+  localizationRef.current = { language, t };
+
+  useEffect(() => {
+    const serverLanguage = state.snapshot?.uiLanguage;
+    if (serverLanguage === "en" || serverLanguage === "ru") setLanguage(serverLanguage);
+  }, [setLanguage, state.snapshot?.uiLanguage]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -147,8 +156,11 @@ export function App({
       .catch((caught: unknown) => {
         if (cancelled) return;
         setTranscriptionConfig(null);
+        const localization = localizationRef.current;
         setTranscriptionConfigError(
-          caught instanceof Error ? caught.message : "Не удалось загрузить конфигурацию",
+          caught instanceof Error
+            ? (localizeKnownServerText(localization.language, caught.message) ?? caught.message)
+            : localization.t("Не удалось загрузить конфигурацию"),
         );
       });
     return () => {
@@ -164,10 +176,10 @@ export function App({
       if (permission === "granted" || permission === "denied") {
         setNotificationPrompt(false);
       } else {
-        setNotificationError("Браузер не выдал разрешение. Попробуйте ещё раз.");
+        setNotificationError(t("Браузер не выдал разрешение. Попробуйте ещё раз."));
       }
     } catch {
-      setNotificationError("Не удалось запросить разрешение у браузера");
+      setNotificationError(t("Не удалось запросить разрешение у браузера"));
     } finally {
       setNotificationRequesting(false);
     }
@@ -202,7 +214,7 @@ export function App({
     >
       {settings.baseUrl.startsWith("http://") && (
         <div className="http-warning">
-          Небезопасное HTTP-подключение: данные доступны перехватчику в LAN.
+          {t("Небезопасное HTTP-подключение: данные доступны перехватчику в LAN.")}
         </div>
       )}
       <Sidebar
@@ -215,21 +227,25 @@ export function App({
       {(drawer || drawerDragging) && (
         <button
           className="drawer-backdrop"
-          aria-label="Закрыть меню"
+          aria-label={t("Закрыть меню")}
           onClick={() => setDrawer(false)}
         />
       )}
       <main className="content">
         {state.error && (
           <div className="offline-banner">
-            <span>{state.error}. Серверные задачи продолжат выполняться.</span>
-            <button onClick={reconnect}>Повторить</button>
+            <span>
+              {t("{{error}}. Серверные задачи продолжат выполняться.", {
+                error: localizeKnownServerText(language, state.error) ?? state.error,
+              })}
+            </span>
+            <button onClick={reconnect}>{t("Повторить")}</button>
           </div>
         )}
         {!snapshot ? (
           <div className="center-state">
             <div className="spinner" />
-            <p>Получаем состояние Codex…</p>
+            <p>{t("Получаем состояние Codex…")}</p>
           </div>
         ) : (
           <Routes>
@@ -296,8 +312,10 @@ export function App({
                 <BellIcon />
               </span>
               <div>
-                <h2 id="notification-permission-title">Разрешить уведомления?</h2>
-                <p>CodexNest сообщит, когда задача завершится или потребуется ваше решение.</p>
+                <h2 id="notification-permission-title">{t("Разрешить уведомления?")}</h2>
+                <p>
+                  {t("CodexNest сообщит, когда задача завершится или потребуется ваше решение.")}
+                </p>
               </div>
             </div>
             {notificationError && (
@@ -311,7 +329,7 @@ export function App({
                 disabled={notificationRequesting}
                 onClick={dismissNotificationPrompt}
               >
-                Не сейчас
+                {t("Не сейчас")}
               </button>
               <button
                 type="button"
@@ -319,7 +337,7 @@ export function App({
                 disabled={notificationRequesting}
                 onClick={() => void enableBrowserNotifications()}
               >
-                {notificationRequesting ? "Запрашиваем…" : "Разрешить уведомления"}
+                {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
               </button>
             </div>
           </div>
@@ -358,6 +376,7 @@ function HomeRoute({
   threads: ThreadSummary[];
   onOpenNavigation(): void;
 }) {
+  const { t } = useI18n();
   const latest = [...threads]
     .filter((thread) => !thread.archived)
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
@@ -365,15 +384,15 @@ function HomeRoute({
   return (
     <div className="thread-workspace">
       <div className="conversation-pane">
-        <WorkspaceHeader title="Нет открытых сессий" onOpenNavigation={onOpenNavigation} />
+        <WorkspaceHeader title={t("Нет открытых сессий")} onOpenNavigation={onOpenNavigation} />
         <div className="new-session-empty">
           <span className="new-session-glyph">
             <NewTaskIcon />
           </span>
-          <h2>Создайте сессию в проекте</h2>
-          <p>Откройте список проектов и нажмите + рядом с нужным проектом.</p>
+          <h2>{t("Создайте сессию в проекте")}</h2>
+          <p>{t("Откройте список проектов и нажмите + рядом с нужным проектом.")}</p>
           <button type="button" onClick={onOpenNavigation}>
-            Открыть проекты
+            {t("Открыть проекты")}
           </button>
         </div>
       </div>
@@ -395,6 +414,7 @@ function Sidebar({
   projectListDirection: ProjectListDirection;
 }) {
   const { api, state, dispatch } = useConnection();
+  const { language, t } = useI18n();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
@@ -506,9 +526,9 @@ function Sidebar({
     try {
       await copyText(path);
       menu?.removeAttribute("open");
-      showProjectNotice(projectId, "success", "Путь скопирован", true);
+      showProjectNotice(projectId, "success", t("Путь скопирован"), true);
     } catch {
-      showProjectNotice(projectId, "error", "Не удалось скопировать путь");
+      showProjectNotice(projectId, "error", t("Не удалось скопировать путь"));
     }
   }
 
@@ -527,7 +547,9 @@ function Sidebar({
       showProjectNotice(
         projectId,
         "error",
-        caught instanceof Error ? caught.message : "Не удалось изменить порядок проектов",
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось изменить порядок проектов"),
       );
     } finally {
       setMovingProjectId(null);
@@ -675,7 +697,10 @@ function Sidebar({
     } catch (caught) {
       setCreateError({
         projectId,
-        message: caught instanceof Error ? caught.message : "Не удалось создать сессию",
+        message:
+          caught instanceof Error
+            ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+            : t("Не удалось создать сессию"),
       });
     } finally {
       setCreatingProjectId(null);
@@ -696,7 +721,7 @@ function Sidebar({
     }
   }
 
-  const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError);
+  const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError, t);
   const projectDragTargets = projectDrag
     ? displayedProjectIds.filter((projectId) => projectId !== projectDrag.projectId)
     : [];
@@ -708,7 +733,7 @@ function Sidebar({
   const archive = archivedThreads.length > 0 && (
     <details className="archive-group">
       <summary>
-        Архив
+        {t("Архив")}
         <span>{archivedThreads.length}</span>
       </summary>
       {archivedThreads.map((thread) => (
@@ -721,20 +746,22 @@ function Sidebar({
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
       <div className="sidebar-controls">
         <div
-          aria-label={`Состояние сервера: ${networkLabel(state.network)}`}
+          aria-label={t("Состояние сервера: {{state}}", {
+            state: networkLabel(state.network, t),
+          })}
           className="server-status"
           role="status"
         >
           <ConnectionDot state={state.network} />
-          <span>{networkLabel(state.network)}</span>
+          <span>{networkLabel(state.network, t)}</span>
         </div>
         <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
           <SlidersIcon />
-          Настройки
+          {t("Настройки")}
         </NavLink>
         <button
           aria-busy={rateLimitsLoading}
-          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
+          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
           className="sidebar-control-action codex-limits"
           disabled={rateLimitsLoading}
           onClick={() => void refreshRateLimits()}
@@ -744,10 +771,14 @@ function Sidebar({
         </button>
         <button className="sidebar-control-action" onClick={onNewProject}>
           <PlusIcon />
-          Добавить проект
+          {t("Добавить проект")}
         </button>
       </div>
-      <nav className={`thread-nav ${projectListDirection}`} aria-label="Задачи" ref={threadNavRef}>
+      <nav
+        className={`thread-nav ${projectListDirection}`}
+        aria-label={t("Задачи")}
+        ref={threadNavRef}
+      >
         <div className={`project-list${projectDrag ? " project-list-dragging" : ""}`}>
           {projectListDirection === "bottom-up" && archive}
           {orderedGroups.map((group) => {
@@ -776,7 +807,7 @@ function Sidebar({
                 >
                   {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
                   <FolderIcon />
-                  <span>{group.project?.displayName ?? "Без проекта"}</span>
+                  <span>{group.project?.displayName ?? t("Без проекта")}</span>
                 </button>
                 {group.project && (
                   <>
@@ -789,13 +820,17 @@ function Sidebar({
                       onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
                       onPointerMove={moveProjectDrag}
                       onPointerUp={finishProjectDrag}
-                      title={`Перетащить проект ${group.project.displayName}`}
+                      title={t("Перетащить проект {{project}}", {
+                        project: group.project.displayName,
+                      })}
                     >
                       <GripVerticalIcon />
                     </span>
                     <details className="project-action-menu" data-dismiss-on-outside-click>
                       <summary
-                        aria-label={`Действия с проектом ${group.project.displayName}`}
+                        aria-label={t("Действия с проектом {{project}}", {
+                          project: group.project.displayName,
+                        })}
                         className="project-icon-action"
                       >
                         <MoreIcon />
@@ -811,7 +846,7 @@ function Sidebar({
                             )
                           }
                         >
-                          <CopyIcon /> Копировать путь
+                          <CopyIcon /> {t("Копировать путь")}
                         </button>
                         <button
                           disabled={cannotMoveAbove || movingProjectId !== null}
@@ -824,7 +859,7 @@ function Sidebar({
                             )
                           }
                         >
-                          <ArrowUpIcon /> Переместить выше
+                          <ArrowUpIcon /> {t("Переместить выше")}
                         </button>
                         <button
                           disabled={cannotMoveBelow || movingProjectId !== null}
@@ -837,13 +872,15 @@ function Sidebar({
                             )
                           }
                         >
-                          <ArrowDownIcon /> Переместить ниже
+                          <ArrowDownIcon /> {t("Переместить ниже")}
                         </button>
                       </div>
                     </details>
                     <button
                       aria-busy={creatingProjectId === group.project.id}
-                      aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                      aria-label={t("Создать новую сессию в проекте {{project}}", {
+                        project: group.project.displayName,
+                      })}
                       className="project-icon-action"
                       disabled={creatingProjectId !== null}
                       type="button"
@@ -883,10 +920,14 @@ function Sidebar({
                 ))}
                 {group.threads.length > 5 && (
                   <button className="show-more" onClick={() => toggleShowAll(key)}>
-                    {groupShowsAll ? "Показать меньше" : `Показать ещё ${group.threads.length - 5}`}
+                    {groupShowsAll
+                      ? t("Показать меньше")
+                      : t("Показать ещё {{count}}", { count: group.threads.length - 5 })}
                   </button>
                 )}
-                {!group.threads.length && <span className="project-empty">Пока нет задач</span>}
+                {!group.threads.length && (
+                  <span className="project-empty">{t("Пока нет задач")}</span>
+                )}
               </div>
             );
             const projectGroupClasses = [
@@ -917,53 +958,66 @@ function Sidebar({
 }
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
+  const { language } = useI18n();
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
       to={`/threads/${encodeURIComponent(thread.id)}`}
       onClick={onNavigate}
     >
-      <span className="thread-link-title">{thread.title}</span>
+      <span className="thread-link-title">
+        {localizeKnownServerText(language, thread.title) ?? thread.title}
+      </span>
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );
 }
 
-function rateLimitsLabel(limits: CodexRateLimitsResponse | null, error: boolean): string {
-  if (error) return "Повторить лимиты";
-  if (!limits) return "Лимиты Codex";
+function rateLimitsLabel(
+  limits: CodexRateLimitsResponse | null,
+  error: boolean,
+  t: Translate,
+): string {
+  if (error) return t("Повторить лимиты");
+  if (!limits) return t("Лимиты Codex");
   const windows = [limits.primary, limits.secondary]
     .filter((window): window is CodexRateLimitWindow => window !== null)
-    .map(formatRateLimitWindow);
-  return windows.length ? windows.join(" · ") : "Лимиты недоступны";
+    .map((window) => formatRateLimitWindow(window, t));
+  return windows.length ? windows.join(" · ") : t("Лимиты недоступны");
 }
 
-function formatRateLimitWindow(window: CodexRateLimitWindow): string {
+function formatRateLimitWindow(window: CodexRateLimitWindow, t: Translate): string {
   const remaining = Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)));
-  return `${rateLimitDuration(window.windowDurationMins)} ${remaining}%`;
+  return `${rateLimitDuration(window.windowDurationMins, t)} ${remaining}%`;
 }
 
-function rateLimitDuration(minutes: number | null): string {
-  if (minutes === null) return "Лимит";
-  if (minutes >= 1_440 && minutes % 1_440 === 0) return `${minutes / 1_440} д`;
-  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} ч`;
-  return `${minutes} мин`;
+function rateLimitDuration(minutes: number | null, t: Translate): string {
+  if (minutes === null) return t("Лимит");
+  if (minutes >= 1_440 && minutes % 1_440 === 0) {
+    return t("{{count}} д", { count: minutes / 1_440 });
+  }
+  if (minutes >= 60 && minutes % 60 === 0) {
+    return t("{{count}} ч", { count: minutes / 60 });
+  }
+  return t("{{count}} мин", { count: minutes });
 }
 
-function rateLimitsAriaLabel(text: string, loading: boolean, error: boolean): string {
-  if (loading) return "Обновляем лимиты Codex";
-  if (error) return "Повторить обновление лимитов Codex";
-  return text === "Лимиты Codex" ? "Показать лимиты Codex" : `Обновить лимиты Codex: ${text}`;
+function rateLimitsAriaLabel(text: string, loading: boolean, error: boolean, t: Translate): string {
+  if (loading) return t("Обновляем лимиты Codex");
+  if (error) return t("Повторить обновление лимитов Codex");
+  return text === t("Лимиты Codex")
+    ? t("Показать лимиты Codex")
+    : t("Обновить лимиты Codex: {{text}}", { text });
 }
 
 function ConnectionDot({ state }: { state: "connecting" | "connected" | "offline" }) {
   return <span aria-hidden="true" className={`connection-dot ${state}`} />;
 }
 
-function networkLabel(state: "connecting" | "connected" | "offline"): string {
+function networkLabel(state: "connecting" | "connected" | "offline", t: Translate): string {
   return state === "connected"
-    ? "Подключено"
+    ? t("Подключено")
     : state === "connecting"
-      ? "Подключение…"
-      : "Нет связи";
+      ? t("Подключение…")
+      : t("Нет связи");
 }

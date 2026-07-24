@@ -6,6 +6,7 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { useI18n, type Translate } from "../i18n";
 import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
 
 export function SettingsPicker({
@@ -31,18 +32,19 @@ export function SettingsPicker({
   onGoalUpdate?(value: UpdateThreadGoalRequest): void;
   onGoalClear?(): void;
 }) {
+  const { language, t } = useI18n();
   const model = effectiveModel(models, value.model);
 
   return (
     <div className="settings-picker">
       <SettingSelect
-        ariaLabel="Модель"
+        ariaLabel={t("Модель")}
         disabled={disabled || models.length === 0}
         icon={<ModelIcon />}
         value={value.model ?? ""}
         onChange={(selected) => changeModel(selected || null)}
       >
-        <option value="">{model?.displayName ?? "Модель"}</option>
+        <option value="">{model?.displayName ?? t("Модель")}</option>
         {models.map((option) => (
           <option value={option.id} key={option.id}>
             {option.displayName}
@@ -51,7 +53,7 @@ export function SettingsPicker({
       </SettingSelect>
 
       <SettingSelect
-        ariaLabel="Уровень рассуждений"
+        ariaLabel={t("Уровень рассуждений")}
         disabled={disabled || !model}
         icon={<BrainIcon />}
         iconOnly
@@ -69,8 +71,8 @@ export function SettingsPicker({
       <button
         aria-label={
           value.collaborationMode === "plan"
-            ? "Выключить режим планирования"
-            : "Включить режим планирования"
+            ? t("Выключить режим планирования")
+            : t("Включить режим планирования")
         }
         aria-pressed={value.collaborationMode === "plan"}
         className={`setting-control plan-toggle${value.collaborationMode === "plan" ? " active" : ""}`}
@@ -88,13 +90,16 @@ export function SettingsPicker({
 
       {goal ? (
         <details className="goal-picker" data-dismiss-on-outside-click>
-          <summary className="setting-control goal-toggle active" aria-label="Управление целью">
+          <summary
+            className="setting-control goal-toggle active"
+            aria-label={t("Управление целью")}
+          >
             <TargetIcon />
           </summary>
           <div className="goal-popover">
             <div className="goal-popover-heading">
-              <strong>{goalStatusLabel(goal.status)}</strong>
-              <span>{formatGoalUsage(goal)}</span>
+              <strong>{goalStatusLabel(goal.status, t)}</strong>
+              <span>{formatGoalUsage(goal, language, t)}</span>
             </div>
             <p>{goal.objective}</p>
             <div className="goal-popover-actions">
@@ -104,7 +109,7 @@ export function SettingsPicker({
                   disabled={goalBusy}
                   onClick={() => onGoalUpdate?.({ status: "paused" })}
                 >
-                  Пауза
+                  {t("Пауза")}
                 </button>
               )}
               {["paused", "blocked"].includes(goal.status) && (
@@ -113,18 +118,18 @@ export function SettingsPicker({
                   disabled={goalBusy}
                   onClick={() => onGoalUpdate?.({ status: "active" })}
                 >
-                  Продолжить
+                  {t("Продолжить")}
                 </button>
               )}
               <button type="button" disabled={goalBusy} onClick={onGoalClear}>
-                Очистить
+                {t("Очистить")}
               </button>
             </div>
           </div>
         </details>
       ) : (
         <button
-          aria-label={goalMode ? "Выключить режим цели" : "Включить режим цели"}
+          aria-label={goalMode ? t("Выключить режим цели") : t("Включить режим цели")}
           aria-pressed={goalMode}
           className={`setting-control goal-toggle${goalMode ? " active" : ""}`}
           disabled={disabled || !model}
@@ -164,7 +169,7 @@ export function SettingsPicker({
   }
 }
 
-function goalStatusLabel(status: ThreadGoal["status"]): string {
+function goalStatusLabel(status: ThreadGoal["status"], t: Translate): string {
   const labels: Record<ThreadGoal["status"], string> = {
     active: "Цель активна",
     paused: "Цель на паузе",
@@ -173,14 +178,30 @@ function goalStatusLabel(status: ThreadGoal["status"]): string {
     budgetLimited: "Достигнут бюджет цели",
     complete: "Цель выполнена",
   };
-  return labels[status];
+  return t(labels[status]);
 }
 
-function formatGoalUsage(goal: ThreadGoal): string {
+function formatGoalUsage(goal: ThreadGoal, language: "en" | "ru", t: Translate): string {
   const minutes = Math.floor(goal.timeUsedSeconds / 60);
   const seconds = goal.timeUsedSeconds % 60;
-  const time = minutes ? `${minutes}м ${seconds}с` : `${seconds}с`;
-  return `${goal.tokensUsed.toLocaleString()} токенов · ${time}`;
+  const time = minutes
+    ? t("{{count}}м {{seconds}}с", { count: minutes, seconds })
+    : t("{{count}}с", { count: seconds });
+  const modulo100 = goal.tokensUsed % 100;
+  const modulo10 = goal.tokensUsed % 10;
+  const tokenLabel =
+    language === "en"
+      ? goal.tokensUsed === 1
+        ? "{{count}} токен"
+        : "{{count}} токенов"
+      : modulo100 >= 11 && modulo100 <= 14
+        ? "{{count}} токенов"
+        : modulo10 === 1
+          ? "{{count}} токен"
+          : modulo10 >= 2 && modulo10 <= 4
+            ? "{{count}} токена"
+            : "{{count}} токенов";
+  return `${t(tokenLabel, { count: goal.tokensUsed.toLocaleString(language) })} · ${time}`;
 }
 
 function SettingSelect({

@@ -21,6 +21,7 @@ import type {
   TranscriptionProvider,
   TurnProgress,
   TurnView,
+  UiLanguage,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
@@ -38,6 +39,7 @@ import {
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { openDownloadUrl } from "../downloads";
+import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage } from "./Composer";
@@ -79,6 +81,9 @@ export function ThreadPage({
   const { threadId = "" } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const { language, t } = useI18n();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
@@ -189,7 +194,11 @@ export function ThreadPage({
           }
         } catch (caught) {
           if (composerDraftRef.current.threadId === targetThreadId) {
-            setError(caught instanceof Error ? caught.message : "Не удалось сохранить черновик");
+            setError(
+              caught instanceof Error
+                ? localizeKnownServerText(language, caught.message)
+                : t("Не удалось сохранить черновик"),
+            );
           }
         }
       });
@@ -303,7 +312,9 @@ export function ThreadPage({
     if (!request) return;
     void request
       .then((value) => dispatch({ type: "goal", threadId, goal: value }))
-      .catch((caught: Error) => setError(caught.message));
+      .catch((caught: Error) =>
+        setError(localizeKnownServerText(languageRef.current, caught.message)),
+      );
   }, [api, dispatch, threadId]);
 
   useEffect(() => {
@@ -337,7 +348,7 @@ export function ThreadPage({
   useEffect(() => {
     if (threadId) {
       void refreshDetail(threadId, { force: true }).catch((caught: Error) =>
-        setError(caught.message),
+        setError(localizeKnownServerText(languageRef.current, caught.message)),
       );
     }
   }, [threadId, refreshDetail, state.snapshotEpoch]);
@@ -361,7 +372,7 @@ export function ThreadPage({
     detailReconcileKey.current = key;
     void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
       detailReconcileKey.current = null;
-      setError(caught.message);
+      setError(localizeKnownServerText(languageRef.current, caught.message));
     });
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
@@ -446,7 +457,7 @@ export function ThreadPage({
   if (!summary)
     return (
       <div className="center-state">
-        <h2>Задача не найдена</h2>
+        <h2>{t("Задача не найдена")}</h2>
       </div>
     );
 
@@ -493,7 +504,11 @@ export function ThreadPage({
     event.preventDefault();
     const submittedComposerInput = input;
     const submittedAnnotations = annotations;
-    const submittedInput = formatAnnotatedMessage(submittedComposerInput, submittedAnnotations);
+    const submittedInput = formatAnnotatedMessage(
+      submittedComposerInput,
+      submittedAnnotations,
+      language,
+    );
     if ((!submittedInput.trim() && !images.length) || (goalMode && !input.trim())) return;
     const submittedImages = images;
     const submittedGoalMode = goalMode;
@@ -534,7 +549,7 @@ export function ThreadPage({
           messageId: clientMessageId,
           turnId: result.turnId,
         });
-        if (result.goalWarning) setError(result.goalWarning);
+        if (result.goalWarning) setError(localizeKnownServerText(language, result.goalWarning));
       }
       pendingDraftsRef.current.delete(threadId);
       dispatch({ type: "draft", threadId, draft: null });
@@ -542,7 +557,11 @@ export function ThreadPage({
     } catch (caught) {
       dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
       replaceComposerDraft(submittedDraft, false);
-      setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отправить сообщение"),
+      );
     } finally {
       setBusy(false);
     }
@@ -564,7 +583,7 @@ export function ThreadPage({
         message: {
           id: clientMessageId,
           threadId,
-          text: "Да, реализуй этот план",
+          text: t("Да, реализуй этот план"),
           images: [],
           createdAt: Date.now(),
           destination: "turn",
@@ -572,7 +591,7 @@ export function ThreadPage({
         },
       });
       const result = await api.startTurn(threadId, {
-        input: "Да, реализуй этот план",
+        input: t("Да, реализуй этот план"),
         clientMessageId,
       });
       dispatch({
@@ -591,7 +610,11 @@ export function ThreadPage({
           .then((thread) => dispatch({ type: "thread", thread }))
           .catch(() => undefined);
       }
-      setError(caught instanceof Error ? caught.message : "Не удалось начать реализацию плана");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось начать реализацию плана"),
+      );
     } finally {
       setBusy(false);
     }
@@ -603,7 +626,11 @@ export function ThreadPage({
     try {
       await api.sendQueuedNow(threadId, messageId);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отправить сообщение"),
+      );
     } finally {
       setSendingQueuedId(null);
     }
@@ -615,7 +642,11 @@ export function ThreadPage({
     try {
       await api.markRead(threadId, { observedUpdatedAt: summary!.updatedAt });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось закончить сессию");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось закончить сессию"),
+      );
     } finally {
       setFinishing(false);
     }
@@ -625,7 +656,7 @@ export function ThreadPage({
   const toggleArchive = () => void api.archive(threadId, !summary.archived);
 
   async function deleteThread() {
-    if (!window.confirm("Удалить эту сессию? Это действие нельзя отменить.")) return;
+    if (!window.confirm(t("Удалить эту сессию? Это действие нельзя отменить."))) return;
     setDeleting(true);
     setError(null);
     try {
@@ -633,7 +664,11 @@ export function ThreadPage({
       dispatch({ type: "thread.remove", threadId });
       navigate("/", { replace: true });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось удалить сессию");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось удалить сессию"),
+      );
       setDeleting(false);
     }
   }
@@ -646,7 +681,11 @@ export function ThreadPage({
       dispatch({ type: "thread", thread });
       if (patch.collaborationMode === "plan") setGoalMode(false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось изменить настройки");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить настройки"),
+      );
     } finally {
       setSettingsBusy(false);
     }
@@ -659,7 +698,11 @@ export function ThreadPage({
       const updated = await api.updateGoal(threadId, patch);
       dispatch({ type: "goal", threadId, goal: updated });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось изменить цель");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить цель"),
+      );
     } finally {
       setGoalBusy(false);
     }
@@ -672,7 +715,11 @@ export function ThreadPage({
       await api.clearGoal(threadId);
       dispatch({ type: "goal", threadId, goal: null });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось очистить цель");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось очистить цель"),
+      );
     } finally {
       setGoalBusy(false);
     }
@@ -691,27 +738,27 @@ export function ThreadPage({
     <div className="thread-workspace">
       <div className="conversation-pane">
         <WorkspaceHeader
-          title={summary.title}
+          title={localizeKnownServerText(language, summary.title) ?? summary.title}
           subtitle={project?.displayName ?? summary.cwd}
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
             <details className="thread-action-menu" data-dismiss-on-outside-click>
-              <summary className="icon-button" aria-label="Действия с задачей">
+              <summary className="icon-button" aria-label={t("Действия с задачей")}>
                 <MoreIcon />
               </summary>
               <div className="action-menu-popover">
                 <button onClick={togglePin}>
-                  <PinIcon /> {summary.pinned ? "Открепить" : "Закрепить"}
+                  <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
                 </button>
                 <button onClick={() => setRenaming(true)}>
-                  <PencilIcon /> Переименовать
+                  <PencilIcon /> {t("Переименовать")}
                 </button>
                 <button onClick={toggleArchive}>
-                  <ArchiveIcon /> {summary.archived ? "Вернуть из архива" : "Архивировать"}
+                  <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
                 </button>
                 <button className="danger" disabled={deleting} onClick={() => void deleteThread()}>
-                  <TrashIcon /> {deleting ? "Удаляем…" : "Удалить"}
+                  <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
                 </button>
               </div>
             </details>
@@ -729,13 +776,13 @@ export function ThreadPage({
         >
           <section className="timeline" aria-live="polite">
             {loadingOlder && (
-              <div className="history-loader" aria-label="Загружаем старые сообщения">
+              <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
                 <span className="spinner small" />
               </div>
             )}
             {olderError && (
               <button className="history-retry" type="button" onClick={() => void loadOlder()}>
-                Повторить загрузку старых сообщений
+                {t("Повторить загрузку старых сообщений")}
               </button>
             )}
             {!detail && optimisticTurnMessages.length === 0 && (
@@ -786,12 +833,12 @@ export function ThreadPage({
                           disabled={busy || latestPlanHasAnnotations}
                           title={
                             latestPlanHasAnnotations
-                              ? "Сначала отправьте или удалите аннотации к плану"
+                              ? t("Сначала отправьте или удалите аннотации к плану")
                               : undefined
                           }
                           onClick={() => void implementPlan()}
                         >
-                          Да, реализуй этот план
+                          {t("Да, реализуй этот план")}
                         </button>
                       )}
                     </div>
@@ -836,7 +883,7 @@ export function ThreadPage({
                 disabled={finishing}
                 onClick={() => void finishThread()}
               >
-                {finishing ? "Заканчиваем…" : "Закончить"}
+                {finishing ? t("Заканчиваем…") : t("Закончить")}
               </button>
             )}
           </section>
@@ -850,7 +897,7 @@ export function ThreadPage({
               scrollToEnd(scrollRef.current, "smooth");
             }}
           >
-            Требуется внимание <ChevronDownIcon />
+            {t("Требуется внимание")} <ChevronDownIcon />
           </button>
         )}
         <Composer
@@ -871,7 +918,7 @@ export function ThreadPage({
           goalBusy={goalBusy}
           onGoalModeChange={(value) => {
             if (value && annotations.length) {
-              setError("Сначала отправьте или удалите аннотации");
+              setError(t("Сначала отправьте или удалите аннотации"));
               return;
             }
             setGoalMode(value);
@@ -887,7 +934,7 @@ export function ThreadPage({
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
           onTranscribe={async (audio) => {
-            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
+            if (!transcriptionProvider) throw new Error(t("Распознавание речи не настроено"));
             return (await api.transcribe(audio)).text;
           }}
           error={error}
@@ -906,7 +953,7 @@ export function ThreadPage({
       {inspectorOpen && (
         <button
           className="inspector-backdrop"
-          aria-label="Закрыть сведения"
+          aria-label={t("Закрыть сведения")}
           onClick={() => setInspectorOpen(false)}
         />
       )}
@@ -1027,6 +1074,7 @@ function DownloadLink({
   onDownload(path: string): Promise<void>;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const busyRef = useRef(false);
@@ -1060,11 +1108,11 @@ function DownloadLink({
         }}
       >
         {children}
-        {busy && <span className="download-link-status"> — скачиваем…</span>}
+        {busy && <span className="download-link-status"> — {t("скачиваем…")}</span>}
       </a>
       {failed && (
         <span className="download-link-error" role="alert">
-          Не удалось скачать файл. Нажмите ещё раз.
+          {t("Не удалось скачать файл. Нажмите ещё раз.")}
         </span>
       )}
     </span>
@@ -1105,6 +1153,7 @@ export function Activity({
   onUpdateAnnotation?(annotationId: string, comment: string): boolean;
   onDeleteAnnotation?(annotationId: string): boolean;
 }) {
+  const { language, t } = useI18n();
   if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
     const messageAnnotations = numberedAnnotations(annotations, item.id);
@@ -1153,7 +1202,7 @@ export function Activity({
     return (
       <article className="message plan">
         <div className="message-body">
-          <div className="activity-label">План</div>
+          <div className="activity-label">{t("План")}</div>
           <AnnotatableMarkdownContent
             text={item.text}
             messageId={item.id}
@@ -1196,13 +1245,13 @@ export function Activity({
   if (item.type === "planChecklist") {
     return (
       <article className="message plan-checklist">
-        <div className="activity-label">Ход работы</div>
+        <div className="activity-label">{t("Ход работы")}</div>
         {item.explanation && <p>{item.explanation}</p>}
         <ol>
           {item.steps.map((step, index) => (
             <li className={step.status} key={`${index}:${step.step}`}>
               <input
-                aria-label={step.status === "completed" ? "Выполнено" : "Не выполнено"}
+                aria-label={step.status === "completed" ? t("Выполнено") : t("Не выполнено")}
                 checked={step.status === "completed"}
                 readOnly
                 tabIndex={-1}
@@ -1220,7 +1269,7 @@ export function Activity({
     return (
       <ActivityDetails
         icon={<TerminalIcon />}
-        title={item.command || "Выполнена команда"}
+        title={item.command || t("Выполнена команда")}
         status={item.status}
       >
         {item.cwd && <div className="path">{item.cwd}</div>}
@@ -1233,7 +1282,7 @@ export function Activity({
     return (
       <ActivityDetails
         icon={<FileIcon />}
-        title={item.path ? `Изменён ${item.path}` : "Изменены файлы"}
+        title={item.path ? t("Изменён {{path}}", { path: item.path }) : t("Изменены файлы")}
         status={item.status}
       >
         <pre>{item.patch}</pre>
@@ -1243,15 +1292,15 @@ export function Activity({
   if (item.type === "tool") {
     return (
       <ActivityDetails icon={<ToolIcon />} title={item.title} status={item.status}>
-        {item.detail && <p>{item.detail}</p>}
+        {item.detail && <p>{localizeKnownServerText(language, item.detail)}</p>}
       </ActivityDetails>
     );
   }
   if (item.type === "error" || item.type === "unsupported") {
     return (
       <article className="error-banner activity-error">
-        <strong>{item.type === "unsupported" ? "Несовместимое событие" : "Ошибка"}</strong>
-        <p>{item.message}</p>
+        <strong>{item.type === "unsupported" ? t("Несовместимое событие") : t("Ошибка")}</strong>
+        <p>{localizeKnownServerText(language, item.message)}</p>
       </article>
     );
   }
@@ -1313,6 +1362,7 @@ function AnnotatableMarkdownContent({
   onUpdate?(annotationId: string, comment: string): boolean;
   onDelete?(annotationId: string): boolean;
 }) {
+  const { t } = useI18n();
   const surfaceRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFormElement>(null);
@@ -1533,7 +1583,7 @@ function AnnotatableMarkdownContent({
             type="button"
             className="annotation-marker"
             style={{ left: position.left, top: position.top }}
-            aria-label={`Аннотация ${item.number}`}
+            aria-label={t("Аннотация {{number}}", { number: item.number })}
             disabled={readOnly}
             onClick={() => openExistingEditor(item)}
             key={item.annotation.id}
@@ -1549,14 +1599,14 @@ function AnnotatableMarkdownContent({
           onPointerDown={(event) => event.preventDefault()}
         >
           <button type="button" onClick={openNewEditor}>
-            Аннотация
+            {t("Аннотация")}
           </button>
           <button type="button" onClick={() => void copySelection()}>
             {copyState === "copied"
-              ? "Скопировано"
+              ? t("Скопировано")
               : copyState === "failed"
-                ? "Ошибка копирования"
-                : "Копировать"}
+                ? t("Ошибка копирования")
+                : t("Копировать")}
           </button>
         </div>
       )}
@@ -1572,8 +1622,8 @@ function AnnotatableMarkdownContent({
         >
           <textarea
             autoFocus
-            aria-label="Комментарий к выделенному тексту"
-            placeholder="Комментарий"
+            aria-label={t("Комментарий к выделенному тексту")}
+            placeholder={t("Комментарий")}
             rows={2}
             value={comment}
             onChange={(event) => setComment(event.target.value)}
@@ -1582,7 +1632,7 @@ function AnnotatableMarkdownContent({
             <button
               className="annotation-editor-save"
               type="submit"
-              aria-label="Сохранить аннотацию"
+              aria-label={t("Сохранить аннотацию")}
               disabled={!comment.trim()}
             >
               <SendIcon />
@@ -1590,7 +1640,7 @@ function AnnotatableMarkdownContent({
             <button
               className="annotation-editor-delete"
               type="button"
-              aria-label="Удалить аннотацию"
+              aria-label={t("Удалить аннотацию")}
               onClick={() => {
                 if (!editedAnnotation || onDelete?.(editedAnnotation.annotation.id)) {
                   setEditor(null);
@@ -1632,6 +1682,7 @@ function ActivityGroup({
   cwd: string;
   onDownload(path: string): Promise<void>;
 }) {
+  const { t } = useI18n();
   const status = items.some((item) => item.status === "failed")
     ? "failed"
     : items.some((item) => item.status === "inProgress")
@@ -1639,25 +1690,25 @@ function ActivityGroup({
       : "completed";
   const labels: string[] = [];
   if (items.some((item) => item.type === "command" && item.kind === "read")) {
-    labels.push("Прочитаны файлы");
+    labels.push(t("Прочитаны файлы"));
   }
   if (items.some((item) => item.type === "command" && item.kind === "search")) {
-    labels.push("Выполнен поиск");
+    labels.push(t("Выполнен поиск"));
   }
   if (items.some((item) => item.type === "command" && item.kind === "command")) {
-    labels.push("Выполнены команды");
+    labels.push(t("Выполнены команды"));
   }
-  if (items.some((item) => item.type === "fileChange")) labels.push("Отредактированы файлы");
-  if (items.some((item) => item.type === "tool")) labels.push("Использованы инструменты");
+  if (items.some((item) => item.type === "fileChange")) labels.push(t("Отредактированы файлы"));
+  if (items.some((item) => item.type === "tool")) labels.push(t("Использованы инструменты"));
   return (
     <details className="activity-group">
       <summary>
         <span className="activity-group-icon">
           <ToolIcon />
         </span>
-        <span>{labels.join(" · ") || "Выполнены действия"}</span>
+        <span>{labels.join(" · ") || t("Выполнены действия")}</span>
         {status === "inProgress" && <span className="spinner small" />}
-        {status === "failed" && <span className="activity-group-error">Ошибка</span>}
+        {status === "failed" && <span className="activity-group-error">{t("Ошибка")}</span>}
       </summary>
       <div className="activity-group-content">
         {items.map((item) => (
@@ -1681,9 +1732,10 @@ function QueuedMessages({
   cwd: string;
   onDownload(path: string): Promise<void>;
 }) {
+  const { t } = useI18n();
   if (!messages.length) return null;
   return (
-    <section className="queued-messages" aria-label="Очередь сообщений">
+    <section className="queued-messages" aria-label={t("Очередь сообщений")}>
       {messages.map((message) => (
         <article
           className="message userMessage queued-message"
@@ -1698,12 +1750,12 @@ function QueuedMessages({
           </div>
           <MessageFooter text={message.text} timestamp={message.createdAt} />
           <div className="queued-message-footer">
-            <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
+            <span>{message.status === "dispatching" ? t("Отправляется…") : t("В очереди")}</span>
             <button
               disabled={message.status === "dispatching" || sendingId !== null}
               onClick={() => onSendNow(message.id)}
             >
-              Отправить сейчас
+              {t("Отправить сейчас")}
             </button>
           </div>
         </article>
@@ -1713,16 +1765,22 @@ function QueuedMessages({
 }
 
 function MessageImages({ images }: { images: string[] }) {
+  const { t } = useI18n();
   return (
     <div className="message-images">
       {images.map((image, index) => (
-        <img src={image} alt={`Изображение ${index + 1}`} key={`${index}:${image.slice(-24)}`} />
+        <img
+          src={image}
+          alt={t("Изображение {{number}}", { number: index + 1 })}
+          key={`${index}:${image.slice(-24)}`}
+        />
       ))}
     </div>
   );
 }
 
 function MessageFooter({ text, timestamp }: { text: string; timestamp: number | null }) {
+  const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const timerRef = useRef<number | null>(null);
   const canCopy = Boolean(text.trim());
@@ -1747,13 +1805,15 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
 
   return (
     <footer className="message-footer">
-      {copyState === "copied" && <span role="status">Скопировано</span>}
-      {copyState === "failed" && <span role="alert">Не удалось скопировать</span>}
+      {copyState === "copied" && <span role="status">{t("Скопировано")}</span>}
+      {copyState === "failed" && <span role="alert">{t("Не удалось скопировать")}</span>}
       {timestamp !== null && (
-        <time dateTime={new Date(timestamp).toISOString()}>{formatMessageTime(timestamp)}</time>
+        <time dateTime={new Date(timestamp).toISOString()}>
+          {formatMessageTime(timestamp, language)}
+        </time>
       )}
       {canCopy && (
-        <button type="button" aria-label="Копировать сообщение" onClick={() => void copy()}>
+        <button type="button" aria-label={t("Копировать сообщение")} onClick={() => void copy()}>
           <CopyIcon />
         </button>
       )}
@@ -1768,6 +1828,7 @@ export function TurnTiming({
   turn: TurnView;
   active?: boolean;
 }) {
+  const { language, t } = useI18n();
   const startedAt = turn.startedAt ?? turn.progress.startedAt;
   if (active) return <ActiveTurnStatus progress={{ ...turn.progress, startedAt }} />;
   if (turn.status === "inProgress" || startedAt === null) return null;
@@ -1775,14 +1836,17 @@ export function TurnTiming({
     turn.durationMs ??
     (turn.completedAt === null ? null : Math.max(0, turn.completedAt - startedAt));
   return duration === null ? null : (
-    <div className="turn-timing">Работал {formatDuration(duration)}</div>
+    <div className="turn-timing">
+      {t("Работал {{duration}}", { duration: formatDuration(duration, language) })}
+    </div>
   );
 }
 
 function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
+  const { language, t } = useI18n();
   const startedAt = progress?.startedAt ?? null;
-  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null);
-  const label = progress?.explanation?.trim() || "Codex работает";
+  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null, language);
+  const label = progress?.explanation?.trim() || t("Codex работает");
   return (
     <div className="turn-timing active" role="status">
       <span className="spinner small" />
@@ -1794,18 +1858,19 @@ function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
   );
 }
 
-export function formatMessageTime(timestamp: number): string {
+export function formatMessageTime(timestamp: number, language: UiLanguage = "ru"): string {
   const value = new Date(timestamp);
   const today = new Date();
-  const time = new Intl.DateTimeFormat(undefined, {
+  const locale = language === "ru" ? "ru-RU" : "en-US";
+  const time = new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
   }).format(value);
   if (value.toDateString() === today.toDateString()) return time;
-  return `${new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
+  return `${new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
 }
 
-function useElapsed(startedAt: number, active = true): string {
+function useElapsed(startedAt: number, active = true, language: UiLanguage = "ru"): string {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!active) return;
@@ -1813,13 +1878,17 @@ function useElapsed(startedAt: number, active = true): string {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [active, startedAt]);
-  return formatDuration(Math.max(0, now - startedAt));
+  return formatDuration(Math.max(0, now - startedAt), language);
 }
 
-function formatDuration(durationMs: number): string {
+function formatDuration(durationMs: number, language: UiLanguage = "ru"): string {
   const seconds = Math.max(0, Math.floor(durationMs / 1_000));
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
+  if (language === "en") {
+    if (hours) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+    return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  }
   if (hours) return `${hours}ч ${minutes % 60}м ${seconds % 60}с`;
   return minutes ? `${minutes}м ${seconds % 60}с` : `${seconds}с`;
 }
@@ -1898,12 +1967,15 @@ function ActivityDetails({
   status: string;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <details className="activity-card">
       <summary>
         <span className="activity-icon">{icon}</span>
         <span className="activity-title">{title}</span>
-        <span className={`activity-status activity-status-${status}`}>{statusLabel(status)}</span>
+        <span className={`activity-status activity-status-${status}`}>
+          {statusLabel(status, t)}
+        </span>
       </summary>
       <div className="activity-content">{children}</div>
     </details>
@@ -1919,6 +1991,7 @@ function RenameDialog({
   onClose(): void;
   onRename(value: string): Promise<void>;
 }) {
+  const { language, t } = useI18n();
   const [value, setValue] = useState(initialValue);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1933,30 +2006,30 @@ function RenameDialog({
           setBusy(true);
           setError(null);
           void onRename(value.trim())
-            .catch((caught: Error) => setError(caught.message))
+            .catch((caught: Error) => setError(localizeKnownServerText(language, caught.message)))
             .finally(() => setBusy(false));
         }}
       >
         <div className="row-between">
           <div>
-            <span className="dialog-eyebrow">Задача</span>
-            <h2>Переименовать</h2>
+            <span className="dialog-eyebrow">{t("Задача")}</span>
+            <h2>{t("Переименовать")}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Закрыть" onClick={onClose}>
+          <button type="button" className="icon-button" aria-label={t("Закрыть")} onClick={onClose}>
             <XIcon />
           </button>
         </div>
         <label>
-          Название
+          {t("Название")}
           <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} />
         </label>
         {error && <div className="error-banner">{error}</div>}
         <div className="dialog-actions">
           <button type="button" onClick={onClose}>
-            Отмена
+            {t("Отмена")}
           </button>
           <button className="primary" disabled={busy || !value.trim()}>
-            {busy ? "Сохраняем…" : "Сохранить"}
+            {busy ? t("Сохраняем…") : t("Сохранить")}
           </button>
         </div>
       </form>
@@ -1964,6 +2037,10 @@ function RenameDialog({
   );
 }
 
-function statusLabel(status: string): string {
-  return status === "inProgress" ? "выполняется" : status === "failed" ? "ошибка" : "готово";
+function statusLabel(status: string, t: Translate): string {
+  return status === "inProgress"
+    ? t("выполняется")
+    : status === "failed"
+      ? t("ошибка")
+      : t("готово");
 }

@@ -1,10 +1,12 @@
 import { type FormEvent, useState } from "react";
 
 import { ApiClient } from "../api";
+import { localizeKnownServerText, useI18n } from "../i18n";
 import { normalizeBaseUrl, saveConnectionSettings, type ConnectionSettings } from "../storage";
 import { ServerIcon } from "./Icons";
 
 export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionSettings): void }) {
+  const { language, t } = useI18n();
   const [baseUrl, setBaseUrl] = useState("http://");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -15,15 +17,19 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
     setBusy(true);
     setError(null);
     try {
-      const settings = { baseUrl: normalizeBaseUrl(baseUrl), token: token.trim() };
-      if (!settings.token) throw new Error("Введите bearer token");
+      const settings = { baseUrl: normalizeBaseUrl(baseUrl, language), token: token.trim() };
+      if (!settings.token) throw new Error(t("Введите bearer token"));
       const api = new ApiClient(settings);
       await api.health();
       await api.summary();
       await saveConnectionSettings(settings);
       onConnected(settings);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось сохранить подключение");
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось сохранить подключение"),
+      );
     } finally {
       setBusy(false);
     }
@@ -36,10 +42,10 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
           <ServerIcon />
         </div>
         <span className="dialog-eyebrow">CodexNest</span>
-        <h1>Подключение к CodexNest</h1>
-        <p className="muted">Укажите адрес домашнего сервера и bearer token.</p>
+        <h1>{t("Подключение к CodexNest")}</h1>
+        <p className="muted">{t("Укажите адрес домашнего сервера и bearer token.")}</p>
         <label>
-          Адрес сервера
+          {t("Адрес сервера")}
           <input
             type="url"
             inputMode="url"
@@ -62,12 +68,12 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
         </label>
         {baseUrl.trim().startsWith("http://") && (
           <div className="warning">
-            HTTP не шифрует token и содержимое сессий. Используйте только доверенную LAN.
+            {t("HTTP не шифрует token и содержимое сессий. Используйте только доверенную LAN.")}
           </div>
         )}
         {error && <div className="error-banner">{error}</div>}
         <button className="primary" disabled={busy} type="submit">
-          {busy ? "Проверяем…" : "Подключиться"}
+          {busy ? t("Проверяем…") : t("Подключиться")}
         </button>
       </form>
     </main>

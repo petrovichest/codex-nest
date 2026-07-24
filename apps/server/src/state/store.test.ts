@@ -23,6 +23,7 @@ describe("StateStore", () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
+    expect(store.snapshot().uiLanguage).toBe("en");
     await Promise.all([
       store.update((state) => {
         state.devices.a = { fcmToken: "one", updatedAt: 1 };
@@ -104,6 +105,7 @@ describe("StateStore", () => {
 
     const store = new StateStore(path);
     await store.load();
+    expect(store.snapshot().uiLanguage).toBe("ru");
     expect(store.snapshot().messageQueues?.thread).toEqual([
       expect.objectContaining({ id: "queued", text: "Старое сообщение" }),
     ]);
