@@ -1904,7 +1904,7 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
     if (group.length) result.push(group);
     group = [];
   };
-  for (const item of items) {
+  for (const item of activitiesForDisplay(items)) {
     if (!hasVisibleActivity(item)) continue;
     if (["command", "fileChange", "tool"].includes(item.type)) {
       group.push(item);
@@ -1914,6 +1914,24 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
     }
   }
   flush();
+  return result;
+}
+
+function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
+  const result = [...items];
+  for (let index = 0; index < result.length; index += 1) {
+    const item = result[index];
+    if (item?.type !== "planChecklist" || !item.afterItemId) continue;
+    const finalAnswerIndex = result.findIndex(
+      (candidate) =>
+        candidate.id === item.afterItemId &&
+        candidate.type === "agentMessage" &&
+        candidate.phase === "final_answer",
+    );
+    if (finalAnswerIndex < 0 || finalAnswerIndex > index) continue;
+    result.splice(index, 1);
+    result.splice(finalAnswerIndex, 0, item);
+  }
   return result;
 }
 

@@ -1529,6 +1529,58 @@ describe("Activity", () => {
     expect(document.querySelector(".turn-progress")).toBeNull();
   });
 
+  it("shows a final checklist above its separate final answer", () => {
+    const api = threadApi();
+    const completed = { ...summary, state: "completed" as const };
+    mockThreadConnection(api, completed, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "final-answer",
+              status: "completed",
+              text: "Итоговый ответ",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+            {
+              type: "planChecklist",
+              id: "final-checklist",
+              status: "completed",
+              explanation: "Работа завершена",
+              steps: [{ step: "Проверить результат", status: "completed" }],
+              timestamp: 3,
+              afterItemId: "final-answer",
+            },
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    const checklist = screen.getByText("Проверить результат").closest("article");
+    const answer = screen.getByText("Итоговый ответ").closest("article");
+    const timing = view.container.querySelector(".turn-timing");
+    expect(checklist).toHaveClass("plan-checklist");
+    expect(checklist).toHaveTextContent("Работа завершена");
+    expect(answer).toHaveClass("agentMessage");
+    expect(checklist).not.toBe(answer);
+    expect(checklist!.compareDocumentPosition(answer!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(answer!.compareDocumentPosition(timing!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it("does not leave timeline gaps for empty streamed activities", () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
