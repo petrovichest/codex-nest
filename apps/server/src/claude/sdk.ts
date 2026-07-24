@@ -62,12 +62,25 @@ export interface ClaudeQueryParams {
   options?: Record<string, unknown>;
 }
 
+/** The interrupt receipt (`still_queued` uuids survive) advertised via `interrupt_receipt_v1`. */
+export interface ClaudeInterruptReceipt {
+  still_queued?: string[];
+}
+
 /**
- * The injectable Claude SDK seam. `query` is unused until Stage 3 (live turns);
- * it is declared here so the seam is stable, but fakes may throw when it is called.
+ * The live query handle: an async generator of SDK messages plus `interrupt()`. Narrowed
+ * from the SDK's `Query` so the consumer never depends on the full SDK surface.
+ */
+export interface ClaudeQuery extends AsyncGenerator<unknown, void, unknown> {
+  interrupt(): Promise<ClaudeInterruptReceipt | undefined>;
+}
+
+/**
+ * The injectable Claude SDK seam. `query` drives live turns (Stage 3); fakes supply a
+ * controllable ClaudeQuery. ALL imports of the real SDK stay confined to this module.
  */
 export interface ClaudeSdk {
-  query(params: ClaudeQueryParams): AsyncGenerator<unknown, void, unknown>;
+  query(params: ClaudeQueryParams): ClaudeQuery;
   getSessionMessages(
     sessionId: string,
     options: ClaudeSessionReadOptions,
@@ -82,8 +95,7 @@ export interface ClaudeSdk {
 export async function loadRealSdk(): Promise<ClaudeSdk> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   return {
-    query: (params: ClaudeQueryParams) =>
-      sdk.query(params as never) as unknown as AsyncGenerator<unknown, void, unknown>,
+    query: (params: ClaudeQueryParams) => sdk.query(params as never) as unknown as ClaudeQuery,
     getSessionMessages: async (sessionId, options) =>
       (await sdk.getSessionMessages(sessionId, options)) as unknown as ClaudeTranscriptMessage[],
     getSessionInfo: async (sessionId, options) =>

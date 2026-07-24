@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { buildClaudeTurns, paginateClaudeTurns, projectClaudeTurns } from "./projection";
+import {
+  buildClaudeTurns,
+  ClaudeLiveTurn,
+  isInterruptMarker,
+  paginateClaudeTurns,
+  projectClaudeTurns,
+} from "./projection";
 import type { ClaudeContentBlock, ClaudeSessionInfo, ClaudeTranscriptMessage } from "./sdk";
 
 interface Fixture {
@@ -378,5 +384,215 @@ describe("paginateClaudeTurns", () => {
     );
     expect(page.turns).toHaveLength(1);
     expect(page.olderTurnsCursor).toBeNull();
+  });
+});
+
+/** A transcript-shaped message with an explicit uuid, for exercising ClaudeLiveTurn. */
+function msg(
+  type: "user" | "assistant",
+  uuid: string,
+  content: ClaudeContentBlock[],
+  stopReason: string | null = null,
+): ClaudeTranscriptMessage {
+  return {
+    type,
+    uuid,
+    session_id: "s",
+    message: { role: type, content, ...(type === "assistant" ? { stop_reason: stopReason } : {}) },
+    parent_tool_use_id: null,
+    parent_agent_id: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+describe("ClaudeLiveTurn", () => {
+  it("accumulates text deltas under a stable id and finalizes to the same id", () => {
+    const live = new ClaudeLiveTurn("turn-1", SANDBOX_CWD);
+    live.prompt("hi", []);
+    live.streamDelta("text", "Hel");
+    const growing = live.streamDelta("text", "lo");
+    expect(growing).toMatchObject({ type: "agentMessage", text: "Hello", status: "inProgress" });
+
+    const emitted = live.ingestAssistant(
+      msg("assistant", "a1", [{ type: "text", text: "Hello" }], "end_turn"),
+    );
+    // The finalized item reuses the streamed id, so the client shows one growing item.
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]!.id).toBe(growing!.id);
+    expect(emitted[0]).toMatchObject({ type: "agentMessage", status: "completed", text: "Hello" });
+    expect(live.items.filter((item) => item.type === "agentMessage")).toHaveLength(1);
+  });
+
+  it("streams thinking deltas as an in-progress reasoning item", () => {
+    const live = new ClaudeLiveTurn("turn-1", SANDBOX_CWD);
+    live.prompt("hi", []);
+    const item = live.streamDelta("thinking", "let me think");
+    expect(item).toMatchObject({ type: "reasoning", status: "inProgress", text: "let me think" });
+  });
+
+  it("pairs a tool_use with its later tool_result (inProgress → completed)", () => {
+    const live = new ClaudeLiveTurn("turn-1", "/work");
+    live.prompt("run it", []);
+    const started = live.ingestAssistant(
+      msg(
+        "assistant",
+        "a1",
+        [{ type: "tool_use", id: "t-1", name: "Bash", input: { command: "date" } }],
+        "tool_use",
+      ),
+    );
+    expect(started.at(-1)).toMatchObject({ type: "command", id: "t-1", status: "inProgress" });
+
+    const completed = live.ingestToolResult(
+      msg("user", "u2", [{ type: "tool_result", tool_use_id: "t-1", content: "Tue" }]),
+    );
+    expect(completed).toEqual([
+      expect.objectContaining({ type: "command", id: "t-1", status: "completed", output: "Tue" }),
+    ]);
+  });
+
+  it("accumulates fileChange progress counters and plan checklist steps", () => {
+    const live = new ClaudeLiveTurn("turn-1", "/work");
+    live.prompt("do work", []);
+    live.ingestAssistant(
+      msg(
+        "assistant",
+        "a1",
+        [
+          {
+            type: "tool_use",
+            id: "todo",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "Write file", status: "in_progress" },
+                { content: "Verify", status: "pending" },
+              ],
+            },
+          },
+        ],
+        "tool_use",
+      ),
+    );
+    live.ingestToolResult(
+      msg("user", "u1", [{ type: "tool_result", tool_use_id: "todo", content: "ok" }]),
+    );
+    live.ingestAssistant(
+      msg(
+        "assistant",
+        "a2",
+        [
+          {
+            type: "tool_use",
+            id: "w",
+            name: "Write",
+            input: { file_path: "/work/a.txt", content: "one\ntwo" },
+          },
+        ],
+        "tool_use",
+      ),
+    );
+    live.ingestToolResult(
+      msg("user", "u2", [{ type: "tool_result", tool_use_id: "w", content: "written" }]),
+    );
+
+    expect(live.progress.steps).toEqual([
+      { step: "Write file", status: "inProgress" },
+      { step: "Verify", status: "pending" },
+    ]);
+    expect(live.progress).toMatchObject({ filesChanged: 1, additions: 2, deletions: 0 });
+  });
+
+  it("marks the last agent message as the final answer on finalize", () => {
+    const live = new ClaudeLiveTurn("turn-1", "/work");
+    live.prompt("hi", []);
+    live.ingestAssistant(msg("assistant", "a1", [{ type: "text", text: "interim" }], "tool_use"));
+    live.ingestAssistant(msg("assistant", "a2", [{ type: "text", text: "final" }], "end_turn"));
+    const finalized = live.finalize();
+    expect(finalized).toMatchObject({ type: "agentMessage", text: "final", phase: "final_answer" });
+    const answers = live.items.filter(
+      (item) => item.type === "agentMessage" && item.phase === "final_answer",
+    );
+    expect(answers).toHaveLength(1);
+  });
+
+  it("converges with the transcript read: identical turn id and item ids", () => {
+    const turnId = "turn-conv";
+    const transcript: ClaudeTranscriptMessage[] = [
+      msg("user", turnId, [{ type: "text", text: "edit and run" }]),
+      msg("assistant", "a-think", [{ type: "thinking", thinking: "planning" }], "tool_use"),
+      msg(
+        "assistant",
+        "a-bash",
+        [{ type: "tool_use", id: "tu-bash", name: "Bash", input: { command: "date" } }],
+        "tool_use",
+      ),
+      msg(
+        "assistant",
+        "a-edit",
+        [
+          {
+            type: "tool_use",
+            id: "tu-edit",
+            name: "Edit",
+            input: { file_path: "/work/x.ts", old_string: "a", new_string: "b" },
+          },
+        ],
+        "tool_use",
+      ),
+      msg("user", "u-res1", [{ type: "tool_result", tool_use_id: "tu-bash", content: "Tue" }]),
+      msg("user", "u-res2", [{ type: "tool_result", tool_use_id: "tu-edit", content: "ok" }]),
+      msg("assistant", "a-final", [{ type: "text", text: "done" }], "end_turn"),
+    ];
+    const transcriptTurn = buildClaudeTurns(transcript, "/work")[0]!;
+
+    const live = new ClaudeLiveTurn(turnId, "/work");
+    live.prompt("edit and run", []);
+    live.ingestAssistant(transcript[1]!);
+    live.ingestAssistant(transcript[2]!);
+    live.ingestAssistant(transcript[3]!);
+    live.ingestToolResult(transcript[4]!);
+    live.ingestToolResult(transcript[5]!);
+    live.ingestAssistant(transcript[6]!);
+    live.finalize();
+
+    expect(live.turnId).toBe(transcriptTurn.id);
+    expect(live.items.map((item) => item.id)).toEqual(transcriptTurn.items.map((item) => item.id));
+    expect(live.items.map((item) => item.type)).toEqual(
+      transcriptTurn.items.map((item) => item.type),
+    );
+    // The final answer phase matches too.
+    const liveFinal = live.items.find((item) => item.type === "agentMessage");
+    const transcriptFinal = transcriptTurn.items.find((item) => item.type === "agentMessage");
+    expect(liveFinal).toMatchObject({ phase: "final_answer" });
+    expect(transcriptFinal).toMatchObject({ phase: "final_answer" });
+  });
+});
+
+describe("interrupt markers (real transcript fixture)", () => {
+  it("does not mint a turn from the marker and reads the interrupted turn as interrupted", () => {
+    const { info, messages } = loadFixture("session-interrupt.json");
+    const turns = buildClaudeTurns(messages, info.cwd);
+    // Exactly one turn (the marker user-message must not start a second turn).
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.status).toBe("interrupted");
+    // The marker itself is dropped: no item renders its `[Request interrupted…]` text.
+    const texts = turns[0]!.items
+      .filter((item) => item.type === "userMessage" || item.type === "agentMessage")
+      .map((item) =>
+        item.type === "userMessage" || item.type === "agentMessage" ? item.text : "",
+      );
+    expect(texts.some((text) => text.includes("Request interrupted"))).toBe(false);
+    // The denied Bash tool is present and failed (the interrupt denied it).
+    expect(
+      turns[0]!.items.some((item) => item.type === "command" && item.status === "failed"),
+    ).toBe(true);
+  });
+
+  it("identifies the interrupt marker message directly", () => {
+    const { messages } = loadFixture("session-interrupt.json");
+    const marker = messages.find((message) => isInterruptMarker(message));
+    expect(marker).toBeDefined();
+    expect(isInterruptMarker(messages[0]!)).toBe(false); // the real user prompt is not a marker
   });
 });

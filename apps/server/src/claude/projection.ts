@@ -8,11 +8,18 @@ import type { ClaudeContentBlock, ClaudeTranscriptMessage } from "./sdk";
 type ToolUseBlock = Extract<ClaudeContentBlock, { type: "tool_use" }>;
 type ToolResultBlock = Extract<ClaudeContentBlock, { type: "tool_result" }>;
 type ImageBlock = Extract<ClaudeContentBlock, { type: "image" }>;
+// The userMessage/agentMessage/reasoning/plan members of ActivityItem share one shape;
+// this is that text-bearing member (Extract by a `type` subset would collapse to never).
+type TextActivityItem = Extract<ActivityItem, { text: string; images: string[] }>;
 
 /** Mirrors Codex's THREAD_TURN_PAGE_SIZE so both backends paginate identically. */
 export const CLAUDE_THREAD_TURN_PAGE_SIZE = 20;
 
 const CLOSED_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens"]);
+
+// CLI-inserted markers that record why a turn stopped. They are `user` text messages
+// but must NOT start a turn (they carry no user intent) and must not render as items.
+const INTERRUPT_MARKER = /^\[Request interrupted by user/;
 
 export interface ProjectClaudeTurnsOptions {
   cwd?: string;
@@ -43,9 +50,11 @@ export function projectClaudeTurns(
 export function buildClaudeTurns(messages: ClaudeTranscriptMessage[], cwd?: string): TurnView[] {
   // Only the main session is projected; sub-agent messages (parent_tool_use_id set)
   // are represented by their parent Task tool_use in the main thread. Non-record
-  // entries (a corrupt transcript line) are dropped rather than crashing the read.
+  // entries (a corrupt transcript line) and CLI interrupt markers are dropped so they
+  // neither start a turn nor render as items.
   const mainThread = messages.filter(
-    (message) => isRecord(message) && message.parent_tool_use_id === null,
+    (message) =>
+      isRecord(message) && message.parent_tool_use_id === null && !isInterruptMarker(message),
   );
   const groups: ClaudeTranscriptMessage[][] = [];
   for (const message of mainThread) {
@@ -83,26 +92,10 @@ function buildTurn(
   isFinalTurn: boolean,
 ): TurnView {
   const prompt = group[0]!;
+  const turnId = prompt.uuid;
   const results = collectToolResults(group);
-  const items: ActivityItem[] = [];
-  let lastAgentMessageId: string | null = null;
-
-  for (const message of group) {
-    contentBlocks(message).forEach((block, blockIndex) => {
-      const item = mapBlock(message, block, blockIndex, results, cwd, items.at(-1)?.id ?? null);
-      if (!item) return;
-      if (item.type === "agentMessage") lastAgentMessageId = item.id;
-      items.push(item);
-    });
-  }
-
-  // The last text block of the final assistant message is the turn's final answer.
-  if (lastAgentMessageId) {
-    const finalAnswer = items.find(
-      (item) => item.id === lastAgentMessageId && item.type === "agentMessage",
-    );
-    if (finalAnswer && finalAnswer.type === "agentMessage") finalAnswer.phase = "final_answer";
-  }
+  const items = buildTurnItems(group, turnId, cwd, results);
+  markFinalAnswer(items);
 
   const closed = isTurnClosed(group);
   const status: TurnView["status"] = !isFinalTurn || closed ? "completed" : "interrupted";
@@ -113,7 +106,7 @@ function buildTurn(
     startedAt !== null && completedAt !== null ? Math.max(0, completedAt - startedAt) : null;
 
   return {
-    id: prompt.uuid,
+    id: turnId,
     status,
     startedAt,
     completedAt,
@@ -123,27 +116,80 @@ function buildTurn(
   };
 }
 
-function mapBlock(
-  message: ClaudeTranscriptMessage,
-  block: ClaudeContentBlock,
-  blockIndex: number,
-  results: Map<string, ToolResult>,
+/**
+ * Maps a turn's messages (oldest→newest) into ActivityItems. Shared by the transcript
+ * read path and the live turn. Item ids are stable and identical across both halves so
+ * reopening a thread after a live turn dedupes cleanly:
+ *  - text / thinking / image blocks → `${turnId}:${ordinal}` where ordinal counts those
+ *    blocks in order (the SDK's streaming identity is disjoint from the persisted
+ *    wrapper-message uuid — see ClaudeLiveTurn — so an order-based id is what both halves
+ *    can compute, live under a growing stream and offline from the transcript);
+ *  - tool_use blocks → the tool_use_id (present in both the stream and the transcript).
+ */
+export function buildTurnItems(
+  group: ClaudeTranscriptMessage[],
+  turnId: string,
   cwd: string | undefined,
-  previousItemId: string | null,
-): ActivityItem | null {
-  const blockId = `${message.uuid}:${blockIndex}`;
-  const timestamp = timestampMs(message);
+  results: Map<string, ToolResult>,
+): ActivityItem[] {
+  const items: ActivityItem[] = [];
+  const ordinal = new OrdinalCounter(turnId);
+  for (const message of group) {
+    const role = message.type === "user" ? "user" : "assistant";
+    for (const block of contentBlocks(message)) {
+      const item = renderBlock(block, {
+        id: ordinal.idFor(block),
+        role,
+        cwd,
+        results,
+        timestamp: timestampMs(message),
+        previousItemId: items.at(-1)?.id ?? null,
+      });
+      if (item) items.push(item);
+    }
+  }
+  return items;
+}
+
+/** Assigns block ids: an incrementing ordinal for text-like blocks, the id for tools. */
+class OrdinalCounter {
+  private ordinal = 0;
+  constructor(private readonly turnId: string) {}
+
+  idFor(block: ClaudeContentBlock): string {
+    if (block.type === "text" || block.type === "thinking" || block.type === "image") {
+      const id = `${this.turnId}:${this.ordinal}`;
+      this.ordinal += 1;
+      return id;
+    }
+    if (block.type === "tool_use") return (block as ToolUseBlock).id;
+    return `${this.turnId}:x${this.ordinal}`;
+  }
+}
+
+interface RenderContext {
+  id: string;
+  role: "user" | "assistant";
+  cwd: string | undefined;
+  results: Map<string, ToolResult>;
+  timestamp: number | null;
+  previousItemId: string | null;
+}
+
+/** The single block→ActivityItem core used by both the transcript and live projections. */
+function renderBlock(block: ClaudeContentBlock, context: RenderContext): ActivityItem | null {
+  const { id, timestamp } = context;
   switch (block.type) {
     case "text": {
       const text = typeof block.text === "string" ? block.text : "";
-      const type = message.type === "user" ? "userMessage" : "agentMessage";
-      return { type, id: blockId, status: "completed", text, images: [], timestamp, phase: null };
+      const type = context.role === "user" ? "userMessage" : "agentMessage";
+      return { type, id, status: "completed", text, images: [], timestamp, phase: null };
     }
     case "thinking": {
       const text = typeof block.thinking === "string" ? block.thinking : "";
       return {
         type: "reasoning",
-        id: blockId,
+        id,
         status: "completed",
         text,
         images: [],
@@ -152,11 +198,10 @@ function mapBlock(
       };
     }
     case "image": {
-      // A user-supplied image reaches us as its own block; reconstruct the data URL.
       const url = imageDataUrl(block);
       return {
         type: "userMessage",
-        id: blockId,
+        id,
         status: "completed",
         text: "",
         images: url ? [url] : [],
@@ -166,7 +211,13 @@ function mapBlock(
     }
     case "tool_use": {
       const toolUse = block as ToolUseBlock;
-      return mapToolUse(toolUse, results.get(toolUse.id), cwd, timestamp, previousItemId);
+      return mapToolUse(
+        toolUse,
+        context.results.get(toolUse.id),
+        context.cwd,
+        timestamp,
+        context.previousItemId,
+      );
     }
     case "tool_result":
       // Paired into its tool_use item; standalone results carry no display value.
@@ -174,10 +225,21 @@ function mapBlock(
     default:
       return {
         type: "unsupported",
-        id: blockId,
+        id,
         status: "failed",
         message: `Неподдерживаемый блок Claude: ${String(block.type)}`,
       };
+  }
+}
+
+/** Sets the last agent text block of a turn as its final answer. */
+function markFinalAnswer(items: ActivityItem[]): void {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.type === "agentMessage") {
+      item.phase = "final_answer";
+      return;
+    }
   }
 }
 
@@ -245,7 +307,8 @@ function mapToolUse(
       return {
         type: "planChecklist",
         id,
-        status: status === "failed" ? "failed" : "completed",
+        status:
+          status === "failed" ? "failed" : status === "inProgress" ? "inProgress" : "completed",
         explanation: null,
         steps: todoSteps(input.todos),
         timestamp: timestamp ?? 0,
@@ -282,9 +345,143 @@ function readCommand(
   };
 }
 
-interface ToolResult {
+export interface ToolResult {
   text: string;
   isError: boolean;
+}
+
+/**
+ * A live, incrementally-built turn. The session feeds it SDK messages as they stream;
+ * it produces the same ActivityItems (identical ids) the transcript read produces for
+ * the finished turn, so a reopen after the turn ends dedupes cleanly. Text/thinking
+ * blocks stream token-by-token under their ordinal id (the id their finalizing
+ * `assistant` message will also get), so the growing item and its final form share one
+ * id — the SDK never exposes the persisted wrapper uuid before the block completes.
+ */
+export class ClaudeLiveTurn {
+  /** Finalized (closed) transcript messages, oldest→newest. */
+  private readonly messages: ClaudeTranscriptMessage[] = [];
+  private readonly toolResults = new Map<string, ToolResult>();
+  private finalizedItems: ActivityItem[] = [];
+  /** The currently-streaming text/thinking block, not yet closed by an assistant message. */
+  private streaming: { item: TextActivityItem } | null = null;
+  private startedAt: number | null = null;
+
+  constructor(
+    readonly turnId: string,
+    private readonly cwd: string | undefined,
+  ) {}
+
+  /** Records the user prompt (text + images) as items; returns them to emit. */
+  prompt(text: string, images: string[]): ActivityItem[] {
+    const content: ClaudeContentBlock[] = [];
+    if (text.trim()) content.push({ type: "text", text });
+    for (const url of images) {
+      const parsed = parseImageDataUrl(url);
+      if (parsed) content.push({ type: "image", source: parsed });
+    }
+    const message: ClaudeTranscriptMessage = {
+      type: "user",
+      uuid: this.turnId,
+      session_id: "",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+      timestamp: new Date().toISOString(),
+    };
+    this.startedAt ??= Date.now();
+    return this.appendStructural(message);
+  }
+
+  /** Ingests a completed assistant message (one content block). Returns items to emit. */
+  ingestAssistant(message: ClaudeTranscriptMessage): ActivityItem[] {
+    this.streaming = null; // the completed message supersedes any partial of this block
+    return this.appendStructural(message);
+  }
+
+  /** Ingests a user message carrying tool_result blocks. Returns items to emit. */
+  ingestToolResult(message: ClaudeTranscriptMessage): ActivityItem[] {
+    if (isInterruptMarker(message) || message.parent_tool_use_id !== null) return [];
+    for (const block of contentBlocks(message)) {
+      if (block.type !== "tool_result") continue;
+      const result = block as ToolResultBlock;
+      if (typeof result.tool_use_id !== "string") continue;
+      this.toolResults.set(result.tool_use_id, {
+        text: toolResultText(result.content),
+        isError: result.is_error === true,
+      });
+    }
+    return this.appendStructural(message);
+  }
+
+  /** Grows the currently-open streaming block; returns the updated item (or null). */
+  streamDelta(kind: "text" | "thinking", delta: string): ActivityItem | null {
+    if (!delta) return null;
+    const current: TextActivityItem = this.streaming?.item ?? {
+      type: kind === "thinking" ? "reasoning" : "agentMessage",
+      id: `${this.turnId}:${this.nextOrdinal()}`,
+      status: "inProgress",
+      text: "",
+      images: [],
+      timestamp: Date.now(),
+      phase: null,
+    };
+    const item: TextActivityItem = { ...current, text: current.text + delta };
+    this.streaming = { item };
+    return item;
+  }
+
+  /** Marks the turn's last agent message as the final answer; returns it if changed. */
+  finalize(): ActivityItem | null {
+    this.streaming = null;
+    for (let index = this.finalizedItems.length - 1; index >= 0; index -= 1) {
+      const item = this.finalizedItems[index]!;
+      if (item.type === "agentMessage") {
+        if (item.phase === "final_answer") return null;
+        const updated: ActivityItem = { ...item, phase: "final_answer" };
+        this.finalizedItems[index] = updated;
+        return updated;
+      }
+    }
+    return null;
+  }
+
+  get progress(): TurnProgress {
+    return buildProgress(this.items, this.startedAt);
+  }
+
+  /** All items (finalized + any open streaming block) — used to render the live turn. */
+  get items(): ActivityItem[] {
+    return this.streaming
+      ? [...this.finalizedItems, this.streaming.item]
+      : [...this.finalizedItems];
+  }
+
+  private appendStructural(message: ClaudeTranscriptMessage): ActivityItem[] {
+    this.startedAt ??= timestampMs(message) ?? Date.now();
+    this.messages.push(message);
+    const previous = this.finalizedItems;
+    this.finalizedItems = buildTurnItems(this.messages, this.turnId, this.cwd, this.toolResults);
+    return diffItems(previous, this.finalizedItems);
+  }
+
+  private nextOrdinal(): number {
+    return this.finalizedItems.filter(
+      (item) =>
+        item.type === "userMessage" || item.type === "agentMessage" || item.type === "reasoning",
+    ).length;
+  }
+}
+
+/** Returns items in `next` that are new or changed vs `previous` (matched by id). */
+function diffItems(previous: ActivityItem[], next: ActivityItem[]): ActivityItem[] {
+  const before = new Map(previous.map((item) => [item.id, item]));
+  const changed: ActivityItem[] = [];
+  for (const item of next) {
+    const prior = before.get(item.id);
+    if (!prior || JSON.stringify(prior) !== JSON.stringify(item)) changed.push(item);
+  }
+  return changed;
 }
 
 function collectToolResults(group: ClaudeTranscriptMessage[]): Map<string, ToolResult> {
@@ -433,12 +630,29 @@ function buildProgress(items: ActivityItem[], startedAt: number | null): TurnPro
 }
 
 function isUserPrompt(message: ClaudeTranscriptMessage): boolean {
-  if (!isRecord(message) || message.type !== "user") return false;
+  if (!isRecord(message) || message.type !== "user" || isInterruptMarker(message)) return false;
   const apiMessage = (message as { message?: unknown }).message;
   const content = isRecord(apiMessage) ? apiMessage.content : undefined;
   if (typeof content === "string") return content.trim().length > 0;
   if (!Array.isArray(content)) return false;
   return content.some((block) => isRecord(block) && block.type !== "tool_result");
+}
+
+/** True for CLI-inserted `[Request interrupted by user …]` markers (a user text message). */
+export function isInterruptMarker(message: ClaudeTranscriptMessage): boolean {
+  if (!isRecord(message) || message.type !== "user") return false;
+  const apiMessage = (message as { message?: unknown }).message;
+  const content = isRecord(apiMessage) ? apiMessage.content : undefined;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content) &&
+          content.length === 1 &&
+          isRecord(content[0]) &&
+          content[0].type === "text"
+        ? String(content[0].text ?? "")
+        : null;
+  return text !== null && INTERRUPT_MARKER.test(text.trim());
 }
 
 function isTurnClosed(group: ClaudeTranscriptMessage[]): boolean {
@@ -457,6 +671,15 @@ function imageDataUrl(block: ClaudeContentBlock): string | null {
   const source = (block as ImageBlock).source;
   if (!source || source.type !== "base64" || !source.media_type || !source.data) return null;
   return `data:${source.media_type};base64,${source.data}`;
+}
+
+/** Parses a `data:<media_type>;base64,<data>` URL into an image block source. */
+export function parseImageDataUrl(
+  url: string,
+): { type: "base64"; media_type: string; data: string } | null {
+  const match = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,(.+)$/i.exec(url.trim());
+  if (!match) return null;
+  return { type: "base64", media_type: match[1]!, data: match[2]! };
 }
 
 function relativizePath(path: string, cwd: string | undefined): string {
