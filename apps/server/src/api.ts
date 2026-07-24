@@ -50,7 +50,11 @@ import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
 import { CodexBackend, compact, effectiveModel } from "./backends/codex";
 import type { AgentBackend } from "./backends/backend";
-import { ThreadNotFoundError, UnsupportedForAgentError } from "./backends/backend";
+import {
+  BackendUnavailableError,
+  ThreadNotFoundError,
+  UnsupportedForAgentError,
+} from "./backends/backend";
 import type { SessionHub } from "./backends/hub";
 import { ClaudeBackend } from "./claude/backend";
 import type { ClaudeManager } from "./claude/manager";
@@ -902,7 +906,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.setErrorHandler((error: Error, request, reply) => {
     request.log.error({ errorName: error.name }, "request failed");
-    if (error instanceof BridgeUnavailableError) {
+    if (error instanceof BridgeUnavailableError || error instanceof BackendUnavailableError) {
       return apiError(reply, 503, "app_server_unavailable", error.message);
     }
     if (error instanceof TranscriptionError) {

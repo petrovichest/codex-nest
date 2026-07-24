@@ -88,3 +88,15 @@ export class UnsupportedForAgentError extends Error {
     this.name = "UnsupportedForAgentError";
   }
 }
+
+/**
+ * Thrown when a backend cannot currently run a turn (agent CLI missing, not logged in).
+ * api.ts maps it to 503 app_server_unavailable — the same shape Codex's
+ * BridgeUnavailableError produces, so the client handles both agents identically.
+ */
+export class BackendUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BackendUnavailableError";
+  }
+}

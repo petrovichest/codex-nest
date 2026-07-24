@@ -15,7 +15,7 @@ import { ClaudeBackend } from "./claude/backend";
 import { ClaudeManager } from "./claude/manager";
 import { DEFAULT_CLAUDE_MODELS } from "./claude/models";
 import { patchClaudeSession } from "./claude/registry";
-import type { ClaudeSdk, ClaudeTranscriptMessage, VersionRunner } from "./claude/sdk";
+import type { ClaudeQuery, ClaudeSdk, ClaudeTranscriptMessage, VersionRunner } from "./claude/sdk";
 import { CodexBridge } from "./codex/bridge";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
@@ -24,7 +24,11 @@ import { StateStore } from "./state/store";
 
 const headers = { authorization: "Bearer correct" };
 const directories: string[] = [];
+const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  // Stop Claude sessions and flush background writes before removing the temp dirs, so
+  // fire-and-forget turn writes never race the rename onto a deleted directory.
+  for (const cleanup of cleanups.splice(0)) await cleanup().catch(() => undefined);
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -75,8 +79,25 @@ async function setup({
   const codexBackend = new CodexBackend({ projection, bridge, store, codexManager });
 
   const sdk: ClaudeSdk = {
+    // Auto-completing turn: init → a short answer → success result, then ends.
     query: () => {
-      throw new Error("unused in Stage 2");
+      async function* messages(): AsyncGenerator<unknown, void, unknown> {
+        yield { type: "system", subtype: "init", session_id: "sess-live" };
+        yield {
+          type: "assistant",
+          uuid: "a1",
+          parent_tool_use_id: null,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+          },
+        };
+        yield { type: "result", subtype: "success" };
+      }
+      const query = messages() as ClaudeQuery;
+      query.interrupt = async () => undefined;
+      return query;
     },
     getSessionInfo: vi.fn(async () => ({ sessionId: "s", lastModified: 1, fileSize: 10 })),
     getSessionMessages: vi.fn(async () => fixtureMessages()),
@@ -89,6 +110,7 @@ async function setup({
       sdk,
       models: DEFAULT_CLAUDE_MODELS,
       bin: "claude",
+      attention,
       runVersion: okRunner,
     });
     const backend = claudeBackend;
@@ -122,6 +144,10 @@ async function setup({
     codexManager,
     claudeManager,
     projectRoot: dir,
+  });
+  cleanups.push(async () => {
+    claudeBackend?.stop();
+    await store.flushed();
   });
   return { app, store, claudeBackend, sdk };
 }
@@ -188,7 +214,7 @@ describe("GET/POST /settings/claude", () => {
 });
 
 describe("thread creation routing", () => {
-  it("routes agent:claude to the Claude backend and reports turns are not ready yet", async () => {
+  it("routes agent:claude to the Claude backend and starts a turn", async () => {
     const { app, store } = await setup();
     const response = await app.inject({
       method: "POST",
@@ -196,11 +222,9 @@ describe("thread creation routing", () => {
       headers,
       payload: { projectId: "p1", input: "привет", agent: "claude" },
     });
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      error: { code: "conflict", message: "Ходы Claude появятся на следующем этапе" },
-    });
-    // createThread ran on the Claude backend before startTurn rejected — a registry entry exists.
+    expect(response.statusCode).toBe(201);
+    expect(response.json().thread.agent).toBe("claude");
+    expect(typeof response.json().turnId).toBe("string");
     expect(Object.keys(store.snapshot().claudeSessions ?? {})).toHaveLength(1);
     await app.close();
   });
@@ -216,15 +240,14 @@ describe("thread creation routing", () => {
     });
     expect(codex.statusCode).toBe(409);
     expect(codex.json().error.message).toBe("Codex maintenance is in progress");
-    // …but Claude reaches its own turns-not-ready rejection, proving it was not gated.
+    // …but Claude starts its turn, proving maintenance never gated it.
     const claude = await app.inject({
       method: "POST",
       url: "/api/v1/threads",
       headers,
       payload: { projectId: "p1", input: "hi", agent: "claude" },
     });
-    expect(claude.statusCode).toBe(409);
-    expect(claude.json().error.message).toBe("Ходы Claude появятся на следующем этапе");
+    expect(claude.statusCode).toBe(201);
     await app.close();
   });
 
@@ -298,8 +321,8 @@ describe("reading a Claude thread over HTTP", () => {
   });
 });
 
-describe("Claude queue is paused until Stage 3 (no drain livelock)", () => {
-  it("keeps an enqueued message durably queued and never storms startTurn", async () => {
+describe("Claude queue drains once turns are supported", () => {
+  it("delivers an enqueued message on a ready Claude thread", async () => {
     const { app, store, claudeBackend } = await setup();
     const summary = await claudeBackend!.createThread("p1", "/work", {
       collaborationMode: "default",
@@ -313,23 +336,19 @@ describe("Claude queue is paused until Stage 3 (no drain livelock)", () => {
       payload: { input: "позже" },
     });
     expect(enqueue.statusCode).toBe(202);
-    // Let any fire-and-forget drain (and the thread.upserted-triggered redrain) settle.
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
-    expect(startSpy).not.toHaveBeenCalled();
-    const queued = store.snapshot().messageQueues?.[summary.id] ?? [];
-    expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ status: "queued" });
-    expect(claudeBackend!.summary(summary.id)?.queuedMessageCount).toBe(1);
-
-    // sendNow surfaces the meaningful 409 instead of looping.
-    const send = await app.inject({
-      method: "POST",
-      url: `/api/v1/threads/${summary.id}/queue/${queued[0]!.id}/send`,
-      headers,
-    });
-    expect(send.statusCode).toBe(409);
-    expect(send.json().error.message).toBe("Ходы Claude появятся на следующем этапе");
+    // The queue is no longer paused for Claude: drain dispatches the message and the
+    // auto-completing turn clears it from the durable queue. Poll (fsync-heavy persist).
+    for (let index = 0; index < 100; index += 1) {
+      if (
+        (store.snapshot().messageQueues?.[summary.id] ?? []).length === 0 &&
+        startSpy.mock.calls.length
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(startSpy).toHaveBeenCalled();
+    expect(store.snapshot().messageQueues?.[summary.id] ?? []).toHaveLength(0);
     await app.close();
   });
 });

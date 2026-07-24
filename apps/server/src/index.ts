@@ -11,7 +11,8 @@ import { SessionHub } from "./backends/hub";
 import { ClaudeBackend } from "./claude/backend";
 import { ClaudeManager } from "./claude/manager";
 import { resolveClaudeModels } from "./claude/models";
-import { loadRealSdk, readClaudeVersion } from "./claude/sdk";
+import { loadRealSdk } from "./claude/sdk";
+import { ClaudeTitleGenerator } from "./claude/title";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
@@ -95,7 +96,8 @@ const codexBackend = new CodexBackend({
 });
 
 // Claude backend: constructed for `true` (always, surfacing unavailable state) and
-// for `auto` only when a startup version probe succeeds; skipped entirely for `false`.
+// for `auto` only when the version probe succeeds; skipped entirely for `false`. A single
+// probe both decides auto-mode enablement and seeds the backend's connection state.
 const claudeLog = {
   warn: (payload: Record<string, unknown>, message: string) =>
     process.stderr.write(`${message} ${JSON.stringify(payload)}\n`),
@@ -103,20 +105,20 @@ const claudeLog = {
 let claudeBackend: ClaudeBackend | undefined;
 let claudeManager: ClaudeManager | undefined;
 if (config.claudeEnabled !== "false") {
-  const enabled =
-    config.claudeEnabled === "true" ||
-    (await readClaudeVersion(config.claudeBin).then(
-      () => true,
-      () => false,
-    ));
-  if (enabled) {
-    claudeBackend = new ClaudeBackend({
-      store,
-      sdk: await loadRealSdk(),
-      models: resolveClaudeModels(config.claudeModels, claudeLog),
-      bin: config.claudeBin,
-    });
-    const backend = claudeBackend;
+  const claudeSdk = await loadRealSdk();
+  const backend = new ClaudeBackend({
+    store,
+    sdk: claudeSdk,
+    models: resolveClaudeModels(config.claudeModels, claudeLog),
+    bin: config.claudeBin,
+    attention,
+    idleTimeoutMs: config.claudeIdleTimeoutMs,
+    maxSessions: config.claudeMaxSessions,
+    titles: new ClaudeTitleGenerator(claudeSdk, config.claudeBin),
+  });
+  const probe = await backend.probe();
+  if (config.claudeEnabled === "true" || probe.version !== null) {
+    claudeBackend = backend;
     claudeManager = new ClaudeManager({
       path: config.claudeBin,
       currentStatus: () => backend.currentProbe(),
