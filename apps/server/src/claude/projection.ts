@@ -395,6 +395,10 @@ export class ClaudeLiveTurn {
 
   /** Ingests a completed assistant message (one content block). Returns items to emit. */
   ingestAssistant(message: ClaudeTranscriptMessage): ActivityItem[] {
+    // Sub-agent (Task) messages are represented by the parent Task tool_use on the main
+    // thread — the transcript's mainThread filter drops them, so the live half must too,
+    // or a subagent-using turn diverges from its later transcript read.
+    if (isInterruptMarker(message) || message.parent_tool_use_id !== null) return [];
     this.streaming = null; // the completed message supersedes any partial of this block
     return this.appendStructural(message);
   }

@@ -393,13 +393,14 @@ function msg(
   uuid: string,
   content: ClaudeContentBlock[],
   stopReason: string | null = null,
+  parentToolUseId: string | null = null,
 ): ClaudeTranscriptMessage {
   return {
     type,
     uuid,
     session_id: "s",
     message: { role: type, content, ...(type === "assistant" ? { stop_reason: stopReason } : {}) },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     parent_agent_id: null,
     timestamp: "2026-01-01T00:00:00.000Z",
   };
@@ -566,6 +567,75 @@ describe("ClaudeLiveTurn", () => {
     const transcriptFinal = transcriptTurn.items.find((item) => item.type === "agentMessage");
     expect(liveFinal).toMatchObject({ phase: "final_answer" });
     expect(transcriptFinal).toMatchObject({ phase: "final_answer" });
+  });
+
+  it("excludes sub-agent (Task) messages from the live turn, converging with the transcript", () => {
+    const turnId = "turn-subagent";
+    // A Task turn: the parent Task tool_use/tool_result are main-thread; the sub-agent's
+    // own thinking/tool_use/tool_result carry parent_tool_use_id and must be dropped by
+    // BOTH halves (only the parent Task tool_use shows on the main thread).
+    const transcript: ClaudeTranscriptMessage[] = [
+      msg("user", turnId, [{ type: "text", text: "delegate this" }]),
+      msg(
+        "assistant",
+        "a-task",
+        [{ type: "tool_use", id: "tu-task", name: "Task", input: { description: "sub" } }],
+        "tool_use",
+      ),
+      // --- sub-agent messages (parent_tool_use_id = the Task id) — must NOT be projected ---
+      msg(
+        "assistant",
+        "sub-think",
+        [{ type: "thinking", thinking: "subagent reasoning" }],
+        "tool_use",
+        "tu-task",
+      ),
+      msg(
+        "assistant",
+        "sub-bash",
+        [{ type: "tool_use", id: "tu-sub", name: "Bash", input: { command: "whoami" } }],
+        "tool_use",
+        "tu-task",
+      ),
+      msg(
+        "user",
+        "sub-res",
+        [{ type: "tool_result", tool_use_id: "tu-sub", content: "root" }],
+        null,
+        "tu-task",
+      ),
+      // --- back on the main thread: the Task result, then the final answer ---
+      msg("user", "u-task-res", [
+        { type: "tool_result", tool_use_id: "tu-task", content: "sub done" },
+      ]),
+      msg("assistant", "a-final", [{ type: "text", text: "delegated and finished" }], "end_turn"),
+    ];
+    const transcriptTurn = buildClaudeTurns(transcript, "/work")[0]!;
+
+    const live = new ClaudeLiveTurn(turnId, "/work");
+    live.prompt("delegate this", []);
+    for (const message of transcript.slice(1)) {
+      if (message.type === "assistant") live.ingestAssistant(message);
+      else live.ingestToolResult(message);
+    }
+    live.finalize();
+
+    // Identical items live and from the transcript — no sub-agent content in either.
+    expect(live.items.map((item) => item.id)).toEqual(transcriptTurn.items.map((item) => item.id));
+    expect(live.items.map((item) => item.type)).toEqual(
+      transcriptTurn.items.map((item) => item.type),
+    );
+    for (const collection of [live.items, transcriptTurn.items]) {
+      expect(collection.some((item) => item.id === "tu-sub")).toBe(false); // sub-agent Bash absent
+      expect(
+        collection.some(
+          (item) =>
+            (item.type === "reasoning" || item.type === "agentMessage") &&
+            item.text.includes("subagent reasoning"),
+        ),
+      ).toBe(false);
+      expect(collection.some((item) => item.type === "tool" && item.title === "Task")).toBe(true);
+    }
   });
 });
 
