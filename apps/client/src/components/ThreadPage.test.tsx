@@ -273,6 +273,34 @@ describe("Activity", () => {
     expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
   });
 
+  it("copies fenced code blocks separately from the whole message", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Готовый промпт:\n\n```text\nПервая строка\nВторая строка\n```\n\n`inline`",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "Копировать блок" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать блок" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Первая строка\nВторая строка"));
+    expect(screen.getByRole("button", { name: "Блок скопирован" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Копировать сообщение" })).toBeInTheDocument();
+  });
+
   it("creates an annotation from an exact text selection", async () => {
     const onCreate = vi.fn().mockReturnValue(true);
     render(

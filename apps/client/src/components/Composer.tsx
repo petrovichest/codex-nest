@@ -131,12 +131,15 @@ export function Composer({
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | undefined>(undefined);
   const recordingLimitRef = useRef<number | undefined>(undefined);
+  const transcriptionStartedAtRef = useRef(0);
+  const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [transcribingSeconds, setTranscribingSeconds] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const localSpeechBusy = speechState !== "idle";
   const speechBusy = localSpeechBusy || Boolean(transcriptionStatus?.belongsToComposer);
@@ -161,6 +164,23 @@ export function Composer({
         t,
       )
     : null;
+  const transcriptionTimerText = transcriptionStatus?.belongsToComposer
+    ? formatTranscriptionTimer(
+        transcriptionStatus.elapsedSeconds,
+        transcriptionStatus.estimatedTotalSeconds,
+      )
+    : speechState === "transcribing"
+      ? formatRecordingTime(transcribingSeconds)
+      : null;
+  const speechTimerText =
+    speechState === "recording" ? formatRecordingTime(recordingSeconds) : transcriptionTimerText;
+  const speechStatusText =
+    speechState === "recording"
+      ? t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })
+      : (transcriptionStatusText ??
+        (speechState === "transcribing"
+          ? formatTranscriptionStatus(transcribingSeconds, null, t)
+          : null));
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -239,6 +259,7 @@ export function Composer({
     return () => {
       aliveRef.current = false;
       clearRecordingTimers();
+      clearTranscriptionTimer();
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== "inactive") {
         discardRecordingRef.current = true;
@@ -335,6 +356,7 @@ export function Composer({
       recorder.addEventListener("error", () => {
         discardRecordingRef.current = true;
         clearRecordingTimers();
+        clearTranscriptionTimer();
         stopMediaStream();
         mediaRecorderRef.current = null;
         if (aliveRef.current) {
@@ -370,7 +392,10 @@ export function Composer({
     if (!recorder || recorder.state === "inactive") return;
     clearRecordingTimers();
     recordingStoppedRef.current = true;
-    if (aliveRef.current) setSpeechState("transcribing");
+    if (aliveRef.current) {
+      startTranscriptionTimer();
+      setSpeechState("transcribing");
+    }
     recorder.stop();
     stopMediaStream();
   }
@@ -383,9 +408,13 @@ export function Composer({
     const bytes = audioBytesRef.current;
     audioChunksRef.current = [];
     audioBytesRef.current = 0;
-    if (discardRecordingRef.current) return;
+    if (discardRecordingRef.current) {
+      clearTranscriptionTimer();
+      return;
+    }
     if (!chunks.length || !bytes) {
       if (aliveRef.current) {
+        clearTranscriptionTimer();
         setSpeechState("idle");
         setSpeechError(t("Запись не содержит аудио"));
       }
@@ -393,6 +422,7 @@ export function Composer({
     }
     if (bytes > (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
       if (aliveRef.current) {
+        clearTranscriptionTimer();
         setSpeechState("idle");
         setSpeechError(t("Запись слишком большая"));
       }
@@ -405,10 +435,16 @@ export function Composer({
     };
     if (onRecordingReady) {
       onRecordingReady(recording);
-      if (aliveRef.current) setSpeechState("idle");
+      if (aliveRef.current) {
+        clearTranscriptionTimer();
+        setSpeechState("idle");
+      }
       return;
     }
-    if (!aliveRef.current || !onTranscribe) return;
+    if (!aliveRef.current || !onTranscribe) {
+      clearTranscriptionTimer();
+      return;
+    }
     try {
       const transcript = await onTranscribe(recording.audio, recording.durationMs);
       if (!aliveRef.current) return;
@@ -423,6 +459,7 @@ export function Composer({
         );
       }
     } finally {
+      clearTranscriptionTimer();
       if (aliveRef.current) setSpeechState("idle");
     }
   }
@@ -461,6 +498,23 @@ export function Composer({
       window.clearTimeout(recordingLimitRef.current);
       recordingLimitRef.current = undefined;
     }
+  }
+
+  function startTranscriptionTimer() {
+    clearTranscriptionTimer();
+    transcriptionStartedAtRef.current = Date.now();
+    setTranscribingSeconds(0);
+    transcriptionTimerRef.current = window.setInterval(() => {
+      setTranscribingSeconds(
+        Math.max(0, Math.floor((Date.now() - transcriptionStartedAtRef.current) / 1_000)),
+      );
+    }, 250);
+  }
+
+  function clearTranscriptionTimer() {
+    if (transcriptionTimerRef.current === undefined) return;
+    window.clearInterval(transcriptionTimerRef.current);
+    transcriptionTimerRef.current = undefined;
   }
 
   function stopMediaStream() {
@@ -583,65 +637,59 @@ export function Composer({
             {running && (
               <span className="composer-hint">{t("Сообщение будет добавлено в очередь")}</span>
             )}
-            {speechState === "recording" && (
-              <span className="composer-recording-status" role="status">
-                {t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })}
-              </span>
-            )}
-            {speechState === "transcribing" && !transcriptionStatusText && (
-              <span className="composer-recording-status" role="status">
-                {t("Распознаём…")}
-              </span>
-            )}
-            {transcriptionStatusText && (
-              <span className="composer-recording-status" role="status">
-                {transcriptionStatusText}
-              </span>
-            )}
           </div>
           <div className="composer-actions">
             {transcriptionConfig && (
-              <button
-                aria-label={
-                  speechState === "recording"
-                    ? t("Остановить запись")
-                    : speechState === "requesting"
-                      ? t("Запрашиваем доступ к микрофону")
-                      : transcriptionStatus && !transcriptionStatus.belongsToComposer
-                        ? t("Идёт распознавание в другой сессии")
-                        : transcriptionBusy
-                          ? t("Распознаём запись")
-                          : speechUnavailable
-                            ? speechUnavailable
-                            : t("Начать запись")
-                }
-                aria-pressed={speechState === "recording"}
-                className={`composer-action microphone${speechState === "recording" ? " recording" : ""}`}
-                disabled={
-                  speechState === "requesting" ||
-                  speechState === "transcribing" ||
-                  Boolean(transcriptionStatus) ||
-                  (speechState === "idle" && (busy || Boolean(speechUnavailable)))
-                }
-                title={speechUnavailable ?? undefined}
-                type="button"
-                onPointerDown={
-                  speechState === "idle" && !transcriptionStatus ? captureInsertionPoint : undefined
-                }
-                onClick={() =>
-                  speechState === "recording" ? stopRecording() : void startRecording()
-                }
-              >
-                {speechState === "requesting" ||
-                speechState === "transcribing" ||
-                transcriptionStatus?.belongsToComposer ? (
-                  <span className="spinner small" />
-                ) : speechState === "recording" ? (
-                  <StopIcon />
-                ) : (
-                  <MicrophoneIcon />
+              <>
+                <button
+                  aria-label={
+                    speechState === "recording"
+                      ? t("Остановить запись")
+                      : speechState === "requesting"
+                        ? t("Запрашиваем доступ к микрофону")
+                        : transcriptionStatus && !transcriptionStatus.belongsToComposer
+                          ? t("Идёт распознавание в другой сессии")
+                          : transcriptionBusy
+                            ? t("Распознаём запись")
+                            : speechUnavailable
+                              ? speechUnavailable
+                              : t("Начать запись")
+                  }
+                  aria-pressed={speechState === "recording"}
+                  className={`composer-action microphone${speechState === "recording" ? " recording" : ""}${speechTimerText ? " timing" : ""}`}
+                  disabled={
+                    speechState === "requesting" ||
+                    speechState === "transcribing" ||
+                    Boolean(transcriptionStatus) ||
+                    (speechState === "idle" && (busy || Boolean(speechUnavailable)))
+                  }
+                  title={speechUnavailable ?? undefined}
+                  type="button"
+                  onPointerDown={
+                    speechState === "idle" && !transcriptionStatus
+                      ? captureInsertionPoint
+                      : undefined
+                  }
+                  onClick={() =>
+                    speechState === "recording" ? stopRecording() : void startRecording()
+                  }
+                >
+                  {speechTimerText ? (
+                    <span className="composer-action-timer" aria-hidden="true">
+                      {speechTimerText}
+                    </span>
+                  ) : speechState === "requesting" ? (
+                    <span className="spinner small" />
+                  ) : (
+                    <MicrophoneIcon />
+                  )}
+                </button>
+                {speechStatusText && (
+                  <span className="sr-only" role="status">
+                    {speechStatusText}
+                  </span>
                 )}
-              </button>
+              </>
             )}
             {running && onStop && (
               <button
@@ -758,7 +806,7 @@ function formatTranscriptionStatus(
   if (estimatedTotalSeconds === null) {
     return t("Распознаём · прошло {{time}}", { time: formatRecordingTime(elapsedSeconds) });
   }
-  if (elapsedSeconds < estimatedTotalSeconds) {
+  if (elapsedSeconds <= estimatedTotalSeconds) {
     return t("Распознаём · осталось ≈ {{time}}", {
       time: formatRecordingTime(Math.max(0, estimatedTotalSeconds - elapsedSeconds)),
     });
@@ -766,4 +814,15 @@ function formatTranscriptionStatus(
   return t("Распознаём · дольше прогноза на {{time}}", {
     time: formatRecordingTime(elapsedSeconds - estimatedTotalSeconds),
   });
+}
+
+function formatTranscriptionTimer(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+): string {
+  if (estimatedTotalSeconds === null) return formatRecordingTime(elapsedSeconds);
+  if (elapsedSeconds <= estimatedTotalSeconds) {
+    return `≈${formatRecordingTime(estimatedTotalSeconds - elapsedSeconds)}`;
+  }
+  return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
 }

@@ -1334,6 +1334,45 @@ pre {
   background: transparent;
 }
 
+.markdown-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: 12px 0;
+}
+
+.message .markdown-code-block pre {
+  margin: 0;
+  padding-right: 48px;
+}
+
+.markdown-code-copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-color: var(--line-strong);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--muted-strong);
+}
+
+.markdown-code-copy svg {
+  width: 16px;
+  height: 16px;
+}
+
+.markdown-code-block[data-copy-state="copied"] .markdown-code-copy {
+  color: var(--success);
+}
+
+.markdown-code-block[data-copy-state="failed"] .markdown-code-copy {
+  color: var(--danger);
+}
+
 .message hr {
   margin: 18px 0;
   border: 0;
@@ -1969,33 +2008,32 @@ pre {
 .setting-select {
   position: relative;
   display: flex;
-  gap: 2px;
-  padding-right: 3px;
+  gap: 5px;
+  padding: 0 7px;
 }
 
 .setting-select select {
-  width: auto;
-  max-width: 145px;
-  height: 30px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
   appearance: none;
-  padding: 0 20px 0 2px;
+  padding: 0;
   border: 0;
   outline: 0;
   background: transparent;
-  color: inherit;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
+  opacity: 0;
 }
 
 .setting-select select:disabled {
   cursor: default;
 }
 
-.setting-select-chevron {
-  position: absolute;
-  right: 5px;
-  pointer-events: none;
+.setting-select:has(select:focus-visible) {
+  outline: 2px solid color-mix(in srgb, var(--text) 65%, transparent);
+  outline-offset: 2px;
 }
 
 .setting-control.icon-only,
@@ -2006,16 +2044,6 @@ pre {
   justify-content: center;
   gap: 0;
   padding: 0;
-}
-
-.setting-select.icon-only select {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  max-width: none;
-  height: 100%;
-  padding: 0;
-  opacity: 0;
 }
 
 .plan-toggle.active,
@@ -2211,8 +2239,21 @@ pre {
   animation: microphone-pulse 1.4s ease-in-out infinite;
 }
 
-.composer-recording-status {
+.composer-action.microphone.timing {
+  width: auto;
+  min-width: 44px;
+  padding: 0 7px;
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
+}
+
+.composer-action.microphone.timing:disabled {
+  opacity: 1;
+}
+
+.composer-action-timer {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -3079,10 +3120,6 @@ pre {
 
   .composer-hint {
     display: none;
-  }
-
-  .setting-select select {
-    max-width: 116px;
   }
 
   .goal-popover {

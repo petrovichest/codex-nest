@@ -46,6 +46,7 @@ import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
 import {
   ArchiveIcon,
+  CheckIcon,
   ChevronDownIcon,
   CopyIcon,
   FileIcon,
@@ -1194,6 +1195,9 @@ function MarkdownContent({
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
+        pre({ children }) {
+          return <CopyableCodeBlock>{children}</CopyableCodeBlock>;
+        },
         table({ children }) {
           return (
             <div className="markdown-table-scroll">
@@ -1217,6 +1221,55 @@ function MarkdownContent({
     >
       {text}
     </ReactMarkdown>
+  );
+}
+
+function CopyableCodeBlock({ children }: { children?: React.ReactNode }) {
+  const { t } = useI18n();
+  const preRef = useRef<HTMLPreElement>(null);
+  const timerRef = useRef<number | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  async function copy() {
+    const text = (preRef.current?.textContent ?? "").replace(/\n$/, "");
+    try {
+      await copyText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopyState("idle"), 1_800);
+  }
+
+  const label =
+    copyState === "copied"
+      ? t("Блок скопирован")
+      : copyState === "failed"
+        ? t("Не удалось скопировать блок")
+        : t("Копировать блок");
+
+  return (
+    <div className="markdown-code-block" data-copy-state={copyState}>
+      <pre ref={preRef}>{children}</pre>
+      <button
+        type="button"
+        className="markdown-code-copy"
+        aria-label={label}
+        aria-live="polite"
+        title={label}
+        onClick={() => void copy()}
+      >
+        {copyState === "copied" ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </div>
   );
 }
 

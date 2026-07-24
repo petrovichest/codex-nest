@@ -7,7 +7,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useI18n, type Translate } from "../i18n";
-import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
+import { BrainIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
 
 export function SettingsPicker({
   models,
@@ -34,20 +34,22 @@ export function SettingsPicker({
 }) {
   const { language, t } = useI18n();
   const model = effectiveModel(models, value.model);
+  const modelDisplayName = model ? compactModelName(model.displayName) : t("Модель");
 
   return (
     <div className="settings-picker">
       <SettingSelect
         ariaLabel={t("Модель")}
         disabled={disabled || models.length === 0}
+        displayValue={modelDisplayName}
         icon={<ModelIcon />}
         value={value.model ?? ""}
         onChange={(selected) => changeModel(selected || null)}
       >
-        <option value="">{model?.displayName ?? t("Модель")}</option>
+        <option value="">{modelDisplayName}</option>
         {models.map((option) => (
           <option value={option.id} key={option.id}>
-            {option.displayName}
+            {compactModelName(option.displayName)}
           </option>
         ))}
       </SettingSelect>
@@ -206,12 +208,14 @@ function formatGoalUsage(goal: ThreadGoal, language: "en" | "ru", t: Translate):
 
 function SettingSelect({
   ariaLabel,
+  displayValue,
   icon,
   iconOnly = false,
   children,
   ...props
 }: {
   ariaLabel: string;
+  displayValue?: string;
   icon: React.ReactNode;
   iconOnly?: boolean;
   children: React.ReactNode;
@@ -222,6 +226,7 @@ function SettingSelect({
   return (
     <label className={`setting-control setting-select${iconOnly ? " icon-only" : ""}`}>
       {icon}
+      {!iconOnly && <span className="setting-select-value">{displayValue}</span>}
       <select
         aria-label={ariaLabel}
         disabled={props.disabled}
@@ -230,7 +235,6 @@ function SettingSelect({
       >
         {children}
       </select>
-      {!iconOnly && <ChevronDownIcon className="setting-select-chevron" />}
     </label>
   );
 }
@@ -238,4 +242,11 @@ function SettingSelect({
 function effectiveModel(models: ModelOption[], modelId?: string): ModelOption | undefined {
   if (modelId) return models.find((model) => model.id === modelId);
   return models.find((model) => model.isDefault) ?? models[0];
+}
+
+function compactModelName(displayName: string): string {
+  const match = /^gpt-([0-9]+(?:\.[0-9]+)*)(?:-(.+))?$/i.exec(displayName.trim());
+  if (!match) return displayName;
+  const [, version, variant] = match;
+  return variant ? `${version}${variant.replaceAll("-", "").toLowerCase()}` : version;
 }

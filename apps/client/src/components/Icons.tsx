@@ -95,6 +95,12 @@ export const CopyIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const CheckIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m5 12 4 4L19 6" />
+  </Icon>
+);
+
 export const ArrowUpIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m6 10 6-6 6 6M12 4v16" />
