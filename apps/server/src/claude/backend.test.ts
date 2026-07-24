@@ -54,6 +54,12 @@ class FakeQuery implements AsyncGenerator<unknown, void, unknown> {
   private done = false;
   private error: unknown;
   interruptCount = 0;
+  /** The canUseTool the session wired into options, so tests can drive an approval. */
+  canUseTool?: (
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: { toolUseID: string },
+  ) => Promise<{ behavior: string; message?: string }>;
   emit(message: unknown): void {
     this.q.push(message);
     this.wake();
@@ -112,8 +118,10 @@ async function setup(options: { runVersion?: VersionRunner; sdk?: Partial<Claude
   stores.push(store);
   const queries: FakeQuery[] = [];
   const sdk: ClaudeSdk = {
-    query: () => {
+    query: (params) => {
       const query = new FakeQuery();
+      query.canUseTool = (params.options as { canUseTool?: FakeQuery["canUseTool"] } | undefined)
+        ?.canUseTool;
       queries.push(query);
       return query as unknown as ClaudeQuery;
     },
@@ -478,5 +486,174 @@ describe("ClaudeBackend session pool", () => {
     }
     // Three threads ran, but only two idle sessions are retained.
     expect(backend.openSessionCount).toBe(2);
+  });
+});
+
+const toolUse = (uuid: string, id: string, command: string) => ({
+  type: "assistant",
+  uuid,
+  parent_tool_use_id: null,
+  message: {
+    role: "assistant",
+    content: [{ type: "tool_use", id, name: "Bash", input: { command } }],
+    stop_reason: "tool_use",
+  },
+});
+
+describe("ClaudeBackend interrupt + queue race (regression)", () => {
+  it("re-queues a message raced against an interrupt, delivering it to a FRESH session", async () => {
+    const { MessageQueue } = await import("../message-queue");
+    const { backend, store, events, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", { collaborationMode: "default" });
+
+    const queue = new MessageQueue(store, {
+      pauseReason: () => backend.pauseReason(),
+      currentTurnId: (threadId) => backend.currentTurnId(threadId),
+      start: (threadId, message) =>
+        backend
+          .startTurn(threadId, {
+            text: message.text,
+            images: message.images ?? [],
+            clientMessageId: message.id,
+          })
+          .then((result) => result.turnId),
+      steer: (threadId, turnId, message) =>
+        backend.steerTurn(threadId, turnId, {
+          text: message.text,
+          images: message.images ?? [],
+          clientMessageId: message.id,
+        }),
+      wasDelivered: (threadId, messageId) => backend.wasDelivered(threadId, messageId),
+      publish: () => undefined,
+    });
+    backend.on("event", (event) => {
+      if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
+        void queue.drain(event.thread.id).catch(() => undefined);
+      }
+    });
+
+    // Turn A running mid-tool.
+    const { turnId } = await backend.startTurn(id, {
+      text: "A",
+      images: [],
+      clientMessageId: null,
+    });
+    const qA = queries.at(-1)!;
+    qA.emit(initMsg("sess-a"));
+    qA.emit(toolUse("a1", "t-sleep", "sleep 9"));
+    await flush();
+    expect(backend.currentTurnId(id)).toBe(turnId);
+
+    // Enqueue B while A runs — stays queued.
+    await queue.enqueue(id, "B");
+    await flush();
+    expect(queue.count(id)).toBe(1);
+    const queriesBeforeInterrupt = queries.length;
+
+    // Interrupt A → result arrives → finishTurn parks in awaiting-idle → terminal
+    // thread.upserted drains, which (pre-fix) dispatched B into the dying session.
+    await backend.interruptTurn(id, turnId);
+    qA.emit(resultMsg("error_during_execution"));
+    // Give the fsync-heavy drain attempt time to run and be rejected + re-queued.
+    await waitFor(() => store.snapshot().threadMeta[id]?.lastOutcome === "interrupted");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(queue.count(id)).toBe(1); // B survived — NOT delivered into the dying session
+    expect(queries.length).toBe(queriesBeforeInterrupt); // no new session accepted B
+    expect(backend.currentTurnId(id)).toBeNull();
+
+    // The iterator throws → session closes → onSessionClosed re-drains → FRESH session.
+    qA.throwNext(new Error("Claude Code returned an error result: [ede_diagnostic]"));
+    await waitFor(() => queue.count(id) === 0); // B finally delivered
+    expect(queries.length).toBeGreaterThan(queriesBeforeInterrupt); // a fresh query/session
+    const qB = queries.at(-1)!;
+    qB.emit(initMsg("sess-a"));
+    qB.emit(assistantText("b1", "B done"));
+    qB.emit(resultMsg("success"));
+    await waitFor(() => backend.summary(id)?.state === "completed");
+
+    // A was interrupted, B completed — no spurious failed turn ever surfaced.
+    const failed = events.filter(
+      (event) =>
+        event.type === "thread.upserted" &&
+        event.thread.id === id &&
+        event.thread.state === "failed",
+    );
+    expect(failed).toHaveLength(0);
+  });
+});
+
+describe("ClaudeBackend readThread overlay", () => {
+  it("overlays the live turn mid-turn (inProgress) and after completion (transcript-flush-lag safe)", async () => {
+    const { backend, sdk, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", { collaborationMode: "default" });
+    const { turnId } = await backend.startTurn(id, {
+      text: "hi",
+      images: [],
+      clientMessageId: null,
+    });
+    const query = queries.at(-1)!;
+    query.emit(initMsg("sess-x"));
+    query.emit(assistantText("a1", "partial answer"));
+    await flush();
+
+    // Mid-turn: the live turn is overlaid with inProgress status.
+    const mid = await backend.readThread(id);
+    const midTurn = mid.turns.find((turn) => turn.id === turnId);
+    expect(midTurn?.status).toBe("inProgress");
+    expect(
+      midTurn?.items.some((item) => item.type === "agentMessage" && item.text === "partial answer"),
+    ).toBe(true);
+
+    query.emit(resultMsg("success"));
+    await waitFor(() => backend.summary(id)?.state === "completed");
+
+    // Just after completion the SDK transcript file lags (mock it empty) — the retained
+    // projector overlay still renders the completed turn with its items.
+    (sdk.getSessionMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const after = await backend.readThread(id);
+    const afterTurn = after.turns.find((turn) => turn.id === turnId);
+    expect(afterTurn?.status).toBe("completed");
+    expect(
+      afterTurn?.items.some(
+        (item) => item.type === "agentMessage" && item.text === "partial answer",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("ClaudeBackend interrupt while an approval is pending", () => {
+  it("deny-settles the pending canUseTool promise and completes without hanging", async () => {
+    const { backend, attention, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", { collaborationMode: "default" });
+    const { turnId } = await backend.startTurn(id, {
+      text: "run",
+      images: [],
+      clientMessageId: null,
+    });
+    const query = queries.at(-1)!;
+    query.emit(initMsg());
+    await flush();
+
+    // The model asks to run a mutating command → canUseTool → an approval card appears.
+    const decision = query.canUseTool!("Bash", { command: "rm -rf x" }, { toolUseID: "tu-1" });
+    await flush();
+    expect(attention.list().some((request) => request.threadId === id)).toBe(true);
+
+    // Interrupt: must deny-settle the pending approval (before awaiting interrupt) so the
+    // HTTP call doesn't stall until the watchdog, and the promise must not hang.
+    const interrupted = backend.interruptTurn(id, turnId);
+    query.emit(resultMsg("error_during_execution"));
+    query.throwNext(new Error("Claude Code returned an error result: [ede_diagnostic]"));
+    await interrupted;
+    const settled = await Promise.race([
+      decision,
+      new Promise((resolve) => setTimeout(() => resolve("HUNG"), 200)),
+    ]);
+    expect(settled).toMatchObject({ behavior: "deny" });
+    await waitFor(() => backend.currentTurnId(id) === null);
+    expect(attention.list().some((request) => request.threadId === id)).toBe(false);
   });
 });

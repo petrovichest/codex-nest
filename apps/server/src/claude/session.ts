@@ -8,6 +8,7 @@ import type {
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "../attention";
+import { TurnInProgressError } from "../backends/backend";
 import { ClaudeAttention } from "./attention";
 import { ClaudeLiveTurn, parseImageDataUrl } from "./projection";
 import type { ClaudeQuery, ClaudeSdk, ClaudeTranscriptMessage } from "./sdk";
@@ -108,9 +109,19 @@ export class ClaudeSession {
     return this.sessionId;
   }
 
-  /** True while a turn is in flight — the pool must not close it for capacity. */
+  /**
+   * True while a turn is in flight or winding down — the pool must not close it for
+   * capacity, and no new turn may start. "awaiting-idle" is included because after a
+   * self-interrupt the session parks there until the iterator throws (or the watchdog
+   * fires); dispatching into it would race the imminent teardown and lose the message.
+   */
   get busy(): boolean {
-    return this.state === "starting" || this.state === "streaming" || this.state === "interrupting";
+    return (
+      this.state === "starting" ||
+      this.state === "streaming" ||
+      this.state === "interrupting" ||
+      this.state === "awaiting-idle"
+    );
   }
 
   /**
@@ -130,8 +141,11 @@ export class ClaudeSession {
 
   /** Dispatches a user turn (turnId chosen by the backend); returns it. */
   startTurn(text: string, images: string[], turnId: string = randomUUID()): string {
-    if (this.state === "closed") throw new Error("Session is closed");
-    if (this.busy) throw new Error("Session is busy");
+    // Only an idle session accepts a turn. A closed/busy/awaiting-idle session rejects so
+    // the queue re-queues and re-drains once a fresh session is idle (self-healing) — this
+    // is what closes the interrupt+queue race (a terminal thread.upserted must not dispatch
+    // into a dying session).
+    if (this.state !== "idle") throw new TurnInProgressError();
     this.currentTurnId = turnId;
     this.turnCompleted = false;
     this.interruptRequested = false;
@@ -234,6 +248,9 @@ export class ClaudeSession {
         this.ingestStructural(this.liveTurnProjector?.ingestAssistant(toTranscript(message)));
         return;
       case "user":
+        // SDKUserMessageReplay (isReplay) re-emits an earlier message; projecting it would
+        // duplicate the prompt and shift every later ordinal, so drop it.
+        if (message.isReplay) return;
         this.ingestStructural(this.liveTurnProjector?.ingestToolResult(toTranscript(message)));
         return;
       case "stream_event":
@@ -308,7 +325,10 @@ export class ClaudeSession {
     this.turnCompleted = true;
     const finalized = this.liveTurnProjector?.finalize();
     if (finalized) this.options.callbacks.onActivity(finalized, turnId);
-    this.clearWatchdog();
+    // On a self-interrupt keep the watchdog armed: the session parks in awaiting-idle until
+    // the iterator throws (handleIteratorError clears it) — if that throw never lands, the
+    // watchdog is the only thing that force-closes the session instead of parking forever.
+    if (!this.interruptRequested) this.clearWatchdog();
     this.attention.expire();
     this.state = "awaiting-idle";
     this.currentTurnId = null;
@@ -350,6 +370,7 @@ interface SdkMessage {
   session_id?: string;
   uuid?: string;
   parent_tool_use_id?: string | null;
+  isReplay?: boolean;
   message?: { role?: string; content?: unknown; stop_reason?: string | null };
   event?: unknown;
   errors?: unknown;

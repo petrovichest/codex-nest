@@ -320,13 +320,16 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     return Promise.reject(new UnsupportedForAgentError(STEER_UNSUPPORTED));
   }
 
-  async interruptTurn(threadId: string): Promise<void> {
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
     const pooled = this.sessions.get(threadId);
-    if (!pooled) return;
-    await pooled.session.interrupt();
-    // Belt-and-suspenders: the session deny-settles its own pending attention, but expire
-    // any shared-manager stragglers for this thread as well.
+    // Guard the turn id: a stale interrupt (its turn already finished, a queued one now
+    // running) must not kill the wrong turn.
+    if (!pooled || pooled.session.activeTurnId !== turnId) return;
+    // Deny-settle the thread's pending attention BEFORE awaiting interrupt: if the CLI is
+    // blocked inside canUseTool it may not ack the interrupt control-request, so resolving
+    // the pending approval first lets the turn unwind instead of stalling until the watchdog.
     this.attention.expireByThread(threadId);
+    await pooled.session.interrupt();
   }
 
   async renameThread(threadId: string, name: string): Promise<void> {

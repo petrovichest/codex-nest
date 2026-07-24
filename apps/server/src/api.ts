@@ -53,6 +53,7 @@ import type { AgentBackend } from "./backends/backend";
 import {
   BackendUnavailableError,
   ThreadNotFoundError,
+  TurnInProgressError,
   UnsupportedForAgentError,
 } from "./backends/backend";
 import type { SessionHub } from "./backends/hub";
@@ -935,6 +936,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (error instanceof ThreadNotFoundError)
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof UnsupportedForAgentError)
+      return apiError(reply, 409, "conflict", error.message);
+    if (error instanceof TurnInProgressError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof MessageQueuePausedError)
       return apiError(reply, 409, "conflict", error.message);

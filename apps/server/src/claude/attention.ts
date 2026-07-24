@@ -73,6 +73,9 @@ export class ClaudeAttention {
   /** Deny-settles this thread's pending requests (interrupt / turn-end). */
   expire(): void {
     this.attention.expireByThread(this.threadId);
+    // Replay only matters within a turn; drop recorded decisions so the map can't grow
+    // unbounded across a long-lived session.
+    this.decisions.clear();
   }
 
   async request(
@@ -250,7 +253,10 @@ export class ClaudeAttention {
   }
 
   private allowKey(toolName: string, input: Record<string, unknown>): string {
-    if (toolName === "Bash") return `Bash:${firstToken(stringField(input.command))}`;
+    // Exact full command for Bash — a prefix/first-token grant is unsafe (accepting
+    // `git status` for the session would auto-allow `git push --force`; `bash -c 'ls'`
+    // would allow any bash). Other tools grant the whole tool for the session.
+    if (toolName === "Bash") return `Bash:${stringField(input.command)}`;
     return toolName;
   }
 }
@@ -293,10 +299,6 @@ function compactSummary(input: Record<string, unknown>): string {
   const summary = JSON.stringify(input);
   if (summary === undefined || summary === "{}") return "";
   return summary.length > 200 ? `${summary.slice(0, 197)}…` : summary;
-}
-
-function firstToken(command: string): string {
-  return command.trim().split(/\s+/)[0] ?? "";
 }
 
 function stringField(value: unknown): string {

@@ -100,3 +100,15 @@ export class BackendUnavailableError extends Error {
     this.name = "BackendUnavailableError";
   }
 }
+
+/**
+ * Thrown when a turn cannot start because one is already in flight (or winding down).
+ * api.ts maps it to 409 conflict; the message queue re-queues on it and re-drains once
+ * the session is idle, so a raced dispatch self-heals.
+ */
+export class TurnInProgressError extends Error {
+  constructor(message = "Ход уже выполняется") {
+    super(message);
+    this.name = "TurnInProgressError";
+  }
+}

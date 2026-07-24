@@ -143,19 +143,20 @@ describe("ClaudeAttention decisions", () => {
     expect(onCancel).toHaveBeenCalledWith("turn-1");
   });
 
-  it("acceptForSession auto-allows later matching commands without new attention", async () => {
+  it("acceptForSession auto-allows only the EXACT same command, not a prefix match", async () => {
     const { manager, attention } = setup();
-    const first = attention.request("turn-1", "Bash", { command: "mkdir a" }, "t-1");
+    const first = attention.request("turn-1", "Bash", { command: "git status" }, "t-1");
     manager.resolve(pendingRequest(manager).id, { kind: "approval", decision: "acceptForSession" });
     await first;
 
-    // A later `mkdir` (same command prefix) is auto-allowed silently — no new attention.
-    const second = await attention.request("turn-1", "Bash", { command: "mkdir b" }, "t-2");
-    expect(second).toEqual({ behavior: "allow", updatedInput: { command: "mkdir b" } });
+    // The exact same command is auto-allowed silently — no new attention.
+    const same = await attention.request("turn-1", "Bash", { command: "git status" }, "t-2");
+    expect(same).toEqual({ behavior: "allow", updatedInput: { command: "git status" } });
     expect(manager.list()).toHaveLength(0);
 
-    // A different command prefix still prompts.
-    void attention.request("turn-1", "Bash", { command: "rm x" }, "t-3");
+    // A DIFFERENT command sharing the first token (`git`) still prompts — exact match only,
+    // so accepting `git status` never auto-allows `git push --force`.
+    void attention.request("turn-1", "Bash", { command: "git push --force" }, "t-3");
     expect(manager.list()).toHaveLength(1);
   });
 });

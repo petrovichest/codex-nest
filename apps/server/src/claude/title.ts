@@ -1,6 +1,7 @@
 import type { ClaudeSdk } from "./sdk";
 
 const TITLE_INPUT_LIMIT = 8_000;
+const TITLE_TIMEOUT_MS = 30_000;
 
 // Mirrors the Codex title prompt intent (see thread-title.ts): a short, user-facing
 // title in the message's own language, treating the message strictly as data.
@@ -29,33 +30,44 @@ export class ClaudeTitleGenerator {
   ) {}
 
   async generate(input: string, options: ClaudeTitleOptions): Promise<string> {
-    const query = this.sdk.query({
-      prompt: input.trim().slice(0, TITLE_INPUT_LIMIT),
-      options: {
-        model: "haiku",
-        maxTurns: 1,
-        cwd: options.cwd,
-        pathToClaudeCodeExecutable: this.bin,
-        settingSources: [],
-        strictMcpConfig: true,
-        allowedTools: [],
-        tools: [],
-        persistSession: false,
-        systemPrompt: TITLE_INSTRUCTIONS,
-      },
-    });
-    let title: string | undefined;
-    for await (const message of query) {
-      const result = message as { type?: string; subtype?: string; result?: unknown };
-      if (
-        result.type === "result" &&
-        result.subtype === "success" &&
-        typeof result.result === "string"
-      ) {
-        title = result.result;
+    // Bound the throwaway query: a wedged CLI would otherwise leak the subprocess and hang
+    // this promise forever. The timeout aborts the query (Options.abortController) and the
+    // finally clears the timer.
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), TITLE_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const query = this.sdk.query({
+        prompt: input.trim().slice(0, TITLE_INPUT_LIMIT),
+        options: {
+          model: "haiku",
+          maxTurns: 1,
+          cwd: options.cwd,
+          pathToClaudeCodeExecutable: this.bin,
+          settingSources: [],
+          strictMcpConfig: true,
+          allowedTools: [],
+          tools: [],
+          persistSession: false,
+          systemPrompt: TITLE_INSTRUCTIONS,
+          abortController,
+        },
+      });
+      let title: string | undefined;
+      for await (const message of query) {
+        const result = message as { type?: string; subtype?: string; result?: unknown };
+        if (
+          result.type === "result" &&
+          result.subtype === "success" &&
+          typeof result.result === "string"
+        ) {
+          title = result.result;
+        }
       }
+      return parseTitle(title);
+    } finally {
+      clearTimeout(timer);
     }
-    return parseTitle(title);
   }
 }
 

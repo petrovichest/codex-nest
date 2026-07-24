@@ -427,8 +427,13 @@ export class ClaudeLiveTurn {
   /** Grows the currently-open streaming block; returns the updated item (or null). */
   streamDelta(kind: "text" | "thinking", delta: string): ActivityItem | null {
     if (!delta) return null;
-    const current: TextActivityItem = this.streaming?.item ?? {
-      type: kind === "thinking" ? "reasoning" : "agentMessage",
+    const type = kind === "thinking" ? "reasoning" : "agentMessage";
+    // Reuse the open item only when it is the same kind; a kind switch (e.g. thinking→text
+    // before the thinking block's assistant message closes it) starts a fresh item so
+    // answer text never lands in the reasoning bubble.
+    const open = this.streaming?.item.type === type ? this.streaming.item : undefined;
+    const current: TextActivityItem = open ?? {
+      type,
       id: `${this.turnId}:${this.nextOrdinal()}`,
       status: "inProgress",
       text: "",
