@@ -330,10 +330,10 @@ codexnest_rollback() {
 # defaulting to "claude" on PATH, mirroring how the server resolves it.
 codexnest_claude_status() {
   local bin enabled path version
-  bin="${CODEXNEST_CLAUDE_BIN:-$(codexnest_config_value CODEXNEST_CLAUDE_BIN || true)}"
-  bin="${bin:-claude}"
-  enabled="${CODEXNEST_CLAUDE_ENABLED:-$(codexnest_config_value CODEXNEST_CLAUDE_ENABLED || true)}"
-  enabled="${enabled:-auto}"
+  bin="$(codexnest_config_value CODEXNEST_CLAUDE_BIN || true)"
+  bin="${bin:-${CODEXNEST_CLAUDE_BIN:-claude}}"
+  enabled="$(codexnest_config_value CODEXNEST_CLAUDE_ENABLED || true)"
+  enabled="${enabled:-${CODEXNEST_CLAUDE_ENABLED:-auto}}"
   path="$(command -v "$bin" 2>/dev/null || true)"
   if [[ -n "$path" ]]; then
     version="$("$path" --version 2>/dev/null || true)"
