@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run src/codex/integration.test.ts",
+    "test:integration:claude": "vitest run src/claude/integration.test.ts",
     "auth:generate": "tsx scripts/auth-generate.ts",
     "protocol:generate": "node scripts/generate-protocol.mjs"
   },
