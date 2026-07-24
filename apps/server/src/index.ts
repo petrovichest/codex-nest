@@ -8,6 +8,10 @@ import { AttentionManager } from "./attention";
 import { AppManager } from "./app-management";
 import { CodexBackend } from "./backends/codex";
 import { SessionHub } from "./backends/hub";
+import { ClaudeBackend } from "./claude/backend";
+import { ClaudeManager } from "./claude/manager";
+import { resolveClaudeModels } from "./claude/models";
+import { loadRealSdk, readClaudeVersion } from "./claude/sdk";
 import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
@@ -89,7 +93,44 @@ const codexBackend = new CodexBackend({
   codexManager,
   threadTitles,
 });
-const hub = new SessionHub([codexBackend], store, attention, push.configured);
+
+// Claude backend: constructed for `true` (always, surfacing unavailable state) and
+// for `auto` only when a startup version probe succeeds; skipped entirely for `false`.
+const claudeLog = {
+  warn: (payload: Record<string, unknown>, message: string) =>
+    process.stderr.write(`${message} ${JSON.stringify(payload)}\n`),
+};
+let claudeBackend: ClaudeBackend | undefined;
+let claudeManager: ClaudeManager | undefined;
+if (config.claudeEnabled !== "false") {
+  const enabled =
+    config.claudeEnabled === "true" ||
+    (await readClaudeVersion(config.claudeBin).then(
+      () => true,
+      () => false,
+    ));
+  if (enabled) {
+    claudeBackend = new ClaudeBackend({
+      store,
+      sdk: await loadRealSdk(),
+      models: resolveClaudeModels(config.claudeModels, claudeLog),
+      bin: config.claudeBin,
+    });
+    const backend = claudeBackend;
+    claudeManager = new ClaudeManager({
+      path: config.claudeBin,
+      currentStatus: () => backend.currentProbe(),
+      probe: () => backend.probe(),
+    });
+  }
+}
+
+const hub = new SessionHub(
+  claudeBackend ? [codexBackend, claudeBackend] : [codexBackend],
+  store,
+  attention,
+  push.configured,
+);
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
@@ -137,17 +178,21 @@ const app = await buildApp(config, {
   attention,
   push,
   codexManager,
+  claudeManager,
   appManager,
   transcription,
 });
 codexBackend.setLogger(app.log);
+claudeBackend?.setLogger(app.log);
 await app.listen({ host: config.host, port: config.port });
 void codexBackend.start();
+if (claudeBackend) void claudeBackend.start();
 
 async function shutdown(): Promise<void> {
   stateWatcher.close();
   if (authRefreshTimer) clearTimeout(authRefreshTimer);
   codexBackend.stop();
+  claudeBackend?.stop();
   await store.flushed();
   await app.close();
 }

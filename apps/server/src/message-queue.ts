@@ -5,7 +5,8 @@ import type { QueuedMessage } from "@codexnest/protocol";
 import type { StateStore } from "./state/store";
 
 export interface MessageQueueDelivery {
-  paused(threadId: string): boolean;
+  /** Returns the reason turns are paused for this thread, or null when they may run. */
+  pauseReason(threadId: string): string | null;
   currentTurnId(threadId: string): string | null;
   start(threadId: string, message: QueuedMessage): Promise<string>;
   steer(threadId: string, turnId: string, message: QueuedMessage): Promise<string>;
@@ -68,8 +69,8 @@ export class MessageQueue {
 
   sendNow(threadId: string, messageId: string): Promise<string> {
     return this.withLock(threadId, async () => {
-      if (this.delivery.paused(threadId))
-        throw new MessageQueuePausedError("Codex maintenance is in progress");
+      const reason = this.delivery.pauseReason(threadId);
+      if (reason !== null) throw new MessageQueuePausedError(reason);
       const message = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!message) throw new MessageQueueNotFoundError("Queued message not found");
       return this.dispatch(threadId, message, true);
@@ -78,7 +79,7 @@ export class MessageQueue {
 
   drain(threadId: string): Promise<void> {
     return this.withLock(threadId, async () => {
-      if (this.delivery.paused(threadId)) return;
+      if (this.delivery.pauseReason(threadId) !== null) return;
       if (this.delivery.currentTurnId(threadId)) return;
       const message = this.list(threadId)[0];
       if (!message || message.status !== "queued") return;

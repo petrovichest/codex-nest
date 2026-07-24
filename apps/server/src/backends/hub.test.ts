@@ -250,6 +250,23 @@ describe("SessionHub", () => {
     expect(hub.lastSyncedAt).toBe("codex-time");
   });
 
+  it("resolves sync even when one backend's sync rejects", async () => {
+    const codex = new FakeBackend("codex");
+    const claude = new FakeBackend("claude");
+    claude.sync = vi.fn(async () => {
+      throw new Error("claude sync failed");
+    });
+    const hub = new SessionHub(
+      [asBackend(codex), asBackend(claude)],
+      fakeStore(),
+      new AttentionManager(),
+      false,
+    );
+    await expect(hub.sync()).resolves.toBeUndefined();
+    expect(codex.sync).toHaveBeenCalledOnce();
+    expect(claude.sync).toHaveBeenCalledOnce();
+  });
+
   it("re-publishes every thread summary when projects change", () => {
     const codex = new FakeBackend("codex");
     codex.owned = [summary("a", "codex", 5), summary("b", "codex", 9)];

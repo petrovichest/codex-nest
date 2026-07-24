@@ -6,11 +6,14 @@ import { basename, isAbsolute } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type {
+  AgentId,
   ApiErrorCode,
   AppUpdateStatus,
   AttentionResponse,
+  ClaudeManagementStatus,
   CodexManagementStatus,
   CodexRateLimitsResponse,
+  HealthResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadRequest,
@@ -49,6 +52,8 @@ import { CodexBackend, compact, effectiveModel } from "./backends/codex";
 import type { AgentBackend } from "./backends/backend";
 import { ThreadNotFoundError, UnsupportedForAgentError } from "./backends/backend";
 import type { SessionHub } from "./backends/hub";
+import { ClaudeBackend } from "./claude/backend";
+import type { ClaudeManager } from "./claude/manager";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import { parseAccountRateLimits } from "./codex/guards";
 import { RpcError } from "./codex/transport";
@@ -98,6 +103,7 @@ export interface ApiServices {
   attention: AttentionManager;
   push: PushNotifier;
   codexManager?: CodexManager;
+  claudeManager?: ClaudeManager;
   appManager?: AppManager;
   transcription?: Pick<
     TranscriptionService,
@@ -107,14 +113,23 @@ export interface ApiServices {
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention, codexManager, appManager, hub, codexBackend } =
-    services;
+  const {
+    bridge,
+    store,
+    projection,
+    attention,
+    codexManager,
+    claudeManager,
+    appManager,
+    hub,
+    codexBackend,
+  } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
   const queue = new MessageQueue(store, {
-    paused: (threadId) => hub.backendFor(threadId)?.turnsPaused() ?? false,
+    pauseReason: (threadId) => hub.backendFor(threadId)?.pauseReason() ?? null,
     currentTurnId: (threadId) => hub.backendFor(threadId)?.currentTurnId(threadId) ?? null,
     start: (threadId, message) =>
       hub
@@ -167,22 +182,32 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.get("/api/v1/health", async () => {
     const codexReady = bridge.state === "ready";
     const codexMessage = codexReady ? null : "Codex app-server is unavailable";
+    const backends: NonNullable<HealthResponse["backends"]> = [
+      {
+        agent: "codex",
+        state: bridge.state,
+        installedVersion: bridge.actualVersion ?? null,
+        message: codexMessage,
+      },
+    ];
+    const claude = hub.backend("claude");
+    if (claude instanceof ClaudeBackend) {
+      backends.push({
+        agent: "claude",
+        state: claude.connection.state,
+        installedVersion: claude.currentProbe().version,
+        message: claude.connection.message,
+      });
+    }
     return {
-      status: codexReady ? "ok" : "degraded",
+      status: backends.some((backend) => backend.state === "ready") ? "ok" : "degraded",
       serverVersion: SERVER_VERSION,
       appServer: {
         state: bridge.state,
         installedVersion: bridge.actualVersion ?? null,
         message: codexMessage,
       },
-      backends: [
-        {
-          agent: "codex" as const,
-          state: bridge.state,
-          installedVersion: bridge.actualVersion ?? null,
-          message: codexMessage,
-        },
-      ],
+      backends,
     };
   });
 
@@ -365,6 +390,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
   });
 
+  app.get("/api/v1/settings/claude", async (): Promise<ClaudeManagementStatus> => {
+    return claudeManager?.status() ?? disabledClaudeStatus();
+  });
+
+  app.post("/api/v1/settings/claude/check", async (): Promise<ClaudeManagementStatus> => {
+    return claudeManager ? claudeManager.check() : disabledClaudeStatus();
+  });
+
   app.get("/api/v1/settings/app", async (): Promise<AppUpdateStatus> => {
     return requireAppManager(appManager).status();
   });
@@ -483,10 +516,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
         return apiError(reply, 404, "not_found", "Project not found");
       }
-      const backend = resolveBackend(hub, request.body?.agent, reply);
-      if (!backend) return;
+      const backend = resolveBackend(hub, request.body?.agent);
       if (!(backend instanceof CodexBackend)) {
-        return apiError(reply, 409, "validation_failed", "Этот агент пока не поддерживает проекты");
+        throw new UnsupportedForAgentError("Этот агент пока не поддерживает проекты");
       }
       const thread = await backend.getOrCreateProjectThread(request.params.id);
       return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
@@ -525,25 +557,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
-    const backend = requireCodexThread(hub, request.params.id, reply);
-    if (!backend) return;
-    return backend.readGoal(request.params.id);
+  app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request) => {
+    return requireCodexThread(hub, request.params.id).readGoal(request.params.id);
   });
 
   app.patch<{ Params: { id: string }; Body: UpdateThreadGoalRequest }>(
     "/api/v1/threads/:id/goal",
-    async (request, reply) => {
-      const backend = requireCodexThread(hub, request.params.id, reply);
-      if (!backend) return;
-      return backend.setGoal(request.params.id, validateGoalPatch(request.body));
+    async (request) => {
+      return requireCodexThread(hub, request.params.id).setGoal(
+        request.params.id,
+        validateGoalPatch(request.body),
+      );
     },
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
-    const backend = requireCodexThread(hub, request.params.id, reply);
-    if (!backend) return;
-    await backend.clearGoal(request.params.id);
+    await requireCodexThread(hub, request.params.id).clearGoal(request.params.id);
     return reply.code(204).send();
   });
 
@@ -612,15 +641,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
-      codexManager?.assertTurnsAllowed();
       const body = validateThreadBody(request.body, reply);
       if (!body) return;
       const project = store
         .snapshot()
         .projects.find((candidate) => candidate.id === body.projectId);
       if (!project) return apiError(reply, 404, "not_found", "Project not found");
-      const backend = resolveBackend(hub, body.agent, reply);
-      if (!backend) return;
+      const backend = resolveBackend(hub, body.agent);
+      // Codex maintenance only gates Codex thread creation — never Claude's.
+      if (backend instanceof CodexBackend) codexManager?.assertTurnsAllowed();
       const settings = mergeSettings(
         backend.newSessionSettings,
         body.settings ?? {},
@@ -636,7 +665,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         },
         { goal: body.goal ?? false },
       );
-      if (body.settings?.reasoningEffort !== undefined) {
+      if (backend instanceof CodexBackend && body.settings?.reasoningEffort !== undefined) {
         await codexBackend.setDefaultReasoningEffort(settings.reasoningEffort);
       }
       return reply.code(201).send({
@@ -694,7 +723,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       const settings = mergeSettings(summary.settings, patch, backend.models);
       const thread = await backend.setSettings(request.params.id, settings);
-      if (patch.reasoningEffort !== undefined) {
+      if (backend instanceof CodexBackend && patch.reasoningEffort !== undefined) {
         await codexBackend.setDefaultReasoningEffort(settings.reasoningEffort);
       }
       return thread;
@@ -937,37 +966,28 @@ function requireAppManager(manager: AppManager | undefined): AppManager {
   return manager;
 }
 
-function resolveBackend(
-  hub: SessionHub,
-  agent: unknown,
-  reply: FastifyReply,
-): AgentBackend | undefined {
-  const resolved = agent === undefined ? "codex" : agent;
-  if (resolved !== "codex" && resolved !== "claude") {
-    apiError(reply, 409, "validation_failed", "Неизвестный агент");
-    return undefined;
-  }
-  const backend = hub.backend(resolved);
-  if (!backend) {
-    apiError(reply, 409, "validation_failed", "Агент недоступен");
-    return undefined;
-  }
+function disabledClaudeStatus(): ClaudeManagementStatus {
+  return {
+    supported: false,
+    unavailableReason: "Агент Claude отключён",
+    cliVersion: null,
+    path: null,
+  };
+}
+
+function resolveBackend(hub: SessionHub, agent: unknown): AgentBackend {
+  // An unknown or disabled agent simply has no registered backend, so no literal
+  // agent list is needed here — hub.backend returns undefined and we 409.
+  const backend = hub.backend((agent === undefined ? "codex" : agent) as AgentId);
+  if (!backend) throw new UnsupportedForAgentError("Выбранный агент недоступен");
   return backend;
 }
 
-function requireCodexThread(
-  hub: SessionHub,
-  threadId: string,
-  reply: FastifyReply,
-): CodexBackend | undefined {
+function requireCodexThread(hub: SessionHub, threadId: string): CodexBackend {
   const backend = hub.backendFor(threadId);
-  if (!backend) {
-    apiError(reply, 404, "not_found", "Thread not found");
-    return undefined;
-  }
+  if (!backend) throw new ThreadNotFoundError();
   if (!(backend instanceof CodexBackend)) {
-    apiError(reply, 409, "validation_failed", "Цели доступны только в Codex");
-    return undefined;
+    throw new UnsupportedForAgentError("Цели доступны только в Codex");
   }
   return backend;
 }

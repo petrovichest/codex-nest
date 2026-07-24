@@ -93,6 +93,15 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([{ ...pending, status: "queued" }]);
   });
 
+  it("rejects an immediate send with the reason supplied by the delivery hook", async () => {
+    const { queue, setPaused } = await setup("active");
+    setPaused(true);
+    const message = await queue.enqueue("thread", "После обслуживания");
+    await expect(queue.sendNow("thread", message.id)).rejects.toThrow(
+      "Codex maintenance is in progress",
+    );
+  });
+
   it("keeps messages queued while delivery is paused and resumes afterwards", async () => {
     const { queue, delivery, setPaused } = await setup(null);
     setPaused(true);
@@ -118,7 +127,7 @@ async function setup(initialTurn: string | null) {
   let currentTurn = initialTurn;
   let paused = false;
   const delivery = {
-    paused: vi.fn(() => paused),
+    pauseReason: vi.fn(() => (paused ? "Codex maintenance is in progress" : null)),
     currentTurnId: vi.fn(() => currentTurn),
     start: vi.fn(async () => {
       currentTurn = "started";

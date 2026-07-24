@@ -21,7 +21,7 @@ import type {
 import type { CodexBridge } from "../codex/bridge";
 import type { ThreadResumeResponse } from "../codex/generated/v2/index";
 import { parseThreadRead, parseThreadStart, parseTurnStart, parseTurnSteer } from "../codex/guards";
-import type { CodexManager } from "../codex-management";
+import { CODEX_MAINTENANCE_MESSAGE, type CodexManager } from "../codex-management";
 import { safeError } from "../logging";
 import { MessageQueueNotFoundError } from "../message-queue";
 import type { AppProjection } from "../projection";
@@ -207,8 +207,8 @@ export class CodexBackend extends EventEmitter implements AgentBackend {
     return this.projection.recordAttentionResponse(request, response);
   }
 
-  turnsPaused(): boolean {
-    return this.codexManager?.maintenanceActive ?? false;
+  pauseReason(): string | null {
+    return this.codexManager?.maintenanceActive ? CODEX_MAINTENANCE_MESSAGE : null;
   }
 
   currentTurnId(threadId: string): string | null {

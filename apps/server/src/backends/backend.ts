@@ -67,7 +67,8 @@ export interface AgentBackend extends EventEmitter {
   setPinned(threadId: string, pinned: boolean): Promise<void>;
   recordAttentionResponse(request: AttentionRequest, response: AttentionResponse): Promise<void>;
 
-  turnsPaused(): boolean;
+  /** Reason turns are currently paused (e.g. maintenance), or null when they may run. */
+  pauseReason(): string | null;
   currentTurnId(threadId: string): string | null;
   wasDelivered(threadId: string, messageId: string): Promise<boolean>;
 }

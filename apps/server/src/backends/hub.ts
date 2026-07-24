@@ -123,7 +123,9 @@ export class SessionHub extends EventEmitter {
   }
 
   async sync(): Promise<void> {
-    await Promise.all(this.backends.map((backend) => backend.sync()));
+    // allSettled: one backend's sync failure must not fail POST /sync — its failure
+    // surfaces through its own connection state instead.
+    await Promise.allSettled(this.backends.map((backend) => backend.sync()));
   }
 
   private handleBackendEvent(backend: AgentBackend, event: ServerEvent): void {

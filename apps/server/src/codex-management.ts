@@ -24,6 +24,9 @@ const PROXY_VARIABLES = [
 ] as const;
 const NO_PROXY = "localhost,127.0.0.1,::1";
 
+/** Single source for the "turns paused during maintenance" reason (see CodexBackend.pauseReason). */
+export const CODEX_MAINTENANCE_MESSAGE = "Codex maintenance is in progress";
+
 export type ParsedProxy = {
   protocol: "http" | "https";
   host: string;
@@ -92,7 +95,7 @@ export class CodexManager {
 
   assertTurnsAllowed(): void {
     if (this.maintenanceActive) {
-      throw new CodexManagementError("busy", "Codex maintenance is in progress");
+      throw new CodexManagementError("busy", CODEX_MAINTENANCE_MESSAGE);
     }
   }
 
