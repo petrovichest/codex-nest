@@ -366,7 +366,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: MAX_TRANSCRIPTION_BYTES,
-        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+        timingEstimate: {
+          sampleCount: 0,
+          estimatedFixedProcessingMs: null,
+          estimatedProcessingMsPerAudioSecond: null,
+        },
       },
       store,
     );
@@ -424,13 +428,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       let timingEstimate = config.timingEstimate;
       if (audioDurationMs !== null && timingProfile) {
         const processingMs = Math.max(1, Date.now() - startedAt);
-        const sample = processingMs / (audioDurationMs / 1_000);
         try {
           const nextState = await store.update((state) => {
             state.transcriptionTimings ??= {};
             state.transcriptionTimings[timingProfile] = appendTranscriptionTimingSample(
               state.transcriptionTimings[timingProfile],
-              sample,
+              { audioDurationMs, processingMs },
             );
           });
           timingEstimate = transcriptionTimingEstimate(

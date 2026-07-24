@@ -26,6 +26,7 @@ export type UiLanguage = "en" | "ru";
 
 export type TranscriptionTimingEstimate = {
   sampleCount: number;
+  estimatedFixedProcessingMs: number | null;
   estimatedProcessingMsPerAudioSecond: number | null;
 };
 

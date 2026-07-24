@@ -117,7 +117,10 @@ describe("StateStore", () => {
     await store.load();
     await store.update((state) => {
       state.transcriptionTimings = {
-        "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
+        "local:http://127.0.0.1:8178/inference:raw": [
+          { audioDurationMs: 2_000, processingMs: 6_000 },
+          { audioDurationMs: 3_000, processingMs: 7_000 },
+        ],
       };
       state.threadMeta.thread = {
         pinned: false,
@@ -162,7 +165,35 @@ describe("StateStore", () => {
       },
     });
     expect(reloaded.snapshot().transcriptionTimings).toEqual({
-      "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
+      "local:http://127.0.0.1:8178/inference:raw": [
+        { audioDurationMs: 2_000, processingMs: 6_000 },
+        { audioDurationMs: 3_000, processingMs: 7_000 },
+      ],
+    });
+  });
+
+  it("discards legacy timing coefficients that lack audio durations", async () => {
+    const { path } = await temporaryState();
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        auth: {},
+        projects: [],
+        threadMeta: {},
+        devices: {},
+        uiLanguage: "ru",
+        transcriptionTimings: {
+          "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
+        },
+      }),
+      "utf8",
+    );
+
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.snapshot().transcriptionTimings).toEqual({
+      "local:http://127.0.0.1:8178/inference:raw": [],
     });
   });
 

@@ -345,11 +345,20 @@ export function ThreadPage({
     recording: ComposerRecording,
   ): void {
     if (activeTranscriptionRef.current || !transcriptionProvider) return;
-    const rate = transcriptionConfig?.timingEstimate.estimatedProcessingMsPerAudioSecond ?? null;
+    const fixedProcessingMs =
+      transcriptionConfig?.timingEstimate.estimatedFixedProcessingMs ?? null;
+    const processingMsPerAudioSecond =
+      transcriptionConfig?.timingEstimate.estimatedProcessingMsPerAudioSecond ?? null;
     const estimatedTotalSeconds =
-      rate === null
+      fixedProcessingMs === null || processingMsPerAudioSecond === null
         ? null
-        : Math.max(1, Math.ceil((recording.durationMs / 1_000) * (rate / 1_000)));
+        : Math.max(
+            1,
+            Math.ceil(
+              (fixedProcessingMs + (recording.durationMs / 1_000) * processingMsPerAudioSecond) /
+                1_000,
+            ),
+          );
     const job: ActiveTranscription = {
       id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
       threadId: targetThreadId,

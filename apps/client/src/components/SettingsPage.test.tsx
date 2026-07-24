@@ -502,5 +502,9 @@ const transcriptionConfig: TranscriptionConfigResponse = {
   refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
-  timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+  timingEstimate: {
+    sampleCount: 0,
+    estimatedFixedProcessingMs: null,
+    estimatedProcessingMsPerAudioSecond: null,
+  },
 };

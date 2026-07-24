@@ -38,13 +38,18 @@ export interface DeviceState {
   updatedAt: number;
 }
 
+export interface TranscriptionTimingSampleState {
+  audioDurationMs: number;
+  processingMs: number;
+}
+
 export interface CodexNestState {
   schemaVersion: 1;
   auth: { tokenSha256?: string };
   projects: Project[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
-  transcriptionTimings?: Record<string, number[]>;
+  transcriptionTimings?: Record<string, TranscriptionTimingSampleState[]>;
   uiLanguage: UiLanguage;
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
@@ -171,20 +176,7 @@ function validateState(value: unknown): CodexNestState {
   if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
     throw new Error("Corrupt CodexNest state");
   }
-  if (
-    value.transcriptionTimings !== undefined &&
-    (!isRecord(value.transcriptionTimings) ||
-      Object.values(value.transcriptionTimings).some(
-        (samples) =>
-          !Array.isArray(samples) ||
-          samples.length > 20 ||
-          samples.some(
-            (sample) => typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0,
-          ),
-      ))
-  ) {
-    throw new Error("Corrupt transcription timings in CodexNest state");
-  }
+  const transcriptionTimings = normalizeTranscriptionTimings(value.transcriptionTimings);
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
   }
@@ -250,7 +242,46 @@ function validateState(value: unknown): CodexNestState {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
   const state = value as unknown as CodexNestState;
-  return value.uiLanguage === undefined ? { ...state, uiLanguage: "ru" } : state;
+  return {
+    ...state,
+    ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
+    ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
+  };
+}
+
+function normalizeTranscriptionTimings(
+  value: unknown,
+): Record<string, TranscriptionTimingSampleState[]> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error("Corrupt transcription timings in CodexNest state");
+
+  const normalized: Record<string, TranscriptionTimingSampleState[]> = {};
+  for (const [profile, samples] of Object.entries(value)) {
+    if (!Array.isArray(samples) || samples.length > 20) {
+      throw new Error("Corrupt transcription timings in CodexNest state");
+    }
+    normalized[profile] = samples.flatMap((sample) => {
+      if (typeof sample === "number" && Number.isFinite(sample) && sample > 0) return [];
+      if (
+        !isRecord(sample) ||
+        typeof sample.audioDurationMs !== "number" ||
+        !Number.isFinite(sample.audioDurationMs) ||
+        sample.audioDurationMs <= 0 ||
+        typeof sample.processingMs !== "number" ||
+        !Number.isFinite(sample.processingMs) ||
+        sample.processingMs <= 0
+      ) {
+        throw new Error("Corrupt transcription timings in CodexNest state");
+      }
+      return [
+        {
+          audioDurationMs: sample.audioDurationMs,
+          processingMs: sample.processingMs,
+        },
+      ];
+    });
+  }
+  return normalized;
 }
 
 function isTimelineArtifacts(value: unknown): value is Record<string, TimelineArtifact[]> {

@@ -1930,6 +1930,7 @@ describe("Activity", () => {
           text: string;
           timingEstimate: {
             sampleCount: number;
+            estimatedFixedProcessingMs: number;
             estimatedProcessingMsPerAudioSecond: number;
           };
         }) => void)
@@ -1978,7 +1979,7 @@ describe("Activity", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
 
     await waitFor(() => expect(api.transcribe).toHaveBeenCalledOnce());
-    expect(screen.getByText("Распознаём · осталось ≈ 0:01")).toBeInTheDocument();
+    expect(screen.getByText("Распознаём · осталось ≈ 0:03")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
 
     await screen.findByRole("heading", { name: "Другая задача" });
@@ -1995,6 +1996,7 @@ describe("Activity", () => {
         text: "голос",
         timingEstimate: {
           sampleCount: 2,
+          estimatedFixedProcessingMs: 2_500,
           estimatedProcessingMsPerAudioSecond: 4_000,
         },
       }),
@@ -2008,6 +2010,7 @@ describe("Activity", () => {
     );
     expect(timingChanged).toHaveBeenCalledWith({
       sampleCount: 2,
+      estimatedFixedProcessingMs: 2_500,
       estimatedProcessingMsPerAudioSecond: 4_000,
     });
 
@@ -2042,6 +2045,7 @@ function threadRoute(state?: Record<string, unknown>) {
 function voiceThreadRoute(
   onTimingChange: (estimate: {
     sampleCount: number;
+    estimatedFixedProcessingMs: number | null;
     estimatedProcessingMsPerAudioSecond: number | null;
   }) => void,
 ) {
@@ -2077,7 +2081,11 @@ const transcriptionConfig: TranscriptionConfigResponse = {
   refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
-  timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+  timingEstimate: {
+    sampleCount: 5,
+    estimatedFixedProcessingMs: 2_000,
+    estimatedProcessingMsPerAudioSecond: 4_000,
+  },
 };
 
 function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
@@ -2154,7 +2162,11 @@ function threadApi() {
     clearGoal: vi.fn().mockResolvedValue(undefined),
     transcribe: vi.fn().mockResolvedValue({
       text: "голос",
-      timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+      timingEstimate: {
+        sampleCount: 5,
+        estimatedFixedProcessingMs: 2_000,
+        estimatedProcessingMsPerAudioSecond: 4_000,
+      },
     }),
   };
 }

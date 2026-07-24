@@ -23,6 +23,10 @@ export const MAX_TRANSCRIPTION_BYTES = 24 * 1024 * 1024;
 export const MAX_RECORDING_SECONDS = 5 * 60;
 export const MAX_TRANSCRIPTION_TIMING_SAMPLES = 20;
 
+const MIN_TRANSCRIPTION_TIMING_SAMPLES = 5;
+const MIN_TRANSCRIPTION_DURATION_SPAN_MS = 5_000;
+const MIN_TRANSCRIPTION_DURATION_BUCKETS = 3;
+const MIN_TRANSCRIPTION_PAIR_DISTANCE_MS = 1_000;
 const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODELS = new Set(["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]);
 const MANAGED_ENVIRONMENT_VARIABLES = new Set([
@@ -52,6 +56,11 @@ interface TranscriptionSettings {
   language?: string;
   refineLocal: boolean;
   refinementModel: string;
+}
+
+export interface TranscriptionTimingSample {
+  audioDurationMs: number;
+  processingMs: number;
 }
 
 export interface TranscriptionServiceOptions extends TranscriptionSettings {
@@ -213,27 +222,74 @@ export function transcriptionTimingProfile(config: TranscriptionConfigResponse):
 }
 
 export function transcriptionTimingEstimate(
-  samples: readonly number[] | undefined,
+  samples: readonly TranscriptionTimingSample[] | undefined,
 ): TranscriptionTimingEstimate {
   if (!samples?.length) return emptyTranscriptionTimingEstimate();
-  const sorted = [...samples].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  const median = sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+  const unavailable = {
+    sampleCount: samples.length,
+    estimatedFixedProcessingMs: null,
+    estimatedProcessingMsPerAudioSecond: null,
+  };
+  if (samples.length < MIN_TRANSCRIPTION_TIMING_SAMPLES) return unavailable;
+
+  const durations = samples.map(({ audioDurationMs }) => audioDurationMs);
+  const durationSpan = Math.max(...durations) - Math.min(...durations);
+  const durationBuckets = new Set(durations.map((durationMs) => Math.floor(durationMs / 1_000)));
+  if (
+    durationSpan < MIN_TRANSCRIPTION_DURATION_SPAN_MS ||
+    durationBuckets.size < MIN_TRANSCRIPTION_DURATION_BUCKETS
+  ) {
+    return unavailable;
+  }
+
+  const slopes: number[] = [];
+  for (let left = 0; left < samples.length; left += 1) {
+    for (let right = left + 1; right < samples.length; right += 1) {
+      const durationDeltaMs = samples[right]!.audioDurationMs - samples[left]!.audioDurationMs;
+      if (Math.abs(durationDeltaMs) < MIN_TRANSCRIPTION_PAIR_DISTANCE_MS) continue;
+      slopes.push(
+        (samples[right]!.processingMs - samples[left]!.processingMs) / (durationDeltaMs / 1_000),
+      );
+    }
+  }
+  if (!slopes.length) return unavailable;
+
+  const processingMsPerAudioSecond = Math.max(0, median(slopes));
+  const fixedProcessingMs = Math.max(
+    0,
+    median(
+      samples.map(
+        ({ audioDurationMs, processingMs }) =>
+          processingMs - processingMsPerAudioSecond * (audioDurationMs / 1_000),
+      ),
+    ),
+  );
   return {
-    sampleCount: sorted.length,
-    estimatedProcessingMsPerAudioSecond: Math.round(median),
+    sampleCount: samples.length,
+    estimatedFixedProcessingMs: Math.round(fixedProcessingMs),
+    estimatedProcessingMsPerAudioSecond: Math.round(processingMsPerAudioSecond),
   };
 }
 
 export function appendTranscriptionTimingSample(
-  samples: readonly number[] | undefined,
-  sample: number,
-): number[] {
+  samples: readonly TranscriptionTimingSample[] | undefined,
+  sample: TranscriptionTimingSample,
+): TranscriptionTimingSample[] {
   return [...(samples ?? []), sample].slice(-MAX_TRANSCRIPTION_TIMING_SAMPLES);
 }
 
 function emptyTranscriptionTimingEstimate(): TranscriptionTimingEstimate {
-  return { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null };
+  return {
+    sampleCount: 0,
+    estimatedFixedProcessingMs: null,
+    estimatedProcessingMsPerAudioSecond: null,
+  };
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 export function normalizeAudioType(value: string): string {

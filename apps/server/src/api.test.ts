@@ -497,7 +497,11 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
-        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+        timingEstimate: {
+          sampleCount: 0,
+          estimatedFixedProcessingMs: null,
+          estimatedProcessingMsPerAudioSecond: null,
+        },
       })),
       updateConfiguration: vi.fn(async () => ({
         providers: ["local" as const, "openai" as const],
@@ -510,7 +514,11 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
-        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+        timingEstimate: {
+          sampleCount: 0,
+          estimatedFixedProcessingMs: null,
+          estimatedProcessingMsPerAudioSecond: null,
+        },
       })),
       transcribe: vi.fn(async () => "распознанный текст"),
     };
@@ -545,7 +553,11 @@ describe("audio transcriptions", () => {
     expect(transcribed.statusCode).toBe(200);
     expect(transcribed.json()).toEqual({
       text: "распознанный текст",
-      timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+      timingEstimate: {
+        sampleCount: 0,
+        estimatedFixedProcessingMs: null,
+        estimatedProcessingMsPerAudioSecond: null,
+      },
     });
     expect(transcription.transcribe).toHaveBeenCalledWith(
       Buffer.from("audio"),
@@ -565,9 +577,16 @@ describe("audio transcriptions", () => {
     expect(timed.statusCode).toBe(200);
     expect(timed.json().timingEstimate).toMatchObject({
       sampleCount: 1,
-      estimatedProcessingMsPerAudioSecond: expect.any(Number),
+      estimatedFixedProcessingMs: null,
+      estimatedProcessingMsPerAudioSecond: null,
     });
     expect(Object.values(store.snapshot().transcriptionTimings ?? {})).toHaveLength(1);
+    expect(Object.values(store.snapshot().transcriptionTimings ?? {})[0]).toEqual([
+      {
+        audioDurationMs: 2_000,
+        processingMs: expect.any(Number),
+      },
+    ]);
 
     const invalidDuration = await app.inject({
       method: "POST",

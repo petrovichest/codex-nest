@@ -37,26 +37,86 @@ describe("TranscriptionService", () => {
       refinementModel: "gpt-5.6-luna",
       maxRecordingSeconds: 300,
       maxUploadBytes: 24 * 1024 * 1024,
-      timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+      timingEstimate: {
+        sampleCount: 0,
+        estimatedFixedProcessingMs: null,
+        estimatedProcessingMsPerAudioSecond: null,
+      },
     });
     expect(JSON.stringify(service.configuration())).not.toContain("secret");
   });
 
-  it("uses the median recent timing coefficient for estimates", () => {
+  it("learns fixed and duration-based processing time from recent samples", () => {
     expect(transcriptionTimingEstimate(undefined)).toEqual({
       sampleCount: 0,
+      estimatedFixedProcessingMs: null,
       estimatedProcessingMsPerAudioSecond: null,
     });
-    expect(transcriptionTimingEstimate([8_000, 2_000, 4_000, 100_000])).toEqual({
+    expect(
+      transcriptionTimingEstimate([
+        { audioDurationMs: 1_000, processingMs: 5_000 },
+        { audioDurationMs: 5_000, processingMs: 9_000 },
+        { audioDurationMs: 10_000, processingMs: 14_000 },
+        { audioDurationMs: 15_000, processingMs: 19_000 },
+        { audioDurationMs: 20_000, processingMs: 24_000 },
+        { audioDurationMs: 30_000, processingMs: 150_000 },
+      ]),
+    ).toEqual({
+      sampleCount: 6,
+      estimatedFixedProcessingMs: 4_000,
+      estimatedProcessingMsPerAudioSecond: 1_000,
+    });
+  });
+
+  it("waits for enough varied timing samples before estimating", () => {
+    const tooFew = [
+      { audioDurationMs: 1_000, processingMs: 5_000 },
+      { audioDurationMs: 5_000, processingMs: 9_000 },
+      { audioDurationMs: 10_000, processingMs: 14_000 },
+      { audioDurationMs: 15_000, processingMs: 19_000 },
+    ];
+    expect(transcriptionTimingEstimate(tooFew)).toEqual({
       sampleCount: 4,
-      estimatedProcessingMsPerAudioSecond: 6_000,
+      estimatedFixedProcessingMs: null,
+      estimatedProcessingMsPerAudioSecond: null,
     });
     expect(
+      transcriptionTimingEstimate([...tooFew, { audioDurationMs: 5_500, processingMs: 9_500 }]),
+    ).toEqual({
+      sampleCount: 5,
+      estimatedFixedProcessingMs: 4_000,
+      estimatedProcessingMsPerAudioSecond: 1_000,
+    });
+    expect(
+      transcriptionTimingEstimate([
+        { audioDurationMs: 1_000, processingMs: 5_000 },
+        { audioDurationMs: 2_000, processingMs: 6_000 },
+        { audioDurationMs: 3_000, processingMs: 7_000 },
+        { audioDurationMs: 4_000, processingMs: 8_000 },
+        { audioDurationMs: 5_000, processingMs: 9_000 },
+      ]),
+    ).toEqual({
+      sampleCount: 5,
+      estimatedFixedProcessingMs: null,
+      estimatedProcessingMsPerAudioSecond: null,
+    });
+  });
+
+  it("keeps only the latest timing samples", () => {
+    expect(
       appendTranscriptionTimingSample(
-        Array.from({ length: 20 }, (_, index) => index + 1),
-        21,
+        Array.from({ length: 20 }, (_, index) => ({
+          audioDurationMs: index + 1,
+          processingMs: index + 101,
+        })),
+        { audioDurationMs: 21, processingMs: 121 },
       ),
-    ).toEqual(Array.from({ length: 20 }, (_, index) => index + 2));
+    ).toEqual(
+      Array.from({ length: 20 }, (_, index) => ({
+        audioDurationMs: index + 2,
+        processingMs: index + 102,
+      })),
+    );
   });
 
   it("sends OpenAI multipart requests through the configured Codex proxy", async () => {
