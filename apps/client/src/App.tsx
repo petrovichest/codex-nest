@@ -11,6 +11,7 @@ import type {
   CodexRateLimitWindow,
   CodexRateLimitsResponse,
   MoveProjectRequest,
+  Project,
   ThreadSummary,
   TranscriptionConfigResponse,
 } from "@codexnest/protocol";
@@ -36,6 +37,7 @@ import {
   NewTaskIcon,
   PlusIcon,
   SlidersIcon,
+  TrashIcon,
 } from "./components/Icons";
 import { ProjectDialog } from "./components/ProjectDialog";
 import {
@@ -420,11 +422,13 @@ function Sidebar({
 }) {
   const { api, state, dispatch } = useConnection();
   const { language, t } = useI18n();
+  const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [projectDrag, setProjectDrag] = useState<ProjectDragView | null>(null);
   const [projectNotice, setProjectNotice] = useState<{
     projectId: string;
@@ -542,7 +546,7 @@ function Sidebar({
     move: MoveProjectRequest,
     menu: HTMLDetailsElement | null,
   ) {
-    if (movingProjectId) return;
+    if (movingProjectId || deletingProjectId) return;
     setMovingProjectId(projectId);
     setProjectNotice(null);
     try {
@@ -558,6 +562,71 @@ function Sidebar({
       );
     } finally {
       setMovingProjectId(null);
+    }
+  }
+
+  async function deleteProject(
+    project: Project,
+    projectThreads: ThreadSummary[],
+    menu: HTMLDetailsElement | null,
+  ) {
+    if (deletingProjectId) return;
+    if (
+      projectThreads.some(
+        (thread) =>
+          thread.state === "running" ||
+          thread.state === "needsAttention" ||
+          thread.queuedMessageCount > 0,
+      )
+    ) {
+      menu?.removeAttribute("open");
+      showProjectNotice(
+        project.id,
+        "error",
+        t(
+          "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди",
+        ),
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        t(
+          "Удалить проект «{{project}}» из Codex Nest? Проект и его сессии исчезнут из приложения, но папка и история сохранятся.",
+          { project: project.displayName },
+        ),
+      )
+    ) {
+      return;
+    }
+    setDeletingProjectId(project.id);
+    setProjectNotice(null);
+    try {
+      await api.deleteProject(project.id);
+      menu?.removeAttribute("open");
+      dispatch({
+        type: "project.remove",
+        projectId: project.id,
+        threadIds: projectThreads.map((thread) => thread.id),
+      });
+      if (
+        projectThreads.some(
+          (thread) => location.pathname === `/threads/${encodeURIComponent(thread.id)}`,
+        )
+      ) {
+        onClose();
+        navigate("/", { replace: true });
+      }
+    } catch (caught) {
+      showProjectNotice(
+        project.id,
+        "error",
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось удалить проект"),
+      );
+    } finally {
+      setDeletingProjectId(null);
     }
   }
 
@@ -619,7 +688,7 @@ function Sidebar({
   }
 
   function beginProjectDrag(event: ReactPointerEvent<HTMLElement>, projectId: string) {
-    if (movingProjectId || !event.isPrimary || event.button !== 0) return;
+    if (movingProjectId || deletingProjectId || !event.isPrimary || event.button !== 0) return;
     const displayIndex = displayedProjectIds.indexOf(projectId);
     if (displayIndex < 0) return;
     event.preventDefault();
@@ -689,7 +758,7 @@ function Sidebar({
   }
 
   async function createProjectThread(projectId: string) {
-    if (creatingProjectId) return;
+    if (creatingProjectId || deletingProjectId) return;
     setCreatingProjectId(projectId);
     setCreateError(null);
     try {
@@ -792,6 +861,9 @@ function Sidebar({
             const groupShowsAll = showAll.has(key);
             const isBottomUp = projectListDirection === "bottom-up";
             const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
+            const projectThreads = group.project
+              ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ?? [])
+              : [];
             const sessionsId = `project-sessions-${key}`;
             const projectIndex = group.project
               ? (snapshot?.projects.findIndex((project) => project.id === group.project!.id) ?? -1)
@@ -854,7 +926,11 @@ function Sidebar({
                           <CopyIcon /> {t("Копировать путь")}
                         </button>
                         <button
-                          disabled={cannotMoveAbove || movingProjectId !== null}
+                          disabled={
+                            cannotMoveAbove ||
+                            movingProjectId !== null ||
+                            deletingProjectId !== null
+                          }
                           type="button"
                           onClick={(event) =>
                             void moveProject(
@@ -867,7 +943,11 @@ function Sidebar({
                           <ArrowUpIcon /> {t("Переместить выше")}
                         </button>
                         <button
-                          disabled={cannotMoveBelow || movingProjectId !== null}
+                          disabled={
+                            cannotMoveBelow ||
+                            movingProjectId !== null ||
+                            deletingProjectId !== null
+                          }
                           type="button"
                           onClick={(event) =>
                             void moveProject(
@@ -879,6 +959,23 @@ function Sidebar({
                         >
                           <ArrowDownIcon /> {t("Переместить ниже")}
                         </button>
+                        <button
+                          className="danger"
+                          disabled={deletingProjectId !== null}
+                          type="button"
+                          onClick={(event) =>
+                            void deleteProject(
+                              group.project!,
+                              projectThreads,
+                              event.currentTarget.closest("details"),
+                            )
+                          }
+                        >
+                          <TrashIcon />{" "}
+                          {deletingProjectId === group.project.id
+                            ? t("Удаляем…")
+                            : t("Удалить проект")}
+                        </button>
                       </div>
                     </details>
                     <button
@@ -887,7 +984,7 @@ function Sidebar({
                         project: group.project.displayName,
                       })}
                       className="project-icon-action"
-                      disabled={creatingProjectId !== null}
+                      disabled={creatingProjectId !== null || deletingProjectId !== null}
                       type="button"
                       onClick={() => void createProjectThread(group.project!.id)}
                     >

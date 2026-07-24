@@ -46,7 +46,10 @@ const ENGLISH: Record<string, string> = {
   "Путь скопирован": "Path copied",
   "Не удалось скопировать путь": "Failed to copy path",
   "Не удалось изменить порядок проектов": "Failed to reorder projects",
+  "Не удалось удалить проект": "Failed to remove project",
   "Не удалось создать сессию": "Failed to create session",
+  "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди":
+    "A project cannot be removed while its sessions are running, awaiting a decision, or have queued messages",
   Архив: "Archive",
   "Состояние сервера: {{state}}": "Server status: {{state}}",
   Настройки: "Settings",
@@ -58,6 +61,9 @@ const ENGLISH: Record<string, string> = {
   "Копировать путь": "Copy path",
   "Переместить выше": "Move up",
   "Переместить ниже": "Move down",
+  "Удалить проект": "Remove project",
+  "Удалить проект «{{project}}» из Codex Nest? Проект и его сессии исчезнут из приложения, но папка и история сохранятся.":
+    "Remove “{{project}}” from Codex Nest? The project and its sessions will disappear from the app, but the folder and history will be preserved.",
   "Создать новую сессию в проекте {{project}}": "Create a new session in {{project}}",
   "Показать меньше": "Show less",
   "Показать ещё {{count}}": "Show {{count}} more",

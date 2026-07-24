@@ -175,6 +175,83 @@ describe("AppProjection", () => {
     expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["blank", "running"]);
   });
 
+  it("hides sessions from dismissed project paths and restores them when registered again", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.projects.push({
+        id: "root",
+        displayName: "Root",
+        path: "/work",
+        createdAt: "x",
+        updatedAt: "x",
+      });
+    });
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("root-thread", "/work/src", 3));
+    projection.upsertThread(thread("nested-thread", "/work/nested", 2));
+    projection.upsertThread(thread("unrelated", "/other", 1));
+
+    await store.update((state) => {
+      state.projects = [];
+      state.dismissedProjectPaths = ["/work"];
+    });
+    projection.removeProject("root");
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["unrelated"]);
+
+    await store.update((state) => {
+      state.projects.push({
+        id: "nested",
+        displayName: "Nested",
+        path: "/work/nested",
+        createdAt: "x",
+        updatedAt: "x",
+      });
+    });
+    projection.publishProject("nested");
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual([
+      "nested-thread",
+      "unrelated",
+    ]);
+
+    await store.update((state) => {
+      state.projects.push({
+        id: "restored",
+        displayName: "Root",
+        path: "/work",
+        createdAt: "y",
+        updatedAt: "y",
+      });
+      delete state.dismissedProjectPaths;
+    });
+    projection.publishProject("restored");
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual([
+      "root-thread",
+      "nested-thread",
+      "unrelated",
+    ]);
+    expect(projection.snapshot().threads.find((item) => item.id === "root-thread")?.projectId).toBe(
+      "restored",
+    );
+
+    await store.update((state) => {
+      state.projects = state.projects.filter((project) => project.id !== "nested");
+      state.dismissedProjectPaths = ["/work/nested"];
+    });
+    projection.removeProject("nested");
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual([
+      "root-thread",
+      "unrelated",
+    ]);
+  });
+
   it("only clears a completed session through its observed update", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

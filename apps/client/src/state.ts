@@ -39,6 +39,7 @@ export type ClientAction =
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
+  | { type: "project.remove"; projectId: string; threadIds: string[] }
   | { type: "goal"; threadId: string; goal: ThreadGoal | null }
   | { type: "optimistic.add"; message: OptimisticMessage }
   | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
@@ -87,6 +88,18 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return applyThreadSummary(state, action.thread);
     case "thread.remove":
       return removeThreadState(state, action.threadId);
+    case "project.remove": {
+      const snapshot = state.snapshot
+        ? {
+            ...state.snapshot,
+            projects: state.snapshot.projects.filter((project) => project.id !== action.projectId),
+          }
+        : null;
+      return action.threadIds.reduce((next, threadId) => removeThreadState(next, threadId), {
+        ...state,
+        snapshot,
+      });
+    }
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
     case "optimistic.add":

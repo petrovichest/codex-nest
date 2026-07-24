@@ -109,6 +109,23 @@ describe("StateStore", () => {
     expect(store.snapshot().messageQueues?.thread).toEqual([
       expect.objectContaining({ id: "queued", text: "Старое сообщение" }),
     ]);
+    expect(store.snapshot().dismissedProjectPaths).toBeUndefined();
+  });
+
+  it("persists dismissed project paths without changing the state schema", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.dismissedProjectPaths = ["/work/removed"];
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot()).toMatchObject({
+      schemaVersion: 1,
+      dismissedProjectPaths: ["/work/removed"],
+    });
   });
 
   it("reloads unmaterialized sessions and complete server drafts", async () => {

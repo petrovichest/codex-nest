@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 import type {
   ActivityItem,
@@ -47,6 +47,7 @@ export interface CodexNestState {
   schemaVersion: 1;
   auth: { tokenSha256?: string };
   projects: Project[];
+  dismissedProjectPaths?: string[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
   transcriptionTimings?: Record<string, TranscriptionTimingSampleState[]>;
@@ -172,6 +173,15 @@ function validateState(value: unknown): CodexNestState {
   }
   if (!isRecord(value.auth) || !Array.isArray(value.projects)) {
     throw new Error("Corrupt CodexNest state");
+  }
+  if (
+    value.dismissedProjectPaths !== undefined &&
+    (!Array.isArray(value.dismissedProjectPaths) ||
+      value.dismissedProjectPaths.some(
+        (path) => typeof path !== "string" || !path.trim() || !isAbsolute(path),
+      ))
+  ) {
+    throw new Error("Corrupt dismissed project paths in CodexNest state");
   }
   if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
     throw new Error("Corrupt CodexNest state");

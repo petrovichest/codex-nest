@@ -531,6 +531,76 @@ describe("App routing and navigation", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать путь");
   });
 
+  it("removes a project after confirmation and hides all of its sessions locally", async () => {
+    const api = mockConnection(
+      snapshot([baseThread, { ...baseThread, id: "archived", title: "Архивная", archived: true }]),
+    );
+    api.deleteProject.mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить проект" }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      "Удалить проект «Проект» из Codex Nest? Проект и его сессии исчезнут из приложения, но папка и история сохранятся.",
+    );
+    await waitFor(() => expect(api.deleteProject).toHaveBeenCalledWith("project"));
+    expect(api.dispatch).toHaveBeenCalledWith({
+      type: "project.remove",
+      projectId: "project",
+      threadIds: ["newer", "archived"],
+    });
+    confirm.mockRestore();
+  });
+
+  it("cancels project removal without calling the API", () => {
+    const api = mockConnection(snapshot([baseThread]));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить проект" }));
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("blocks project removal while a session is active", async () => {
+    const api = mockConnection(
+      snapshot([{ ...baseThread, state: "running", currentTurnId: "turn" }]),
+    );
+    const confirm = vi.spyOn(window, "confirm");
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить проект" }));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди",
+    );
+    confirm.mockRestore();
+  });
+
+  it("shows a project-scoped error when removal fails", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.deleteProject.mockRejectedValue(new Error("Сервер недоступен"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderApp("/threads/newer");
+    const projectGroup = screen
+      .getByLabelText("Действия с проектом Проект")
+      .closest(".project-group") as HTMLElement;
+    fireEvent.click(within(projectGroup).getByLabelText("Действия с проектом Проект"));
+    fireEvent.click(within(projectGroup).getByRole("button", { name: "Удалить проект" }));
+
+    expect(await within(projectGroup).findByRole("alert")).toHaveTextContent("Сервер недоступен");
+    confirm.mockRestore();
+  });
+
   it("moves projects with boundary actions disabled", async () => {
     const secondProject: Project = {
       id: "second",
@@ -1097,7 +1167,9 @@ function mockConnection(
     interrupt: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
     createProjectThread: vi.fn(),
+    deleteProject: vi.fn(),
     moveProject: vi.fn(),
+    dispatch: vi.fn(),
     readTranscriptionConfig: vi.fn().mockResolvedValue({
       providers: [],
       provider: null,
@@ -1160,7 +1232,7 @@ function mockConnection(
       error: null,
       snapshotEpoch: 1,
     },
-    dispatch: vi.fn(),
+    dispatch: api.dispatch,
     reconnect: vi.fn(),
     refreshDetail: vi.fn().mockImplementation(async (id: string) => ({
       summary: appSnapshot.threads.find((thread) => thread.id === id),

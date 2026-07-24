@@ -30,9 +30,8 @@ import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
 import { parseModelList, parseThreadList, parseThreadResume, parseTurnsList } from "./codex/guards";
-import { projectForCwd } from "./projects";
-import type { StateStore } from "./state/store";
-import type { TimelineArtifact } from "./state/store";
+import { pathContains, projectForCwd } from "./projects";
+import type { CodexNestState, StateStore, TimelineArtifact } from "./state/store";
 
 interface CachedThread {
   thread: Thread;
@@ -83,7 +82,9 @@ export class AppProjection extends EventEmitter {
         cached.liveOutcome = undefined;
         cached.thread.status = { type: "active", activeFlags: [] };
       }
-      this.publish({ type: "attention.upserted", attention: request });
+      if (!request.threadId || this.isThreadVisible(request.threadId)) {
+        this.publish({ type: "attention.upserted", attention: request });
+      }
       if (request.threadId) this.publishThread(request.threadId);
     });
     attention.on("removed", (attentionId: string) => {
@@ -102,13 +103,17 @@ export class AppProjection extends EventEmitter {
 
   snapshot(): AppSnapshot {
     const state = this.store.snapshot();
+    const threads = this.sortedThreads().filter((thread) => this.isCwdVisible(thread.cwd, state));
+    const visibleThreadIds = new Set(threads.map((thread) => thread.id));
     return {
       sequence: this.sequence,
       uiLanguage: state.uiLanguage,
       connection: this.connection,
       projects: state.projects,
-      threads: this.sortedThreads(),
-      attention: this.attention.list(),
+      threads,
+      attention: this.attention
+        .list()
+        .filter((request) => !request.threadId || visibleThreadIds.has(request.threadId)),
       models: this.models,
       defaultReasoningEffort: this.store.snapshot().defaultReasoningEffort,
       taskDefaults: this.store.snapshot().taskDefaults ?? {},
@@ -331,7 +336,7 @@ export class AppProjection extends EventEmitter {
   publishProject(projectId: string): void {
     const project = this.store.snapshot().projects.find((candidate) => candidate.id === projectId);
     if (project) this.publish({ type: "project.upserted", project });
-    for (const thread of this.threads.values()) this.publishThread(thread.thread.id);
+    this.publish({ type: "resync.required" });
   }
 
   publishProjectsReordered(projects: Project[]): void {
@@ -340,11 +345,13 @@ export class AppProjection extends EventEmitter {
 
   removeProject(projectId: string): void {
     this.publish({ type: "project.removed", projectId });
-    for (const thread of this.threads.values()) this.publishThread(thread.thread.id);
+    this.publish({ type: "resync.required" });
   }
 
   publishQueue(threadId: string, messages: QueuedMessage[]): void {
-    this.publish({ type: "queue.changed", threadId, messages });
+    if (this.isThreadVisible(threadId)) {
+      this.publish({ type: "queue.changed", threadId, messages });
+    }
     this.publishThread(threadId);
   }
 
@@ -1076,8 +1083,25 @@ export class AppProjection extends EventEmitter {
   }
 
   private publishThread(threadId: string): void {
+    if (!this.isThreadVisible(threadId)) return;
     const summary = this.summary(threadId);
     if (summary) this.publish({ type: "thread.upserted", thread: summary });
+  }
+
+  private isThreadVisible(threadId: string): boolean {
+    const cached = this.threads.get(threadId);
+    return !cached || this.isCwdVisible(cached.thread.cwd, this.store.snapshot());
+  }
+
+  private isCwdVisible(cwd: string, state: CodexNestState): boolean {
+    const project = projectForCwd(state.projects, cwd);
+    let dismissedPath: string | undefined;
+    for (const path of state.dismissedProjectPaths ?? []) {
+      if (pathContains(path, cwd) && (!dismissedPath || path.length > dismissedPath.length)) {
+        dismissedPath = path;
+      }
+    }
+    return !dismissedPath || (!!project && project.path.length >= dismissedPath.length);
   }
 
   private publish(event: ServerEvent): void {

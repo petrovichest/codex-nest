@@ -85,7 +85,7 @@ import {
   MessageQueuePausedError,
   MessageQueueValidationError,
 } from "./message-queue";
-import type { StateStore } from "./state/store";
+import type { CodexNestState, StateStore } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
 import {
   appendTranscriptionTimingSample,
@@ -614,6 +614,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const project = createProject(body.path, canonical);
     await store.update((state) => {
       state.projects.push(project);
+      restoreDismissedProjectPath(state, canonical);
     });
     projection.publishProject(project.id);
     return reply.code(201).send(project);
@@ -645,6 +646,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         draft.projects = draft.projects.map((project) =>
           project.id === current.id ? updated : project,
         );
+        restoreDismissedProjectPath(draft, path);
       });
       projection.publishProject(updated.id);
       return updated;
@@ -709,13 +711,36 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/projects/:id", async (request, reply) => {
-    if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
+    const project = store
+      .snapshot()
+      .projects.find((candidate) => candidate.id === request.params.id);
+    if (!project) {
       return apiError(reply, 404, "not_found", "Project not found");
     }
+    const hasActiveSessions = projection
+      .snapshot()
+      .threads.some(
+        (thread) =>
+          thread.projectId === project.id &&
+          (thread.state === "running" ||
+            thread.state === "needsAttention" ||
+            thread.queuedMessageCount > 0),
+      );
+    if (hasActiveSessions) {
+      return apiError(
+        reply,
+        409,
+        "conflict",
+        "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди",
+      );
+    }
     await store.update((state) => {
-      state.projects = state.projects.filter((project) => project.id !== request.params.id);
+      state.projects = state.projects.filter((candidate) => candidate.id !== project.id);
+      state.dismissedProjectPaths = [
+        ...new Set([...(state.dismissedProjectPaths ?? []), project.path]),
+      ];
     });
-    projection.removeProject(request.params.id);
+    projection.removeProject(project.id);
     return reply.code(204).send();
   });
 
@@ -1746,6 +1771,12 @@ function userConfigVersion(layers: unknown[]): string | null {
 
 function isConfigVersionConflict(error: unknown): boolean {
   return error instanceof RpcError && /version|stale|changed|conflict/i.test(error.message);
+}
+
+function restoreDismissedProjectPath(state: CodexNestState, path: string): void {
+  const remaining = (state.dismissedProjectPaths ?? []).filter((candidate) => candidate !== path);
+  if (remaining.length) state.dismissedProjectPaths = remaining;
+  else delete state.dismissedProjectPaths;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

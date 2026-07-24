@@ -243,6 +243,37 @@ describe("clientReducer", () => {
     expect(state.snapshot?.projects.map((project) => project.id)).toEqual(["two", "one"]);
   });
 
+  it("removes a project and all of its session state atomically", () => {
+    const project = {
+      id: "project",
+      displayName: "Project",
+      path: "/work",
+      createdAt: "x",
+      updatedAt: "x",
+    };
+    const projectThread = { ...baseThread, projectId: project.id };
+    const unrelated = { ...baseThread, id: "other", projectId: null };
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, projects: [project], threads: [projectThread, unrelated] },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: { summary: projectThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+      page: "latest",
+    });
+
+    state = clientReducer(state, {
+      type: "project.remove",
+      projectId: project.id,
+      threadIds: [projectThread.id],
+    });
+
+    expect(state.snapshot?.projects).toEqual([]);
+    expect(state.snapshot?.threads).toEqual([unrelated]);
+    expect(state.details[projectThread.id]).toBeUndefined();
+  });
+
   it("applies live progress and the server-owned message queue", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

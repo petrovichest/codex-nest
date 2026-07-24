@@ -472,6 +472,126 @@ describe("HTTP authentication", () => {
   });
 });
 
+describe("project removal", () => {
+  it("blocks active work, hides sessions, preserves files, and restores sessions on re-add", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-project-removal-api-test-"));
+    directories.push(directory);
+    const projectPath = join(directory, "project");
+    await mkdir(projectPath);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.projects.push({
+        id: "project",
+        displayName: "Project",
+        path: projectPath,
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      });
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    projection.upsertThread({ ...testThread("project-thread"), cwd: projectPath });
+    projection.upsertThread({ ...testThread("unrelated"), cwd: join(directory, "other") });
+    const config = loadConfig({
+      statePath: store.path,
+      clientDist: join(directory, "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+      websocketAuthTimeoutMs: 25,
+    });
+    const app = await buildApp(config, {
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      push: new PushNotifier(store),
+      projectRoot: directory,
+    });
+    const headers = { authorization: "Bearer correct" };
+
+    await projection.setCurrentTurn("project-thread", "active-turn");
+    const activeRemoval = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/projects/project",
+      headers,
+    });
+    expect(activeRemoval.statusCode).toBe(409);
+    expect(activeRemoval.json()).toMatchObject({ error: { code: "conflict" } });
+    expect(store.snapshot().projects).toHaveLength(1);
+
+    projection.upsertThread({ ...testThread("project-thread"), cwd: projectPath });
+    await store.update((state) => {
+      state.threadMeta["project-thread"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        awaitingPlanResponse: true,
+      };
+    });
+    const attentionRemoval = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/projects/project",
+      headers,
+    });
+    expect(attentionRemoval.statusCode).toBe(409);
+
+    await store.update((state) => {
+      state.threadMeta["project-thread"]!.awaitingPlanResponse = false;
+      state.messageQueues = {
+        "project-thread": [
+          {
+            id: "queued",
+            threadId: "project-thread",
+            text: "Продолжить",
+            createdAt: 1,
+            status: "queued",
+          },
+        ],
+      };
+    });
+    const queuedRemoval = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/projects/project",
+      headers,
+    });
+    expect(queuedRemoval.statusCode).toBe(409);
+
+    await store.update((state) => {
+      delete state.messageQueues?.["project-thread"];
+    });
+    const removed = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/projects/project",
+      headers,
+    });
+    expect(removed.statusCode).toBe(204);
+    expect(await realpath(projectPath)).toBe(projectPath);
+    expect(store.snapshot().dismissedProjectPaths).toEqual([projectPath]);
+    expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["unrelated"]);
+
+    const restored = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers,
+      payload: { path: projectPath },
+    });
+    expect(restored.statusCode).toBe(201);
+    expect(store.snapshot().dismissedProjectPaths).toBeUndefined();
+    expect(projection.snapshot().threads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "project-thread",
+          projectId: restored.json().id as string,
+        }),
+        expect.objectContaining({ id: "unrelated", projectId: null }),
+      ]),
+    );
+
+    await app.close();
+  });
+});
+
 describe("audio transcriptions", () => {
   it("keeps config and audio uploads authenticated and maps provider failures", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-transcription-api-test-"));
