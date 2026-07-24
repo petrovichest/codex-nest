@@ -592,7 +592,7 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
 
-    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("project"));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("project", undefined));
     expect(
       await screen.findByRole("heading", { level: 1, name: "Без названия" }),
     ).toBeInTheDocument();
@@ -863,11 +863,30 @@ describe("App dual-agent sidebar", () => {
 
     renderApp("/threads/newer");
 
-    // Codex appears as both the active thread's header chip and its sidebar row chip.
-    const codexChips = screen.getAllByText("Codex");
-    expect(codexChips.length).toBeGreaterThan(0);
-    codexChips.forEach((chip) => expect(chip).toHaveClass("agent-chip"));
-    expect(screen.getByText("Claude Code")).toHaveClass("agent-chip");
+    // Both agents appear as identity chips (rows + header); the per-project «+» menu also
+    // lists them, so assert against the chip elements specifically.
+    const chipLabels = Array.from(document.querySelectorAll(".agent-chip")).map(
+      (chip) => chip.textContent,
+    );
+    expect(chipLabels).toContain("Codex");
+    expect(chipLabels).toContain("Claude Code");
+  });
+
+  it("creates a session for the chosen agent from the per-project menu", async () => {
+    const claudeThread = { ...baseThread, id: "claude-thread", agent: "claude" as const };
+    const api = mockConnection({
+      ...snapshot([baseThread]),
+      backends: [backend("codex", "ready"), backend("claude", "ready")],
+    });
+    api.createProjectThread.mockResolvedValue({ thread: claudeThread });
+
+    renderApp("/threads/newer");
+
+    // The per-project «+» is a Codex/Claude Code menu when two backends are present.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalled());
+    expect(api.createProjectThread.mock.calls[0].slice(0, 2)).toEqual(["project", "claude"]);
   });
 });
 

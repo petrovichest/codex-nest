@@ -300,13 +300,14 @@ export function ThreadPage({
   }, [threadId]);
 
   useEffect(() => {
-    if (!threadId) return;
+    // Goals are Codex-only; the goal endpoint 409s for other agents, so skip the fetch.
+    if (!threadId || summary?.agent !== "codex") return;
     const request = api.readGoal?.(threadId);
     if (!request) return;
     void request
       .then((value) => dispatch({ type: "goal", threadId, goal: value }))
       .catch((caught: Error) => setError(caught.message));
-  }, [api, dispatch, threadId]);
+  }, [api, dispatch, threadId, summary?.agent]);
 
   useEffect(() => {
     const notice = (location.state as { notice?: unknown } | null)?.notice;

@@ -2,13 +2,14 @@ import { type RefObject, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import type {
+  AgentId,
   CodexRateLimitWindow,
   CodexRateLimitsResponse,
   ThreadSummary,
   TranscriptionConfigResponse,
 } from "@codexnest/protocol";
 
-import { agentLabel, backendFor, hasMultipleBackends } from "./agents";
+import { agentLabel, backendFor, snapshotBackends } from "./agents";
 import {
   getBrowserNotificationPermission,
   requestBrowserNotificationPermission,
@@ -389,8 +390,9 @@ function Sidebar({
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
   // The rate-limits widget is Codex-specific; show it only when a ready Codex backend exists.
   const codexReady = backendFor(snapshot, "codex")?.connection.state === "ready";
-  // Agent chips are only meaningful once more than one backend is available.
-  const showAgentChips = hasMultipleBackends(snapshot);
+  // Agent chips + the per-project agent picker only appear once more than one backend exists.
+  const backends = snapshotBackends(snapshot);
+  const showAgentChips = backends.length >= 2;
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
@@ -471,13 +473,18 @@ function Sidebar({
     }
   }
 
-  async function createProjectThread(projectId: string) {
+  async function createProjectThread(
+    projectId: string,
+    agent?: AgentId,
+    menu?: HTMLDetailsElement | null,
+  ) {
     if (creatingProjectId) return;
     setCreatingProjectId(projectId);
     setCreateError(null);
     try {
-      const result = await api.createProjectThread(projectId);
+      const result = await api.createProjectThread(projectId, agent);
       dispatch({ type: "thread", thread: result.thread });
+      menu?.removeAttribute("open");
       onClose();
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
         state: { focusComposer: true },
@@ -637,20 +644,54 @@ function Sidebar({
                         </button>
                       </div>
                     </details>
-                    <button
-                      aria-busy={creatingProjectId === group.project.id}
-                      aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
-                      className="project-icon-action"
-                      disabled={creatingProjectId !== null}
-                      type="button"
-                      onClick={() => void createProjectThread(group.project!.id)}
-                    >
-                      {creatingProjectId === group.project.id ? (
-                        <span className="spinner small" />
-                      ) : (
-                        <PlusIcon />
-                      )}
-                    </button>
+                    {showAgentChips ? (
+                      <details className="project-action-menu" data-dismiss-on-outside-click>
+                        <summary
+                          aria-busy={creatingProjectId === group.project.id}
+                          aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                          className="project-icon-action"
+                        >
+                          {creatingProjectId === group.project.id ? (
+                            <span className="spinner small" />
+                          ) : (
+                            <PlusIcon />
+                          )}
+                        </summary>
+                        <div className="project-action-popover">
+                          {backends.map((entry) => (
+                            <button
+                              key={entry.agent}
+                              disabled={creatingProjectId !== null}
+                              type="button"
+                              onClick={(event) =>
+                                void createProjectThread(
+                                  group.project!.id,
+                                  entry.agent,
+                                  event.currentTarget.closest("details"),
+                                )
+                              }
+                            >
+                              <PlusIcon /> {agentLabel(entry.agent)}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    ) : (
+                      <button
+                        aria-busy={creatingProjectId === group.project.id}
+                        aria-label={`Создать новую сессию в проекте ${group.project.displayName}`}
+                        className="project-icon-action"
+                        disabled={creatingProjectId !== null}
+                        type="button"
+                        onClick={() => void createProjectThread(group.project!.id)}
+                      >
+                        {creatingProjectId === group.project.id ? (
+                          <span className="spinner small" />
+                        ) : (
+                          <PlusIcon />
+                        )}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
