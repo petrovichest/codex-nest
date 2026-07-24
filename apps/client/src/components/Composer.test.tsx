@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
+import type { AgentId, SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
 
 import { Composer, type ComposerImage } from "./Composer";
 
@@ -41,6 +41,18 @@ describe("Composer", () => {
 
     fireEvent.change(reasoning, { target: { value: "high" } });
     expect(reasoning).toHaveValue("high");
+  });
+
+  it("shows the permission preset and hides the goal toggle for a Claude thread", () => {
+    render(<Harness agent="claude" />);
+    expect(screen.getByRole("combobox", { name: "Режим разрешений" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Включить режим цели" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Claude Code" })).toBeInTheDocument();
+  });
+
+  it("blocks sending when the thread's backend is unavailable", () => {
+    render(<Harness agent="claude" blocked initialInput="привет" />);
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
   });
 
   it("starts at two rows, grows to its cap, and then enables internal scrolling", () => {
@@ -257,13 +269,17 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 };
 
 function Harness({
+  agent = "codex",
   busy = false,
+  blocked = false,
   hasSupplementalContent = false,
   initialInput = "",
   transcriptionConfig: speechConfig,
   onTranscribe,
 }: {
+  agent?: AgentId;
   busy?: boolean;
+  blocked?: boolean;
   hasSupplementalContent?: boolean;
   initialInput?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
@@ -274,6 +290,8 @@ function Harness({
   const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
   return (
     <Composer
+      agent={agent}
+      blocked={blocked}
       input={input}
       onInput={setInput}
       images={images}

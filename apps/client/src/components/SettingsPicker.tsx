@@ -1,14 +1,23 @@
 import type {
+  AgentId,
   ModelOption,
+  PermissionPreset,
   SessionSettings,
   ThreadGoal,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
+import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, ShieldIcon, TargetIcon } from "./Icons";
+
+const PERMISSION_PRESET_LABELS: Record<PermissionPreset, string> = {
+  ask: "Спрашивать",
+  auto: "Авто",
+  "full-access": "Полный доступ",
+};
 
 export function SettingsPicker({
+  agent,
   models,
   value,
   disabled,
@@ -20,6 +29,7 @@ export function SettingsPicker({
   onGoalUpdate,
   onGoalClear,
 }: {
+  agent: AgentId;
   models: ModelOption[];
   value: SessionSettings;
   disabled: boolean;
@@ -32,6 +42,9 @@ export function SettingsPicker({
   onGoalClear?(): void;
 }) {
   const model = effectiveModel(models, value.model);
+  // Goals and the service-tier/personality knobs are Codex-only; Claude exposes a per-session
+  // permission preset instead. The plan (collaborationMode) toggle stays for both agents.
+  const isClaude = agent === "claude";
 
   return (
     <div className="settings-picker">
@@ -66,6 +79,22 @@ export function SettingsPicker({
         ))}
       </SettingSelect>
 
+      {isClaude && (
+        <SettingSelect
+          ariaLabel="Режим разрешений"
+          disabled={disabled}
+          icon={<ShieldIcon />}
+          value={value.permissionPreset ?? "ask"}
+          onChange={(selected) => onChange({ permissionPreset: selected as PermissionPreset })}
+        >
+          {(Object.keys(PERMISSION_PRESET_LABELS) as PermissionPreset[]).map((preset) => (
+            <option value={preset} key={preset}>
+              {PERMISSION_PRESET_LABELS[preset]}
+            </option>
+          ))}
+        </SettingSelect>
+      )}
+
       <button
         aria-label={
           value.collaborationMode === "plan"
@@ -86,60 +115,61 @@ export function SettingsPicker({
         <PlanIcon />
       </button>
 
-      {goal ? (
-        <details className="goal-picker" data-dismiss-on-outside-click>
-          <summary className="setting-control goal-toggle active" aria-label="Управление целью">
+      {!isClaude &&
+        (goal ? (
+          <details className="goal-picker" data-dismiss-on-outside-click>
+            <summary className="setting-control goal-toggle active" aria-label="Управление целью">
+              <TargetIcon />
+            </summary>
+            <div className="goal-popover">
+              <div className="goal-popover-heading">
+                <strong>{goalStatusLabel(goal.status)}</strong>
+                <span>{formatGoalUsage(goal)}</span>
+              </div>
+              <p>{goal.objective}</p>
+              <div className="goal-popover-actions">
+                {goal.status === "active" && (
+                  <button
+                    type="button"
+                    disabled={goalBusy}
+                    onClick={() => onGoalUpdate?.({ status: "paused" })}
+                  >
+                    Пауза
+                  </button>
+                )}
+                {["paused", "blocked"].includes(goal.status) && (
+                  <button
+                    type="button"
+                    disabled={goalBusy}
+                    onClick={() => onGoalUpdate?.({ status: "active" })}
+                  >
+                    Продолжить
+                  </button>
+                )}
+                <button type="button" disabled={goalBusy} onClick={onGoalClear}>
+                  Очистить
+                </button>
+              </div>
+            </div>
+          </details>
+        ) : (
+          <button
+            aria-label={goalMode ? "Выключить режим цели" : "Включить режим цели"}
+            aria-pressed={goalMode}
+            className={`setting-control goal-toggle${goalMode ? " active" : ""}`}
+            disabled={disabled || !model}
+            type="button"
+            onClick={() => {
+              const next = !goalMode;
+              if (next && value.collaborationMode === "plan") {
+                onChange({ collaborationMode: "default" });
+              }
+              onGoalModeChange?.(next);
+            }}
+          >
             <TargetIcon />
-          </summary>
-          <div className="goal-popover">
-            <div className="goal-popover-heading">
-              <strong>{goalStatusLabel(goal.status)}</strong>
-              <span>{formatGoalUsage(goal)}</span>
-            </div>
-            <p>{goal.objective}</p>
-            <div className="goal-popover-actions">
-              {goal.status === "active" && (
-                <button
-                  type="button"
-                  disabled={goalBusy}
-                  onClick={() => onGoalUpdate?.({ status: "paused" })}
-                >
-                  Пауза
-                </button>
-              )}
-              {["paused", "blocked"].includes(goal.status) && (
-                <button
-                  type="button"
-                  disabled={goalBusy}
-                  onClick={() => onGoalUpdate?.({ status: "active" })}
-                >
-                  Продолжить
-                </button>
-              )}
-              <button type="button" disabled={goalBusy} onClick={onGoalClear}>
-                Очистить
-              </button>
-            </div>
-          </div>
-        </details>
-      ) : (
-        <button
-          aria-label={goalMode ? "Выключить режим цели" : "Включить режим цели"}
-          aria-pressed={goalMode}
-          className={`setting-control goal-toggle${goalMode ? " active" : ""}`}
-          disabled={disabled || !model}
-          type="button"
-          onClick={() => {
-            const next = !goalMode;
-            if (next && value.collaborationMode === "plan") {
-              onChange({ collaborationMode: "default" });
-            }
-            onGoalModeChange?.(next);
-          }}
-        >
-          <TargetIcon />
-        </button>
-      )}
+          </button>
+        ))}
     </div>
   );
 

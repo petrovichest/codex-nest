@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import type {
+  AgentId,
   ModelOption,
   Project,
   SessionSettings,
@@ -19,6 +20,7 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { agentLabel } from "../agents";
 import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, XIcon } from "./Icons";
 import { SettingsPicker } from "./SettingsPicker";
 
@@ -38,6 +40,7 @@ function viewportHeight(): number {
 }
 
 export function Composer({
+  agent,
   input,
   onInput,
   images,
@@ -45,6 +48,7 @@ export function Composer({
   onSubmit,
   busy,
   running = false,
+  blocked = false,
   settings,
   onSettingsChange,
   settingsBusy = false,
@@ -67,6 +71,7 @@ export function Composer({
   autoFocus = false,
   hasSupplementalContent = false,
 }: {
+  agent: AgentId;
   input: string;
   onInput(value: string): void;
   images: ComposerImage[];
@@ -74,6 +79,8 @@ export function Composer({
   onSubmit(event: FormEvent): void;
   busy: boolean;
   running?: boolean;
+  /** Send is blocked (e.g. the thread's backend is unavailable); the reason shows above. */
+  blocked?: boolean;
   settings: SessionSettings;
   onSettingsChange(value: UpdateThreadSettingsRequest): void;
   settingsBusy?: boolean;
@@ -123,6 +130,7 @@ export function Composer({
     hasContent &&
     (!goalMode || Boolean(input.trim())) &&
     !busy &&
+    !blocked &&
     !speechBusy &&
     (!creating || Boolean(projectId));
   const speechUnavailable = microphoneUnavailableReason(
@@ -458,7 +466,7 @@ export function Composer({
         <textarea
           ref={textareaRef}
           autoFocus={autoFocus}
-          aria-label={running ? "Направить текущую задачу" : "Сообщение для Codex"}
+          aria-label={running ? "Направить текущую задачу" : `Сообщение для ${agentLabel(agent)}`}
           rows={2}
           maxLength={goalMode ? 4_000 : undefined}
           readOnly={speechBusy}
@@ -512,6 +520,7 @@ export function Composer({
               </label>
             )}
             <SettingsPicker
+              agent={agent}
               disabled={running || busy || settingsBusy || speechBusy}
               models={models}
               value={settings}

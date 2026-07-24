@@ -8,6 +8,7 @@ import type {
   PermissionGrant,
 } from "@codexnest/protocol";
 
+import { agentLabel } from "../agents";
 import { useConnection } from "../connection";
 import { AlertIcon } from "./Icons";
 
@@ -23,9 +24,12 @@ export function AttentionPanel({ requests }: { requests: AttentionRequest[] }) {
 }
 
 function AttentionCard({ request }: { request: AttentionRequest }) {
-  const { api } = useConnection();
+  const { api, state } = useConnection();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The acting agent behind this request (for agent-specific copy); Codex when unknown.
+  const actingAgent =
+    state.snapshot?.threads.find((thread) => thread.id === request.threadId)?.agent ?? "codex";
 
   async function respond(response: AttentionResponse) {
     setBusy(true);
@@ -84,7 +88,12 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
         <PermissionForm request={request} busy={busy} respond={respond} />
       )}
       {request.kind === "userInput" && (
-        <UserInputForm request={request} busy={busy} respond={respond} />
+        <UserInputForm
+          request={request}
+          agentName={agentLabel(actingAgent)}
+          busy={busy}
+          respond={respond}
+        />
       )}
       {request.kind === "elicitation" && (
         <ElicitationForm request={request} busy={busy} respond={respond} />
@@ -215,10 +224,12 @@ function PermissionForm({
 
 function UserInputForm({
   request,
+  agentName,
   busy,
   respond,
 }: {
   request: Extract<AttentionRequest, { kind: "userInput" }>;
+  agentName: string;
   busy: boolean;
   respond(response: AttentionResponse): Promise<void>;
 }) {
@@ -244,7 +255,7 @@ function UserInputForm({
         void respond({ kind: "userInput", answers });
       }}
     >
-      <h3>Codex просит уточнение</h3>
+      <h3>{agentName} просит уточнение</h3>
       {request.autoResolutionMs !== null && (
         <Countdown deadline={request.createdAt + request.autoResolutionMs} />
       )}

@@ -1749,6 +1749,83 @@ describe("Activity", () => {
   });
 });
 
+describe("ThreadPage dual-agent", () => {
+  const readyBackend = (agent: "codex" | "claude", models: unknown[] = []) => ({
+    agent,
+    connection: { state: "ready", message: null, syncedAt: null },
+    models,
+  });
+
+  it("hides the send-now affordance on a Claude thread's queue", () => {
+    const api = threadApi();
+    const running = {
+      ...summary,
+      agent: "claude" as const,
+      state: "running" as const,
+      currentTurnId: "turn",
+    };
+    mockThreadConnection(api, running, {
+      queuedMessages: [
+        {
+          id: "queued",
+          threadId: "thread",
+          text: "Срочная правка",
+          createdAt: 1,
+          status: "queued",
+        },
+      ],
+    });
+    renderThread();
+
+    expect(screen.getByText("В очереди")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отправить сейчас" })).toBeNull();
+  });
+
+  it("shows the agent chip and a per-agent running label with two backends", () => {
+    const api = threadApi();
+    const running = {
+      ...summary,
+      agent: "claude" as const,
+      state: "running" as const,
+      currentTurnId: "missing-turn",
+    };
+    const value = mockThreadConnection(api, running);
+    Object.assign(value.state.snapshot, {
+      backends: [readyBackend("codex"), readyBackend("claude", value.state.snapshot.models)],
+    });
+    renderThread();
+
+    expect(screen.getByText("Claude Code работает…")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toHaveClass("agent-chip");
+  });
+
+  it("banners an unavailable backend and blocks the composer", () => {
+    const api = threadApi();
+    const value = mockThreadConnection(api, { ...summary, agent: "claude" as const });
+    Object.assign(value.state.snapshot, {
+      backends: [
+        readyBackend("codex"),
+        {
+          agent: "claude",
+          connection: {
+            state: "unavailable",
+            message: "Выполните claude login на сервере",
+            syncedAt: null,
+          },
+          models: value.state.snapshot.models,
+        },
+      ],
+    });
+    renderThread();
+
+    expect(screen.getByText(/claude login/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Claude Code" }), {
+      target: { value: "привет" },
+    });
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+  });
+});
+
 function renderThread(state?: Record<string, unknown>) {
   return render(threadRoute(state));
 }

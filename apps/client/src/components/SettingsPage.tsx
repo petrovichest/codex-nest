@@ -19,6 +19,7 @@ import {
 import { useConnection } from "../connection";
 import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
 import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
+import { ClaudeSettingsCard } from "./ClaudeSettingsCard";
 import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
@@ -184,6 +185,8 @@ export function SettingsPage({
             <ApplicationSettingsCard />
 
             <CodexSettingsCard />
+
+            <ClaudeSettingsCard />
 
             <form className="settings-card" onSubmit={saveTaskDefaults}>
               <div className="settings-card-heading">

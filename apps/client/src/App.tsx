@@ -8,6 +8,7 @@ import type {
   TranscriptionConfigResponse,
 } from "@codexnest/protocol";
 
+import { agentLabel, backendFor, hasMultipleBackends } from "./agents";
 import {
   getBrowserNotificationPermission,
   requestBrowserNotificationPermission,
@@ -199,7 +200,7 @@ export function App({
         {!snapshot ? (
           <div className="center-state">
             <div className="spinner" />
-            <p>Получаем состояние Codex…</p>
+            <p>Получаем состояние сервера…</p>
           </div>
         ) : (
           <Routes>
@@ -386,6 +387,10 @@ function Sidebar({
   const snapshot = state.snapshot;
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
+  // The rate-limits widget is Codex-specific; show it only when a ready Codex backend exists.
+  const codexReady = backendFor(snapshot, "codex")?.connection.state === "ready";
+  // Agent chips are only meaningful once more than one backend is available.
+  const showAgentChips = hasMultipleBackends(snapshot);
   const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
@@ -509,7 +514,12 @@ function Sidebar({
         <span>{archivedThreads.length}</span>
       </summary>
       {archivedThreads.map((thread) => (
-        <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+        <ThreadLink
+          thread={thread}
+          key={thread.id}
+          onNavigate={onClose}
+          showAgent={showAgentChips}
+        />
       ))}
     </details>
   );
@@ -529,16 +539,18 @@ function Sidebar({
           <SlidersIcon />
           Настройки
         </NavLink>
-        <button
-          aria-busy={rateLimitsLoading}
-          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
-          className="sidebar-control-action codex-limits"
-          disabled={rateLimitsLoading}
-          onClick={() => void refreshRateLimits()}
-        >
-          {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
-          <span>{rateLimitsText}</span>
-        </button>
+        {codexReady && (
+          <button
+            aria-busy={rateLimitsLoading}
+            aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}
+            className="sidebar-control-action codex-limits"
+            disabled={rateLimitsLoading}
+            onClick={() => void refreshRateLimits()}
+          >
+            {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
+            <span>{rateLimitsText}</span>
+          </button>
+        )}
         <button className="sidebar-control-action" onClick={onNewProject}>
           <PlusIcon />
           Добавить проект
@@ -663,7 +675,12 @@ function Sidebar({
             const sessions = (
               <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                 {visible.map((thread) => (
-                  <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+                  <ThreadLink
+                    thread={thread}
+                    key={thread.id}
+                    onNavigate={onClose}
+                    showAgent={showAgentChips}
+                  />
                 ))}
                 {group.threads.length > 5 && (
                   <button className="show-more" onClick={() => toggleShowAll(key)}>
@@ -688,7 +705,15 @@ function Sidebar({
   );
 }
 
-function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
+function ThreadLink({
+  thread,
+  onNavigate,
+  showAgent = false,
+}: {
+  thread: ThreadSummary;
+  onNavigate(): void;
+  showAgent?: boolean;
+}) {
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
@@ -696,6 +721,9 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
       onClick={onNavigate}
     >
       <span className="thread-link-title">{thread.title}</span>
+      {showAgent && (
+        <span className={`agent-chip agent-${thread.agent}`}>{agentLabel(thread.agent)}</span>
+      )}
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );

@@ -831,6 +831,46 @@ describe("App routing and navigation", () => {
   });
 });
 
+describe("App dual-agent sidebar", () => {
+  const backend = (agent: "codex" | "claude", state: "ready" | "unavailable") => ({
+    agent,
+    connection: { state, message: null, syncedAt: null },
+    models: [],
+  });
+
+  it("hides the Codex rate-limits widget when the Codex backend is unavailable", () => {
+    mockConnection({
+      ...snapshot([{ ...baseThread, agent: "claude" }]),
+      backends: [backend("codex", "unavailable"), backend("claude", "ready")],
+    });
+
+    renderApp("/threads/newer");
+
+    expect(screen.queryByRole("button", { name: /лимиты Codex/i })).not.toBeInTheDocument();
+  });
+
+  it("labels thread rows with an agent chip when two backends are present", () => {
+    const claudeThread = {
+      ...baseThread,
+      id: "claude-thread",
+      agent: "claude" as const,
+      title: "Claude задача",
+    };
+    mockConnection({
+      ...snapshot([baseThread, claudeThread]),
+      backends: [backend("codex", "ready"), backend("claude", "ready")],
+    });
+
+    renderApp("/threads/newer");
+
+    // Codex appears as both the active thread's header chip and its sidebar row chip.
+    const codexChips = screen.getAllByText("Codex");
+    expect(codexChips.length).toBeGreaterThan(0);
+    codexChips.forEach((chip) => expect(chip).toHaveClass("agent-chip"));
+    expect(screen.getByText("Claude Code")).toHaveClass("agent-chip");
+  });
+});
+
 function renderApp(path: string, onDisconnected = () => undefined) {
   return render(
     <MemoryRouter initialEntries={[path]}>

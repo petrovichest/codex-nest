@@ -13,6 +13,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import type {
   ActivityItem,
+  AgentId,
   GitChangesSummary,
   QueuedMessage,
   ThreadDetail,
@@ -26,6 +27,7 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { agentLabel, backendFor, hasMultipleBackends } from "../agents";
 import {
   type AnnotationDraft,
   formatAnnotatedMessage,
@@ -450,6 +452,17 @@ export function ThreadPage({
       </div>
     );
 
+  // Per-backend view for this thread: which models feed the pickers, whether the acting
+  // agent's CLI is currently unavailable (thread-level, not app-wide), and whether the
+  // dual-agent identity badge should show.
+  const threadBackend = backendFor(state.snapshot, summary.agent);
+  const threadModels = threadBackend?.models ?? state.snapshot?.models ?? [];
+  const backendUnavailableReason =
+    threadBackend && threadBackend.connection.state === "unavailable"
+      ? (threadBackend.connection.message ?? `${agentLabel(summary.agent)} недоступен`)
+      : null;
+  const showAgentBadge = hasMultipleBackends(state.snapshot);
+
   function persistAnnotations(next: PendingAnnotation[]): boolean {
     replaceComposerDraft(
       { ...currentComposerDraft(), annotations: next, ...(next.length ? { goalMode: false } : {}) },
@@ -693,6 +706,13 @@ export function ThreadPage({
         <WorkspaceHeader
           title={summary.title}
           subtitle={project?.displayName ?? summary.cwd}
+          badge={
+            showAgentBadge ? (
+              <span className={`agent-chip agent-${summary.agent}`}>
+                {agentLabel(summary.agent)}
+              </span>
+            ) : undefined
+          }
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
@@ -797,13 +817,17 @@ export function ThreadPage({
                     </div>
                   ),
                 )}
-                <TurnTiming turn={turn} active={summary.currentTurnId === turn.id} />
+                <TurnTiming
+                  turn={turn}
+                  agent={summary.agent}
+                  active={summary.currentTurnId === turn.id}
+                />
               </div>
             ))}
             {summary.currentTurnId &&
               !detail?.turns.some((turn) => turn.id === summary.currentTurnId) && (
                 <div className="turn active-turn-placeholder">
-                  <ActiveTurnStatus progress={activeProgress} />
+                  <ActiveTurnStatus agent={summary.agent} progress={activeProgress} />
                 </div>
               )}
             {detachedOptimisticMessages(
@@ -827,6 +851,7 @@ export function ThreadPage({
               )}
               sendingId={sendingQueuedId}
               onSendNow={(messageId) => void sendQueuedNow(messageId)}
+              allowSendNow={summary.agent !== "claude"}
               cwd={summary.cwd}
               onDownload={downloadFile}
             />
@@ -853,8 +878,15 @@ export function ThreadPage({
             Требуется внимание <ChevronDownIcon />
           </button>
         )}
+        {backendUnavailableReason && (
+          <div className="backend-unavailable-banner" role="status">
+            {backendUnavailableReason}
+          </div>
+        )}
         <Composer
           key={threadId}
+          agent={summary.agent}
+          blocked={Boolean(backendUnavailableReason)}
           autoFocus={(location.state as { focusComposer?: unknown } | null)?.focusComposer === true}
           input={input}
           onInput={setInput}
@@ -878,7 +910,7 @@ export function ThreadPage({
           }}
           onGoalUpdate={(patch) => void updateGoal(patch)}
           onGoalClear={() => void clearGoal()}
-          models={state.snapshot?.models ?? []}
+          models={threadModels}
           onStop={
             summary.currentTurnId
               ? () => void api.interrupt(threadId, summary.currentTurnId!)
@@ -1672,12 +1704,15 @@ function QueuedMessages({
   messages,
   sendingId,
   onSendNow,
+  allowSendNow = true,
   cwd,
   onDownload,
 }: {
   messages: QueuedMessage[];
   sendingId: string | null;
   onSendNow(messageId: string): void;
+  /** Whether the "send now" (steer-into-turn) affordance is offered — false for Claude. */
+  allowSendNow?: boolean;
   cwd: string;
   onDownload(path: string): Promise<void>;
 }) {
@@ -1699,12 +1734,14 @@ function QueuedMessages({
           <MessageFooter text={message.text} timestamp={message.createdAt} />
           <div className="queued-message-footer">
             <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
-            <button
-              disabled={message.status === "dispatching" || sendingId !== null}
-              onClick={() => onSendNow(message.id)}
-            >
-              Отправить сейчас
-            </button>
+            {allowSendNow && (
+              <button
+                disabled={message.status === "dispatching" || sendingId !== null}
+                onClick={() => onSendNow(message.id)}
+              >
+                Отправить сейчас
+              </button>
+            )}
           </div>
         </article>
       ))}
@@ -1763,13 +1800,15 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
 
 export function TurnTiming({
   turn,
+  agent = "codex",
   active = turn.status === "inProgress",
 }: {
   turn: TurnView;
+  agent?: AgentId;
   active?: boolean;
 }) {
   const startedAt = turn.startedAt ?? turn.progress.startedAt;
-  if (active) return <ActiveTurnStatus progress={{ ...turn.progress, startedAt }} />;
+  if (active) return <ActiveTurnStatus agent={agent} progress={{ ...turn.progress, startedAt }} />;
   if (turn.status === "inProgress" || startedAt === null) return null;
   const duration =
     turn.durationMs ??
@@ -1779,10 +1818,16 @@ export function TurnTiming({
   );
 }
 
-function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
+function ActiveTurnStatus({
+  progress,
+  agent = "codex",
+}: {
+  progress?: TurnProgress;
+  agent?: AgentId;
+}) {
   const startedAt = progress?.startedAt ?? null;
   const elapsed = useElapsed(startedAt ?? 0, startedAt !== null);
-  const label = progress?.explanation?.trim() || "Codex работает";
+  const label = progress?.explanation?.trim() || `${agentLabel(agent)} работает`;
   return (
     <div className="turn-timing active" role="status">
       <span className="spinner small" />

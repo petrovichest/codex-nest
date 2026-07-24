@@ -5,12 +5,14 @@ import { FolderIcon, InfoIcon, PanelLeftIcon } from "./Icons";
 export function WorkspaceHeader({
   title,
   subtitle,
+  badge,
   onOpenNavigation,
   onToggleInspector,
   actions,
 }: {
   title: string;
   subtitle?: string;
+  badge?: ReactNode;
   onOpenNavigation(): void;
   onToggleInspector?(): void;
   actions?: ReactNode;
@@ -32,6 +34,7 @@ export function WorkspaceHeader({
           <h1>{title}</h1>
           {subtitle && <p>{subtitle}</p>}
         </div>
+        {badge}
       </div>
       <div className="workspace-actions">
         {actions}

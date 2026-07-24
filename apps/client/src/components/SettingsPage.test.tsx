@@ -24,6 +24,13 @@ vi.mock("./CodexSettingsCard", () => ({
     </section>
   ),
 }));
+vi.mock("./ClaudeSettingsCard", () => ({
+  ClaudeSettingsCard: () => (
+    <section>
+      <h2>Claude Code CLI</h2>
+    </section>
+  ),
+}));
 vi.mock("./ApplicationSettingsCard", () => ({
   ApplicationSettingsCard: () => (
     <section>
@@ -164,6 +171,7 @@ describe("SettingsPage", () => {
     ).toEqual([
       "Обновление CodexNest",
       "Codex CLI",
+      "Claude Code CLI",
       "Новые задачи",
       "Разрешения Codex",
       "Распознавание речи",

@@ -10,7 +10,7 @@ vi.mock("../connection", () => ({ useConnection: connection }));
 describe("AttentionPanel", () => {
   it("responds to approvals through the existing API", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
-    connection.mockReturnValue({ api: { respond } });
+    connection.mockReturnValue({ api: { respond }, state: { snapshot: null } });
     render(
       <AttentionPanel
         requests={[
@@ -43,7 +43,7 @@ describe("AttentionPanel", () => {
 
   it("shows user-input questions one at a time and submits all answers at the end", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
-    connection.mockReturnValue({ api: { respond } });
+    connection.mockReturnValue({ api: { respond }, state: { snapshot: null } });
     render(
       <AttentionPanel
         requests={[
@@ -110,5 +110,40 @@ describe("AttentionPanel", () => {
         answers: { storage: ["На сервере"], source: ["Галерея"] },
       }),
     );
+  });
+
+  it("names the acting agent in the user-input title for a Claude thread", () => {
+    connection.mockReturnValue({
+      api: { respond: vi.fn() },
+      state: { snapshot: { threads: [{ id: "thread", agent: "claude" }] } },
+    });
+    render(
+      <AttentionPanel
+        requests={[
+          {
+            id: "questions",
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "item",
+            createdAt: 1,
+            kind: "userInput",
+            autoResolutionMs: null,
+            questions: [
+              {
+                id: "q",
+                header: "H",
+                question: "Q?",
+                isOther: false,
+                isSecret: false,
+                options: [{ label: "A", description: "" }],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Claude Code просит уточнение" }),
+    ).toBeInTheDocument();
   });
 });

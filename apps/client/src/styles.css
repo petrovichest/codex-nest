@@ -508,6 +508,62 @@ pre {
   white-space: nowrap;
 }
 
+/* Dual-agent identity chip (sidebar rows + thread header) and the creation segmented control. */
+.agent-chip {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.agent-chip.agent-claude {
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-muted));
+  color: var(--text-strong);
+}
+
+.agent-segmented {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 16px;
+  padding: 3px;
+  border-radius: 11px;
+  background: var(--surface-muted);
+}
+
+.agent-segment {
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.agent-segment.selected {
+  background: var(--surface);
+  color: var(--text-strong);
+  box-shadow: var(--shadow);
+}
+
+.backend-unavailable-banner {
+  margin: 0 12px 8px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-text) 30%, var(--line));
+  border-radius: 10px;
+  background: var(--warning);
+  color: var(--warning-text);
+  font-size: 12px;
+}
+
 .status,
 .connection-dot {
   display: inline-block;

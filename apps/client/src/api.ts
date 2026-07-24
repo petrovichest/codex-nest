@@ -1,8 +1,10 @@
 import type {
+  AgentId,
   ApiError,
   AppUpdateStatus,
   AppSnapshot,
   AttentionResponse,
+  ClaudeManagementStatus,
   CodexRateLimitsResponse,
   CodexManagementStatus,
   CreateDirectoryRequest,
@@ -97,6 +99,14 @@ export class ApiClient {
     return this.request("/api/v1/settings/codex/check", { method: "POST", timeoutMs: null });
   }
 
+  readClaudeSettings(): Promise<ClaudeManagementStatus> {
+    return this.request("/api/v1/settings/claude");
+  }
+
+  checkClaude(): Promise<ClaudeManagementStatus> {
+    return this.request("/api/v1/settings/claude/check", { method: "POST", timeoutMs: null });
+  }
+
   updateCodexProxy(body: UpdateCodexProxyRequest): Promise<CodexManagementStatus> {
     return this.request("/api/v1/settings/codex/proxy", {
       method: "PUT",
@@ -159,9 +169,10 @@ export class ApiClient {
     return this.request(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
-  createProjectThread(projectId: string): Promise<CreateProjectThreadResponse> {
+  createProjectThread(projectId: string, agent?: AgentId): Promise<CreateProjectThreadResponse> {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
+      ...(agent ? { body: { agent } } : {}),
     });
   }
 

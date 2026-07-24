@@ -95,6 +95,7 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Обнови интерфейс",
+        agent: "codex",
         clientMessageId: expect.any(String),
         settings: {
           collaborationMode: "default",
@@ -182,6 +183,7 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Продолжай глубоко рассуждать",
+        agent: "codex",
         clientMessageId: expect.any(String),
         settings: {
           collaborationMode: "default",
@@ -245,10 +247,120 @@ describe("NewSession", () => {
       expect(createThread).toHaveBeenCalledWith({
         projectId: "project",
         input: "Доведи проверяемый результат до конца",
+        agent: "codex",
         goal: true,
         clientMessageId: expect.any(String),
         settings: { collaborationMode: "default" },
       }),
     );
+  });
+
+  const claudeModel = {
+    id: "sonnet",
+    displayName: "Claude Sonnet 5",
+    description: "",
+    isDefault: true,
+    reasoningEfforts: [{ value: "medium", description: null, isDefault: true }],
+    serviceTiers: [],
+    supportsPersonality: false,
+  };
+
+  it("offers an agent picker with dual backends and creates a Claude session", async () => {
+    const createThread = vi.fn().mockResolvedValue({ thread: { id: "created" }, turnId: "turn" });
+    connection.mockReturnValue({
+      api: { createThread },
+      dispatch: vi.fn(),
+      state: {
+        snapshot: {
+          connection: { state: "ready" },
+          models: [],
+          backends: [
+            {
+              agent: "codex",
+              connection: { state: "ready", message: null, syncedAt: null },
+              models: [],
+            },
+            {
+              agent: "claude",
+              connection: { state: "ready", message: null, syncedAt: null },
+              models: [claudeModel],
+            },
+          ],
+        },
+        network: "connected",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Что поручим Codex?" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+    expect(screen.getByRole("heading", { name: "Что поручим Claude Code?" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Claude Code" }), {
+      target: { value: "привет" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith(
+        expect.objectContaining({ agent: "claude", input: "привет" }),
+      ),
+    );
+  });
+
+  it("blocks creation when the selected agent's backend is unavailable", () => {
+    connection.mockReturnValue({
+      api: { createThread: vi.fn() },
+      dispatch: vi.fn(),
+      state: {
+        snapshot: {
+          connection: { state: "ready" },
+          models: [],
+          backends: [
+            {
+              agent: "codex",
+              connection: { state: "ready", message: null, syncedAt: null },
+              models: [],
+            },
+            {
+              agent: "claude",
+              connection: {
+                state: "unavailable",
+                message: "Выполните claude login на сервере",
+                syncedAt: null,
+              },
+              models: [claudeModel],
+            },
+          ],
+        },
+        network: "connected",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Claude Code" }), {
+      target: { value: "привет" },
+    });
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    expect(screen.getByText(/claude login/)).toBeInTheDocument();
   });
 });

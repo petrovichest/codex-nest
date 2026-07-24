@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
+  AgentId,
   ModelOption,
   Project,
   SessionSettings,
@@ -12,6 +13,7 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { agentLabel, backendFor, defaultAgent, modelsForAgent, snapshotBackends } from "../agents";
 import { useConnection } from "../connection";
 import type { OptimisticMessage } from "../state";
 import { Composer, type ComposerImage } from "./Composer";
@@ -34,24 +36,51 @@ export function NewSession({
 }) {
   const { api, state, dispatch } = useConnection();
   const navigate = useNavigate();
+  const snapshot = state.snapshot;
+  const backends = useMemo(() => snapshotBackends(snapshot), [snapshot]);
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [input, setInput] = useState("");
   const [images, setImages] = useState<ComposerImage[]>([]);
   const [goalMode, setGoalMode] = useState(false);
+  const [agent, setAgent] = useState<AgentId>(() => defaultAgent(snapshot));
   const [settings, setSettings] = useState<SessionSettings>(() =>
     initialSettings(
-      state.snapshot?.defaultReasoningEffort,
-      state.snapshot?.models ?? [],
-      state.snapshot?.taskDefaults,
+      snapshot?.defaultReasoningEffort,
+      modelsForAgent(snapshot, defaultAgent(snapshot)),
+      snapshot?.taskDefaults,
     ),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
+  const showAgentPicker = backends.length >= 2;
+  const selectedBackend = backendFor(snapshot, agent);
+  const agentModels = selectedBackend?.models ?? [];
+  const backendBlockedReason =
+    selectedBackend && selectedBackend.connection.state !== "ready"
+      ? (selectedBackend.connection.message ?? `${agentLabel(agent)} недоступен`)
+      : null;
+
   useEffect(() => {
     if (!projectId && projects[0]) setProjectId(projects[0].id);
   }, [projectId, projects]);
+
+  // Switching agent re-seeds settings from the chosen backend's models (a Codex model id is
+  // not valid for Claude and vice versa) and drops goal mode, which is Codex-only.
+  function changeAgent(next: AgentId) {
+    if (next === agent) return;
+    setAgent(next);
+    setGoalMode(false);
+    setError(null);
+    setSettings(
+      initialSettings(
+        snapshot?.defaultReasoningEffort,
+        modelsForAgent(snapshot, next),
+        snapshot?.taskDefaults,
+      ),
+    );
+  }
 
   const project = useMemo(
     () => projects.find((candidate) => candidate.id === projectId) ?? null,
@@ -61,6 +90,7 @@ export function NewSession({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!projectId || (!input.trim() && !images.length) || (goalMode && !input.trim())) return;
+    if (backendBlockedReason) return;
     const clientMessageId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const createdAt = Date.now();
     setBusy(true);
@@ -69,6 +99,7 @@ export function NewSession({
       const result = await api.createThread({
         projectId,
         input,
+        agent,
         ...(images.length ? { images: images.map((image) => image.url) } : {}),
         ...(goalMode ? { goal: true } : {}),
         clientMessageId,
@@ -118,10 +149,27 @@ export function NewSession({
           <span className="new-session-glyph">
             <NewTaskIcon />
           </span>
-          <h2>Что поручим Codex?</h2>
+          <h2>Что поручим {agentLabel(agent)}?</h2>
           <p>Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.</p>
+          {showAgentPicker && (
+            <div className="agent-segmented" role="radiogroup" aria-label="Агент">
+              {backends.map((backend) => (
+                <button
+                  key={backend.agent}
+                  type="button"
+                  role="radio"
+                  aria-checked={agent === backend.agent}
+                  className={`agent-segment${agent === backend.agent ? " selected" : ""}`}
+                  onClick={() => changeAgent(backend.agent)}
+                >
+                  {agentLabel(backend.agent)}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <Composer
+          agent={agent}
           autoFocus
           input={input}
           onInput={setInput}
@@ -136,7 +184,8 @@ export function NewSession({
           }}
           goalMode={goalMode}
           onGoalModeChange={setGoalMode}
-          models={state.snapshot?.models ?? []}
+          models={agentModels}
+          blocked={Boolean(backendBlockedReason)}
           projects={projects}
           projectId={projectId}
           onProjectChange={setProjectId}
@@ -147,7 +196,7 @@ export function NewSession({
             if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
             return (await api.transcribe(audio)).text;
           }}
-          error={error}
+          error={error ?? backendBlockedReason}
         />
       </div>
       <NewSessionInspector
