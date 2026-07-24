@@ -1760,4 +1760,24 @@ describe("project threads route (dual backend)", () => {
     expect(patched.statusCode).toBe(200);
     expect(patched.json().settings.permissionPreset).toBe("full-access");
   });
+
+  it("rejects a Claude-only permissionPreset when patching a Codex thread's settings", async () => {
+    const { app } = await dualBackendApp();
+    const headers = { authorization: "Bearer correct" };
+    // Agent omitted → Codex thread; the settings route (not just create) must reject the preset.
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    const threadId = created.json().thread.id;
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/${threadId}/settings`,
+      headers,
+      payload: { permissionPreset: "auto" },
+    });
+    expect(patched.statusCode).toBe(400);
+  });
 });

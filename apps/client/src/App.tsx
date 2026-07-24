@@ -388,8 +388,10 @@ function Sidebar({
   const snapshot = state.snapshot;
   const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
   const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
-  // The rate-limits widget is Codex-specific; show it only when a ready Codex backend exists.
-  const codexReady = backendFor(snapshot, "codex")?.connection.state === "ready";
+  // The rate-limits widget is Codex-specific; show it whenever a Codex backend is present.
+  // While Codex restarts the widget stays and renders its own placeholder/error state; it is
+  // absent only when a deployment genuinely has no Codex backend.
+  const codexPresent = backendFor(snapshot, "codex") !== undefined;
   // Agent chips + the per-project agent picker only appear once more than one backend exists.
   const backends = snapshotBackends(snapshot);
   const showAgentChips = backends.length >= 2;
@@ -546,7 +548,7 @@ function Sidebar({
           <SlidersIcon />
           Настройки
         </NavLink>
-        {codexReady && (
+        {codexPresent && (
           <button
             aria-busy={rateLimitsLoading}
             aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError)}

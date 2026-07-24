@@ -838,10 +838,23 @@ describe("App dual-agent sidebar", () => {
     models: [],
   });
 
-  it("hides the Codex rate-limits widget when the Codex backend is unavailable", () => {
+  it("keeps the Codex rate-limits widget while the Codex backend is present but unavailable", () => {
     mockConnection({
       ...snapshot([{ ...baseThread, agent: "claude" }]),
       backends: [backend("codex", "unavailable"), backend("claude", "ready")],
+    });
+
+    renderApp("/threads/newer");
+
+    // Gating is on presence, not readiness: a restarting Codex keeps the widget (in its
+    // placeholder state) instead of making it vanish.
+    expect(screen.getByRole("button", { name: /лимиты Codex/i })).toBeInTheDocument();
+  });
+
+  it("hides the Codex rate-limits widget only when no Codex backend is present", () => {
+    mockConnection({
+      ...snapshot([{ ...baseThread, agent: "claude" }]),
+      backends: [backend("claude", "ready")],
     });
 
     renderApp("/threads/newer");

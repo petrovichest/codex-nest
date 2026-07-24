@@ -1,6 +1,8 @@
 import { Capacitor } from "@capacitor/core";
 
-import type { AppSnapshot, ServerEvent } from "@codexnest/protocol";
+import type { AgentId, AppSnapshot, ServerEvent } from "@codexnest/protocol";
+
+import { agentLabel } from "./agents";
 
 export type BrowserNotificationPermission = NotificationPermission | "unsupported";
 
@@ -19,6 +21,7 @@ export async function requestBrowserNotificationPermission(): Promise<BrowserNot
 export class BrowserNotificationTracker {
   private readonly threadStates = new Map<string, string>();
   private readonly threadTitles = new Map<string, string>();
+  private readonly threadAgents = new Map<string, AgentId>();
   private readonly attentionThreads = new Map<string, string | null>();
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
@@ -29,6 +32,7 @@ export class BrowserNotificationTracker {
     let newest = cutoff;
     this.threadStates.clear();
     this.threadTitles.clear();
+    this.threadAgents.clear();
     this.attentionThreads.clear();
     const missedThreads: AppSnapshot["threads"] = [];
     const missedAttention: AppSnapshot["attention"] = [];
@@ -36,6 +40,7 @@ export class BrowserNotificationTracker {
     for (const thread of snapshot.threads) {
       this.threadStates.set(thread.id, thread.state);
       this.threadTitles.set(thread.id, thread.title);
+      this.threadAgents.set(thread.id, thread.agent);
       newest = Math.max(newest, thread.updatedAt);
       if (
         !firstConnection &&
@@ -54,12 +59,13 @@ export class BrowserNotificationTracker {
       }
     }
     for (const thread of missedThreads) {
-      this.showThreadState(thread.state, thread.id, thread.title);
+      this.showThreadState(thread.state, thread.id, thread.title, thread.agent);
     }
     for (const attention of missedAttention) {
+      const agent = this.agentFor(attention.threadId);
       this.show(
-        "Codex ждёт решения",
-        this.titleFor(attention.threadId),
+        `${agentLabel(agent)} ждёт решения`,
+        this.titleFor(attention.threadId, agent),
         `attention:${attention.id}`,
         attention.threadId,
       );
@@ -72,13 +78,20 @@ export class BrowserNotificationTracker {
       const previous = this.threadStates.get(event.thread.id);
       this.threadStates.set(event.thread.id, event.thread.state);
       this.threadTitles.set(event.thread.id, event.thread.title);
+      this.threadAgents.set(event.thread.id, event.thread.agent);
       if (previous !== event.thread.state) {
-        this.showThreadState(event.thread.state, event.thread.id, event.thread.title);
+        this.showThreadState(
+          event.thread.state,
+          event.thread.id,
+          event.thread.title,
+          event.thread.agent,
+        );
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.thread.updatedAt);
     } else if (event.type === "thread.removed") {
       this.threadStates.delete(event.threadId);
       this.threadTitles.delete(event.threadId);
+      this.threadAgents.delete(event.threadId);
     } else if (event.type === "attention.upserted") {
       if (!this.attentionThreads.has(event.attention.id)) {
         this.attentionThreads.set(event.attention.id, event.attention.threadId);
@@ -86,9 +99,10 @@ export class BrowserNotificationTracker {
           !event.attention.threadId ||
           this.threadStates.get(event.attention.threadId) !== "needsAttention"
         ) {
+          const agent = this.agentFor(event.attention.threadId);
           this.show(
-            "Codex ждёт решения",
-            this.titleFor(event.attention.threadId),
+            `${agentLabel(agent)} ждёт решения`,
+            this.titleFor(event.attention.threadId, agent),
             `attention:${event.attention.id}`,
             event.attention.threadId,
           );
@@ -100,13 +114,23 @@ export class BrowserNotificationTracker {
     }
   }
 
-  private showThreadState(state: string, threadId: string, threadTitle: string): void {
+  private showThreadState(
+    state: string,
+    threadId: string,
+    threadTitle: string,
+    agent: AgentId,
+  ): void {
     if (state === "completed") {
       this.show("Задача завершена", threadTitle, `completed:${threadId}`, threadId);
     } else if (state === "failed") {
       this.show("Задача завершилась с ошибкой", threadTitle, `failed:${threadId}`, threadId);
     } else if (state === "needsAttention" && !this.hasAttentionForThread(threadId)) {
-      this.show("Codex ждёт решения", threadTitle, `needs-attention:${threadId}`, threadId);
+      this.show(
+        `${agentLabel(agent)} ждёт решения`,
+        threadTitle,
+        `needs-attention:${threadId}`,
+        threadId,
+      );
     }
   }
 
@@ -114,9 +138,14 @@ export class BrowserNotificationTracker {
     return [...this.attentionThreads.values()].includes(threadId);
   }
 
-  private titleFor(threadId: string | null): string {
+  private agentFor(threadId: string | null): AgentId {
+    if (!threadId) return "codex";
+    return this.threadAgents.get(threadId) ?? "codex";
+  }
+
+  private titleFor(threadId: string | null, agent: AgentId): string {
     if (!threadId) return "Откройте CodexNest для подробностей";
-    return this.threadTitles.get(threadId) ?? "Задача Codex";
+    return this.threadTitles.get(threadId) ?? `Задача ${agentLabel(agent)}`;
   }
 
   private show(title: string, body: string, tag: string, threadId: string | null): void {

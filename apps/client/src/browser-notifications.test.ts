@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AppSnapshot, AttentionRequest, ThreadSummary } from "@codexnest/protocol";
+import type { AgentId, AppSnapshot, AttentionRequest, ThreadSummary } from "@codexnest/protocol";
 
 import {
   BrowserNotificationTracker,
@@ -101,6 +101,45 @@ describe("BrowserNotificationTracker", () => {
     });
   });
 
+  it("labels a Claude thread that starts needing attention with the Claude Code name", () => {
+    const tracker = new BrowserNotificationTracker();
+    const running = thread("running", 10, "claude");
+    tracker.acceptSnapshot(snapshot([running]));
+
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "needsAttention", updatedAt: 20 },
+    });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Claude Code ждёт решения");
+  });
+
+  it("labels a Claude thread's attention request with the Claude Code name", () => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10, "claude")]));
+
+    tracker.acceptEvent({ type: "attention.upserted", attention: attentionRequest(20) });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Claude Code ждёт решения");
+    expect(notifications[0]?.options?.body).toBe("Тестовая задача");
+  });
+
+  it("falls back to the Codex generic task label for an attention on an unknown thread", () => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+
+    tracker.acceptEvent({
+      type: "attention.upserted",
+      attention: { ...attentionRequest(20), id: "ghost", threadId: "ghost" },
+    });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Codex ждёт решения");
+    expect(notifications[0]?.options?.body).toBe("Задача Codex");
+  });
+
   it("does not display system notifications while the page is visible", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     const tracker = new BrowserNotificationTracker();
@@ -166,10 +205,14 @@ describe("browser notification permission", () => {
   });
 });
 
-function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary {
+function thread(
+  state: ThreadSummary["state"],
+  updatedAt: number,
+  agent: AgentId = "codex",
+): ThreadSummary {
   return {
     id: "thread",
-    agent: "codex",
+    agent,
     projectId: "project",
     title: "Тестовая задача",
     preview: "",
