@@ -1,7 +1,7 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { useEffect, useRef } from "react";
-import type { NavigateFunction } from "react-router-dom";
+import type { NavigateFunction } from "react-router";
 import type { UiLanguage } from "@codexnest/protocol";
 
 const PENDING_THREAD_KEY = "codexnest.pendingThreadId";
