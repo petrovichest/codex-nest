@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type {
   AttentionRequest,
   ThreadDetail,
   ThreadDraft,
   ThreadSummary,
+  TranscriptionConfigResponse,
   TurnProgress,
   UpdateThreadDraftRequest,
 } from "@codexnest/protocol";
@@ -43,6 +44,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
 
 describe("Activity", () => {
@@ -1824,6 +1830,105 @@ describe("Activity", () => {
     expect(scroll.scrollTop).toBe(900);
     delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
   });
+
+  it("keeps transcription attached to its source draft while switching sessions", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    let resolveTranscription:
+      | ((value: {
+          text: string;
+          timingEstimate: {
+            sampleCount: number;
+            estimatedProcessingMsPerAudioSecond: number;
+          };
+        }) => void)
+      | undefined;
+    const api = threadApi();
+    api.updateThreadDraft.mockRejectedValueOnce(new Error("offline"));
+    api.transcribe.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTranscription = resolve;
+        }),
+    );
+    const initialDraft: ThreadDraft = {
+      input: "Начало конец",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    };
+    const context = mockThreadConnection(api, summary, { draft: initialDraft });
+    const other = { ...summary, id: "other", title: "Другая задача" };
+    const details = context.state.details as Record<string, ThreadDetail>;
+    context.state.snapshot.threads = [summary, other];
+    details.other = {
+      summary: other,
+      turns: [],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      draft: null,
+    };
+    context.dispatch.mockImplementation((action) => {
+      if (action.type !== "draft") return;
+      const current = details[action.threadId];
+      if (current) details[action.threadId] = { ...current, draft: action.draft };
+    });
+    const timingChanged = vi.fn();
+    render(voiceThreadRoute(timingChanged));
+
+    const textarea = (await screen.findByRole("textbox", {
+      name: "Сообщение для Codex",
+    })) as HTMLTextAreaElement;
+    await waitFor(() => expect(textarea).toHaveValue("Начало конец"));
+    textarea.setSelectionRange(7, 7);
+    fireEvent.select(textarea);
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+
+    await waitFor(() => expect(api.transcribe).toHaveBeenCalledOnce());
+    expect(screen.getByText("Распознаём · осталось ≈ 0:01")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
+
+    await screen.findByRole("heading", { name: "Другая задача" });
+    expect(
+      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+      "readonly",
+    );
+    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
+
+    await act(async () =>
+      resolveTranscription?.({
+        text: "голос",
+        timingEstimate: {
+          sampleCount: 2,
+          estimatedProcessingMsPerAudioSecond: 4_000,
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Начало голос конец" }),
+        { keepalive: false },
+      ),
+    );
+    expect(timingChanged).toHaveBeenCalledWith({
+      sampleCount: 2,
+      estimatedProcessingMsPerAudioSecond: 4_000,
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Открыть A" }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+        "Начало голос конец",
+      ),
+    );
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledTimes(2));
+  });
 });
 
 function renderThread(state?: Record<string, unknown>) {
@@ -1842,6 +1947,80 @@ function threadRoute(state?: Record<string, unknown>) {
       </Routes>
     </MemoryRouter>
   );
+}
+
+function voiceThreadRoute(
+  onTimingChange: (estimate: {
+    sampleCount: number;
+    estimatedProcessingMsPerAudioSecond: number | null;
+  }) => void,
+) {
+  return (
+    <MemoryRouter initialEntries={["/threads/thread"]}>
+      <Link to="/threads/thread">Открыть A</Link>
+      <Link to="/threads/other">Открыть B</Link>
+      <Routes>
+        <Route
+          path="/threads/:threadId"
+          element={
+            <ThreadPage
+              transcriptionConfig={transcriptionConfig}
+              transcriptionProvider="local"
+              onTranscriptionTimingChange={onTimingChange}
+              onOpenNavigation={() => undefined}
+            />
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+const transcriptionConfig: TranscriptionConfigResponse = {
+  providers: ["local"],
+  provider: "local",
+  localUrl: "http://127.0.0.1:8178/inference",
+  openAiApiKeyConfigured: false,
+  openAiModel: "gpt-4o-transcribe",
+  language: "ru",
+  refineLocal: false,
+  refinementModel: "gpt-5.6-luna",
+  maxRecordingSeconds: 300,
+  maxUploadBytes: 24 * 1024 * 1024,
+  timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+};
+
+function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
+  class FakeMediaRecorder extends EventTarget {
+    static isTypeSupported = vi.fn(() => true);
+    readonly mimeType: string;
+    state: RecordingState = "inactive";
+
+    constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+      super();
+      this.mimeType = options?.mimeType ?? "audio/webm";
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      if (this.state === "inactive") return;
+      this.state = "inactive";
+      const data = new Blob(["audio"], { type: this.mimeType });
+      const dataEvent = new Event("dataavailable") as BlobEvent;
+      Object.defineProperty(dataEvent, "data", { value: data });
+      this.dispatchEvent(dataEvent);
+      this.dispatchEvent(new Event("stop"));
+    }
+  }
+
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia: vi.fn(getUserMedia) },
+  });
 }
 
 function threadApi() {
@@ -1881,6 +2060,10 @@ function threadApi() {
     readGoal: vi.fn().mockResolvedValue(null),
     updateGoal: vi.fn().mockResolvedValue(null),
     clearGoal: vi.fn().mockResolvedValue(undefined),
+    transcribe: vi.fn().mockResolvedValue({
+      text: "голос",
+      timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+    }),
   };
 }
 

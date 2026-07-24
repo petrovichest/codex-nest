@@ -12,6 +12,7 @@ import {
 import type {
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  TranscriptionTimingEstimate,
   UpdateTranscriptionSettingsRequest,
 } from "@codexnest/protocol";
 
@@ -20,6 +21,7 @@ import type { TranscriptRefiner } from "./transcript-refiner";
 
 export const MAX_TRANSCRIPTION_BYTES = 24 * 1024 * 1024;
 export const MAX_RECORDING_SECONDS = 5 * 60;
+export const MAX_TRANSCRIPTION_TIMING_SAMPLES = 20;
 
 const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODELS = new Set(["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]);
@@ -99,6 +101,7 @@ export class TranscriptionService {
       refinementModel: this.settings.refinementModel,
       maxRecordingSeconds: MAX_RECORDING_SECONDS,
       maxUploadBytes: MAX_TRANSCRIPTION_BYTES,
+      timingEstimate: emptyTranscriptionTimingEstimate(),
     };
   }
 
@@ -199,6 +202,38 @@ export class TranscriptionService {
       await dispatcher?.close().catch(() => undefined);
     }
   }
+}
+
+export function transcriptionTimingProfile(config: TranscriptionConfigResponse): string | null {
+  if (config.provider === "openai") return `openai:${config.openAiModel}`;
+  if (config.provider !== "local" || !config.localUrl) return null;
+  return config.refineLocal
+    ? `local:${config.localUrl}:refined:${config.refinementModel}`
+    : `local:${config.localUrl}:raw`;
+}
+
+export function transcriptionTimingEstimate(
+  samples: readonly number[] | undefined,
+): TranscriptionTimingEstimate {
+  if (!samples?.length) return emptyTranscriptionTimingEstimate();
+  const sorted = [...samples].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+  return {
+    sampleCount: sorted.length,
+    estimatedProcessingMsPerAudioSecond: Math.round(median),
+  };
+}
+
+export function appendTranscriptionTimingSample(
+  samples: readonly number[] | undefined,
+  sample: number,
+): number[] {
+  return [...(samples ?? []), sample].slice(-MAX_TRANSCRIPTION_TIMING_SAMPLES);
+}
+
+function emptyTranscriptionTimingEstimate(): TranscriptionTimingEstimate {
+  return { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null };
 }
 
 export function normalizeAudioType(value: string): string {

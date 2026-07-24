@@ -155,11 +155,11 @@ export function NewSession({
           onNewProject={onNewProject}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
-          onTranscribe={async (audio) => {
+          onTranscribe={async (audio, durationMs) => {
             if (!transcriptionProvider) {
               throw new Error(t("Распознавание речи не настроено"));
             }
-            return (await api.transcribe(audio)).text;
+            return (await api.transcribe(audio, durationMs)).text;
           }}
           error={error}
         />

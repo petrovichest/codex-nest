@@ -262,6 +262,11 @@ export function App({
                 <ThreadPage
                   transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
                   transcriptionConfig={transcriptionConfig}
+                  onTranscriptionTimingChange={(timingEstimate) =>
+                    setTranscriptionConfig((current) =>
+                      current ? { ...current, timingEstimate } : current,
+                    )
+                  }
                   onOpenNavigation={() => setDrawer(true)}
                 />
               }

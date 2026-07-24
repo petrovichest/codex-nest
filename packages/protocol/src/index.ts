@@ -24,6 +24,11 @@ export type TranscriptionProvider = "local" | "openai";
 
 export type UiLanguage = "en" | "ru";
 
+export type TranscriptionTimingEstimate = {
+  sampleCount: number;
+  estimatedProcessingMsPerAudioSecond: number | null;
+};
+
 export type UiLanguageSettings = {
   language: UiLanguage;
 };
@@ -41,6 +46,7 @@ export type TranscriptionConfigResponse = {
   refinementModel: string;
   maxRecordingSeconds: number;
   maxUploadBytes: number;
+  timingEstimate: TranscriptionTimingEstimate;
 };
 
 export type UpdateTranscriptionSettingsRequest = {
@@ -55,6 +61,7 @@ export type UpdateTranscriptionSettingsRequest = {
 
 export type TranscriptionResponse = {
   text: string;
+  timingEstimate: TranscriptionTimingEstimate;
 };
 
 export type GitChangesSummary = {

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
 
-import { Composer, type ComposerImage } from "./Composer";
+import { Composer, type ComposerImage, type ComposerTranscriptionStatus } from "./Composer";
 
 const models = [
   {
@@ -215,6 +215,7 @@ describe("Composer", () => {
     await waitFor(() => expect(textarea).toHaveValue("Начало голос конец"));
     expect(onTranscribe).toHaveBeenCalledWith(
       expect.objectContaining({ type: "audio/webm;codecs=opus" }),
+      expect.any(Number),
     );
     expect(track.stop).toHaveBeenCalled();
     expect(textarea).not.toHaveAttribute("readonly");
@@ -241,6 +242,70 @@ describe("Composer", () => {
     render(<Harness transcriptionConfig={{ ...transcriptionConfig, providers: [] }} />);
     expect(screen.getByRole("button", { name: "Распознавание речи не настроено" })).toBeDisabled();
   });
+
+  it("shows learned countdowns only in the source composer", () => {
+    const view = render(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 2,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Распознаём · осталось ≈ 0:08")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+      "readonly",
+    );
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 13,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+    expect(screen.getByText("Распознаём · дольше прогноза на 0:03")).toBeInTheDocument();
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 4,
+          estimatedTotalSeconds: null,
+        }}
+      />,
+    );
+    expect(screen.getByText("Распознаём · прошло 0:04")).toBeInTheDocument();
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: false,
+          elapsedSeconds: 4,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+      "readonly",
+    );
+    expect(
+      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
+    ).toBeDisabled();
+  });
 });
 
 const transcriptionConfig: TranscriptionConfigResponse = {
@@ -254,6 +319,7 @@ const transcriptionConfig: TranscriptionConfigResponse = {
   refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
+  timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
 };
 
 function Harness({
@@ -262,12 +328,14 @@ function Harness({
   initialInput = "",
   transcriptionConfig: speechConfig,
   onTranscribe,
+  transcriptionStatus = null,
 }: {
   busy?: boolean;
   hasSupplementalContent?: boolean;
   initialInput?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
+  transcriptionStatus?: ComposerTranscriptionStatus | null;
 }) {
   const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>([]);
@@ -295,6 +363,7 @@ function Harness({
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
+      transcriptionStatus={transcriptionStatus}
       error={null}
       hasSupplementalContent={hasSupplementalContent}
     />

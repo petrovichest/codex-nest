@@ -29,6 +29,18 @@ export type ComposerImage = {
   url: string;
 };
 
+export type ComposerRecording = {
+  audio: Blob;
+  durationMs: number;
+  selection: { start: number; end: number };
+};
+
+export type ComposerTranscriptionStatus = {
+  belongsToComposer: boolean;
+  elapsedSeconds: number;
+  estimatedTotalSeconds: number | null;
+};
+
 const KEYBOARD_VIEWPORT_DELTA = 120;
 const RECORDING_MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
@@ -64,6 +76,9 @@ export function Composer({
   transcriptionConfig = null,
   transcriptionProvider = null,
   onTranscribe,
+  onRecordingReady,
+  transcriptionStatus = null,
+  transcriptionError = null,
   error,
   autoFocus = false,
   hasSupplementalContent = false,
@@ -92,7 +107,10 @@ export function Composer({
   onStop?(): void;
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
-  onTranscribe?(audio: Blob): Promise<string>;
+  onTranscribe?(audio: Blob, durationMs: number): Promise<string>;
+  onRecordingReady?(recording: ComposerRecording): void;
+  transcriptionStatus?: ComposerTranscriptionStatus | null;
+  transcriptionError?: string | null;
   error: string | null;
   autoFocus?: boolean;
   hasSupplementalContent?: boolean;
@@ -108,6 +126,7 @@ export function Composer({
   const audioChunksRef = useRef<Blob[]>([]);
   const audioBytesRef = useRef(0);
   const discardRecordingRef = useRef(false);
+  const recordingStoppedRef = useRef(false);
   const aliveRef = useRef(true);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | undefined>(undefined);
@@ -119,7 +138,9 @@ export function Composer({
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const speechBusy = speechState !== "idle";
+  const localSpeechBusy = speechState !== "idle";
+  const speechBusy = localSpeechBusy || Boolean(transcriptionStatus?.belongsToComposer);
+  const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
   const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
   const canSubmit =
     hasContent &&
@@ -130,9 +151,16 @@ export function Composer({
   const speechUnavailable = microphoneUnavailableReason(
     transcriptionConfig,
     transcriptionProvider,
-    onTranscribe,
+    Boolean(onTranscribe || onRecordingReady),
     t,
   );
+  const transcriptionStatusText = transcriptionStatus?.belongsToComposer
+    ? formatTranscriptionStatus(
+        transcriptionStatus.elapsedSeconds,
+        transcriptionStatus.estimatedTotalSeconds,
+        t,
+      )
+    : null;
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -210,10 +238,14 @@ export function Composer({
     aliveRef.current = true;
     return () => {
       aliveRef.current = false;
-      discardRecordingRef.current = true;
       clearRecordingTimers();
       const recorder = mediaRecorderRef.current;
-      if (recorder?.state !== "inactive") recorder?.stop();
+      if (recorder && recorder.state !== "inactive") {
+        discardRecordingRef.current = true;
+        recorder.stop();
+      } else if (!recordingStoppedRef.current) {
+        discardRecordingRef.current = true;
+      }
       stopMediaStream();
     };
   }, []);
@@ -258,11 +290,11 @@ export function Composer({
   }
 
   async function startRecording() {
-    if (speechState !== "idle" || busy) return;
+    if (speechState !== "idle" || transcriptionStatus || busy) return;
     const unavailable = microphoneUnavailableReason(
       transcriptionConfig,
       transcriptionProvider,
-      onTranscribe,
+      Boolean(onTranscribe || onRecordingReady),
       t,
     );
     if (unavailable) {
@@ -280,6 +312,7 @@ export function Composer({
     setSpeechError(null);
     setSpeechState("requesting");
     discardRecordingRef.current = false;
+    recordingStoppedRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!aliveRef.current) {
@@ -336,6 +369,7 @@ export function Composer({
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
     clearRecordingTimers();
+    recordingStoppedRef.current = true;
     if (aliveRef.current) setSpeechState("transcribing");
     recorder.stop();
     stopMediaStream();
@@ -349,19 +383,34 @@ export function Composer({
     const bytes = audioBytesRef.current;
     audioChunksRef.current = [];
     audioBytesRef.current = 0;
-    if (discardRecordingRef.current || !aliveRef.current) return;
+    if (discardRecordingRef.current) return;
     if (!chunks.length || !bytes) {
-      setSpeechState("idle");
-      setSpeechError(t("Запись не содержит аудио"));
+      if (aliveRef.current) {
+        setSpeechState("idle");
+        setSpeechError(t("Запись не содержит аудио"));
+      }
       return;
     }
     if (bytes > (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
-      setSpeechState("idle");
-      setSpeechError(t("Запись слишком большая"));
+      if (aliveRef.current) {
+        setSpeechState("idle");
+        setSpeechError(t("Запись слишком большая"));
+      }
       return;
     }
+    const recording = {
+      audio: new Blob(chunks, { type: mimeType }),
+      durationMs: Math.max(1, Date.now() - recordingStartedAtRef.current),
+      selection: insertionRef.current ?? { start: input.length, end: input.length },
+    };
+    if (onRecordingReady) {
+      onRecordingReady(recording);
+      if (aliveRef.current) setSpeechState("idle");
+      return;
+    }
+    if (!aliveRef.current || !onTranscribe) return;
     try {
-      const transcript = await onTranscribe!(new Blob(chunks, { type: mimeType }));
+      const transcript = await onTranscribe(recording.audio, recording.durationMs);
       if (!aliveRef.current) return;
       insertTranscript(transcript);
       setSpeechError(null);
@@ -539,9 +588,14 @@ export function Composer({
                 {t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })}
               </span>
             )}
-            {speechState === "transcribing" && (
+            {speechState === "transcribing" && !transcriptionStatusText && (
               <span className="composer-recording-status" role="status">
                 {t("Распознаём…")}
+              </span>
+            )}
+            {transcriptionStatusText && (
+              <span className="composer-recording-status" role="status">
+                {transcriptionStatusText}
               </span>
             )}
           </div>
@@ -553,27 +607,34 @@ export function Composer({
                     ? t("Остановить запись")
                     : speechState === "requesting"
                       ? t("Запрашиваем доступ к микрофону")
-                      : speechState === "transcribing"
-                        ? t("Распознаём запись")
-                        : speechUnavailable
-                          ? speechUnavailable
-                          : t("Начать запись")
+                      : transcriptionStatus && !transcriptionStatus.belongsToComposer
+                        ? t("Идёт распознавание в другой сессии")
+                        : transcriptionBusy
+                          ? t("Распознаём запись")
+                          : speechUnavailable
+                            ? speechUnavailable
+                            : t("Начать запись")
                 }
                 aria-pressed={speechState === "recording"}
                 className={`composer-action microphone${speechState === "recording" ? " recording" : ""}`}
                 disabled={
                   speechState === "requesting" ||
                   speechState === "transcribing" ||
+                  Boolean(transcriptionStatus) ||
                   (speechState === "idle" && (busy || Boolean(speechUnavailable)))
                 }
                 title={speechUnavailable ?? undefined}
                 type="button"
-                onPointerDown={speechState === "idle" ? captureInsertionPoint : undefined}
+                onPointerDown={
+                  speechState === "idle" && !transcriptionStatus ? captureInsertionPoint : undefined
+                }
                 onClick={() =>
                   speechState === "recording" ? stopRecording() : void startRecording()
                 }
               >
-                {speechState === "requesting" || speechState === "transcribing" ? (
+                {speechState === "requesting" ||
+                speechState === "transcribing" ||
+                transcriptionStatus?.belongsToComposer ? (
                   <span className="spinner small" />
                 ) : speechState === "recording" ? (
                   <StopIcon />
@@ -605,9 +666,12 @@ export function Composer({
           </div>
         </div>
       </div>
-      {(error || attachmentError || speechError) && (
+      {(error || attachmentError || speechError || transcriptionError) && (
         <div className="composer-error">
-          {localizeKnownServerText(language, error) ?? attachmentError ?? speechError}
+          {localizeKnownServerText(language, error) ??
+            attachmentError ??
+            speechError ??
+            transcriptionError}
         </div>
       )}
     </form>
@@ -643,10 +707,10 @@ function pastedImageName(mimeType: string, index: number): string {
 function microphoneUnavailableReason(
   config: TranscriptionConfigResponse | null,
   provider: TranscriptionProvider | null,
-  transcribe: ((audio: Blob) => Promise<string>) | undefined,
+  canTranscribe: boolean,
   t: Translate,
 ): string | null {
-  if (!config || !provider || !config.providers.includes(provider) || !transcribe) {
+  if (!config || !provider || !config.providers.includes(provider) || !canTranscribe) {
     return t("Распознавание речи не настроено");
   }
   if (
@@ -684,4 +748,22 @@ function recordingErrorMessage(error: unknown, t: Translate): string {
 function formatRecordingTime(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatTranscriptionStatus(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+  t: Translate,
+): string {
+  if (estimatedTotalSeconds === null) {
+    return t("Распознаём · прошло {{time}}", { time: formatRecordingTime(elapsedSeconds) });
+  }
+  if (elapsedSeconds < estimatedTotalSeconds) {
+    return t("Распознаём · осталось ≈ {{time}}", {
+      time: formatRecordingTime(Math.max(0, estimatedTotalSeconds - elapsedSeconds)),
+    });
+  }
+  return t("Распознаём · дольше прогноза на {{time}}", {
+    time: formatRecordingTime(elapsedSeconds - estimatedTotalSeconds),
+  });
 }

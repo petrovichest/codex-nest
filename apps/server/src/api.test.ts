@@ -497,6 +497,7 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
       })),
       updateConfiguration: vi.fn(async () => ({
         providers: ["local" as const, "openai" as const],
@@ -509,6 +510,7 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
       })),
       transcribe: vi.fn(async () => "распознанный текст"),
     };
@@ -541,11 +543,43 @@ describe("audio transcriptions", () => {
       payload: Buffer.from("audio"),
     });
     expect(transcribed.statusCode).toBe(200);
-    expect(transcribed.json()).toEqual({ text: "распознанный текст" });
+    expect(transcribed.json()).toEqual({
+      text: "распознанный текст",
+      timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+    });
     expect(transcription.transcribe).toHaveBeenCalledWith(
       Buffer.from("audio"),
       "audio/webm;codecs=opus",
     );
+
+    const timed = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions",
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(timed.statusCode).toBe(200);
+    expect(timed.json().timingEstimate).toMatchObject({
+      sampleCount: 1,
+      estimatedProcessingMsPerAudioSecond: expect.any(Number),
+    });
+    expect(Object.values(store.snapshot().transcriptionTimings ?? {})).toHaveLength(1);
+
+    const invalidDuration = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions",
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "unknown",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(invalidDuration.statusCode).toBe(400);
 
     const updated = await app.inject({
       method: "PUT",

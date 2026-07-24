@@ -44,6 +44,7 @@ export interface CodexNestState {
   projects: Project[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
+  transcriptionTimings?: Record<string, number[]>;
   uiLanguage: UiLanguage;
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
@@ -169,6 +170,20 @@ function validateState(value: unknown): CodexNestState {
   }
   if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
     throw new Error("Corrupt CodexNest state");
+  }
+  if (
+    value.transcriptionTimings !== undefined &&
+    (!isRecord(value.transcriptionTimings) ||
+      Object.values(value.transcriptionTimings).some(
+        (samples) =>
+          !Array.isArray(samples) ||
+          samples.length > 20 ||
+          samples.some(
+            (sample) => typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0,
+          ),
+      ))
+  ) {
+    throw new Error("Corrupt transcription timings in CodexNest state");
   }
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");

@@ -116,6 +116,9 @@ describe("StateStore", () => {
     const store = new StateStore(path);
     await store.load();
     await store.update((state) => {
+      state.transcriptionTimings = {
+        "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
+      };
       state.threadMeta.thread = {
         pinned: false,
         lastReadUpdatedAt: 0,
@@ -157,6 +160,9 @@ describe("StateStore", () => {
         goalMode: true,
         annotations: [{ comment: "Комментарий" }],
       },
+    });
+    expect(reloaded.snapshot().transcriptionTimings).toEqual({
+      "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
     });
   });
 

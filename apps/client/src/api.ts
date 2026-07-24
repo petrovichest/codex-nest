@@ -79,11 +79,17 @@ export class ApiClient {
     return this.request("/api/v1/settings/transcription", { method: "PUT", body });
   }
 
-  transcribe(audio: Blob): Promise<TranscriptionResponse> {
+  transcribe(audio: Blob, recordingDurationMs?: number): Promise<TranscriptionResponse> {
     return this.request("/api/v1/transcriptions", {
       method: "POST",
       rawBody: audio,
       contentType: audio.type,
+      headers:
+        recordingDurationMs === undefined
+          ? undefined
+          : {
+              "X-CodexNest-Audio-Duration-Ms": String(Math.max(1, Math.round(recordingDurationMs))),
+            },
       timeoutMs: null,
     });
   }
@@ -318,9 +324,11 @@ export class ApiClient {
       authenticated?: boolean;
       timeoutMs?: number | null;
       keepalive?: boolean;
+      headers?: Record<string, string>;
     } = {},
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers.set(name, value);
     if (options.authenticated !== false)
       headers.set("Authorization", `Bearer ${this.settings.token}`);
     if (options.rawBody !== undefined) {
