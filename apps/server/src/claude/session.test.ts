@@ -37,6 +37,11 @@ class FakeQuery implements AsyncGenerator<unknown, void, unknown> {
     return this.receipt;
   }
 
+  permissionModes: string[] = [];
+  async setPermissionMode(mode: string): Promise<void> {
+    this.permissionModes.push(mode);
+  }
+
   async next(): Promise<IteratorResult<unknown, void>> {
     for (;;) {
       if (this.queue.length) return { value: this.queue.shift(), done: false };
@@ -120,7 +125,13 @@ function makeSession(overrides: Partial<ClaudeSessionOptions> = {}) {
     onPlanAccepted: () => undefined,
     onAuthError: (message) => events.auth.push(message),
   };
-  const sdk: Pick<ClaudeSdk, "query"> = { query: () => fake as unknown as ClaudeQuery };
+  const captured: { options?: Record<string, unknown> } = {};
+  const sdk: Pick<ClaudeSdk, "query"> = {
+    query: (params) => {
+      captured.options = params.options;
+      return fake as unknown as ClaudeQuery;
+    },
+  };
   const session = new ClaudeSession({
     threadId: "thread-1",
     cwd: "/work",
@@ -134,7 +145,7 @@ function makeSession(overrides: Partial<ClaudeSessionOptions> = {}) {
     callbacks,
     ...overrides,
   });
-  return { session, fake, events };
+  return { session, fake, events, captured };
 }
 
 const sessions: ClaudeSession[] = [];
@@ -331,5 +342,24 @@ describe("ClaudeSession failures", () => {
     fake.throwNext(new Error("Invalid API key; please run claude login"));
     await flush();
     expect(events.auth).toContain("Выполните `claude login` на сервере");
+  });
+});
+
+describe("ClaudeSession permission mode", () => {
+  it("starts the query with the configured permission mode", () => {
+    const { session, captured } = makeSession({ permissionMode: "acceptEdits" });
+    track(session);
+    session.startTurn("hi", []);
+    expect(captured.options?.permissionMode).toBe("acceptEdits");
+  });
+
+  it("forwards a permission-mode change to the live query", async () => {
+    const { session, fake } = makeSession();
+    track(session);
+    session.startTurn("hi", []);
+    fake.emit(initMessage());
+    await flush();
+    session.setPermissionMode("bypassPermissions");
+    expect(fake.permissionModes).toEqual(["bypassPermissions"]);
   });
 });

@@ -216,7 +216,7 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     const state = this.store.snapshot();
     const entry = state.claudeSessions?.[threadId];
     if (!entry) throw new ThreadNotFoundError();
-    const summary = this.toSummary(threadId, entry, state);
+    let summary = this.toSummary(threadId, entry, state);
     const draft = state.threadMeta[threadId]?.draft ?? null;
     const queuedMessages = state.messageQueues?.[threadId] ?? [];
     const artifacts = state.threadMeta[threadId]?.timelineArtifacts ?? {};
@@ -244,6 +244,18 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
       const index = turns.findIndex((turn) => turn.id === view.id);
       if (index >= 0) turns[index] = view;
       else turns.push(view);
+    }
+    // Lazy outcome write-back: a thread whose final transcript turn is unclosed (the
+    // projection marks it "interrupted") but which has no live session and no persisted
+    // outcome lost its turn to a crash/restart. Persist "interrupted" so the list shows
+    // «прервано» instead of idle, dated from the transcript's last activity. The live-session
+    // guard keeps a genuinely-running turn (overlaid above) from being misread as lost.
+    if (!session && !state.threadMeta[threadId]?.lastOutcome && turns.length) {
+      const lastTurn = turns[turns.length - 1]!;
+      if (lastTurn.status === "interrupted") {
+        await this.persistInterruptedOutcome(threadId, lastActivityTimestamp(lastTurn));
+        summary = this.summary(threadId) ?? summary;
+      }
     }
     turns = turns.map((turn) => mergeArtifacts(turn, artifacts[turn.id] ?? []));
     const page = paginateClaudeTurns(turns, cursor ?? null);
@@ -357,6 +369,9 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
   async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
     this.assertOwned(threadId);
     await setThreadSettings(this.store, threadId, settings);
+    // A live (idle-pooled) session picks up a permission-preset change immediately; the api
+    // layer only permits settings edits between turns, so this never races a running turn.
+    this.sessions.get(threadId)?.session.setPermissionMode(permissionModeFor(settings));
     this.publishThread(threadId);
     return this.summary(threadId)!;
   }
@@ -437,7 +452,7 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
       sessionId: entry.sessionId,
       model: settings.model,
       effort: settings.reasoningEffort,
-      permissionMode: settings.collaborationMode === "plan" ? "plan" : "default",
+      permissionMode: permissionModeFor(settings),
       bin: this.bin,
       idleTimeoutMs: this.idleTimeoutMs,
       sdk: this.sdk,
@@ -496,6 +511,17 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     });
     // The completed turn is now in the transcript — drop the cache so the next read merges it.
     this.transcriptCache.delete(threadId);
+    this.publishThread(threadId);
+  }
+
+  /** Records an "interrupted" outcome for a lost turn detected on read (see readThread). */
+  private async persistInterruptedOutcome(threadId: string, at: number): Promise<void> {
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.lastOutcome = "interrupted";
+      meta.outcomeUpdatedAt = at;
+      state.threadMeta[threadId] = meta;
+    });
     this.publishThread(threadId);
   }
 
@@ -733,4 +759,34 @@ function preview(text: string): string {
 
 function isTerminal(state: ThreadState): boolean {
   return state === "completed" || state === "failed" || state === "interrupted";
+}
+
+/**
+ * Maps a session's settings to the Claude SDK permission mode. An active plan collaboration
+ * mode wins (the CLI must still gate ExitPlanMode). Otherwise the permission preset selects
+ * it: ask → "default" (each tool prompts via canUseTool → attention), auto → "acceptEdits",
+ * full-access → "bypassPermissions". Even bypassPermissions keeps firing canUseTool for the
+ * ask-class tools (AskUserQuestion/ExitPlanMode), so those approvals still surface.
+ */
+function permissionModeFor(settings: SessionSettings): string {
+  if (settings.collaborationMode === "plan") return "plan";
+  switch (settings.permissionPreset) {
+    case "auto":
+      return "acceptEdits";
+    case "full-access":
+      return "bypassPermissions";
+    default:
+      return "default";
+  }
+}
+
+/** Latest activity timestamp in a turn (for dating a lazily-detected interrupted outcome). */
+function lastActivityTimestamp(turn: TurnView): number {
+  let latest = turn.startedAt ?? 0;
+  for (const item of turn.items) {
+    if ("timestamp" in item && typeof item.timestamp === "number" && item.timestamp > latest) {
+      latest = item.timestamp;
+    }
+  }
+  return latest || Date.now();
 }

@@ -73,6 +73,12 @@ export interface ClaudeInterruptReceipt {
  */
 export interface ClaudeQuery extends AsyncGenerator<unknown, void, unknown> {
   interrupt(): Promise<ClaudeInterruptReceipt | undefined>;
+  /**
+   * Switches the live query's permission mode (streaming input mode only). Applied to the
+   * next tool decision; CodexNest calls it when a session's permission preset changes while
+   * the query is alive. Optional so fakes and older SDKs need not implement it.
+   */
+  setPermissionMode?(mode: string): Promise<void>;
 }
 
 /**

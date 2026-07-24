@@ -85,10 +85,12 @@ export class ClaudeSession {
   private watchdogTimer?: NodeJS.Timeout;
   private stderrTail = "";
   private sessionId: string | null;
+  private permissionMode: string;
   private closing = false;
 
   constructor(private readonly options: ClaudeSessionOptions) {
     this.sessionId = options.sessionId;
+    this.permissionMode = options.permissionMode;
     this.attention = new ClaudeAttention(options.threadId, options.cwd, options.attention, {
       onUserInputResponse: (turnId, itemId, questions, answers) =>
         this.options.callbacks.onUserInputResponse(turnId, itemId, questions, answers),
@@ -165,6 +167,17 @@ export class ClaudeSession {
     return turnId;
   }
 
+  /**
+   * Updates the session's permission mode. Stored for the next `query` and, if one is live
+   * (streaming input), forwarded to it so the change applies to the next tool decision.
+   */
+  setPermissionMode(mode: string): void {
+    this.permissionMode = mode;
+    void this.query?.setPermissionMode?.(mode).catch(() => {
+      // A stale/closing query rejects; the stored mode still seeds the next query.
+    });
+  }
+
   /** Interrupts the running turn (receipt fast-path, watchdog force-abort fallback). */
   async interrupt(): Promise<void> {
     if (this.state !== "streaming" && this.state !== "starting") return;
@@ -205,7 +218,7 @@ export class ClaudeSession {
         cwd: this.options.cwd,
         ...(this.options.model ? { model: this.options.model } : {}),
         ...(this.options.effort ? { effort: this.options.effort } : {}),
-        permissionMode: this.options.permissionMode,
+        permissionMode: this.permissionMode,
         pathToClaudeCodeExecutable: this.options.bin,
         settingSources: [],
         strictMcpConfig: true,

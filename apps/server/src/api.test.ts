@@ -9,6 +9,9 @@ import { buildApp } from "./app";
 import type { AppManager } from "./app-management";
 import { CodexBackend } from "./backends/codex";
 import { SessionHub } from "./backends/hub";
+import { ClaudeBackend } from "./claude/backend";
+import { DEFAULT_CLAUDE_MODELS } from "./claude/models";
+import type { ClaudeSdk, VersionRunner } from "./claude/sdk";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
@@ -1635,3 +1638,93 @@ function testTurn(id: string, status: Turn["status"]): Turn {
     durationMs: null,
   };
 }
+
+describe("project threads route (dual backend)", () => {
+  // createThread never touches the SDK, so a throwing stub is enough for this route test.
+  const claudeSdk: ClaudeSdk = {
+    query: () => {
+      throw new Error("query is unused when only creating a Claude thread");
+    },
+    getSessionMessages: async () => [],
+    getSessionInfo: async () => null,
+  };
+  const claudeRunner: VersionRunner = async () => ({ stdout: "2.1.0 (Claude Code)", stderr: "" });
+
+  async function dualBackendApp() {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-dual-threads-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.projects.push({
+        id: "project",
+        displayName: "Project",
+        path: "/work",
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      });
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    const config = loadConfig({
+      statePath: store.path,
+      clientDist: join(directory, "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+      websocketAuthTimeoutMs: 25,
+    });
+    const services = codexServices({
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      push: new PushNotifier(store),
+      projectRoot: directory,
+    });
+    const claudeBackend = new ClaudeBackend({
+      store,
+      sdk: claudeSdk,
+      models: DEFAULT_CLAUDE_MODELS,
+      bin: "claude",
+      attention,
+      runVersion: claudeRunner,
+    });
+    const hub = new SessionHub(
+      [services.codexBackend, claudeBackend],
+      store,
+      attention,
+      services.push.configured,
+    );
+    const app = await buildApp(config, { ...services, hub });
+    return { app };
+  }
+
+  it("creates a Claude project thread when agent is claude (no longer 409s)", async () => {
+    const { app } = await dualBackendApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers: { authorization: "Bearer correct" },
+      payload: { agent: "claude" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().thread).toMatchObject({
+      agent: "claude",
+      projectId: "project",
+      cwd: "/work",
+    });
+  });
+
+  it("rejects an unknown agent on the project threads route", async () => {
+    const { app } = await dualBackendApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers: { authorization: "Bearer correct" },
+      payload: { agent: "gemini" },
+    });
+    expect(created.statusCode).toBe(409);
+  });
+});

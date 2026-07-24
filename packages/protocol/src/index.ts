@@ -645,6 +645,7 @@ export type UpdateThreadSettingsRequest = {
   reasoningEffort?: string | null;
   serviceTier?: string | null;
   personality?: string | null;
+  permissionPreset?: PermissionPreset | null;
 };
 
 export type SteerTurnRequest = {

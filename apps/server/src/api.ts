@@ -518,14 +518,23 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.post<{ Params: { id: string }; Body: CreateProjectThreadRequest }>(
     "/api/v1/projects/:id/threads",
     async (request, reply) => {
-      if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
-        return apiError(reply, 404, "not_found", "Project not found");
-      }
+      const project = store
+        .snapshot()
+        .projects.find((candidate) => candidate.id === request.params.id);
+      if (!project) return apiError(reply, 404, "not_found", "Project not found");
       const backend = resolveBackend(hub, request.body?.agent);
-      if (!(backend instanceof CodexBackend)) {
-        throw new UnsupportedForAgentError("Этот агент пока не поддерживает проекты");
+      // Codex keeps its dedicated reuse-or-start path (byte-identical). Every other backend
+      // creates through the generic AgentBackend.createThread, which reuses an empty thread
+      // in the project the same way (see ClaudeBackend.findReusableThread).
+      if (backend instanceof CodexBackend) {
+        const thread = await backend.getOrCreateProjectThread(request.params.id);
+        return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
       }
-      const thread = await backend.getOrCreateProjectThread(request.params.id);
+      const thread = await backend.createThread(
+        request.params.id,
+        project.path,
+        backend.newSessionSettings,
+      );
       return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
     },
   );
@@ -1207,6 +1216,7 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     "reasoningEffort",
     "serviceTier",
     "personality",
+    "permissionPreset",
   ]);
   if (Object.keys(settings).some((key) => !known.has(key))) {
     throw new ProjectValidationError("Unknown session setting");
@@ -1216,6 +1226,13 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
     !["default", "plan"].includes(String(settings.collaborationMode))
   ) {
     throw new ProjectValidationError("Invalid collaborationMode");
+  }
+  if (
+    settings.permissionPreset !== undefined &&
+    settings.permissionPreset !== null &&
+    !["ask", "auto", "full-access"].includes(String(settings.permissionPreset))
+  ) {
+    throw new ProjectValidationError("Invalid permissionPreset");
   }
   for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
     if (

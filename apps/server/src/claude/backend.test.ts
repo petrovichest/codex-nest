@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ServerEvent } from "@codexnest/protocol";
+import type { ServerEvent, SessionSettings } from "@codexnest/protocol";
 
 import { AttentionManager } from "../attention";
 import { StateStore } from "../state/store";
@@ -75,6 +75,10 @@ class FakeQuery implements AsyncGenerator<unknown, void, unknown> {
   async interrupt(): Promise<ClaudeInterruptReceipt | undefined> {
     this.interruptCount += 1;
     return { still_queued: [] };
+  }
+  permissionModes: string[] = [];
+  async setPermissionMode(mode: string): Promise<void> {
+    this.permissionModes.push(mode);
   }
   async next(): Promise<IteratorResult<unknown, void>> {
     for (;;) {
@@ -275,6 +279,64 @@ describe("ClaudeBackend readThread", () => {
   it("throws ThreadNotFoundError for an unknown thread", async () => {
     const { backend } = await setup();
     await expect(backend.readThread("nope")).rejects.toThrow("Thread not found");
+  });
+
+  const lostTurnTranscript = (): ClaudeTranscriptMessage[] => [
+    {
+      type: "user",
+      uuid: "u1",
+      session_id: "sess-lost",
+      message: { role: "user", content: [{ type: "text", text: "do it" }] },
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+      timestamp: "2026-07-24T07:59:59.000Z",
+    },
+    {
+      type: "assistant",
+      uuid: "a1",
+      session_id: "sess-lost",
+      // stop_reason null → the projection leaves the final turn unclosed (interrupted).
+      message: { role: "assistant", content: [{ type: "text", text: "half" }], stop_reason: null },
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+      timestamp: "2026-07-24T08:00:00.000Z",
+    },
+  ];
+
+  it("lazily persists an interrupted outcome for a lost trailing turn (no live session)", async () => {
+    const { backend, store, events } = await setup({
+      sdk: { getSessionMessages: vi.fn(async () => lostTurnTranscript()) },
+    });
+    const { id } = await backend.createThread("p", "/work", { collaborationMode: "default" });
+    await patchClaudeSession(store, id, { sessionId: "sess-lost", preview: "do it" });
+
+    const before = events.length;
+    const detail = await backend.readThread(id);
+
+    expect(detail.turns.at(-1)?.status).toBe("interrupted");
+    expect(detail.summary.state).toBe("interrupted");
+    expect(store.snapshot().threadMeta[id]?.lastOutcome).toBe("interrupted");
+    expect(store.snapshot().threadMeta[id]?.outcomeUpdatedAt).toBe(
+      Date.parse("2026-07-24T08:00:00.000Z"),
+    );
+    expect(events.slice(before).some((event) => event.type === "thread.upserted")).toBe(true);
+  });
+
+  it("does not overwrite an already-persisted outcome on read", async () => {
+    const { backend, store } = await setup({
+      sdk: { getSessionMessages: vi.fn(async () => lostTurnTranscript()) },
+    });
+    const { id } = await backend.createThread("p", "/work", { collaborationMode: "default" });
+    await patchClaudeSession(store, id, { sessionId: "sess-lost", preview: "do it" });
+    // A prior completed outcome must survive — the lazy write-back only fills a missing one.
+    await store.update((state) => {
+      state.threadMeta[id] = { pinned: false, lastReadUpdatedAt: 0, lastOutcome: "completed" };
+    });
+
+    const detail = await backend.readThread(id);
+    expect(detail.summary.state).toBe("completed");
+    expect(store.snapshot().threadMeta[id]?.lastOutcome).toBe("completed");
+    expect(store.snapshot().threadMeta[id]?.outcomeUpdatedAt).toBeUndefined();
   });
 });
 
@@ -655,5 +717,57 @@ describe("ClaudeBackend interrupt while an approval is pending", () => {
     expect(settled).toMatchObject({ behavior: "deny" });
     await waitFor(() => backend.currentTurnId(id) === null);
     expect(attention.list().some((request) => request.threadId === id)).toBe(false);
+  });
+});
+
+describe("ClaudeBackend permission preset mapping", () => {
+  it("maps presets and an active plan mode to the SDK permission mode at session start", async () => {
+    const modes: Array<string | undefined> = [];
+    const { backend } = await setup({
+      sdk: {
+        query: (params) => {
+          modes.push((params.options as { permissionMode?: string }).permissionMode);
+          return new FakeQuery() as unknown as ClaudeQuery;
+        },
+      },
+    });
+    await backend.start();
+    const cases: Array<[SessionSettings, string]> = [
+      [{ collaborationMode: "default" }, "default"],
+      [{ collaborationMode: "default", permissionPreset: "ask" }, "default"],
+      [{ collaborationMode: "default", permissionPreset: "auto" }, "acceptEdits"],
+      [{ collaborationMode: "default", permissionPreset: "full-access" }, "bypassPermissions"],
+      // An active plan collaboration mode overrides the preset.
+      [{ collaborationMode: "plan", permissionPreset: "full-access" }, "plan"],
+    ];
+    let index = 0;
+    for (const [settings] of cases) {
+      const { id } = await backend.createThread(`proj-${index}`, "/work", settings);
+      await backend.startTurn(id, { text: "hi", images: [], clientMessageId: null });
+      index += 1;
+    }
+    expect(modes).toEqual(cases.map(([, expected]) => expected));
+  });
+});
+
+describe("ClaudeBackend setSettings", () => {
+  it("forwards a permission-preset change to a live pooled session", async () => {
+    const { backend, queries } = await setup();
+    await backend.start();
+    const { id } = await backend.createThread("p", "/work", {
+      collaborationMode: "default",
+      permissionPreset: "ask",
+    });
+    await backend.startTurn(id, { text: "hi", images: [], clientMessageId: null });
+    queries[0]!.emit(initMsg());
+    queries[0]!.emit(resultMsg("success"));
+    // The session stays alive (idle) in the pool after the turn completes.
+    await waitFor(() => backend.currentTurnId(id) === null);
+
+    await backend.setSettings(id, {
+      collaborationMode: "default",
+      permissionPreset: "full-access",
+    });
+    expect(queries[0]!.permissionModes).toEqual(["bypassPermissions"]);
   });
 });
