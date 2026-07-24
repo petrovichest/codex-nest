@@ -57,7 +57,7 @@ export class BrowserNotificationTracker {
       }
     }
     for (const thread of missedThreads) {
-      this.showThreadState(thread.state, thread.id, thread.title, thread.agent);
+      this.showThreadState(thread.state, thread.id, thread.title, this.agentFor(thread.id));
     }
     for (const attention of missedAttention) {
       const agent = this.agentFor(attention.threadId);
@@ -84,7 +84,7 @@ export class BrowserNotificationTracker {
           event.thread.state,
           event.thread.id,
           event.thread.title,
-          event.thread.agent,
+          this.agentFor(event.thread.id),
         );
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.thread.updatedAt);

@@ -140,6 +140,20 @@ describe("BrowserNotificationTracker", () => {
     expect(notifications[0]?.options?.body).toBe("Задача Codex");
   });
 
+  it("labels an agent-less thread (old-server skew) as Codex, not «undefined»", () => {
+    const tracker = new BrowserNotificationTracker();
+    const running = { ...thread("running", 10), agent: undefined } as unknown as ThreadSummary;
+    tracker.acceptSnapshot(snapshot([running]));
+
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "needsAttention", updatedAt: 20 },
+    });
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Codex ждёт решения");
+  });
+
   it("does not display system notifications while the page is visible", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     const tracker = new BrowserNotificationTracker();
