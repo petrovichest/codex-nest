@@ -1462,7 +1462,7 @@ describe("Activity", () => {
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
   });
 
-  it("shows server-owned queued messages and sends one immediately", async () => {
+  it("docks queued messages above the composer and supports queue actions", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
     mockThreadConnection(api, running, {
@@ -1474,13 +1474,75 @@ describe("Activity", () => {
           createdAt: 1,
           status: "queued",
         },
+        {
+          id: "second",
+          threadId: "thread",
+          text: "Следующее сообщение",
+          createdAt: 2,
+          status: "queued",
+        },
       ],
     });
     renderThread();
 
-    expect(screen.getByText("В очереди")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    const queue = screen.getByRole("region", { name: "Очередь сообщений" });
+    expect(queue.closest("form")).toHaveClass("composer");
+    expect(queue.closest(".timeline")).toBeNull();
+    expect(
+      Array.from(queue.querySelectorAll("[data-message-id]")).map((node) =>
+        node.getAttribute("data-message-id"),
+      ),
+    ).toEqual(["queued", "second"]);
+    expect(screen.getAllByText("В очереди")).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {
+      target: { value: "Исправленная срочная правка" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() =>
+      expect(api.updateQueued).toHaveBeenCalledWith("thread", "queued", {
+        input: "Исправленная срочная правка",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "Текст сообщения в очереди" })).toBeNull(),
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {
+      target: { value: "Не сохранять" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(api.updateQueued).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Удалить сообщение из очереди" })[0]!);
+    await waitFor(() => expect(api.deleteQueued).toHaveBeenCalledWith("thread", "queued"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Отправить сейчас" })[0]!);
     await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "queued"));
+  });
+
+  it("disables queue actions until optimistic messages are confirmed", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    context.state.optimisticMessages.thread = [
+      {
+        id: "optimistic",
+        threadId: "thread",
+        text: "Добавляется",
+        images: [],
+        createdAt: 1,
+        destination: "queue",
+        turnId: null,
+      },
+    ];
+    renderThread();
+
+    expect(screen.getByText("Добавляется…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Изменить сообщение в очереди" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Удалить сообщение из очереди" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
   });
 
   it("shows chronological plan checklists inside the turn without a composer status pill", () => {
@@ -2070,6 +2132,8 @@ function threadApi() {
       ),
     enqueue: vi.fn().mockResolvedValue({ id: "queued" }),
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
+    updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),
+    deleteQueued: vi.fn().mockResolvedValue(undefined),
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
@@ -2112,6 +2176,7 @@ function mockThreadConnection(
       id: string;
       threadId: string;
       text: string;
+      images?: string[];
       createdAt: number;
       status: "queued" | "dispatching";
     }>;

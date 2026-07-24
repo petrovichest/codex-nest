@@ -51,7 +51,7 @@ describe("Composer", () => {
       within(model)
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["5.6sol", "5.6sol", "5.6terra", "Other Model"]);
+    ).toEqual(["По умолчанию · 5.6sol", "5.6sol", "5.6terra", "Other Model"]);
     expect(control?.querySelector(".setting-select-value")).toHaveTextContent("5.6sol");
     expect(control?.querySelector(".setting-select-chevron")).toBeNull();
 

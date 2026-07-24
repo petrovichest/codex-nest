@@ -46,7 +46,9 @@ export function SettingsPicker({
         value={value.model ?? ""}
         onChange={(selected) => changeModel(selected || null)}
       >
-        <option value="">{modelDisplayName}</option>
+        <option value="">
+          {t("По умолчанию")} · {modelDisplayName}
+        </option>
         {models.map((option) => (
           <option value={option.id} key={option.id}>
             {compactModelName(option.displayName)}

@@ -1114,6 +1114,42 @@ describe("thread settings", () => {
         status: "queued",
       }),
     ]);
+    const editedQueued = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/thread/queue/${queued.json().id}`,
+      headers,
+      payload: { input: "  Исправленный текст  " },
+    });
+    expect(editedQueued.statusCode).toBe(200);
+    expect(editedQueued.json()).toMatchObject({
+      id: "client-queued",
+      text: "Исправленный текст",
+      status: "queued",
+    });
+    const invalidQueuedEdit = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/thread/queue/${queued.json().id}`,
+      headers,
+      payload: { input: " " },
+    });
+    expect(invalidQueuedEdit.statusCode).toBe(400);
+
+    const cancellable = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Удалить из очереди", clientMessageId: "client-cancelled" },
+    });
+    const cancelled = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/threads/thread/queue/${cancellable.json().id}`,
+      headers,
+    });
+    expect(cancelled.statusCode).toBe(204);
+    expect(store.snapshot().messageQueues?.thread).toEqual([
+      expect.objectContaining({ id: "client-queued", text: "Исправленный текст" }),
+    ]);
+
     const sentNow = await app.inject({
       method: "POST",
       url: `/api/v1/threads/thread/queue/${queued.json().id}/send`,
@@ -1126,12 +1162,12 @@ describe("thread settings", () => {
       bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],
     ).toMatchObject({
       clientUserMessageId: queued.json().id,
-      input: [{ type: "text", text: "Поставь в очередь", text_elements: [] }],
+      input: [{ type: "text", text: "Исправленный текст", text_elements: [] }],
     });
     expect(activityEvents.at(-1)).toMatchObject({
       threadId: "thread",
       turnId: "steered",
-      item: { type: "userMessage", id: "client-queued", text: "Поставь в очередь" },
+      item: { type: "userMessage", id: "client-queued", text: "Исправленный текст" },
     });
 
     const invalid = await app.inject({

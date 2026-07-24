@@ -15,6 +15,8 @@ export interface MessageQueueDelivery {
 
 export class MessageQueueNotFoundError extends Error {}
 export class MessageQueuePausedError extends Error {}
+export class MessageQueueConflictError extends Error {}
+export class MessageQueueValidationError extends Error {}
 
 export class MessageQueue {
   private readonly locks = new Map<string, Promise<unknown>>();
@@ -73,6 +75,43 @@ export class MessageQueue {
       const message = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!message) throw new MessageQueueNotFoundError("Queued message not found");
       return this.dispatch(threadId, message, true);
+    });
+  }
+
+  update(threadId: string, messageId: string, text: string): Promise<QueuedMessage> {
+    return this.withLock(threadId, async () => {
+      const current = this.list(threadId).find((candidate) => candidate.id === messageId);
+      if (!current) throw new MessageQueueNotFoundError("Queued message not found");
+      if (current.status !== "queued") {
+        throw new MessageQueueConflictError("Queued message is already being sent");
+      }
+      const trimmed = text.trim();
+      if (!trimmed && !current.images?.length) {
+        throw new MessageQueueValidationError("Queued message text must not be empty");
+      }
+      const updated = { ...current, text: trimmed };
+      await this.store.update((state) => {
+        const messages = state.messageQueues?.[threadId];
+        if (!messages?.some((message) => message.id === messageId)) {
+          throw new MessageQueueNotFoundError("Queued message not found");
+        }
+        state.messageQueues![threadId] = messages.map((message) =>
+          message.id === messageId ? updated : message,
+        );
+      });
+      this.publish(threadId);
+      return updated;
+    });
+  }
+
+  cancel(threadId: string, messageId: string): Promise<void> {
+    return this.withLock(threadId, async () => {
+      const current = this.list(threadId).find((candidate) => candidate.id === messageId);
+      if (!current) throw new MessageQueueNotFoundError("Queued message not found");
+      if (current.status !== "queued") {
+        throw new MessageQueueConflictError("Queued message is already being sent");
+      }
+      await this.remove(threadId, messageId);
     });
   }
 

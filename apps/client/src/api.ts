@@ -34,6 +34,7 @@ import type {
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
+  UpdateQueuedMessageRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
@@ -262,6 +263,24 @@ export class ApiClient {
     return this.request(
       `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}/send`,
       { method: "POST" },
+    );
+  }
+
+  updateQueued(
+    id: string,
+    messageId: string,
+    body: UpdateQueuedMessageRequest,
+  ): Promise<QueuedMessage> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "PATCH", body },
+    );
+  }
+
+  deleteQueued(id: string, messageId: string): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "DELETE" },
     );
   }
 

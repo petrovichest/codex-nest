@@ -417,6 +417,7 @@ const ENGLISH: Record<string, string> = {
   "Для доступа к микрофону откройте CodexNest по HTTPS":
     "Open CodexNest over HTTPS to access the microphone",
   "Добавить в очередь": "Add to queue",
+  "Добавляется…": "Adding…",
   "Добавить изображения": "Add images",
   "Загружаем старые сообщения": "Loading older messages",
   Задача: "Task",
@@ -452,6 +453,7 @@ const ENGLISH: Record<string, string> = {
   "Не удалось закончить сессию": "Failed to finish the session",
   "Не удалось записать аудио": "Failed to record audio",
   "Не удалось изменить настройки": "Failed to change settings",
+  "Не удалось изменить сообщение в очереди": "Failed to update the queued message",
   "Не удалось изменить цель": "Failed to change the goal",
   "Не удалось начать запись с микрофона": "Failed to start microphone recording",
   "Не удалось начать реализацию плана": "Failed to start implementing the plan",
@@ -464,6 +466,7 @@ const ENGLISH: Record<string, string> = {
   "Не удалось скопировать блок": "Failed to copy block",
   "Не удалось сохранить черновик": "Failed to save the draft",
   "Не удалось удалить сессию": "Failed to delete the session",
+  "Не удалось удалить сообщение из очереди": "Failed to delete the queued message",
   "Несовместимое событие": "Unsupported event",
   "Нет доступа к микрофону. Разрешите его в настройках приложения или браузера":
     "Microphone access is denied. Allow it in the app or browser settings",
@@ -476,6 +479,7 @@ const ENGLISH: Record<string, string> = {
   "Очередь сообщений": "Message queue",
   "Ошибка копирования": "Copy failed",
   Переименовать: "Rename",
+  "Изменить сообщение в очереди": "Edit queued message",
   План: "Plan",
   "Повторить загрузку старых сообщений": "Retry loading older messages",
   "Прочитаны файлы": "Files read",
@@ -494,11 +498,13 @@ const ENGLISH: Record<string, string> = {
   "Сохранить аннотацию": "Save annotation",
   "Спросите что угодно": "Ask anything",
   Удалить: "Delete",
+  "Удалить сообщение из очереди": "Delete queued message",
   "Удалить аннотацию": "Delete annotation",
   "Удалить изображение {{name}}": "Delete image {{name}}",
   "Удалить эту сессию? Это действие нельзя отменить.":
     "Delete this session? This action cannot be undone.",
   "Удаляем…": "Deleting…",
+  "Текст сообщения в очереди": "Queued message text",
   "Ход работы": "Progress",
   "Чтобы начать задачу, добавьте рабочую папку.": "Add a workspace folder to start a task.",
   "Этот браузер не поддерживает запись WebM или MP4":

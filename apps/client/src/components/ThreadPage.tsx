@@ -74,6 +74,15 @@ type ActiveTranscription = {
   estimatedTotalSeconds: number | null;
 };
 
+type QueueAction = {
+  messageId: string;
+  kind: "send" | "update" | "delete";
+};
+
+type QueuedMessageView = QueuedMessage & {
+  confirmed: boolean;
+};
+
 function emptyComposerDraft(): UpdateThreadDraftRequest {
   return { input: "", images: [], goalMode: false, annotations: [] };
 }
@@ -136,7 +145,7 @@ export function ThreadPage({
   const [finishing, setFinishing] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
+  const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTranscription, setActiveTranscription] = useState<ActiveTranscription | null>(null);
   const activeTranscriptionRef = useRef<ActiveTranscription | null>(null);
@@ -771,19 +780,57 @@ export function ThreadPage({
     }
   }
 
-  async function sendQueuedNow(messageId: string) {
-    setSendingQueuedId(messageId);
+  async function sendQueuedNow(messageId: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
       await api.sendQueuedNow(threadId, messageId);
+      return true;
     } catch (caught) {
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
           : t("Не удалось отправить сообщение"),
       );
+      return false;
     } finally {
-      setSendingQueuedId(null);
+      setQueueAction(null);
+    }
+  }
+
+  async function updateQueued(messageId: string, value: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "update" });
+    setError(null);
+    try {
+      await api.updateQueued(threadId, messageId, { input: value });
+      return true;
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить сообщение в очереди"),
+      );
+      return false;
+    } finally {
+      setQueueAction(null);
+    }
+  }
+
+  async function deleteQueued(messageId: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "delete" });
+    setError(null);
+    try {
+      await api.deleteQueued(threadId, messageId);
+      return true;
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось удалить сообщение из очереди"),
+      );
+      return false;
+    } finally {
+      setQueueAction(null);
     }
   }
 
@@ -1018,16 +1065,6 @@ export function ThreadPage({
               </div>
             ))}
             <AttentionPanel requests={attention} />
-            <QueuedMessages
-              messages={mergeOptimisticQueue(
-                detail?.queuedMessages ?? [],
-                optimisticQueuedMessages,
-              )}
-              sendingId={sendingQueuedId}
-              onSendNow={(messageId) => void sendQueuedNow(messageId)}
-              cwd={summary.cwd}
-              onDownload={downloadFile}
-            />
             {["completed", "interrupted"].includes(summary.state) && summary.unread && (
               <button
                 className="finish-thread-action"
@@ -1099,7 +1136,15 @@ export function ThreadPage({
           transcriptionError={transcriptionErrors[threadId] ?? null}
           error={error}
           hasSupplementalContent={annotations.length > 0}
-        />
+        >
+          <QueuedMessages
+            messages={mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)}
+            action={queueAction}
+            onSendNow={sendQueuedNow}
+            onUpdate={updateQueued}
+            onDelete={deleteQueued}
+          />
+        </Composer>
       </div>
       <SessionInspector
         open={inspectorOpen}
@@ -1161,10 +1206,10 @@ function detachedOptimisticMessages(
 function mergeOptimisticQueue(
   messages: QueuedMessage[],
   optimistic: OptimisticMessage[],
-): QueuedMessage[] {
+): QueuedMessageView[] {
   const confirmedIds = new Set(messages.map((message) => message.id));
   return [
-    ...messages,
+    ...messages.map((message) => ({ ...message, confirmed: true })),
     ...optimistic
       .filter((message) => !confirmedIds.has(message.id))
       .map((message) => ({
@@ -1174,6 +1219,7 @@ function mergeOptimisticQueue(
         ...(message.images.length ? { images: message.images } : {}),
         createdAt: message.createdAt,
         status: "queued" as const,
+        confirmed: false,
       })),
   ];
 }
@@ -1937,45 +1983,136 @@ function ActivityGroup({
 
 function QueuedMessages({
   messages,
-  sendingId,
+  action,
   onSendNow,
-  cwd,
-  onDownload,
+  onUpdate,
+  onDelete,
 }: {
-  messages: QueuedMessage[];
-  sendingId: string | null;
-  onSendNow(messageId: string): void;
-  cwd: string;
-  onDownload(path: string): Promise<void>;
+  messages: QueuedMessageView[];
+  action: QueueAction | null;
+  onSendNow(messageId: string): Promise<boolean>;
+  onUpdate(messageId: string, value: string): Promise<boolean>;
+  onDelete(messageId: string): Promise<boolean>;
 }) {
   const { t } = useI18n();
+  const [editor, setEditor] = useState<{ messageId: string; value: string } | null>(null);
+
+  useEffect(() => {
+    if (
+      editor &&
+      !messages.some(
+        (message) =>
+          message.id === editor.messageId && message.confirmed && message.status === "queued",
+      )
+    ) {
+      setEditor(null);
+    }
+  }, [editor, messages]);
+
   if (!messages.length) return null;
   return (
     <section className="queued-messages" aria-label={t("Очередь сообщений")}>
-      {messages.map((message) => (
-        <article
-          className="message userMessage queued-message"
-          data-message-id={message.id}
-          key={message.id}
-        >
-          <div className="message-body">
-            {message.text && (
-              <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />
-            )}
-            {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
-          </div>
-          <MessageFooter text={message.text} timestamp={message.createdAt} />
-          <div className="queued-message-footer">
-            <span>{message.status === "dispatching" ? t("Отправляется…") : t("В очереди")}</span>
-            <button
-              disabled={message.status === "dispatching" || sendingId !== null}
-              onClick={() => onSendNow(message.id)}
-            >
-              {t("Отправить сейчас")}
-            </button>
-          </div>
-        </article>
-      ))}
+      <header className="queued-messages-header">
+        <span>{t("Очередь сообщений")}</span>
+        <span>{messages.length}</span>
+      </header>
+      <div className="queued-messages-list">
+        {messages.map((message) => {
+          const editing = editor?.messageId === message.id;
+          const busy = action?.messageId === message.id;
+          const actionsDisabled =
+            action !== null || !message.confirmed || message.status === "dispatching";
+          const editValue = editing ? editor.value : "";
+          const canSave =
+            Boolean(editValue.trim() || message.images?.length) &&
+            editValue.trim() !== message.text;
+          const status = !message.confirmed
+            ? t("Добавляется…")
+            : action?.messageId === message.id && action.kind === "delete"
+              ? t("Удаляем…")
+              : action?.messageId === message.id && action.kind === "update"
+                ? t("Сохраняем…")
+                : message.status === "dispatching" ||
+                    (action?.messageId === message.id && action.kind === "send")
+                  ? t("Отправляется…")
+                  : t("В очереди");
+          return (
+            <article className="queued-message" data-message-id={message.id} key={message.id}>
+              <div className="queued-message-heading">
+                <span>{status}</span>
+                <div className="queued-message-actions">
+                  {!editing && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Изменить сообщение в очереди")}
+                      disabled={actionsDisabled}
+                      onClick={() => setEditor({ messageId: message.id, value: message.text })}
+                    >
+                      <PencilIcon />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    aria-label={t("Удалить сообщение из очереди")}
+                    disabled={actionsDisabled}
+                    onClick={() => void onDelete(message.id)}
+                  >
+                    <TrashIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="queued-message-send"
+                    disabled={actionsDisabled}
+                    onClick={() => void onSendNow(message.id)}
+                  >
+                    {t("Отправить сейчас")}
+                  </button>
+                </div>
+              </div>
+              {editing ? (
+                <div className="queued-message-editor">
+                  <textarea
+                    autoFocus
+                    aria-label={t("Текст сообщения в очереди")}
+                    rows={3}
+                    value={editValue}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setEditor({ messageId: message.id, value: event.target.value })
+                    }
+                  />
+                  <div className="queued-message-editor-actions">
+                    <button type="button" disabled={busy} onClick={() => setEditor(null)}>
+                      {t("Отмена")}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy || !canSave}
+                      onClick={() => {
+                        void onUpdate(message.id, editValue).then((saved) => {
+                          if (saved) setEditor(null);
+                        });
+                      }}
+                    >
+                      {busy ? t("Сохраняем…") : t("Сохранить")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {message.text && <div className="queued-message-text">{message.text}</div>}
+                  {(message.images?.length ?? 0) > 0 && (
+                    <MessageImages images={message.images ?? []} />
+                  )}
+                </>
+              )}
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }

@@ -77,6 +77,50 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([first]);
   });
 
+  it("updates queued text without changing its metadata or images", async () => {
+    const { queue, delivery } = await setup("active");
+    const image = "data:image/png;base64,aW1hZ2U=";
+    const first = await queue.enqueue("thread", "Старый текст", [image]);
+    const second = await queue.enqueue("thread", "Следом");
+
+    const updated = await queue.update("thread", first.id, "  Новый текст  ");
+
+    expect(updated).toEqual({ ...first, text: "Новый текст" });
+    expect(queue.list("thread")).toEqual([updated, second]);
+    expect(delivery.publish).toHaveBeenLastCalledWith("thread", [updated, second]);
+  });
+
+  it("cancels a queued message without affecting the remaining order", async () => {
+    const { queue, delivery } = await setup("active");
+    const first = await queue.enqueue("thread", "Первое");
+    const second = await queue.enqueue("thread", "Второе");
+
+    await queue.cancel("thread", first.id);
+
+    expect(queue.list("thread")).toEqual([second]);
+    expect(delivery.publish).toHaveBeenLastCalledWith("thread", [second]);
+  });
+
+  it("rejects invalid, missing, and dispatching queue mutations", async () => {
+    const { queue, store } = await setup("active");
+    const message = await queue.enqueue("thread", "Сообщение");
+
+    await expect(queue.update("thread", message.id, " ")).rejects.toThrow(
+      "Queued message text must not be empty",
+    );
+    await expect(queue.cancel("thread", "missing")).rejects.toThrow("Queued message not found");
+
+    await store.update((state) => {
+      state.messageQueues!.thread = [{ ...message, status: "dispatching" }];
+    });
+    await expect(queue.update("thread", message.id, "Правка")).rejects.toThrow(
+      "Queued message is already being sent",
+    );
+    await expect(queue.cancel("thread", message.id)).rejects.toThrow(
+      "Queued message is already being sent",
+    );
+  });
+
   it("reconciles dispatching messages after a restart", async () => {
     const { queue, store, delivery } = await setup("active");
     const delivered = queued("delivered", "Доставлено", "dispatching");

@@ -37,6 +37,7 @@ import type {
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
+  UpdateQueuedMessageRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
@@ -77,7 +78,13 @@ import {
 } from "./projects";
 import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
-import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
+import {
+  MessageQueue,
+  MessageQueueConflictError,
+  MessageQueueNotFoundError,
+  MessageQueuePausedError,
+  MessageQueueValidationError,
+} from "./message-queue";
 import type { StateStore } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
 import {
@@ -990,6 +997,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }),
   );
 
+  app.patch<{
+    Params: { id: string; messageId: string };
+    Body: UpdateQueuedMessageRequest;
+  }>(
+    "/api/v1/threads/:id/queue/:messageId",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const body = requireRecord<UpdateQueuedMessageRequest>(request.body);
+      if (typeof body.input !== "string") {
+        return apiError(reply, 400, "validation_failed", "input must be a string");
+      }
+      return queue.update(request.params.id, request.params.messageId, body.input);
+    },
+  );
+
+  app.delete<{ Params: { id: string; messageId: string } }>(
+    "/api/v1/threads/:id/queue/:messageId",
+    async (request, reply) => {
+      await queue.cancel(request.params.id, request.params.messageId);
+      return reply.code(204).send();
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: SteerTurnRequest }>(
     "/api/v1/threads/:id/steer",
     { bodyLimit: CHAT_BODY_LIMIT },
@@ -1127,7 +1157,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof MessageQueueNotFoundError)
       return apiError(reply, 404, "not_found", error.message);
-    if (error instanceof MessageQueuePausedError)
+    if (error instanceof MessageQueueValidationError)
+      return apiError(reply, 400, "validation_failed", error.message);
+    if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof CodexManagementError) {
       if (error.kind === "validation")

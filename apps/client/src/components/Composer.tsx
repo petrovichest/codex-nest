@@ -2,6 +2,7 @@ import {
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -82,6 +83,7 @@ export function Composer({
   error,
   autoFocus = false,
   hasSupplementalContent = false,
+  children,
 }: {
   input: string;
   onInput(value: string): void;
@@ -114,6 +116,7 @@ export function Composer({
   error: string | null;
   autoFocus?: boolean;
   hasSupplementalContent?: boolean;
+  children?: ReactNode;
 }) {
   const { language, t } = useI18n();
   const creating = projects !== undefined;
@@ -565,6 +568,7 @@ export function Composer({
           })}
         </div>
       )}
+      {children}
       <div className="composer-box">
         <textarea
           ref={textareaRef}

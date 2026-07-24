@@ -625,6 +625,10 @@ export type QueueMessageRequest = {
   clientMessageId?: string;
 };
 
+export type UpdateQueuedMessageRequest = {
+  input: string;
+};
+
 export type UpdateThreadSettingsRequest = {
   collaborationMode?: CollaborationMode;
   model?: string | null;
