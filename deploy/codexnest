@@ -301,6 +301,9 @@ codexnest_repair() {
   "$codex_bin" app-server daemon bootstrap
   systemctl --user restart codexnest.service
   codexnest_health_ok "$(codexnest_current_version)" || codexnest_die "CodexNest did not become healthy"
+  # Report Claude non-fatally: there is no daemon to bootstrap and a missing CLI
+  # must never fail repair. The restart above re-probed for it in auto mode.
+  codexnest_claude_status
   printf 'CodexNest and Codex daemon are ready.\n'
 }
 
@@ -320,6 +323,34 @@ codexnest_rollback() {
   printf 'Rolled back to CodexNest %s.\n' "$version"
 }
 
+# Claude Code is an optional second agent backend. It has no daemon and never
+# blocks CodexNest startup, so its absence is informational, not a failure — both
+# doctor and repair report it without ever bootstrapping or failing on it. The
+# bin is resolved via CODEXNEST_CLAUDE_BIN (server.env, then the shell env),
+# defaulting to "claude" on PATH, mirroring how the server resolves it.
+codexnest_claude_status() {
+  local bin enabled path version
+  bin="${CODEXNEST_CLAUDE_BIN:-$(codexnest_config_value CODEXNEST_CLAUDE_BIN || true)}"
+  bin="${bin:-claude}"
+  enabled="${CODEXNEST_CLAUDE_ENABLED:-$(codexnest_config_value CODEXNEST_CLAUDE_ENABLED || true)}"
+  enabled="${enabled:-auto}"
+  path="$(command -v "$bin" 2>/dev/null || true)"
+  if [[ -n "$path" ]]; then
+    version="$("$path" --version 2>/dev/null || true)"
+    version="${version%%$'\n'*}"
+    printf 'Claude Code CLI: %s (%s)\n' "${version:-version unknown}" "$path"
+  else
+    printf 'Claude Code CLI: not installed (optional second backend)\n'
+    printf '  Install Claude Code and run `claude login` as the service user, or set\n'
+    printf '  ANTHROPIC_API_KEY in the service environment. CodexNest stores no Anthropic credentials.\n'
+  fi
+  case "$enabled" in
+    false) printf '  CODEXNEST_CLAUDE_ENABLED=false: the Claude backend stays disabled.\n' ;;
+    true) printf '  CODEXNEST_CLAUDE_ENABLED=true: the server enables Claude and probes this CLI at startup.\n' ;;
+    *) printf '  CODEXNEST_CLAUDE_ENABLED=auto: probed once at server startup; a CLI installed later needs a restart (or set =true).\n' ;;
+  esac
+}
+
 codexnest_doctor() {
   local failed=0
   printf 'CodexNest version: %s\n' "$(codexnest_current_version)"
@@ -334,6 +365,7 @@ codexnest_doctor() {
   else
     printf 'Codex CLI: not installed (run codexnest repair after installing it)\n'
   fi
+  codexnest_claude_status
   curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health || failed=1
   printf '\n'
   return "$failed"
