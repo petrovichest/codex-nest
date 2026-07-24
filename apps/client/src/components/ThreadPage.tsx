@@ -458,6 +458,9 @@ export function ThreadPage({
   // dual-agent identity badge should show.
   const threadBackend = backendFor(state.snapshot, summary.agent);
   const threadModels = threadBackend?.models ?? state.snapshot?.models ?? [];
+  // Intentional asymmetry: this banner blocks an existing thread only when its backend is
+  // "unavailable", so the thread stays usable while the backend is merely "starting"; the
+  // create surfaces (agent picker / New session) gate on "ready" instead.
   const backendUnavailableReason =
     threadBackend && threadBackend.connection.state === "unavailable"
       ? (threadBackend.connection.message ?? `${agentLabel(summary.agent)} недоступен`)
@@ -709,7 +712,10 @@ export function ThreadPage({
           subtitle={project?.displayName ?? summary.cwd}
           badge={
             showAgentBadge ? (
-              <span className={`agent-chip agent-${summary.agent}`}>
+              <span
+                className={`agent-chip agent-${summary.agent}`}
+                aria-label={`Агент: ${agentLabel(summary.agent)}`}
+              >
                 {agentLabel(summary.agent)}
               </span>
             ) : undefined

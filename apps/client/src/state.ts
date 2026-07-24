@@ -65,7 +65,7 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "snapshot":
       return {
         ...state,
-        snapshot: action.snapshot,
+        snapshot: withNormalizedThreads(action.snapshot),
         network: "connected",
         error: null,
         snapshotEpoch: state.snapshotEpoch + 1,
@@ -245,8 +245,26 @@ function applyDetail(
   };
 }
 
-function applyThreadSummary(state: ClientState, thread: ThreadSummary): ClientState {
+/**
+ * A server may omit `agent` on a thread (older builds predate dual backends). Pin a missing
+ * agent to Codex as threads enter state — at snapshot load and via {@link applyThreadSummary}
+ * (thread.upserted + create/rename) — so downstream consumers (goal gating, Composer labels)
+ * always see a concrete AgentId instead of `undefined`. Returns the input unchanged when the
+ * agent is already present, preserving reference identity.
+ */
+function withAgent(thread: ThreadSummary): ThreadSummary {
+  return thread.agent ? thread : { ...thread, agent: "codex" };
+}
+
+function withNormalizedThreads(snapshot: AppSnapshot): AppSnapshot {
+  const threads = snapshot.threads.map(withAgent);
+  const changed = threads.some((thread, index) => thread !== snapshot.threads[index]);
+  return changed ? { ...snapshot, threads } : snapshot;
+}
+
+function applyThreadSummary(state: ClientState, threadInput: ThreadSummary): ClientState {
   if (!state.snapshot) return state;
+  const thread = withAgent(threadInput);
   const detail = state.details[thread.id];
   return {
     ...state,

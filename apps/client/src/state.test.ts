@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AppSnapshot, ServerEvent, ThreadSummary } from "@codexnest/protocol";
 
+import { agentLabel } from "./agents";
 import { clientReducer, initialState, sortThreads } from "./state";
 
 const baseThread: ThreadSummary = {
@@ -45,6 +46,34 @@ describe("clientReducer", () => {
     expect(next.snapshot).toBe(snapshot);
     expect(next.network).toBe("connected");
     expect(next.details.old).toBeDefined();
+  });
+
+  it("pins a missing agent to Codex when a snapshot omits it", () => {
+    const agentless: AppSnapshot = {
+      ...snapshot,
+      threads: [{ ...baseThread, agent: undefined } as unknown as ThreadSummary],
+    };
+    const next = clientReducer(initialState, { type: "snapshot", snapshot: agentless });
+    const summary = next.snapshot?.threads[0];
+    // ThreadPage gates the Codex-only goal fetch on `summary.agent === "codex"`, so a missing
+    // agent must normalize to Codex rather than silently skipping the fetch.
+    expect(summary?.agent).toBe("codex");
+    // The Composer aria-label reads `Сообщение для ${agentLabel(agent)}` — with a concrete
+    // agent it renders «Сообщение для Codex» instead of «Сообщение для undefined».
+    expect(agentLabel(summary!.agent)).toBe("Codex");
+  });
+
+  it("pins a missing agent to Codex on a thread.upserted event", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "thread.upserted",
+        thread: { ...baseThread, id: "two", agent: undefined } as unknown as ThreadSummary,
+      },
+    });
+    expect(state.snapshot?.threads.find((thread) => thread.id === "two")?.agent).toBe("codex");
   });
 
   it("tracks the reasoning effort used for new sessions", () => {

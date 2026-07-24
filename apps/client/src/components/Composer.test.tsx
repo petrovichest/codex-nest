@@ -2,7 +2,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentId, SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
+import type {
+  AgentId,
+  SessionSettings,
+  TranscriptionConfigResponse,
+  UpdateThreadSettingsRequest,
+} from "@codexnest/protocol";
 
 import { Composer, type ComposerImage } from "./Composer";
 
@@ -48,6 +53,17 @@ describe("Composer", () => {
     expect(screen.getByRole("combobox", { name: "Режим разрешений" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Включить режим цели" })).toBeNull();
     expect(screen.getByRole("textbox", { name: "Сообщение для Claude Code" })).toBeInTheDocument();
+  });
+
+  it("routes a permission-preset select change to onSettingsChange", () => {
+    const onSettingsChange = vi.fn();
+    render(<Harness agent="claude" onSettingsChange={onSettingsChange} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Режим разрешений" }), {
+      target: { value: "full-access" },
+    });
+
+    expect(onSettingsChange).toHaveBeenCalledWith({ permissionPreset: "full-access" });
   });
 
   it("blocks sending when the thread's backend is unavailable", () => {
@@ -276,6 +292,7 @@ function Harness({
   initialInput = "",
   transcriptionConfig: speechConfig,
   onTranscribe,
+  onSettingsChange: onSettingsChangeSpy,
 }: {
   agent?: AgentId;
   busy?: boolean;
@@ -284,6 +301,7 @@ function Harness({
   initialInput?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
+  onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
 }) {
   const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>([]);
@@ -299,7 +317,8 @@ function Harness({
       onSubmit={(event) => event.preventDefault()}
       busy={busy}
       settings={settings}
-      onSettingsChange={(patch) =>
+      onSettingsChange={(patch) => {
+        onSettingsChangeSpy?.(patch);
         setSettings((current) => {
           const next = { ...current };
           for (const [key, value] of Object.entries(patch)) {
@@ -307,8 +326,8 @@ function Harness({
             else if (value !== undefined) Object.assign(next, { [key]: value });
           }
           return next;
-        })
-      }
+        });
+      }}
       models={models}
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}

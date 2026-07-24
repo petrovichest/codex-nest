@@ -778,7 +778,12 @@ function ThreadLink({
     >
       <span className="thread-link-title">{thread.title}</span>
       {showAgent && (
-        <span className={`agent-chip agent-${thread.agent}`}>{agentLabel(thread.agent)}</span>
+        <span
+          className={`agent-chip agent-${thread.agent}`}
+          aria-label={`Агент: ${agentLabel(thread.agent)}`}
+        >
+          {agentLabel(thread.agent)}
+        </span>
       )}
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>

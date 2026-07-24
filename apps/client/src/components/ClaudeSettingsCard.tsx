@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { ClaudeManagementStatus } from "@codexnest/protocol";
 
+import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
 import { ToolIcon } from "./Icons";
 
@@ -18,17 +19,25 @@ export function ClaudeSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [serverUnsupported, setServerUnsupported] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
+    setServerUnsupported(false);
     try {
       setStatus(await api.readClaudeSettings());
     } catch (caught) {
-      setLoadError(
-        caught instanceof Error ? caught.message : "Не удалось загрузить состояние Claude Code",
-      );
+      // An older server predates the /settings/claude route and 404s. That is not a failure to
+      // flag in red — show a neutral "unsupported on this server version" note instead.
+      if (caught instanceof ApiClientError && caught.status === 404) {
+        setServerUnsupported(true);
+      } else {
+        setLoadError(
+          caught instanceof Error ? caught.message : "Не удалось загрузить состояние Claude Code",
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -77,6 +86,10 @@ export function ClaudeSettingsCard() {
       {loading ? (
         <div className="settings-loading compact">
           <span className="spinner small" /> Получаем состояние Claude Code…
+        </div>
+      ) : serverUnsupported ? (
+        <div className="settings-notice" role="status">
+          Управление Claude Code недоступно на этой версии сервера.
         </div>
       ) : (
         <>

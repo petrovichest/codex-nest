@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { ApiClientError } from "../api";
 import { ClaudeSettingsCard } from "./ClaudeSettingsCard";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -36,6 +37,36 @@ describe("ClaudeSettingsCard", () => {
     render(<ClaudeSettingsCard />);
 
     expect(await screen.findByText(/claude login/)).toBeInTheDocument();
+  });
+
+  it("shows a neutral note instead of a red error when the server lacks the route", async () => {
+    const readClaudeSettings = vi
+      .fn()
+      .mockRejectedValue(new ApiClientError("not_found", "Route not found", 404));
+    connection.mockReturnValue({ api: { readClaudeSettings, checkClaude: vi.fn() } });
+
+    render(<ClaudeSettingsCard />);
+
+    expect(
+      await screen.findByText("Управление Claude Code недоступно на этой версии сервера."),
+    ).toBeInTheDocument();
+    // Neutral, not an error, and nothing to probe on an older server.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Проверить" })).toBeNull();
+  });
+
+  it("keeps the red error notice for a non-404 load failure", async () => {
+    const readClaudeSettings = vi
+      .fn()
+      .mockRejectedValue(new ApiClientError("internal_error", "Внутренняя ошибка", 500));
+    connection.mockReturnValue({ api: { readClaudeSettings, checkClaude: vi.fn() } });
+
+    render(<ClaudeSettingsCard />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Внутренняя ошибка");
+    expect(
+      screen.queryByText("Управление Claude Code недоступно на этой версии сервера."),
+    ).toBeNull();
   });
 
   it("re-probes Claude Code through the check button", async () => {

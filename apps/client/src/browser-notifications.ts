@@ -19,9 +19,7 @@ export async function requestBrowserNotificationPermission(): Promise<BrowserNot
 }
 
 export class BrowserNotificationTracker {
-  private readonly threadStates = new Map<string, string>();
-  private readonly threadTitles = new Map<string, string>();
-  private readonly threadAgents = new Map<string, AgentId>();
+  private readonly threads = new Map<string, { state: string; title: string; agent: AgentId }>();
   private readonly attentionThreads = new Map<string, string | null>();
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
@@ -30,17 +28,17 @@ export class BrowserNotificationTracker {
     const cutoff = this.lastObservedAt;
     const firstConnection = cutoff === 0;
     let newest = cutoff;
-    this.threadStates.clear();
-    this.threadTitles.clear();
-    this.threadAgents.clear();
+    this.threads.clear();
     this.attentionThreads.clear();
     const missedThreads: AppSnapshot["threads"] = [];
     const missedAttention: AppSnapshot["attention"] = [];
 
     for (const thread of snapshot.threads) {
-      this.threadStates.set(thread.id, thread.state);
-      this.threadTitles.set(thread.id, thread.title);
-      this.threadAgents.set(thread.id, thread.agent);
+      this.threads.set(thread.id, {
+        state: thread.state,
+        title: thread.title,
+        agent: thread.agent,
+      });
       newest = Math.max(newest, thread.updatedAt);
       if (
         !firstConnection &&
@@ -75,10 +73,12 @@ export class BrowserNotificationTracker {
 
   acceptEvent(event: ServerEvent): void {
     if (event.type === "thread.upserted") {
-      const previous = this.threadStates.get(event.thread.id);
-      this.threadStates.set(event.thread.id, event.thread.state);
-      this.threadTitles.set(event.thread.id, event.thread.title);
-      this.threadAgents.set(event.thread.id, event.thread.agent);
+      const previous = this.threads.get(event.thread.id)?.state;
+      this.threads.set(event.thread.id, {
+        state: event.thread.state,
+        title: event.thread.title,
+        agent: event.thread.agent,
+      });
       if (previous !== event.thread.state) {
         this.showThreadState(
           event.thread.state,
@@ -89,15 +89,13 @@ export class BrowserNotificationTracker {
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.thread.updatedAt);
     } else if (event.type === "thread.removed") {
-      this.threadStates.delete(event.threadId);
-      this.threadTitles.delete(event.threadId);
-      this.threadAgents.delete(event.threadId);
+      this.threads.delete(event.threadId);
     } else if (event.type === "attention.upserted") {
       if (!this.attentionThreads.has(event.attention.id)) {
         this.attentionThreads.set(event.attention.id, event.attention.threadId);
         if (
           !event.attention.threadId ||
-          this.threadStates.get(event.attention.threadId) !== "needsAttention"
+          this.threads.get(event.attention.threadId)?.state !== "needsAttention"
         ) {
           const agent = this.agentFor(event.attention.threadId);
           this.show(
@@ -140,12 +138,12 @@ export class BrowserNotificationTracker {
 
   private agentFor(threadId: string | null): AgentId {
     if (!threadId) return "codex";
-    return this.threadAgents.get(threadId) ?? "codex";
+    return this.threads.get(threadId)?.agent ?? "codex";
   }
 
   private titleFor(threadId: string | null, agent: AgentId): string {
     if (!threadId) return "Откройте CodexNest для подробностей";
-    return this.threadTitles.get(threadId) ?? `Задача ${agentLabel(agent)}`;
+    return this.threads.get(threadId)?.title ?? `Задача ${agentLabel(agent)}`;
   }
 
   private show(title: string, body: string, tag: string, threadId: string | null): void {

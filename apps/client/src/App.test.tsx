@@ -876,13 +876,11 @@ describe("App dual-agent sidebar", () => {
 
     renderApp("/threads/newer");
 
-    // Both agents appear as identity chips (rows + header); the per-project «+» menu also
-    // lists them, so assert against the chip elements specifically.
-    const chipLabels = Array.from(document.querySelectorAll(".agent-chip")).map(
-      (chip) => chip.textContent,
-    );
-    expect(chipLabels).toContain("Codex");
-    expect(chipLabels).toContain("Claude Code");
+    // Both agents appear as identity chips (rows + header). The chip aria-label («Агент: …»)
+    // names them distinctly from the per-project «+» menu items, which are plain «Codex» /
+    // «Claude Code» buttons.
+    expect(screen.getAllByLabelText("Агент: Codex").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Агент: Claude Code").length).toBeGreaterThan(0);
   });
 
   it("creates a session for the chosen agent from the per-project menu", async () => {
