@@ -1558,7 +1558,7 @@ describe("Activity", () => {
               explanation: "Работа завершена",
               steps: [{ step: "Проверить результат", status: "completed" }],
               timestamp: 3,
-              afterItemId: "final-answer",
+              afterItemId: "unrendered-reasoning-item",
             },
           ],
         },

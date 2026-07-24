@@ -1918,21 +1918,19 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
 }
 
 function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
-  const result = [...items];
-  for (let index = 0; index < result.length; index += 1) {
-    const item = result[index];
-    if (item?.type !== "planChecklist" || !item.afterItemId) continue;
-    const finalAnswerIndex = result.findIndex(
-      (candidate) =>
-        candidate.id === item.afterItemId &&
-        candidate.type === "agentMessage" &&
-        candidate.phase === "final_answer",
-    );
-    if (finalAnswerIndex < 0 || finalAnswerIndex > index) continue;
-    result.splice(index, 1);
-    result.splice(finalAnswerIndex, 0, item);
-  }
-  return result;
+  const finalAnswerIndex = items.findIndex(
+    (item) => item.type === "agentMessage" && item.phase === "final_answer",
+  );
+  if (finalAnswerIndex < 0) return items;
+  const trailingItems = items.slice(finalAnswerIndex + 1);
+  const trailingChecklists = trailingItems.filter((item) => item.type === "planChecklist");
+  if (!trailingChecklists.length) return items;
+  return [
+    ...items.slice(0, finalAnswerIndex),
+    ...trailingChecklists,
+    items[finalAnswerIndex]!,
+    ...trailingItems.filter((item) => item.type !== "planChecklist"),
+  ];
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {
