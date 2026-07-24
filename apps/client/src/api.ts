@@ -32,18 +32,22 @@ import type {
   TranscriptionResponse,
   UpdateTranscriptionSettingsRequest,
   TurnStartResult,
+  UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
+  UpdateQueuedMessageRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
+  UpdateUiLanguageRequest,
   TaskDefaults,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
+import { readInitialLanguage, translate } from "./i18n";
 
 export class ApiClient {
   constructor(public readonly settings: ConnectionSettings) {}
@@ -78,11 +82,17 @@ export class ApiClient {
     return this.request("/api/v1/settings/transcription", { method: "PUT", body });
   }
 
-  transcribe(audio: Blob): Promise<TranscriptionResponse> {
+  transcribe(audio: Blob, recordingDurationMs?: number): Promise<TranscriptionResponse> {
     return this.request("/api/v1/transcriptions", {
       method: "POST",
       rawBody: audio,
       contentType: audio.type,
+      headers:
+        recordingDurationMs === undefined
+          ? undefined
+          : {
+              "X-CodexNest-Audio-Duration-Ms": String(Math.max(1, Math.round(recordingDurationMs))),
+            },
       timeoutMs: null,
     });
   }
@@ -139,6 +149,10 @@ export class ApiClient {
 
   updateTaskDefaults(body: UpdateTaskDefaultsRequest): Promise<TaskDefaults> {
     return this.request("/api/v1/settings/task-defaults", { method: "PUT", body });
+  }
+
+  updateUiLanguage(body: UpdateUiLanguageRequest): Promise<UiLanguageSettings> {
+    return this.request("/api/v1/settings/ui-language", { method: "PUT", body });
   }
 
   listDirectories(path?: string): Promise<DirectoryListing> {
@@ -263,6 +277,24 @@ export class ApiClient {
     );
   }
 
+  updateQueued(
+    id: string,
+    messageId: string,
+    body: UpdateQueuedMessageRequest,
+  ): Promise<QueuedMessage> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "PATCH", body },
+    );
+  }
+
+  deleteQueued(id: string, messageId: string): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "DELETE" },
+    );
+  }
+
   steer(id: string, body: SteerTurnRequest): Promise<{ turnId: string }> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/steer`, {
       method: "POST",
@@ -322,9 +354,11 @@ export class ApiClient {
       authenticated?: boolean;
       timeoutMs?: number | null;
       keepalive?: boolean;
+      headers?: Record<string, string>;
     } = {},
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers.set(name, value);
     if (options.authenticated !== false)
       headers.set("Authorization", `Bearer ${this.settings.token}`);
     if (options.rawBody !== undefined) {
@@ -349,7 +383,10 @@ export class ApiClient {
         keepalive: options.keepalive,
       });
     } catch {
-      throw new ApiClientError("connection_failed", "Не удалось подключиться к серверу");
+      throw new ApiClientError(
+        "connection_failed",
+        translate(readInitialLanguage(), "Не удалось подключиться к серверу"),
+      );
     } finally {
       if (timeout !== null) window.clearTimeout(timeout);
     }

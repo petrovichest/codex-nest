@@ -61,6 +61,10 @@ export function useDrawerNavigation({
 
     function touchStart(event: TouchEvent) {
       if (!mobile) return;
+      if (event.target instanceof Element && event.target.closest("[data-project-drag-handle]")) {
+        clearGesture();
+        return;
+      }
       if (event.touches.length !== 1) {
         clearGesture();
         return;

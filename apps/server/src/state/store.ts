@@ -11,6 +11,7 @@ import type {
   TaskDefaults,
   ThreadDraft,
   ThreadOutcome,
+  UiLanguage,
 } from "@codexnest/protocol";
 
 export type TimelineArtifact = Extract<
@@ -56,6 +57,8 @@ export interface CodexNestState {
   projects: Project[];
   threadMeta: Record<string, ThreadMetaState>;
   devices: Record<string, DeviceState>;
+  transcriptionTimings?: Record<string, number[]>;
+  uiLanguage: UiLanguage;
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
@@ -69,6 +72,7 @@ export function emptyState(): CodexNestState {
     projects: [],
     threadMeta: {},
     devices: {},
+    uiLanguage: "en",
     messageQueues: {},
   };
 }
@@ -181,6 +185,20 @@ function validateState(value: unknown): CodexNestState {
   if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
     throw new Error("Corrupt CodexNest state");
   }
+  if (
+    value.transcriptionTimings !== undefined &&
+    (!isRecord(value.transcriptionTimings) ||
+      Object.values(value.transcriptionTimings).some(
+        (samples) =>
+          !Array.isArray(samples) ||
+          samples.length > 20 ||
+          samples.some(
+            (sample) => typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0,
+          ),
+      ))
+  ) {
+    throw new Error("Corrupt transcription timings in CodexNest state");
+  }
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
   }
@@ -202,6 +220,12 @@ function validateState(value: unknown): CodexNestState {
   }
   if (value.taskDefaults !== undefined && !isTaskDefaults(value.taskDefaults)) {
     throw new Error("Corrupt task defaults in CodexNest state");
+  }
+  if (
+    value.uiLanguage !== undefined &&
+    (typeof value.uiLanguage !== "string" || !["en", "ru"].includes(value.uiLanguage))
+  ) {
+    throw new Error("Corrupt UI language in CodexNest state");
   }
   for (const project of value.projects) {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");
@@ -249,7 +273,8 @@ function validateState(value: unknown): CodexNestState {
   ) {
     throw new Error("Corrupt token verifier in CodexNest state");
   }
-  return value as unknown as CodexNestState;
+  const state = value as unknown as CodexNestState;
+  return value.uiLanguage === undefined ? { ...state, uiLanguage: "ru" } : state;
 }
 
 function isClaudeSessionState(value: unknown): value is ClaudeSessionState {

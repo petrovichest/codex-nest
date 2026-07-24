@@ -70,6 +70,23 @@ describe("PushNotifier", () => {
       expect.objectContaining({
         tokens: ["phone-token", "tablet-token"],
         data: { threadId: "thread", eventType: "completed" },
+        notification: {
+          title: "Codex session finished",
+          body: "Open CodexNest for details",
+        },
+      }),
+    );
+
+    await store.update((state) => {
+      state.uiLanguage = "ru";
+    });
+    await notifier.send("thread", "failed");
+    expect(firebase.sendEachForMulticast).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        notification: {
+          title: "Сессия Codex завершена",
+          body: "Сессия завершилась с ошибкой",
+        },
       }),
     );
   });

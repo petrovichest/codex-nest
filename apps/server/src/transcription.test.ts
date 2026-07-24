@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FormData as UndiciFormData, Request as UndiciRequest } from "undici";
 
-import { TranscriptionService, type TranscriptionError } from "./transcription";
+import {
+  appendTranscriptionTimingSample,
+  transcriptionTimingEstimate,
+  TranscriptionService,
+  type TranscriptionError,
+} from "./transcription";
 
 const directories: string[] = [];
 
@@ -32,8 +37,26 @@ describe("TranscriptionService", () => {
       refinementModel: "gpt-5.6-luna",
       maxRecordingSeconds: 300,
       maxUploadBytes: 24 * 1024 * 1024,
+      timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
     });
     expect(JSON.stringify(service.configuration())).not.toContain("secret");
+  });
+
+  it("uses the median recent timing coefficient for estimates", () => {
+    expect(transcriptionTimingEstimate(undefined)).toEqual({
+      sampleCount: 0,
+      estimatedProcessingMsPerAudioSecond: null,
+    });
+    expect(transcriptionTimingEstimate([8_000, 2_000, 4_000, 100_000])).toEqual({
+      sampleCount: 4,
+      estimatedProcessingMsPerAudioSecond: 6_000,
+    });
+    expect(
+      appendTranscriptionTimingSample(
+        Array.from({ length: 20 }, (_, index) => index + 1),
+        21,
+      ),
+    ).toEqual(Array.from({ length: 20 }, (_, index) => index + 2));
   });
 
   it("sends OpenAI multipart requests through the configured Codex proxy", async () => {

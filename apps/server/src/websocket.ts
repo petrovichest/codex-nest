@@ -36,7 +36,12 @@ export function registerEventsWebSocket(
     const timeout = setTimeout(() => socket.close(1008, "Authentication timeout"), authTimeoutMs);
     timeout.unref();
     const eventListener = (sequence: number, event: unknown) => {
-      if (authenticated) send(socket, { type: "event", sequence, event } as ServerFrame);
+      if (!authenticated) return;
+      if (isResyncRequired(event)) {
+        send(socket, { type: "snapshot", snapshot: hub.snapshot() });
+        return;
+      }
+      send(socket, { type: "event", sequence, event } as ServerFrame);
     };
 
     socket.on("message", (data) => {
@@ -81,4 +86,10 @@ function allowedOrigin(request: FastifyRequest, allowedOrigins: Set<string>): bo
 
 function send(socket: WebSocket, frame: ServerFrame): void {
   if (socket.readyState === 1) socket.send(JSON.stringify(frame));
+}
+
+function isResyncRequired(event: unknown): event is { type: "resync.required" } {
+  return (
+    !!event && typeof event === "object" && "type" in event && event.type === "resync.required"
+  );
 }

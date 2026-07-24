@@ -4,4 +4,20 @@
     <string name="title_activity_main">CodexNest</string>
     <string name="package_name">com.codexnest.app</string>
     <string name="custom_url_scheme">com.codexnest.app</string>
+    <string name="notification_channel_connection">CodexNest connection</string>
+    <string name="notification_channel_connection_description">Persistent connection to your home server</string>
+    <string name="notification_channel_events">CodexNest events</string>
+    <string name="notification_channel_events_description">Task completion and decision requests</string>
+    <string name="notification_status_connecting">Connecting…</string>
+    <string name="notification_status_open_app">Open the app to configure it</string>
+    <string name="notification_status_app_open">App is open</string>
+    <string name="notification_status_reconnecting">Offline, reconnecting…</string>
+    <string name="notification_status_authenticating">Authenticating…</string>
+    <string name="notification_status_connected">Connected</string>
+    <string name="notification_task_completed">Task completed</string>
+    <string name="notification_task_failed">Task failed</string>
+    <string name="notification_attention">Codex needs your decision</string>
+    <string name="notification_default_task">Codex task</string>
+    <string name="notification_untitled_task">Untitled</string>
+    <string name="notification_open_details">Open CodexNest for details</string>
 </resources>

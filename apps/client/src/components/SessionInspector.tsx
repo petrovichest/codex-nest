@@ -1,5 +1,6 @@
 import type { GitChangesSummary, Project, ThreadSummary } from "@codexnest/protocol";
 
+import { useI18n, type Translate } from "../i18n";
 import { threadStatusClasses } from "../thread-status";
 import {
   ArchiveIcon,
@@ -30,45 +31,46 @@ export function SessionInspector({
   onPin(): void;
   onArchive(): void;
 }) {
+  const { language, t } = useI18n();
   if (!open) return null;
   return (
-    <aside className="session-inspector open" aria-label="Сведения о задаче">
+    <aside className="session-inspector open" aria-label={t("Сведения о задаче")}>
       <div className="inspector-heading">
-        <span>Сведения</span>
-        <button className="icon-button" aria-label="Закрыть сведения" onClick={onClose}>
+        <span>{t("Сведения")}</span>
+        <button className="icon-button" aria-label={t("Закрыть сведения")} onClick={onClose}>
           <XIcon />
         </button>
       </div>
       <dl className="inspector-list">
-        <InspectorRow icon={<ServerIcon />} label="Статус">
+        <InspectorRow icon={<ServerIcon />} label={t("Статус")}>
           <span className={`status-label status-label-${summary.state}`}>
             <span className={threadStatusClasses(summary)} />
-            {stateLabel(summary.state)}
+            {stateLabel(summary.state, t)}
           </span>
         </InspectorRow>
-        <InspectorRow icon={<FolderIcon />} label="Проект">
-          {project?.displayName ?? "Без проекта"}
+        <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
+          {project?.displayName ?? t("Без проекта")}
         </InspectorRow>
         <InspectorRow icon={<GitBranchIcon />} label="Git changes">
           <GitChangesValue value={gitChanges} />
         </InspectorRow>
-        <InspectorRow icon={<ClockIcon />} label="Создана">
-          {formatDate(summary.createdAt)}
+        <InspectorRow icon={<ClockIcon />} label={t("Создана")}>
+          {formatDate(summary.createdAt, language)}
         </InspectorRow>
-        <InspectorRow icon={<ClockIcon />} label="Обновлена">
-          {formatDate(summary.updatedAt)}
+        <InspectorRow icon={<ClockIcon />} label={t("Обновлена")}>
+          {formatDate(summary.updatedAt, language)}
         </InspectorRow>
       </dl>
       <div className="inspector-path">
-        <span>Рабочая папка</span>
+        <span>{t("Рабочая папка")}</span>
         <code>{summary.cwd}</code>
       </div>
       <div className="inspector-actions">
         <button onClick={onPin}>
-          <PinIcon /> {summary.pinned ? "Открепить" : "Закрепить"}
+          <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
         </button>
         <button onClick={onArchive}>
-          <ArchiveIcon /> {summary.archived ? "Вернуть из архива" : "Архивировать"}
+          <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
         </button>
       </div>
     </aside>
@@ -84,39 +86,43 @@ export function NewSessionInspector({
   project: Project | null;
   onClose(): void;
 }) {
+  const { t } = useI18n();
   if (!open) return null;
   return (
-    <aside className="session-inspector open" aria-label="Сведения о новой задаче">
+    <aside className="session-inspector open" aria-label={t("Сведения о новой задаче")}>
       <div className="inspector-heading">
-        <span>Новая задача</span>
-        <button className="icon-button" aria-label="Закрыть сведения" onClick={onClose}>
+        <span>{t("Новая задача")}</span>
+        <button className="icon-button" aria-label={t("Закрыть сведения")} onClick={onClose}>
           <XIcon />
         </button>
       </div>
       <dl className="inspector-list">
-        <InspectorRow icon={<FolderIcon />} label="Проект">
-          {project?.displayName ?? "Не выбран"}
+        <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
+          {project?.displayName ?? t("Не выбран")}
         </InspectorRow>
       </dl>
       {project && (
         <div className="inspector-path">
-          <span>Рабочая папка</span>
+          <span>{t("Рабочая папка")}</span>
           <code>{project.path}</code>
         </div>
       )}
-      <p className="inspector-note">Задача будет создана после отправки первого сообщения.</p>
+      <p className="inspector-note">
+        {t("Задача будет создана после отправки первого сообщения.")}
+      </p>
     </aside>
   );
 }
 
 function GitChangesValue({ value }: { value: GitChangesView }) {
-  if (value === null) return <>Загрузка…</>;
-  if (value === "error") return <>Недоступно</>;
-  if (value.state === "notRepository") return <>Не Git-репозиторий</>;
-  if (value.state === "clean") return <>Нет изменений</>;
+  const { language, t } = useI18n();
+  if (value === null) return <>{t("Загрузка…")}</>;
+  if (value === "error") return <>{t("Недоступно")}</>;
+  if (value.state === "notRepository") return <>{t("Не Git-репозиторий")}</>;
+  if (value.state === "clean") return <>{t("Нет изменений")}</>;
   return (
     <span className="git-changes-summary">
-      <span>{formatFileCount(value.filesChanged)}</span>
+      <span>{formatFileCount(value.filesChanged, language, t)}</span>
       <b className="diff-add">+{value.additions}</b>
       <b className="diff-delete">−{value.deletions}</b>
     </span>
@@ -143,8 +149,8 @@ function InspectorRow({
   );
 }
 
-function formatDate(value: number): string {
-  return new Date(value).toLocaleString("ru", {
+function formatDate(value: number, language: "en" | "ru"): string {
+  return new Date(value).toLocaleString(language, {
     day: "2-digit",
     month: "short",
     hour: "2-digit",
@@ -152,7 +158,8 @@ function formatDate(value: number): string {
   });
 }
 
-function formatFileCount(count: number): string {
+function formatFileCount(count: number, language: "en" | "ru", t: Translate): string {
+  if (language === "en") return t(count === 1 ? "{{count}} file" : "{{count}} files", { count });
   const modulo100 = count % 100;
   const modulo10 = count % 10;
   const suffix =
@@ -163,21 +170,18 @@ function formatFileCount(count: number): string {
         : modulo10 >= 2 && modulo10 <= 4
           ? "файла"
           : "файлов";
-  return `${count} ${suffix}`;
+  return t(`{{count}} ${suffix}`, { count });
 }
 
-function stateLabel(state: string): string {
-  return (
-    (
-      {
-        needsAttention: "Нужно решение",
-        running: "Выполняется",
-        completed: "Завершена",
-        failed: "Ошибка",
-        interrupted: "Прервана",
-        idle: "Готова",
-        unavailable: "Недоступна",
-      } as Record<string, string>
-    )[state] ?? state
-  );
+function stateLabel(state: string, t: Translate): string {
+  const labels: Record<string, string> = {
+    needsAttention: "Нужно решение",
+    running: "Выполняется",
+    completed: "Завершена",
+    failed: "Ошибка",
+    interrupted: "Прервана",
+    idle: "Готова",
+    unavailable: "Недоступна",
+  };
+  return labels[state] ? t(labels[state]) : state;
 }

@@ -160,6 +160,9 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "taskDefaults.changed":
       snapshot.taskDefaults = event.taskDefaults;
       break;
+    case "uiLanguage.changed":
+      snapshot.uiLanguage = event.language;
+      break;
     case "goal.changed":
       return {
         ...state,

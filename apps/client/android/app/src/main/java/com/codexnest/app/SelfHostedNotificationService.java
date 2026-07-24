@@ -34,6 +34,7 @@ public class SelfHostedNotificationService extends Service {
     private static final int SERVICE_NOTIFICATION_ID = 41;
     private static final String STATE_PREFERENCES = "CodexNestNotifications";
     private static final String LAST_OBSERVED_AT = "lastObservedAt";
+    private static final String UI_LANGUAGE = "uiLanguage";
     private static volatile boolean appVisible;
     private static volatile SelfHostedNotificationService instance;
 
@@ -44,6 +45,8 @@ public class SelfHostedNotificationService extends Service {
     private NotificationEventTracker tracker;
     private int retry;
     private boolean stopping;
+    private volatile String uiLanguage = "en";
+    private int statusResource = R.string.notification_status_connecting;
 
     static void setAppVisible(boolean visible) {
         appVisible = visible;
@@ -51,21 +54,39 @@ public class SelfHostedNotificationService extends Service {
         if (current != null) current.handler.post(current::handleVisibilityChange);
     }
 
+    static void setUiLanguage(Context context, String language) {
+        if (!"en".equals(language) && !"ru".equals(language)) return;
+        context
+            .getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putString(UI_LANGUAGE, language)
+            .apply();
+        SelfHostedNotificationService current = instance;
+        if (current != null) current.handler.post(() -> current.applyUiLanguage(language));
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
+        uiLanguage = getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .getString(UI_LANGUAGE, "en");
         createChannels();
         long lastObservedAt = getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
             .getLong(LAST_OBSERVED_AT, 0);
-        tracker = new NotificationEventTracker(lastObservedAt);
+        tracker = new NotificationEventTracker(
+            lastObservedAt,
+            text(R.string.notification_default_task),
+            text(R.string.notification_open_details),
+            text(R.string.notification_untitled_task)
+        );
         client = new OkHttpClient.Builder()
             .pingInterval(30, TimeUnit.SECONDS)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
             .build();
-        startAsForeground(statusNotification("Подключение…"));
+        startAsForeground(statusNotification(statusResource));
     }
 
     @Override
@@ -100,7 +121,7 @@ public class SelfHostedNotificationService extends Service {
         if (stopping || appVisible) return;
         SecureConnectionSettings.Value settings = SecureConnectionSettings.read(this);
         if (settings == null) {
-            updateStatus("Откройте приложение для настройки");
+            updateStatus(R.string.notification_status_open_app);
             stopSelf();
             return;
         }
@@ -122,7 +143,7 @@ public class SelfHostedNotificationService extends Service {
             .url(webSocketUrl)
             .header("Origin", "http://localhost")
             .build();
-        updateStatus("Подключение…");
+        updateStatus(R.string.notification_status_connecting);
         socket = client.newWebSocket(request, new Listener(settings.token));
     }
 
@@ -132,7 +153,7 @@ public class SelfHostedNotificationService extends Service {
             WebSocket current = socket;
             socket = null;
             if (current != null) current.cancel();
-            updateStatus("Приложение открыто");
+            updateStatus(R.string.notification_status_app_open);
         } else {
             connect();
         }
@@ -140,7 +161,7 @@ public class SelfHostedNotificationService extends Service {
 
     private void scheduleReconnect() {
         if (stopping || appVisible) return;
-        updateStatus("Нет связи, переподключение…");
+        updateStatus(R.string.notification_status_reconnecting);
         long[] delays = { 1_000, 2_000, 4_000, 8_000, 15_000, 30_000 };
         long delay = delays[Math.min(retry, delays.length - 1)];
         retry += 1;
@@ -164,7 +185,7 @@ public class SelfHostedNotificationService extends Service {
                 authentication.put("type", "authenticate");
                 authentication.put("token", token);
                 webSocket.send(authentication.toString());
-                updateStatus("Авторизация…");
+                updateStatus(R.string.notification_status_authenticating);
             } catch (Exception error) {
                 webSocket.close(1008, "Authentication failed");
             }
@@ -175,9 +196,10 @@ public class SelfHostedNotificationService extends Service {
             if (webSocket != socket) return;
             try {
                 JSONObject frame = new JSONObject(text);
+                applyFrameLanguage(frame);
                 if ("snapshot".equals(frame.optString("type"))) {
                     retry = 0;
-                    updateStatus("Подключено");
+                    updateStatus(R.string.notification_status_connected);
                 }
                 List<CodexNotification> notifications = tracker.accept(text);
                 getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
@@ -210,11 +232,11 @@ public class SelfHostedNotificationService extends Service {
     private void notifyEvent(CodexNotification event) {
         String title;
         if (event.kind == CodexNotification.Kind.COMPLETED) {
-            title = "Задача завершена";
+            title = text(R.string.notification_task_completed);
         } else if (event.kind == CodexNotification.Kind.FAILED) {
-            title = "Задача завершилась с ошибкой";
+            title = text(R.string.notification_task_failed);
         } else {
-            title = "Codex ждёт решения";
+            title = text(R.string.notification_attention);
         }
 
         Intent intent = new Intent(this, MainActivity.class)
@@ -239,7 +261,7 @@ public class SelfHostedNotificationService extends Service {
         notifyIfAllowed(notificationId, notification);
     }
 
-    private Notification statusNotification(String status) {
+    private Notification statusNotification(int status) {
         PendingIntent contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -249,7 +271,7 @@ public class SelfHostedNotificationService extends Service {
         return new NotificationCompat.Builder(this, SERVICE_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("CodexNest")
-            .setContentText(status)
+            .setContentText(text(status))
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -257,7 +279,8 @@ public class SelfHostedNotificationService extends Service {
             .build();
     }
 
-    private void updateStatus(String status) {
+    private void updateStatus(int status) {
+        statusResource = status;
         notifyIfAllowed(SERVICE_NOTIFICATION_ID, statusNotification(status));
     }
 
@@ -292,19 +315,60 @@ public class SelfHostedNotificationService extends Service {
         NotificationManager manager = getSystemService(NotificationManager.class);
         NotificationChannel service = new NotificationChannel(
             SERVICE_CHANNEL,
-            "Подключение CodexNest",
+            text(R.string.notification_channel_connection),
             NotificationManager.IMPORTANCE_LOW
         );
-        service.setDescription("Постоянное подключение к домашнему серверу");
+        service.setDescription(text(R.string.notification_channel_connection_description));
         service.setShowBadge(false);
         manager.createNotificationChannel(service);
 
         NotificationChannel events = new NotificationChannel(
             EVENT_CHANNEL,
-            "События CodexNest",
+            text(R.string.notification_channel_events),
             NotificationManager.IMPORTANCE_DEFAULT
         );
-        events.setDescription("Завершение задач и запросы решения");
+        events.setDescription(text(R.string.notification_channel_events_description));
         manager.createNotificationChannel(events);
+    }
+
+    private void applyFrameLanguage(JSONObject frame) {
+        String language = null;
+        if ("snapshot".equals(frame.optString("type"))) {
+            JSONObject snapshot = frame.optJSONObject("snapshot");
+            if (snapshot != null) {
+                language = snapshot.has("uiLanguage")
+                    ? snapshot.optString("uiLanguage", null)
+                    : "ru";
+            }
+        } else if ("event".equals(frame.optString("type"))) {
+            JSONObject event = frame.optJSONObject("event");
+            if (event != null && "uiLanguage.changed".equals(event.optString("type"))) {
+                language = event.optString("language", null);
+            }
+        }
+        if ("en".equals(language) || "ru".equals(language)) applyUiLanguage(language);
+    }
+
+    private void applyUiLanguage(String language) {
+        if (!"en".equals(language) && !"ru".equals(language)) return;
+        boolean changed = !language.equals(uiLanguage);
+        uiLanguage = language;
+        getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putString(UI_LANGUAGE, language)
+            .apply();
+        tracker.setFallbackTitles(
+            text(R.string.notification_default_task),
+            text(R.string.notification_open_details),
+            text(R.string.notification_untitled_task)
+        );
+        if (changed) {
+            createChannels();
+            updateStatus(statusResource);
+        }
+    }
+
+    private String text(int resourceId) {
+        return LocalizedResources.getString(this, uiLanguage, resourceId);
     }
 }

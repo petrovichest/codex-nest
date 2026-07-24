@@ -323,6 +323,16 @@ pre {
   min-height: 100%;
 }
 
+.project-list-dragging {
+  user-select: none;
+}
+
+.project-list-dragging .project-sessions,
+.project-list-dragging .project-action-notice,
+.project-list-dragging .project-create-error {
+  display: none;
+}
+
 .thread-nav.bottom-up .project-list {
   display: flex;
   flex-direction: column;
@@ -333,7 +343,33 @@ pre {
 }
 
 .project-group {
+  position: relative;
   margin-top: 10px;
+}
+
+.project-group.project-drop-before::before,
+.project-group.project-drop-after::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  left: 4px;
+  z-index: 2;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.project-group.project-drop-before::before {
+  top: -6px;
+}
+
+.project-group.project-drop-after::after {
+  bottom: -6px;
+}
+
+.project-group-dragging .project-title {
+  opacity: 0.46;
 }
 
 .project-title {
@@ -342,9 +378,38 @@ pre {
   align-items: center;
   gap: 2px;
   padding: 0 4px;
+  border-radius: 7px;
   color: var(--muted-strong);
   font-size: 13px;
   font-weight: 600;
+}
+
+.project-drag-handle {
+  width: 26px;
+  min-width: 26px;
+  height: 31px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  cursor: grab;
+  touch-action: none;
+}
+
+.project-drag-handle svg {
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+}
+
+.project-group-dragging .project-drag-handle {
+  cursor: grabbing;
+}
+
+.project-title:hover,
+.project-title:focus-within {
+  color: var(--text);
+  background: var(--sidebar-hover);
 }
 
 .project-toggle {
@@ -363,11 +428,11 @@ pre {
   font: inherit;
 }
 
-.project-toggle:hover,
+.project-toggle:hover:not(:disabled),
 .project-toggle:focus-visible {
   border-color: transparent;
-  color: var(--text);
-  background: var(--sidebar-hover);
+  color: inherit;
+  background: transparent;
 }
 
 .project-toggle svg {
@@ -1337,6 +1402,45 @@ pre {
   background: transparent;
 }
 
+.markdown-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: 12px 0;
+}
+
+.message .markdown-code-block pre {
+  margin: 0;
+  padding-right: 48px;
+}
+
+.markdown-code-copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-color: var(--line-strong);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--muted-strong);
+}
+
+.markdown-code-copy svg {
+  width: 16px;
+  height: 16px;
+}
+
+.markdown-code-block[data-copy-state="copied"] .markdown-code-copy {
+  color: var(--success);
+}
+
+.markdown-code-block[data-copy-state="failed"] .markdown-code-copy {
+  color: var(--danger);
+}
+
 .message hr {
   margin: 18px 0;
   border: 0;
@@ -1972,33 +2076,32 @@ pre {
 .setting-select {
   position: relative;
   display: flex;
-  gap: 2px;
-  padding-right: 3px;
+  gap: 5px;
+  padding: 0 7px;
 }
 
 .setting-select select {
-  width: auto;
-  max-width: 145px;
-  height: 30px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
   appearance: none;
-  padding: 0 20px 0 2px;
+  padding: 0;
   border: 0;
   outline: 0;
   background: transparent;
-  color: inherit;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
+  opacity: 0;
 }
 
 .setting-select select:disabled {
   cursor: default;
 }
 
-.setting-select-chevron {
-  position: absolute;
-  right: 5px;
-  pointer-events: none;
+.setting-select:has(select:focus-visible) {
+  outline: 2px solid color-mix(in srgb, var(--text) 65%, transparent);
+  outline-offset: 2px;
 }
 
 .setting-control.icon-only,
@@ -2009,16 +2112,6 @@ pre {
   justify-content: center;
   gap: 0;
   padding: 0;
-}
-
-.setting-select.icon-only select {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  max-width: none;
-  height: 100%;
-  padding: 0;
-  opacity: 0;
 }
 
 .plan-toggle.active,
@@ -2214,8 +2307,21 @@ pre {
   animation: microphone-pulse 1.4s ease-in-out infinite;
 }
 
-.composer-recording-status {
+.composer-action.microphone.timing {
+  width: auto;
+  min-width: 44px;
+  padding: 0 7px;
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
+}
+
+.composer-action.microphone.timing:disabled {
+  opacity: 1;
+}
+
+.composer-action-timer {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -2241,31 +2347,130 @@ pre {
 
 .queued-messages {
   display: grid;
-  gap: 9px;
+  gap: 6px;
+  max-height: min(32dvh, 260px);
+  margin: 0 4px 7px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-raised) 96%, transparent);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 8%);
+}
+
+.queued-messages-header,
+.queued-message-heading,
+.queued-message-actions,
+.queued-message-editor-actions {
+  display: flex;
+  align-items: center;
+}
+
+.queued-messages-header {
+  justify-content: space-between;
+  padding: 0 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.queued-messages-list {
+  min-height: 0;
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .queued-message {
-  padding: 6px;
-  opacity: 0.82;
-  border: 1px dashed var(--line-strong);
-  border-radius: 18px;
+  min-width: 0;
+  padding: 7px 8px 8px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-muted);
 }
 
-.queued-message-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 9px;
-  margin-top: 7px;
+.queued-message-heading {
+  justify-content: space-between;
+  gap: 8px;
   color: var(--muted);
   font-size: 11px;
 }
 
-.queued-message-footer button {
+.queued-message-actions {
+  min-width: 0;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.queued-message-actions .icon-button {
+  width: 27px;
+  min-width: 27px;
+  height: 27px;
+  min-height: 27px;
+}
+
+.queued-message-actions .icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.queued-message-send {
   min-height: 27px;
   padding: 0 8px;
   border-color: transparent;
-  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.queued-message-text {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 5px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.queued-message .message-images {
+  grid-template-columns: repeat(auto-fill, 48px);
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.queued-message .message-images img {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.queued-message-editor {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.queued-message-editor textarea {
+  min-height: 68px;
+  max-height: 140px;
+  padding: 8px 9px;
+  resize: vertical;
+  font-size: 14px;
+}
+
+.queued-message-editor-actions {
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.queued-message-editor-actions button {
+  min-height: 29px;
+  padding: 0 10px;
   font-size: 11px;
 }
 
@@ -3082,10 +3287,6 @@ pre {
 
   .composer-hint {
     display: none;
-  }
-
-  .setting-select select {
-    max-width: 116px;
   }
 
   .goal-popover {

@@ -15,6 +15,7 @@ import type {
 
 import { agentLabel, backendFor, defaultAgent, modelsForAgent, snapshotBackends } from "../agents";
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n } from "../i18n";
 import type { OptimisticMessage } from "../state";
 import { Composer, type ComposerImage } from "./Composer";
 import { NewTaskIcon } from "./Icons";
@@ -35,6 +36,7 @@ export function NewSession({
   onNewProject(): void;
 }) {
   const { api, state, dispatch } = useConnection();
+  const { language, t } = useI18n();
   const navigate = useNavigate();
   const snapshot = state.snapshot;
   const backends = useMemo(() => snapshotBackends(snapshot), [snapshot]);
@@ -59,7 +61,8 @@ export function NewSession({
   const agentModels = selectedBackend?.models ?? [];
   const backendBlockedReason =
     selectedBackend && selectedBackend.connection.state !== "ready"
-      ? (selectedBackend.connection.message ?? `${agentLabel(agent)} недоступен`)
+      ? (localizeKnownServerText(language, selectedBackend.connection.message) ??
+        t("{{agent}} недоступен", { agent: agentLabel(agent) }))
       : null;
 
   useEffect(() => {
@@ -126,11 +129,19 @@ export function NewSession({
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
         state: {
           focusComposer: true,
-          ...(result.goalWarning ? { notice: result.goalWarning } : {}),
+          ...(result.goalWarning
+            ? {
+                notice: localizeKnownServerText(language, result.goalWarning) ?? result.goalWarning,
+              }
+            : {}),
         },
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось создать задачу");
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось создать задачу"),
+      );
     } finally {
       setBusy(false);
     }
@@ -140,8 +151,8 @@ export function NewSession({
     <div className="thread-workspace new-session-page">
       <div className="conversation-pane">
         <WorkspaceHeader
-          title="Новая задача"
-          subtitle={project?.displayName ?? "Выберите проект"}
+          title={t("Новая задача")}
+          subtitle={project?.displayName ?? t("Выберите проект")}
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
         />
@@ -149,10 +160,12 @@ export function NewSession({
           <span className="new-session-glyph">
             <NewTaskIcon />
           </span>
-          <h2>Что поручим {agentLabel(agent)}?</h2>
-          <p>Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.</p>
+          <h2>{t("Что поручим {{agent}}?", { agent: agentLabel(agent) })}</h2>
+          <p>
+            {t("Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.")}
+          </p>
           {showAgentPicker && (
-            <div className="agent-segmented" role="radiogroup" aria-label="Агент">
+            <div className="agent-segmented" role="radiogroup" aria-label={t("Агент")}>
               {backends.map((backend) => (
                 <button
                   key={backend.agent}
@@ -192,9 +205,11 @@ export function NewSession({
           onNewProject={onNewProject}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
-          onTranscribe={async (audio) => {
-            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
-            return (await api.transcribe(audio)).text;
+          onTranscribe={async (audio, durationMs) => {
+            if (!transcriptionProvider) {
+              throw new Error(t("Распознавание речи не настроено"));
+            }
+            return (await api.transcribe(audio, durationMs)).text;
           }}
           error={error ?? backendBlockedReason}
         />
@@ -207,7 +222,7 @@ export function NewSession({
       {inspectorOpen && (
         <button
           className="inspector-backdrop"
-          aria-label="Закрыть сведения"
+          aria-label={t("Закрыть сведения")}
           onClick={() => setInspectorOpen(false)}
         />
       )}

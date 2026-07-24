@@ -13,9 +13,34 @@ final class NotificationEventTracker {
     private final Map<String, String> threadTitles = new HashMap<>();
     private final Map<String, String> attentionThreads = new HashMap<>();
     private long lastObservedAt;
+    private String defaultThreadTitle;
+    private String detailsTitle;
+    private String untitledThreadTitle;
 
     NotificationEventTracker(long lastObservedAt) {
+        this(lastObservedAt, "Codex task", "Open CodexNest for details", "Untitled");
+    }
+
+    NotificationEventTracker(
+        long lastObservedAt,
+        String defaultThreadTitle,
+        String detailsTitle,
+        String untitledThreadTitle
+    ) {
         this.lastObservedAt = lastObservedAt;
+        this.defaultThreadTitle = defaultThreadTitle;
+        this.detailsTitle = detailsTitle;
+        this.untitledThreadTitle = untitledThreadTitle;
+    }
+
+    synchronized void setFallbackTitles(
+        String defaultThreadTitle,
+        String detailsTitle,
+        String untitledThreadTitle
+    ) {
+        this.defaultThreadTitle = defaultThreadTitle;
+        this.detailsTitle = detailsTitle;
+        this.untitledThreadTitle = untitledThreadTitle;
     }
 
     synchronized List<CodexNotification> accept(String serializedFrame) throws Exception {
@@ -51,7 +76,7 @@ final class NotificationEventTracker {
                 if (thread == null) continue;
                 String id = thread.optString("id");
                 String state = thread.optString("state");
-                String title = thread.optString("title", "Задача Codex");
+                String title = thread.optString("title", defaultThreadTitle);
                 long updatedAt = thread.optLong("updatedAt", 0);
                 threadStates.put(id, state);
                 threadTitles.put(id, title);
@@ -92,7 +117,7 @@ final class NotificationEventTracker {
                 notifications,
                 thread.optString("state"),
                 thread.optString("id"),
-                thread.optString("title", "Задача Codex")
+                thread.optString("title", defaultThreadTitle)
             );
         }
         notifications.addAll(missedAttention);
@@ -106,7 +131,7 @@ final class NotificationEventTracker {
             JSONObject thread = event.getJSONObject("thread");
             String id = thread.optString("id");
             String state = thread.optString("state");
-            String title = thread.optString("title", "Задача Codex");
+            String title = thread.optString("title", defaultThreadTitle);
             String previous = threadStates.put(id, state);
             threadTitles.put(id, title);
             if (!state.equals(previous)) addStateNotification(notifications, state, id, title);
@@ -145,20 +170,36 @@ final class NotificationEventTracker {
     ) {
         if ("completed".equals(state)) {
             notifications.add(
-                new CodexNotification(CodexNotification.Kind.COMPLETED, threadId, title)
+                new CodexNotification(
+                    CodexNotification.Kind.COMPLETED,
+                    threadId,
+                    displayTitle(title)
+                )
             );
         } else if ("failed".equals(state)) {
-            notifications.add(new CodexNotification(CodexNotification.Kind.FAILED, threadId, title));
+            notifications.add(
+                new CodexNotification(CodexNotification.Kind.FAILED, threadId, displayTitle(title))
+            );
         } else if ("needsAttention".equals(state) && !attentionThreads.containsValue(threadId)) {
             notifications.add(
-                new CodexNotification(CodexNotification.Kind.ATTENTION, threadId, title)
+                new CodexNotification(
+                    CodexNotification.Kind.ATTENTION,
+                    threadId,
+                    displayTitle(title)
+                )
             );
         }
     }
 
     private String titleFor(String threadId) {
-        if (threadId == null) return "Откройте CodexNest для подробностей";
-        return threadTitles.getOrDefault(threadId, "Задача Codex");
+        if (threadId == null) return detailsTitle;
+        return displayTitle(threadTitles.getOrDefault(threadId, defaultThreadTitle));
+    }
+
+    private String displayTitle(String title) {
+        return "Без названия".equals(title) || "Untitled".equals(title)
+            ? untitledThreadTitle
+            : title;
     }
 
     private static String nullableString(JSONObject object, String key) {

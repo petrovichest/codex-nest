@@ -22,6 +22,7 @@ import type {
   ThreadSummary,
   TurnProgress,
   TurnView,
+  UiLanguage,
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "./attention";
@@ -105,10 +106,12 @@ export class AppProjection extends EventEmitter {
   }
 
   snapshot(): AppSnapshot {
+    const state = this.store.snapshot();
     return {
       sequence: this.sequence,
+      uiLanguage: state.uiLanguage,
       connection: this.connection,
-      projects: this.store.snapshot().projects,
+      projects: state.projects,
       threads: this.sortedThreads(),
       attention: this.attention.list(),
       models: this.models,
@@ -289,6 +292,13 @@ export class AppProjection extends EventEmitter {
       else delete state.taskDefaults;
     });
     this.publish({ type: "taskDefaults.changed", taskDefaults });
+  }
+
+  async setUiLanguage(language: UiLanguage): Promise<void> {
+    await this.store.update((state) => {
+      state.uiLanguage = language;
+    });
+    this.publish({ type: "uiLanguage.changed", language });
   }
 
   publishProject(projectId: string): void {
@@ -785,9 +795,11 @@ export class AppProjection extends EventEmitter {
             };
             meta.lastOutcome = outcome;
             meta.outcomeUpdatedAt = updatedAt;
-            meta.awaitingPlanResponse =
-              outcome === "completed" && meta.settings?.collaborationMode === "plan" && hasPlan;
             const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
+            meta.awaitingPlanResponse =
+              outcome === "completed" &&
+              ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
+                latestPlanChecklistIsIncomplete(artifacts));
             if (artifacts) {
               meta.timelineArtifacts![notification.params.turn.id] = artifacts.map((item) =>
                 item.type === "planChecklist"
@@ -1371,6 +1383,17 @@ function isTimelineArtifact(item: ActivityItem): item is TimelineArtifact {
 
 function turnContainsPlan(turn: Turn): boolean {
   return turn.items.some((item) => item.type === "plan" && item.text.trim());
+}
+
+function latestPlanChecklistIsIncomplete(items: TimelineArtifact[] | undefined): boolean {
+  if (!items) return false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.type === "planChecklist") {
+      return item.steps.some((step) => step.status !== "completed");
+    }
+  }
+  return false;
 }
 
 function commandKind(actions: Array<{ type: string }>): "read" | "search" | "command" {

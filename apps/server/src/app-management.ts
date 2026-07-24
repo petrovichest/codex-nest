@@ -43,21 +43,22 @@ export class AppManager {
     const status = normalizeStatus(disk, this.options.currentVersion, this.options.managedInstall);
     if (!status.supported || status.operation === "idle") return status;
     try {
-      await this.runCommand(
+      const { stdout } = await this.runCommand(
         this.options.systemctlBin ?? "systemctl",
-        ["--user", "is-active", "--quiet", "codexnest-update.service"],
+        ["--user", "show", "--property=ActiveState", "--value", "codexnest-update.service"],
         { timeout: 2_000 },
       );
-      return status;
+      if (["active", "activating", "reloading"].includes(stdout.trim())) return status;
     } catch {
-      return {
-        ...status,
-        operation: "idle",
-        result: "failed",
-        message: "CodexNest update was interrupted; the active release is still available",
-        updatedAt: new Date().toISOString(),
-      };
+      // Treat an unavailable unit the same as an inactive updater below.
     }
+    return {
+      ...status,
+      operation: "idle",
+      result: "failed",
+      message: "CodexNest update was interrupted; the active release is still available",
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   async check(): Promise<AppUpdateStatus> {

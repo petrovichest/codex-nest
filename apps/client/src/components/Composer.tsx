@@ -2,6 +2,7 @@ import {
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -21,6 +22,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { agentLabel } from "../agents";
+import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, XIcon } from "./Icons";
 import { SettingsPicker } from "./SettingsPicker";
 
@@ -28,6 +30,18 @@ export type ComposerImage = {
   id: string;
   name: string;
   url: string;
+};
+
+export type ComposerRecording = {
+  audio: Blob;
+  durationMs: number;
+  selection: { start: number; end: number };
+};
+
+export type ComposerTranscriptionStatus = {
+  belongsToComposer: boolean;
+  elapsedSeconds: number;
+  estimatedTotalSeconds: number | null;
 };
 
 const KEYBOARD_VIEWPORT_DELTA = 120;
@@ -67,9 +81,13 @@ export function Composer({
   transcriptionConfig = null,
   transcriptionProvider = null,
   onTranscribe,
+  onRecordingReady,
+  transcriptionStatus = null,
+  transcriptionError = null,
   error,
   autoFocus = false,
   hasSupplementalContent = false,
+  children,
 }: {
   agent: AgentId;
   input: string;
@@ -98,11 +116,16 @@ export function Composer({
   onStop?(): void;
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
-  onTranscribe?(audio: Blob): Promise<string>;
+  onTranscribe?(audio: Blob, durationMs: number): Promise<string>;
+  onRecordingReady?(recording: ComposerRecording): void;
+  transcriptionStatus?: ComposerTranscriptionStatus | null;
+  transcriptionError?: string | null;
   error: string | null;
   autoFocus?: boolean;
   hasSupplementalContent?: boolean;
+  children?: ReactNode;
 }) {
+  const { language, t } = useI18n();
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -113,18 +136,24 @@ export function Composer({
   const audioChunksRef = useRef<Blob[]>([]);
   const audioBytesRef = useRef(0);
   const discardRecordingRef = useRef(false);
+  const recordingStoppedRef = useRef(false);
   const aliveRef = useRef(true);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | undefined>(undefined);
   const recordingLimitRef = useRef<number | undefined>(undefined);
+  const transcriptionStartedAtRef = useRef(0);
+  const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [transcribingSeconds, setTranscribingSeconds] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const speechBusy = speechState !== "idle";
+  const localSpeechBusy = speechState !== "idle";
+  const speechBusy = localSpeechBusy || Boolean(transcriptionStatus?.belongsToComposer);
+  const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
   const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
   const canSubmit =
     hasContent &&
@@ -136,8 +165,33 @@ export function Composer({
   const speechUnavailable = microphoneUnavailableReason(
     transcriptionConfig,
     transcriptionProvider,
-    onTranscribe,
+    Boolean(onTranscribe || onRecordingReady),
+    t,
   );
+  const transcriptionStatusText = transcriptionStatus?.belongsToComposer
+    ? formatTranscriptionStatus(
+        transcriptionStatus.elapsedSeconds,
+        transcriptionStatus.estimatedTotalSeconds,
+        t,
+      )
+    : null;
+  const transcriptionTimerText = transcriptionStatus?.belongsToComposer
+    ? formatTranscriptionTimer(
+        transcriptionStatus.elapsedSeconds,
+        transcriptionStatus.estimatedTotalSeconds,
+      )
+    : speechState === "transcribing"
+      ? formatRecordingTime(transcribingSeconds)
+      : null;
+  const speechTimerText =
+    speechState === "recording" ? formatRecordingTime(recordingSeconds) : transcriptionTimerText;
+  const speechStatusText =
+    speechState === "recording"
+      ? t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })
+      : (transcriptionStatusText ??
+        (speechState === "transcribing"
+          ? formatTranscriptionStatus(transcribingSeconds, null, t)
+          : null));
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -215,10 +269,15 @@ export function Composer({
     aliveRef.current = true;
     return () => {
       aliveRef.current = false;
-      discardRecordingRef.current = true;
       clearRecordingTimers();
+      clearTranscriptionTimer();
       const recorder = mediaRecorderRef.current;
-      if (recorder?.state !== "inactive") recorder?.stop();
+      if (recorder && recorder.state !== "inactive") {
+        discardRecordingRef.current = true;
+        recorder.stop();
+      } else if (!recordingStoppedRef.current) {
+        discardRecordingRef.current = true;
+      }
       stopMediaStream();
     };
   }, []);
@@ -244,7 +303,7 @@ export function Composer({
       );
       onImagesChange([...images, ...added]);
     } catch {
-      setAttachmentError("Не удалось прочитать выбранное изображение");
+      setAttachmentError(t("Не удалось прочитать выбранное изображение"));
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
@@ -263,11 +322,12 @@ export function Composer({
   }
 
   async function startRecording() {
-    if (speechState !== "idle" || busy) return;
+    if (speechState !== "idle" || transcriptionStatus || busy) return;
     const unavailable = microphoneUnavailableReason(
       transcriptionConfig,
       transcriptionProvider,
-      onTranscribe,
+      Boolean(onTranscribe || onRecordingReady),
+      t,
     );
     if (unavailable) {
       setSpeechError(unavailable);
@@ -275,7 +335,7 @@ export function Composer({
     }
     const mimeType = recordingMimeType();
     if (!mimeType) {
-      setSpeechError("Этот браузер не поддерживает запись WebM или MP4");
+      setSpeechError(t("Этот браузер не поддерживает запись WebM или MP4"));
       return;
     }
     if (!insertionRef.current) {
@@ -284,6 +344,7 @@ export function Composer({
     setSpeechError(null);
     setSpeechState("requesting");
     discardRecordingRef.current = false;
+    recordingStoppedRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!aliveRef.current) {
@@ -306,11 +367,12 @@ export function Composer({
       recorder.addEventListener("error", () => {
         discardRecordingRef.current = true;
         clearRecordingTimers();
+        clearTranscriptionTimer();
         stopMediaStream();
         mediaRecorderRef.current = null;
         if (aliveRef.current) {
           setSpeechState("idle");
-          setSpeechError("Не удалось записать аудио");
+          setSpeechError(t("Не удалось записать аудио"));
         }
       });
       recorder.addEventListener("stop", () => void finishRecording(mimeType));
@@ -331,7 +393,7 @@ export function Composer({
       stopMediaStream();
       if (aliveRef.current) {
         setSpeechState("idle");
-        setSpeechError(recordingErrorMessage(caught));
+        setSpeechError(recordingErrorMessage(caught, t));
       }
     }
   }
@@ -340,7 +402,11 @@ export function Composer({
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
     clearRecordingTimers();
-    if (aliveRef.current) setSpeechState("transcribing");
+    recordingStoppedRef.current = true;
+    if (aliveRef.current) {
+      startTranscriptionTimer();
+      setSpeechState("transcribing");
+    }
     recorder.stop();
     stopMediaStream();
   }
@@ -353,34 +419,65 @@ export function Composer({
     const bytes = audioBytesRef.current;
     audioChunksRef.current = [];
     audioBytesRef.current = 0;
-    if (discardRecordingRef.current || !aliveRef.current) return;
+    if (discardRecordingRef.current) {
+      clearTranscriptionTimer();
+      return;
+    }
     if (!chunks.length || !bytes) {
-      setSpeechState("idle");
-      setSpeechError("Запись не содержит аудио");
+      if (aliveRef.current) {
+        clearTranscriptionTimer();
+        setSpeechState("idle");
+        setSpeechError(t("Запись не содержит аудио"));
+      }
       return;
     }
     if (bytes > (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
-      setSpeechState("idle");
-      setSpeechError("Запись слишком большая");
+      if (aliveRef.current) {
+        clearTranscriptionTimer();
+        setSpeechState("idle");
+        setSpeechError(t("Запись слишком большая"));
+      }
+      return;
+    }
+    const recording = {
+      audio: new Blob(chunks, { type: mimeType }),
+      durationMs: Math.max(1, Date.now() - recordingStartedAtRef.current),
+      selection: insertionRef.current ?? { start: input.length, end: input.length },
+    };
+    if (onRecordingReady) {
+      onRecordingReady(recording);
+      if (aliveRef.current) {
+        clearTranscriptionTimer();
+        setSpeechState("idle");
+      }
+      return;
+    }
+    if (!aliveRef.current || !onTranscribe) {
+      clearTranscriptionTimer();
       return;
     }
     try {
-      const transcript = await onTranscribe!(new Blob(chunks, { type: mimeType }));
+      const transcript = await onTranscribe(recording.audio, recording.durationMs);
       if (!aliveRef.current) return;
       insertTranscript(transcript);
       setSpeechError(null);
     } catch (caught) {
       if (aliveRef.current) {
-        setSpeechError(caught instanceof Error ? caught.message : "Не удалось распознать запись");
+        setSpeechError(
+          caught instanceof Error
+            ? localizeKnownServerText(language, caught.message)
+            : t("Не удалось распознать запись"),
+        );
       }
     } finally {
+      clearTranscriptionTimer();
       if (aliveRef.current) setSpeechState("idle");
     }
   }
 
   function insertTranscript(transcript: string) {
     const clean = transcript.trim();
-    if (!clean) throw new Error("Распознавание не вернуло текст");
+    if (!clean) throw new Error(t("Распознавание не вернуло текст"));
     const selection = insertionRef.current ?? { start: input.length, end: input.length };
     const start = Math.min(selection.start, input.length);
     const end = Math.max(start, Math.min(selection.end, input.length));
@@ -414,6 +511,23 @@ export function Composer({
     }
   }
 
+  function startTranscriptionTimer() {
+    clearTranscriptionTimer();
+    transcriptionStartedAtRef.current = Date.now();
+    setTranscribingSeconds(0);
+    transcriptionTimerRef.current = window.setInterval(() => {
+      setTranscribingSeconds(
+        Math.max(0, Math.floor((Date.now() - transcriptionStartedAtRef.current) / 1_000)),
+      );
+    }, 250);
+  }
+
+  function clearTranscriptionTimer() {
+    if (transcriptionTimerRef.current === undefined) return;
+    window.clearInterval(transcriptionTimerRef.current);
+    transcriptionTimerRef.current = undefined;
+  }
+
   function stopMediaStream() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -426,14 +540,14 @@ export function Composer({
     >
       {creating && projects.length === 0 && (
         <div className="composer-empty-projects">
-          <span>Чтобы начать задачу, добавьте рабочую папку.</span>
+          <span>{t("Чтобы начать задачу, добавьте рабочую папку.")}</span>
           <button type="button" onClick={onNewProject}>
-            <PlusIcon /> Добавить проект
+            <PlusIcon /> {t("Добавить проект")}
           </button>
         </div>
       )}
       {images.length > 0 && (
-        <div className="composer-attachments" ref={attachmentsRef} aria-label="Изображения">
+        <div className="composer-attachments" ref={attachmentsRef} aria-label={t("Изображения")}>
           {images.map((image) => {
             const selected = selectedImageId === image.id;
             return (
@@ -441,7 +555,7 @@ export function Composer({
                 <button
                   type="button"
                   className="composer-attachment-preview"
-                  aria-label={`Выбрать изображение ${image.name}`}
+                  aria-label={t("Выбрать изображение {{name}}", { name: image.name })}
                   aria-pressed={selected}
                   onClick={() => setSelectedImageId(image.id)}
                 >
@@ -451,7 +565,7 @@ export function Composer({
                   <button
                     type="button"
                     className="composer-attachment-remove"
-                    aria-label={`Удалить изображение ${image.name}`}
+                    aria-label={t("Удалить изображение {{name}}", { name: image.name })}
                     onClick={() => onImagesChange(images.filter((item) => item.id !== image.id))}
                   >
                     <XIcon />
@@ -462,11 +576,16 @@ export function Composer({
           })}
         </div>
       )}
+      {children}
       <div className="composer-box">
         <textarea
           ref={textareaRef}
           autoFocus={autoFocus}
-          aria-label={running ? "Направить текущую задачу" : `Сообщение для ${agentLabel(agent)}`}
+          aria-label={
+            running
+              ? t("Направить текущую задачу")
+              : t("Сообщение для {{agent}}", { agent: agentLabel(agent) })
+          }
           rows={2}
           maxLength={goalMode ? 4_000 : undefined}
           readOnly={speechBusy}
@@ -478,10 +597,10 @@ export function Composer({
           onKeyDown={keyboardSubmit}
           placeholder={
             goalMode
-              ? "Опишите проверяемый результат цели…"
+              ? t("Опишите проверяемый результат цели…")
               : running
-                ? "Направить текущую задачу…"
-                : "Спросите что угодно"
+                ? t("Направить текущую задачу…")
+                : t("Спросите что угодно")
           }
         />
         <div className="composer-toolbar">
@@ -495,7 +614,7 @@ export function Composer({
               onChange={(event) => void addImages(Array.from(event.target.files ?? []))}
             />
             <button
-              aria-label="Добавить изображения"
+              aria-label={t("Добавить изображения")}
               className="composer-add-image"
               type="button"
               disabled={speechBusy}
@@ -505,9 +624,9 @@ export function Composer({
             </button>
             {creating && projects.length > 0 && (
               <label className="project-picker">
-                <span className="sr-only">Проект</span>
+                <span className="sr-only">{t("Проект")}</span>
                 <select
-                  aria-label="Проект"
+                  aria-label={t("Проект")}
                   value={projectId}
                   onChange={(event) => onProjectChange?.(event.target.value)}
                 >
@@ -532,58 +651,66 @@ export function Composer({
               onGoalUpdate={onGoalUpdate}
               onGoalClear={onGoalClear}
             />
-            {running && <span className="composer-hint">Сообщение будет добавлено в очередь</span>}
-            {speechState === "recording" && (
-              <span className="composer-recording-status" role="status">
-                Запись {formatRecordingTime(recordingSeconds)}
-              </span>
-            )}
-            {speechState === "transcribing" && (
-              <span className="composer-recording-status" role="status">
-                Распознаём…
-              </span>
+            {running && (
+              <span className="composer-hint">{t("Сообщение будет добавлено в очередь")}</span>
             )}
           </div>
           <div className="composer-actions">
             {transcriptionConfig && (
-              <button
-                aria-label={
-                  speechState === "recording"
-                    ? "Остановить запись"
-                    : speechState === "requesting"
-                      ? "Запрашиваем доступ к микрофону"
-                      : speechState === "transcribing"
-                        ? "Распознаём запись"
-                        : speechUnavailable
-                          ? speechUnavailable
-                          : "Начать запись"
-                }
-                aria-pressed={speechState === "recording"}
-                className={`composer-action microphone${speechState === "recording" ? " recording" : ""}`}
-                disabled={
-                  speechState === "requesting" ||
-                  speechState === "transcribing" ||
-                  (speechState === "idle" && (busy || Boolean(speechUnavailable)))
-                }
-                title={speechUnavailable ?? undefined}
-                type="button"
-                onPointerDown={speechState === "idle" ? captureInsertionPoint : undefined}
-                onClick={() =>
-                  speechState === "recording" ? stopRecording() : void startRecording()
-                }
-              >
-                {speechState === "requesting" || speechState === "transcribing" ? (
-                  <span className="spinner small" />
-                ) : speechState === "recording" ? (
-                  <StopIcon />
-                ) : (
-                  <MicrophoneIcon />
+              <>
+                <button
+                  aria-label={
+                    speechState === "recording"
+                      ? t("Остановить запись")
+                      : speechState === "requesting"
+                        ? t("Запрашиваем доступ к микрофону")
+                        : transcriptionStatus && !transcriptionStatus.belongsToComposer
+                          ? t("Идёт распознавание в другой сессии")
+                          : transcriptionBusy
+                            ? t("Распознаём запись")
+                            : speechUnavailable
+                              ? speechUnavailable
+                              : t("Начать запись")
+                  }
+                  aria-pressed={speechState === "recording"}
+                  className={`composer-action microphone${speechState === "recording" ? " recording" : ""}${speechTimerText ? " timing" : ""}`}
+                  disabled={
+                    speechState === "requesting" ||
+                    speechState === "transcribing" ||
+                    Boolean(transcriptionStatus) ||
+                    (speechState === "idle" && (busy || Boolean(speechUnavailable)))
+                  }
+                  title={speechUnavailable ?? undefined}
+                  type="button"
+                  onPointerDown={
+                    speechState === "idle" && !transcriptionStatus
+                      ? captureInsertionPoint
+                      : undefined
+                  }
+                  onClick={() =>
+                    speechState === "recording" ? stopRecording() : void startRecording()
+                  }
+                >
+                  {speechTimerText ? (
+                    <span className="composer-action-timer" aria-hidden="true">
+                      {speechTimerText}
+                    </span>
+                  ) : speechState === "requesting" ? (
+                    <span className="spinner small" />
+                  ) : (
+                    <MicrophoneIcon />
+                  )}
+                </button>
+                {speechStatusText && (
+                  <span className="sr-only" role="status">
+                    {speechStatusText}
+                  </span>
                 )}
-              </button>
+              </>
             )}
             {running && onStop && (
               <button
-                aria-label="Остановить задачу"
+                aria-label={t("Остановить задачу")}
                 className="composer-action stop"
                 type="button"
                 onClick={onStop}
@@ -593,7 +720,7 @@ export function Composer({
             )}
             <button
               aria-label={
-                running ? "Добавить в очередь" : goalMode ? "Запустить цель" : "Отправить"
+                running ? t("Добавить в очередь") : goalMode ? t("Запустить цель") : t("Отправить")
               }
               className="composer-action send"
               disabled={!canSubmit}
@@ -604,8 +731,13 @@ export function Composer({
           </div>
         </div>
       </div>
-      {(error || attachmentError || speechError) && (
-        <div className="composer-error">{error ?? attachmentError ?? speechError}</div>
+      {(error || attachmentError || speechError || transcriptionError) && (
+        <div className="composer-error">
+          {localizeKnownServerText(language, error) ??
+            attachmentError ??
+            speechError ??
+            transcriptionError}
+        </div>
       )}
     </form>
   );
@@ -640,10 +772,11 @@ function pastedImageName(mimeType: string, index: number): string {
 function microphoneUnavailableReason(
   config: TranscriptionConfigResponse | null,
   provider: TranscriptionProvider | null,
-  transcribe: ((audio: Blob) => Promise<string>) | undefined,
+  canTranscribe: boolean,
+  t: Translate,
 ): string | null {
-  if (!config || !provider || !config.providers.includes(provider) || !transcribe) {
-    return "Распознавание речи не настроено";
+  if (!config || !provider || !config.providers.includes(provider) || !canTranscribe) {
+    return t("Распознавание речи не настроено");
   }
   if (
     typeof navigator === "undefined" ||
@@ -651,10 +784,10 @@ function microphoneUnavailableReason(
     typeof MediaRecorder === "undefined"
   ) {
     return typeof window !== "undefined" && window.isSecureContext === false
-      ? "Для доступа к микрофону откройте CodexNest по HTTPS"
-      : "Запись с микрофона не поддерживается на этом устройстве";
+      ? t("Для доступа к микрофону откройте CodexNest по HTTPS")
+      : t("Запись с микрофона не поддерживается на этом устройстве");
   }
-  return recordingMimeType() ? null : "Этот браузер не поддерживает запись WebM или MP4";
+  return recordingMimeType() ? null : t("Этот браузер не поддерживает запись WebM или MP4");
 }
 
 function recordingMimeType(): string | null {
@@ -666,18 +799,47 @@ function recordingMimeType(): string | null {
   );
 }
 
-function recordingErrorMessage(error: unknown): string {
+function recordingErrorMessage(error: unknown, t: Translate): string {
   if (error instanceof DOMException) {
     if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-      return "Нет доступа к микрофону. Разрешите его в настройках приложения или браузера";
+      return t("Нет доступа к микрофону. Разрешите его в настройках приложения или браузера");
     }
-    if (error.name === "NotFoundError") return "Микрофон не найден";
-    if (error.name === "NotReadableError") return "Микрофон занят другим приложением";
+    if (error.name === "NotFoundError") return t("Микрофон не найден");
+    if (error.name === "NotReadableError") return t("Микрофон занят другим приложением");
   }
-  return "Не удалось начать запись с микрофона";
+  return t("Не удалось начать запись с микрофона");
 }
 
 function formatRecordingTime(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatTranscriptionStatus(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+  t: Translate,
+): string {
+  if (estimatedTotalSeconds === null) {
+    return t("Распознаём · прошло {{time}}", { time: formatRecordingTime(elapsedSeconds) });
+  }
+  if (elapsedSeconds <= estimatedTotalSeconds) {
+    return t("Распознаём · осталось ≈ {{time}}", {
+      time: formatRecordingTime(Math.max(0, estimatedTotalSeconds - elapsedSeconds)),
+    });
+  }
+  return t("Распознаём · дольше прогноза на {{time}}", {
+    time: formatRecordingTime(elapsedSeconds - estimatedTotalSeconds),
+  });
+}
+
+function formatTranscriptionTimer(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+): string {
+  if (estimatedTotalSeconds === null) return formatRecordingTime(elapsedSeconds);
+  if (elapsedSeconds <= estimatedTotalSeconds) {
+    return `≈${formatRecordingTime(estimatedTotalSeconds - elapsedSeconds)}`;
+  }
+  return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
 }

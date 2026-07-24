@@ -79,6 +79,21 @@ describe("BrowserNotificationTracker", () => {
     expect(notifications[0]?.options?.body).toBe("Тестовая задача");
   });
 
+  it("uses the server-synchronized language for notification chrome", () => {
+    const tracker = new BrowserNotificationTracker();
+    const running = thread("running", 10);
+    tracker.acceptSnapshot(snapshot([running]));
+    tracker.acceptEvent({ type: "uiLanguage.changed", language: "en" });
+
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "failed", updatedAt: 20 },
+    });
+
+    expect(notifications[0]?.title).toBe("Task failed");
+    expect(notifications[0]?.options?.body).toBe("Тестовая задача");
+  });
+
   it("notifies when a thread starts needing attention without an explicit request", () => {
     const tracker = new BrowserNotificationTracker();
     const running = thread("running", 10);
@@ -257,9 +272,14 @@ function attentionRequest(createdAt: number): AttentionRequest {
   };
 }
 
-function snapshot(threads: ThreadSummary[], attention: AttentionRequest[] = []): AppSnapshot {
+function snapshot(
+  threads: ThreadSummary[],
+  attention: AttentionRequest[] = [],
+  uiLanguage: AppSnapshot["uiLanguage"] = "ru",
+): AppSnapshot {
   return {
     sequence: 1,
+    uiLanguage,
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],
     threads,

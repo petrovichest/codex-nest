@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,14 +9,32 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { Composer, type ComposerImage } from "./Composer";
+import { Composer, type ComposerImage, type ComposerTranscriptionStatus } from "./Composer";
 
 const models = [
   {
-    id: "gpt",
-    displayName: "GPT",
+    id: "gpt-sol",
+    displayName: "GPT-5.6-Sol",
     description: "",
     isDefault: true,
+    reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+    serviceTiers: [],
+    supportsPersonality: true,
+  },
+  {
+    id: "gpt-terra",
+    displayName: "GPT-5.6-Terra",
+    description: "",
+    isDefault: false,
+    reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+    serviceTiers: [],
+    supportsPersonality: true,
+  },
+  {
+    id: "other",
+    displayName: "Other Model",
+    description: "",
+    isDefault: false,
     reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
     serviceTiers: [],
     supportsPersonality: true,
@@ -29,6 +47,23 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
+  it("renders compact model names without a chevron and tracks the selected label width", () => {
+    render(<Harness />);
+    const model = screen.getByRole("combobox", { name: "Модель" });
+    const control = model.closest("label");
+
+    expect(
+      within(model)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["По умолчанию · 5.6sol", "5.6sol", "5.6terra", "Other Model"]);
+    expect(control?.querySelector(".setting-select-value")).toHaveTextContent("5.6sol");
+    expect(control?.querySelector(".setting-select-chevron")).toBeNull();
+
+    fireEvent.change(model, { target: { value: "gpt-terra" } });
+    expect(control?.querySelector(".setting-select-value")).toHaveTextContent("5.6terra");
+  });
+
   it("renders reasoning, plan, and goal as compact icon-only controls", () => {
     const view = render(<Harness />);
     const settings = view.container.querySelector(".settings-picker");
@@ -208,7 +243,13 @@ describe("Composer", () => {
   it("records on the first click and inserts the transcript at the saved cursor", async () => {
     const track = { stop: vi.fn() };
     installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
-    const onTranscribe = vi.fn(async () => "голос");
+    let resolveTranscription: ((transcript: string) => void) | undefined;
+    const onTranscribe = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveTranscription = resolve;
+        }),
+    );
     const view = render(
       <Harness
         initialInput="Начало конец"
@@ -227,6 +268,8 @@ describe("Composer", () => {
     fireEvent.pointerDown(start);
     fireEvent.click(start);
     const stop = await screen.findByRole("button", { name: "Остановить запись" });
+    expect(within(stop).getByText("0:00")).toBeInTheDocument();
+    expect(stop).toHaveClass("timing");
     expect(textarea).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     view.rerender(
@@ -240,9 +283,14 @@ describe("Composer", () => {
     expect(stop).toBeEnabled();
 
     fireEvent.click(stop);
+    const transcribing = await screen.findByRole("button", { name: "Распознаём запись" });
+    expect(within(transcribing).getByText("0:00")).toBeInTheDocument();
+    expect(transcribing).toHaveClass("timing");
+    await act(async () => resolveTranscription?.("голос"));
     await waitFor(() => expect(textarea).toHaveValue("Начало голос конец"));
     expect(onTranscribe).toHaveBeenCalledWith(
       expect.objectContaining({ type: "audio/webm;codecs=opus" }),
+      expect.any(Number),
     );
     expect(track.stop).toHaveBeenCalled();
     expect(textarea).not.toHaveAttribute("readonly");
@@ -269,6 +317,82 @@ describe("Composer", () => {
     render(<Harness transcriptionConfig={{ ...transcriptionConfig, providers: [] }} />);
     expect(screen.getByRole("button", { name: "Распознавание речи не настроено" })).toBeDisabled();
   });
+
+  it("shows learned countdowns only in the source composer", () => {
+    const view = render(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 2,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+
+    expect(
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("≈0:08"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · осталось ≈ 0:08");
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+      "readonly",
+    );
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 13,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+    expect(
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("+0:03"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · дольше прогноза на 0:03");
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: true,
+          elapsedSeconds: 4,
+          estimatedTotalSeconds: null,
+        }}
+      />,
+    );
+    expect(
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("0:04"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · прошло 0:04");
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        transcriptionStatus={{
+          belongsToComposer: false,
+          elapsedSeconds: 4,
+          estimatedTotalSeconds: 10,
+        }}
+      />,
+    );
+    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+      "readonly",
+    );
+    expect(
+      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
+    ).not.toHaveClass("timing");
+  });
 });
 
 const transcriptionConfig: TranscriptionConfigResponse = {
@@ -282,6 +406,7 @@ const transcriptionConfig: TranscriptionConfigResponse = {
   refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
+  timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
 };
 
 function Harness({
@@ -293,6 +418,7 @@ function Harness({
   transcriptionConfig: speechConfig,
   onTranscribe,
   onSettingsChange: onSettingsChangeSpy,
+  transcriptionStatus = null,
 }: {
   agent?: AgentId;
   busy?: boolean;
@@ -302,6 +428,7 @@ function Harness({
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
+  transcriptionStatus?: ComposerTranscriptionStatus | null;
 }) {
   const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>([]);
@@ -332,6 +459,7 @@ function Harness({
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
+      transcriptionStatus={transcriptionStatus}
       error={null}
       hasSupplementalContent={hasSupplementalContent}
     />

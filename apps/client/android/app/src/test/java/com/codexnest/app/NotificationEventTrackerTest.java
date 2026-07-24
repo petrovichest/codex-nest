@@ -88,4 +88,22 @@ public class NotificationEventTrackerTest {
         assertEquals(1, notifications.size());
         assertEquals(CodexNotification.Kind.ATTENTION, notifications.get(0).kind);
     }
+
+    @Test
+    public void localizesTheServerFallbackThreadTitle() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(
+            0,
+            "Codex task",
+            "Open CodexNest for details",
+            "Untitled"
+        );
+        tracker.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Без названия\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
+        );
+        List<CodexNotification> notifications = tracker.accept(
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Без названия\",\"state\":\"completed\",\"updatedAt\":200}}}"
+        );
+
+        assertEquals("Untitled", notifications.get(0).threadTitle);
+    }
 }

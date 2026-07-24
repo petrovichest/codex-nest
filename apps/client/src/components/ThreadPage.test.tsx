@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import type {
   AttentionRequest,
   ThreadDetail,
   ThreadDraft,
   ThreadSummary,
+  TranscriptionConfigResponse,
   TurnProgress,
   UpdateThreadDraftRequest,
 } from "@codexnest/protocol";
@@ -44,6 +45,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
 
 describe("Activity", () => {
@@ -99,6 +105,32 @@ describe("Activity", () => {
     );
     expect(screen.getByText("Проверяю")).toBeInTheDocument();
     expect(screen.queryByText("Ход работы")).not.toBeInTheDocument();
+  });
+
+  it("stops animating unfinished steps when their checklist is no longer active", () => {
+    const item = {
+      type: "planChecklist" as const,
+      id: "checklist",
+      status: "inProgress" as const,
+      explanation: "Проверяю",
+      steps: [
+        { step: "Готово", status: "completed" as const },
+        { step: "Остановлено", status: "inProgress" as const },
+        { step: "Позже", status: "pending" as const },
+      ],
+      timestamp: 1,
+      afterItemId: null,
+    };
+    const view = render(<Activity item={item} />);
+
+    expect(screen.getByText("Остановлено").closest("li")).toHaveClass("inProgress");
+    expect(view.container.querySelector(".plan-checklist .spinner")).not.toBeNull();
+
+    view.rerender(<Activity item={{ ...item, status: "completed" }} />);
+
+    expect(screen.getByText("Готово").closest("li")).toHaveClass("completed");
+    expect(screen.getByText("Остановлено").closest("li")).toHaveClass("pending");
+    expect(view.container.querySelector(".plan-checklist .spinner")).toBeNull();
   });
 
   it("renders GFM tables and task lists", () => {
@@ -240,6 +272,34 @@ describe("Activity", () => {
     const copyButton = screen.getByRole("button", { name: "Копировать сообщение" });
     expect(copyButton.closest(".message-footer")?.lastElementChild).toBe(copyButton);
     expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
+  });
+
+  it("copies fenced code blocks separately from the whole message", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "Готовый промпт:\n\n```text\nПервая строка\nВторая строка\n```\n\n`inline`",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "Копировать блок" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать блок" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Первая строка\nВторая строка"));
+    expect(screen.getByRole("button", { name: "Блок скопирован" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Копировать сообщение" })).toBeInTheDocument();
   });
 
   it("creates an annotation from an exact text selection", async () => {
@@ -1403,7 +1463,7 @@ describe("Activity", () => {
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
   });
 
-  it("shows server-owned queued messages and sends one immediately", async () => {
+  it("docks queued messages above the composer and supports queue actions", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
     mockThreadConnection(api, running, {
@@ -1415,13 +1475,75 @@ describe("Activity", () => {
           createdAt: 1,
           status: "queued",
         },
+        {
+          id: "second",
+          threadId: "thread",
+          text: "Следующее сообщение",
+          createdAt: 2,
+          status: "queued",
+        },
       ],
     });
     renderThread();
 
-    expect(screen.getByText("В очереди")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    const queue = screen.getByRole("region", { name: "Очередь сообщений" });
+    expect(queue.closest("form")).toHaveClass("composer");
+    expect(queue.closest(".timeline")).toBeNull();
+    expect(
+      Array.from(queue.querySelectorAll("[data-message-id]")).map((node) =>
+        node.getAttribute("data-message-id"),
+      ),
+    ).toEqual(["queued", "second"]);
+    expect(screen.getAllByText("В очереди")).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {
+      target: { value: "Исправленная срочная правка" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() =>
+      expect(api.updateQueued).toHaveBeenCalledWith("thread", "queued", {
+        input: "Исправленная срочная правка",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "Текст сообщения в очереди" })).toBeNull(),
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {
+      target: { value: "Не сохранять" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(api.updateQueued).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Удалить сообщение из очереди" })[0]!);
+    await waitFor(() => expect(api.deleteQueued).toHaveBeenCalledWith("thread", "queued"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Отправить сейчас" })[0]!);
     await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "queued"));
+  });
+
+  it("disables queue actions until optimistic messages are confirmed", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    context.state.optimisticMessages.thread = [
+      {
+        id: "optimistic",
+        threadId: "thread",
+        text: "Добавляется",
+        images: [],
+        createdAt: 1,
+        destination: "queue",
+        turnId: null,
+      },
+    ];
+    renderThread();
+
+    expect(screen.getByText("Добавляется…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Изменить сообщение в очереди" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Удалить сообщение из очереди" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
   });
 
   it("shows chronological plan checklists inside the turn without a composer status pill", () => {
@@ -1502,6 +1624,58 @@ describe("Activity", () => {
     expect(cards[1]).toHaveTextContent("Проверяем изменения");
     expect(screen.getAllByText("Проверяем изменения").length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector(".turn-progress")).toBeNull();
+  });
+
+  it("shows a final checklist above its separate final answer", () => {
+    const api = threadApi();
+    const completed = { ...summary, state: "completed" as const };
+    mockThreadConnection(api, completed, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "final-answer",
+              status: "completed",
+              text: "Итоговый ответ",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+            {
+              type: "planChecklist",
+              id: "final-checklist",
+              status: "completed",
+              explanation: "Работа завершена",
+              steps: [{ step: "Проверить результат", status: "completed" }],
+              timestamp: 3,
+              afterItemId: "unrendered-reasoning-item",
+            },
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    const checklist = screen.getByText("Проверить результат").closest("article");
+    const answer = screen.getByText("Итоговый ответ").closest("article");
+    const timing = view.container.querySelector(".turn-timing");
+    expect(checklist).toHaveClass("plan-checklist");
+    expect(checklist).toHaveTextContent("Работа завершена");
+    expect(answer).toHaveClass("agentMessage");
+    expect(checklist).not.toBe(answer);
+    expect(checklist!.compareDocumentPosition(answer!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(answer!.compareDocumentPosition(timing!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
   });
 
   it("does not leave timeline gaps for empty streamed activities", () => {
@@ -1747,6 +1921,105 @@ describe("Activity", () => {
     expect(scroll.scrollTop).toBe(900);
     delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
   });
+
+  it("keeps transcription attached to its source draft while switching sessions", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    let resolveTranscription:
+      | ((value: {
+          text: string;
+          timingEstimate: {
+            sampleCount: number;
+            estimatedProcessingMsPerAudioSecond: number;
+          };
+        }) => void)
+      | undefined;
+    const api = threadApi();
+    api.updateThreadDraft.mockRejectedValueOnce(new Error("offline"));
+    api.transcribe.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTranscription = resolve;
+        }),
+    );
+    const initialDraft: ThreadDraft = {
+      input: "Начало конец",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    };
+    const context = mockThreadConnection(api, summary, { draft: initialDraft });
+    const other = { ...summary, id: "other", title: "Другая задача" };
+    const details = context.state.details as Record<string, ThreadDetail>;
+    context.state.snapshot.threads = [summary, other];
+    details.other = {
+      summary: other,
+      turns: [],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      draft: null,
+    };
+    context.dispatch.mockImplementation((action) => {
+      if (action.type !== "draft") return;
+      const current = details[action.threadId];
+      if (current) details[action.threadId] = { ...current, draft: action.draft };
+    });
+    const timingChanged = vi.fn();
+    render(voiceThreadRoute(timingChanged));
+
+    const textarea = (await screen.findByRole("textbox", {
+      name: "Сообщение для Codex",
+    })) as HTMLTextAreaElement;
+    await waitFor(() => expect(textarea).toHaveValue("Начало конец"));
+    textarea.setSelectionRange(7, 7);
+    fireEvent.select(textarea);
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+
+    await waitFor(() => expect(api.transcribe).toHaveBeenCalledOnce());
+    expect(screen.getByText("Распознаём · осталось ≈ 0:01")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
+
+    await screen.findByRole("heading", { name: "Другая задача" });
+    expect(
+      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+      "readonly",
+    );
+    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
+
+    await act(async () =>
+      resolveTranscription?.({
+        text: "голос",
+        timingEstimate: {
+          sampleCount: 2,
+          estimatedProcessingMsPerAudioSecond: 4_000,
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Начало голос конец" }),
+        { keepalive: false },
+      ),
+    );
+    expect(timingChanged).toHaveBeenCalledWith({
+      sampleCount: 2,
+      estimatedProcessingMsPerAudioSecond: 4_000,
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Открыть A" }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+        "Начало голос конец",
+      ),
+    );
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe("ThreadPage dual-agent", () => {
@@ -1844,6 +2117,80 @@ function threadRoute(state?: Record<string, unknown>) {
   );
 }
 
+function voiceThreadRoute(
+  onTimingChange: (estimate: {
+    sampleCount: number;
+    estimatedProcessingMsPerAudioSecond: number | null;
+  }) => void,
+) {
+  return (
+    <MemoryRouter initialEntries={["/threads/thread"]}>
+      <Link to="/threads/thread">Открыть A</Link>
+      <Link to="/threads/other">Открыть B</Link>
+      <Routes>
+        <Route
+          path="/threads/:threadId"
+          element={
+            <ThreadPage
+              transcriptionConfig={transcriptionConfig}
+              transcriptionProvider="local"
+              onTranscriptionTimingChange={onTimingChange}
+              onOpenNavigation={() => undefined}
+            />
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+const transcriptionConfig: TranscriptionConfigResponse = {
+  providers: ["local"],
+  provider: "local",
+  localUrl: "http://127.0.0.1:8178/inference",
+  openAiApiKeyConfigured: false,
+  openAiModel: "gpt-4o-transcribe",
+  language: "ru",
+  refineLocal: false,
+  refinementModel: "gpt-5.6-luna",
+  maxRecordingSeconds: 300,
+  maxUploadBytes: 24 * 1024 * 1024,
+  timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+};
+
+function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
+  class FakeMediaRecorder extends EventTarget {
+    static isTypeSupported = vi.fn(() => true);
+    readonly mimeType: string;
+    state: RecordingState = "inactive";
+
+    constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+      super();
+      this.mimeType = options?.mimeType ?? "audio/webm";
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      if (this.state === "inactive") return;
+      this.state = "inactive";
+      const data = new Blob(["audio"], { type: this.mimeType });
+      const dataEvent = new Event("dataavailable") as BlobEvent;
+      Object.defineProperty(dataEvent, "data", { value: data });
+      this.dispatchEvent(dataEvent);
+      this.dispatchEvent(new Event("stop"));
+    }
+  }
+
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia: vi.fn(getUserMedia) },
+  });
+}
+
 function threadApi() {
   return {
     settings: { baseUrl: "https://codex.home.arpa", token: "secret" },
@@ -1863,6 +2210,8 @@ function threadApi() {
       ),
     enqueue: vi.fn().mockResolvedValue({ id: "queued" }),
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
+    updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),
+    deleteQueued: vi.fn().mockResolvedValue(undefined),
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
@@ -1881,6 +2230,10 @@ function threadApi() {
     readGoal: vi.fn().mockResolvedValue(null),
     updateGoal: vi.fn().mockResolvedValue(null),
     clearGoal: vi.fn().mockResolvedValue(undefined),
+    transcribe: vi.fn().mockResolvedValue({
+      text: "голос",
+      timingEstimate: { sampleCount: 1, estimatedProcessingMsPerAudioSecond: 4_000 },
+    }),
   };
 }
 
@@ -1901,6 +2254,7 @@ function mockThreadConnection(
       id: string;
       threadId: string;
       text: string;
+      images?: string[];
       createdAt: number;
       status: "queued" | "dispatching";
     }>;

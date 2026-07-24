@@ -4,6 +4,7 @@ import type { ClaudeManagementStatus } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
+import { localizeKnownServerText, useI18n } from "../i18n";
 import { ToolIcon } from "./Icons";
 
 type Feedback = { kind: "error" | "success"; message: string } | null;
@@ -15,6 +16,7 @@ type Feedback = { kind: "error" | "success"; message: string } | null;
  */
 export function ClaudeSettingsCard() {
   const { api } = useConnection();
+  const { language, t } = useI18n();
   const [status, setStatus] = useState<ClaudeManagementStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
@@ -35,13 +37,15 @@ export function ClaudeSettingsCard() {
         setServerUnsupported(true);
       } else {
         setLoadError(
-          caught instanceof Error ? caught.message : "Не удалось загрузить состояние Claude Code",
+          caught instanceof Error
+            ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+            : t("Не удалось загрузить состояние Claude Code"),
         );
       }
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, language, t]);
 
   useEffect(() => {
     void load();
@@ -58,14 +62,21 @@ export function ClaudeSettingsCard() {
       const ready = updated.supported && updated.cliVersion !== null;
       setFeedback(
         ready
-          ? { kind: "success", message: "Claude Code найден и готов к работе." }
-          : { kind: "error", message: updated.unavailableReason ?? "Claude Code недоступен." },
+          ? { kind: "success", message: t("Claude Code найден и готов к работе.") }
+          : {
+              kind: "error",
+              message:
+                localizeKnownServerText(language, updated.unavailableReason) ??
+                t("Claude Code недоступен."),
+            },
       );
     } catch (caught) {
       setFeedback({
         kind: "error",
         message:
-          caught instanceof Error ? caught.message : "Проверка Claude Code завершилась ошибкой",
+          caught instanceof Error
+            ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+            : t("Проверка Claude Code завершилась ошибкой"),
       });
     } finally {
       setChecking(false);
@@ -86,41 +97,45 @@ export function ClaudeSettingsCard() {
         </span>
         <div>
           <h2>Claude Code CLI</h2>
-          <p>Версия и состояние Claude Code на сервере.</p>
+          <p>{t("Версия и состояние Claude Code на сервере.")}</p>
         </div>
       </div>
 
       {loading ? (
         <div className="settings-loading compact">
-          <span className="spinner small" /> Получаем состояние Claude Code…
+          <span className="spinner small" /> {t("Получаем состояние Claude Code…")}
         </div>
       ) : serverUnsupported ? (
         <div className="settings-notice" role="status">
-          Управление Claude Code недоступно на этой версии сервера.
+          {t("Управление Claude Code недоступно на этой версии сервера.")}
         </div>
       ) : (
         <>
           <dl className="codex-status-grid">
             <div>
-              <dt>Установленная версия Claude Code</dt>
+              <dt>{t("Установленная версия Claude Code")}</dt>
               <dd>{status?.cliVersion ?? "—"}</dd>
             </div>
             <div>
-              <dt>Путь к CLI</dt>
+              <dt>{t("Путь к CLI")}</dt>
               <dd>{status?.path ?? "—"}</dd>
             </div>
           </dl>
 
           {cliMissing && (
             <div className="settings-notice warning" role="status">
-              {status?.unavailableReason ?? "Claude Code не найден на сервере."} Установите Claude
-              Code и выполните вход командой <code>claude login</code> на сервере.
+              {localizeKnownServerText(language, status?.unavailableReason) ??
+                t("Claude Code не найден на сервере.")}{" "}
+              {t("Установите Claude Code и выполните вход командой")} <code>claude login</code>{" "}
+              {t("на сервере.")}
             </div>
           )}
           {disabled && (
             <div className="settings-notice warning" role="status">
-              {status?.unavailableReason ?? "Агент Claude отключён."} Чтобы включить агента Claude,
-              задайте переменную окружения <code>CODEXNEST_CLAUDE_ENABLED=true</code> на сервере.
+              {localizeKnownServerText(language, status?.unavailableReason) ??
+                t("Агент Claude отключён.")}{" "}
+              {t("Чтобы включить агента Claude, задайте переменную окружения")}{" "}
+              <code>CODEXNEST_CLAUDE_ENABLED=true</code> {t("на сервере.")}
             </div>
           )}
           {loadError && (
@@ -139,7 +154,7 @@ export function ClaudeSettingsCard() {
 
           <div className="settings-actions codex-actions">
             <button type="button" disabled={checking} onClick={() => void check()}>
-              {checking ? "Проверяем…" : "Проверить"}
+              {checking ? t("Проверяем…") : t("Проверить")}
             </button>
           </div>
         </>

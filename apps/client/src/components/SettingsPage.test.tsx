@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import type { TranscriptionConfigResponse } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
+import { I18nProvider } from "../i18n";
 import { SettingsPage } from "./SettingsPage";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -145,6 +146,34 @@ describe("SettingsPage", () => {
     });
 
     expect(onThemeChange).toHaveBeenCalledWith("dark");
+  });
+
+  it("saves the interface language on the server before applying it", async () => {
+    localStorage.setItem("codexnest.uiLanguage", "ru");
+    const readPermissionSettings = vi.fn().mockResolvedValue({
+      preset: "auto",
+      version: "version-1",
+      overridden: false,
+      message: null,
+    });
+    const updateUiLanguage = vi.fn().mockResolvedValue({ language: "en" });
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings,
+        updatePermissionSettings: vi.fn(),
+        updateUiLanguage,
+      },
+    });
+
+    renderLocalizedPage();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Язык интерфейса" }), {
+      target: { value: "en" },
+    });
+
+    await waitFor(() => expect(updateUiLanguage).toHaveBeenCalledWith({ language: "en" }));
+    expect(await screen.findByRole("combobox", { name: "Interface language" })).toHaveValue("en");
+    expect(localStorage.getItem("codexnest.uiLanguage")).toBe("en");
+    expect(readPermissionSettings).toHaveBeenCalledOnce();
   });
 
   it("orders settings by usage frequency in one column", () => {
@@ -451,6 +480,25 @@ function renderPage(
   );
 }
 
+function renderLocalizedPage() {
+  return render(
+    <I18nProvider>
+      <MemoryRouter>
+        <SettingsPage
+          onOpenNavigation={() => undefined}
+          onSwitchServer={() => undefined}
+          theme="system"
+          onThemeChange={() => undefined}
+          sidebarSide="left"
+          onSidebarSideChange={() => undefined}
+          projectListDirection="top-down"
+          onProjectListDirectionChange={() => undefined}
+        />
+      </MemoryRouter>
+    </I18nProvider>,
+  );
+}
+
 const transcriptionConfig: TranscriptionConfigResponse = {
   providers: ["local", "openai"],
   provider: "local",
@@ -462,4 +510,5 @@ const transcriptionConfig: TranscriptionConfigResponse = {
   refinementModel: "gpt-5.6-luna",
   maxRecordingSeconds: 300,
   maxUploadBytes: 24 * 1024 * 1024,
+  timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
 };

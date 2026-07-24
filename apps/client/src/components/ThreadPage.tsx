@@ -20,8 +20,10 @@ import type {
   ThreadDraft,
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  TranscriptionTimingEstimate,
   TurnProgress,
   TurnView,
+  UiLanguage,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
@@ -40,11 +42,13 @@ import {
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { openDownloadUrl } from "../downloads";
+import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
-import { Composer, type ComposerImage } from "./Composer";
+import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
 import {
   ArchiveIcon,
+  CheckIcon,
   ChevronDownIcon,
   CopyIcon,
   FileIcon,
@@ -65,22 +69,67 @@ type ComposerDraftState = {
   value: UpdateThreadDraftRequest;
 };
 
+type ActiveTranscription = {
+  id: string;
+  threadId: string;
+  startedAt: number;
+  estimatedTotalSeconds: number | null;
+};
+
+type QueueAction = {
+  messageId: string;
+  kind: "send" | "update" | "delete";
+};
+
+type QueuedMessageView = QueuedMessage & {
+  confirmed: boolean;
+};
+
 function emptyComposerDraft(): UpdateThreadDraftRequest {
   return { input: "", images: [], goalMode: false, annotations: [] };
+}
+
+function insertTranscriptIntoDraft(
+  draft: UpdateThreadDraftRequest,
+  selection: { start: number; end: number },
+  transcript: string,
+  t: Translate,
+): UpdateThreadDraftRequest {
+  const clean = transcript.trim();
+  if (!clean) throw new Error(t("Распознавание не вернуло текст"));
+  const start = Math.min(selection.start, draft.input.length);
+  const end = Math.max(start, Math.min(selection.end, draft.input.length));
+  const before = draft.input.slice(0, start);
+  const after = draft.input.slice(end);
+  const leading = before && !/\s$/.test(before) ? " " : "";
+  const trailing = after && !/^\s/.test(after) ? " " : "";
+  const completeInsertion = `${leading}${clean}${trailing}`;
+  const inserted = draft.goalMode
+    ? completeInsertion.slice(0, Math.max(0, 4_000 - before.length - after.length))
+    : completeInsertion;
+  return { ...draft, input: `${before}${inserted}${after}` };
 }
 
 export function ThreadPage({
   transcriptionConfig = null,
   transcriptionProvider = null,
+  onTranscriptionTimingChange,
   onOpenNavigation,
 }: {
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
+  onTranscriptionTimingChange?(estimate: TranscriptionTimingEstimate): void;
   onOpenNavigation(): void;
 }) {
   const { threadId = "" } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const { language, t } = useI18n();
+  const languageRef = useRef(language);
+  languageRef.current = language;
+  const currentThreadIdRef = useRef(threadId);
+  currentThreadIdRef.current = threadId;
+  const pageAliveRef = useRef(true);
   const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
@@ -98,8 +147,12 @@ export function ThreadPage({
   const [finishing, setFinishing] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [sendingQueuedId, setSendingQueuedId] = useState<string | null>(null);
+  const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeTranscription, setActiveTranscription] = useState<ActiveTranscription | null>(null);
+  const activeTranscriptionRef = useRef<ActiveTranscription | null>(null);
+  const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
+  const [transcriptionErrors, setTranscriptionErrors] = useState<Record<string, string>>({});
   const [renaming, setRenaming] = useState(false);
   const [attentionJump, setAttentionJump] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -130,6 +183,7 @@ export function ThreadPage({
   const draftRevisionRef = useRef(0);
   const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const draftTouchedThreadsRef = useRef(new Set<string>());
+  const transcriptionDraftThreadsRef = useRef(new Set<string>());
   const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
   const legacyAnnotationThreadsRef = useRef(new Set<string>());
   const attention = useMemo(
@@ -181,6 +235,7 @@ export function ThreadPage({
           const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
           if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
           pendingDraftsRef.current.delete(targetThreadId);
+          transcriptionDraftThreadsRef.current.delete(targetThreadId);
           dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
           if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
             try {
@@ -191,7 +246,11 @@ export function ThreadPage({
           }
         } catch (caught) {
           if (composerDraftRef.current.threadId === targetThreadId) {
-            setError(caught instanceof Error ? caught.message : "Не удалось сохранить черновик");
+            setError(
+              caught instanceof Error
+                ? localizeKnownServerText(language, caught.message)
+                : t("Не удалось сохранить черновик"),
+            );
           }
         }
       });
@@ -255,6 +314,104 @@ export function ThreadPage({
     return persistPendingDraft(targetThreadId, keepalive);
   }
 
+  function persistDraftImmediatelyForThread(
+    targetThreadId: string,
+    value: UpdateThreadDraftRequest,
+  ): void {
+    const revision = ++draftRevisionRef.current;
+    pendingDraftsRef.current.set(targetThreadId, { revision, value });
+    transcriptionDraftThreadsRef.current.add(targetThreadId);
+    draftTouchedThreadsRef.current.add(targetThreadId);
+    if (currentThreadIdRef.current === targetThreadId) {
+      const next = { threadId: targetThreadId, value };
+      composerDraftRef.current = next;
+      setComposerDraftState(next);
+    }
+    void persistPendingDraft(targetThreadId);
+  }
+
+  function setTranscriptionError(targetThreadId: string, message: string | null): void {
+    if (!pageAliveRef.current) return;
+    setTranscriptionErrors((current) => {
+      if (message) return { ...current, [targetThreadId]: message };
+      if (!(targetThreadId in current)) return current;
+      const next = { ...current };
+      delete next[targetThreadId];
+      return next;
+    });
+  }
+
+  function beginTranscription(
+    targetThreadId: string,
+    targetDraft: UpdateThreadDraftRequest,
+    recording: ComposerRecording,
+  ): void {
+    if (activeTranscriptionRef.current || !transcriptionProvider) return;
+    const rate = transcriptionConfig?.timingEstimate.estimatedProcessingMsPerAudioSecond ?? null;
+    const estimatedTotalSeconds =
+      rate === null
+        ? null
+        : Math.max(1, Math.ceil((recording.durationMs / 1_000) * (rate / 1_000)));
+    const job: ActiveTranscription = {
+      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      threadId: targetThreadId,
+      startedAt: Date.now(),
+      estimatedTotalSeconds,
+    };
+    activeTranscriptionRef.current = job;
+    setActiveTranscription(job);
+    setTranscriptionElapsedSeconds(0);
+    setTranscriptionError(targetThreadId, null);
+
+    void api
+      .transcribe(recording.audio, recording.durationMs)
+      .then((response) => {
+        onTranscriptionTimingChange?.(response.timingEstimate);
+        const nextDraft = insertTranscriptIntoDraft(
+          targetDraft,
+          recording.selection,
+          response.text,
+          t,
+        );
+        persistDraftImmediatelyForThread(targetThreadId, nextDraft);
+        setTranscriptionError(targetThreadId, null);
+      })
+      .catch((caught: unknown) => {
+        setTranscriptionError(
+          targetThreadId,
+          caught instanceof Error
+            ? (localizeKnownServerText(languageRef.current, caught.message) ?? caught.message)
+            : t("Не удалось распознать запись"),
+        );
+      })
+      .finally(() => {
+        if (activeTranscriptionRef.current?.id !== job.id) return;
+        activeTranscriptionRef.current = null;
+        if (pageAliveRef.current) {
+          setActiveTranscription(null);
+          setTranscriptionElapsedSeconds(0);
+        }
+      });
+  }
+
+  useEffect(() => {
+    pageAliveRef.current = true;
+    return () => {
+      pageAliveRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeTranscription) return;
+    const updateElapsed = () =>
+      setTranscriptionElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - activeTranscription.startedAt) / 1_000)),
+      );
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(timer);
+  }, [activeTranscription]);
+
   useEffect(() => {
     if (goal) setGoalMode(false);
   }, [goal]);
@@ -268,7 +425,19 @@ export function ThreadPage({
   }, [threadId]);
 
   useEffect(() => {
-    if (!detail || draftTouchedThreadsRef.current.has(threadId)) return;
+    if (!detail) return;
+    const pending = transcriptionDraftThreadsRef.current.has(threadId)
+      ? pendingDraftsRef.current.get(threadId)?.value
+      : undefined;
+    if (pending) {
+      draftTouchedThreadsRef.current.add(threadId);
+      const next = { threadId, value: pending };
+      composerDraftRef.current = next;
+      setComposerDraftState(next);
+      void persistPendingDraft(threadId);
+      return;
+    }
+    if (draftTouchedThreadsRef.current.has(threadId)) return;
     const detailDraft = detail.draft ?? null;
     if (hydratedDraftSourcesRef.current.get(threadId) === detailDraft) return;
     const localAnnotations = loadPendingAnnotations(threadId);
@@ -306,7 +475,9 @@ export function ThreadPage({
     if (!request) return;
     void request
       .then((value) => dispatch({ type: "goal", threadId, goal: value }))
-      .catch((caught: Error) => setError(caught.message));
+      .catch((caught: Error) =>
+        setError(localizeKnownServerText(languageRef.current, caught.message)),
+      );
   }, [api, dispatch, threadId, summary?.agent]);
 
   useEffect(() => {
@@ -340,7 +511,7 @@ export function ThreadPage({
   useEffect(() => {
     if (threadId) {
       void refreshDetail(threadId, { force: true }).catch((caught: Error) =>
-        setError(caught.message),
+        setError(localizeKnownServerText(languageRef.current, caught.message)),
       );
     }
   }, [threadId, refreshDetail, state.snapshotEpoch]);
@@ -364,7 +535,7 @@ export function ThreadPage({
     detailReconcileKey.current = key;
     void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
       detailReconcileKey.current = null;
-      setError(caught.message);
+      setError(localizeKnownServerText(languageRef.current, caught.message));
     });
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
@@ -449,7 +620,7 @@ export function ThreadPage({
   if (!summary)
     return (
       <div className="center-state">
-        <h2>Задача не найдена</h2>
+        <h2>{t("Задача не найдена")}</h2>
       </div>
     );
 
@@ -463,7 +634,8 @@ export function ThreadPage({
   // create surfaces (agent picker / New session) gate on "ready" instead.
   const backendUnavailableReason =
     threadBackend && threadBackend.connection.state === "unavailable"
-      ? (threadBackend.connection.message ?? `${agentLabel(summary.agent)} недоступен`)
+      ? (localizeKnownServerText(language, threadBackend.connection.message) ??
+        t("{{agent}} недоступен", { agent: agentLabel(summary.agent) }))
       : null;
   const showAgentBadge = hasMultipleBackends(state.snapshot);
 
@@ -510,7 +682,11 @@ export function ThreadPage({
     event.preventDefault();
     const submittedComposerInput = input;
     const submittedAnnotations = annotations;
-    const submittedInput = formatAnnotatedMessage(submittedComposerInput, submittedAnnotations);
+    const submittedInput = formatAnnotatedMessage(
+      submittedComposerInput,
+      submittedAnnotations,
+      language,
+    );
     if ((!submittedInput.trim() && !images.length) || (goalMode && !input.trim())) return;
     const submittedImages = images;
     const submittedGoalMode = goalMode;
@@ -551,7 +727,7 @@ export function ThreadPage({
           messageId: clientMessageId,
           turnId: result.turnId,
         });
-        if (result.goalWarning) setError(result.goalWarning);
+        if (result.goalWarning) setError(localizeKnownServerText(language, result.goalWarning));
       }
       pendingDraftsRef.current.delete(threadId);
       dispatch({ type: "draft", threadId, draft: null });
@@ -559,7 +735,11 @@ export function ThreadPage({
     } catch (caught) {
       dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
       replaceComposerDraft(submittedDraft, false);
-      setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отправить сообщение"),
+      );
     } finally {
       setBusy(false);
     }
@@ -581,7 +761,7 @@ export function ThreadPage({
         message: {
           id: clientMessageId,
           threadId,
-          text: "Да, реализуй этот план",
+          text: t("Да, реализуй этот план"),
           images: [],
           createdAt: Date.now(),
           destination: "turn",
@@ -589,7 +769,7 @@ export function ThreadPage({
         },
       });
       const result = await api.startTurn(threadId, {
-        input: "Да, реализуй этот план",
+        input: t("Да, реализуй этот план"),
         clientMessageId,
       });
       dispatch({
@@ -608,21 +788,67 @@ export function ThreadPage({
           .then((thread) => dispatch({ type: "thread", thread }))
           .catch(() => undefined);
       }
-      setError(caught instanceof Error ? caught.message : "Не удалось начать реализацию плана");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось начать реализацию плана"),
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  async function sendQueuedNow(messageId: string) {
-    setSendingQueuedId(messageId);
+  async function sendQueuedNow(messageId: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
       await api.sendQueuedNow(threadId, messageId);
+      return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось отправить сообщение");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отправить сообщение"),
+      );
+      return false;
     } finally {
-      setSendingQueuedId(null);
+      setQueueAction(null);
+    }
+  }
+
+  async function updateQueued(messageId: string, value: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "update" });
+    setError(null);
+    try {
+      await api.updateQueued(threadId, messageId, { input: value });
+      return true;
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить сообщение в очереди"),
+      );
+      return false;
+    } finally {
+      setQueueAction(null);
+    }
+  }
+
+  async function deleteQueued(messageId: string): Promise<boolean> {
+    setQueueAction({ messageId, kind: "delete" });
+    setError(null);
+    try {
+      await api.deleteQueued(threadId, messageId);
+      return true;
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось удалить сообщение из очереди"),
+      );
+      return false;
+    } finally {
+      setQueueAction(null);
     }
   }
 
@@ -632,7 +858,11 @@ export function ThreadPage({
     try {
       await api.markRead(threadId, { observedUpdatedAt: summary!.updatedAt });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось закончить сессию");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось закончить сессию"),
+      );
     } finally {
       setFinishing(false);
     }
@@ -642,7 +872,7 @@ export function ThreadPage({
   const toggleArchive = () => void api.archive(threadId, !summary.archived);
 
   async function deleteThread() {
-    if (!window.confirm("Удалить эту сессию? Это действие нельзя отменить.")) return;
+    if (!window.confirm(t("Удалить эту сессию? Это действие нельзя отменить."))) return;
     setDeleting(true);
     setError(null);
     try {
@@ -650,7 +880,11 @@ export function ThreadPage({
       dispatch({ type: "thread.remove", threadId });
       navigate("/", { replace: true });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось удалить сессию");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось удалить сессию"),
+      );
       setDeleting(false);
     }
   }
@@ -663,7 +897,11 @@ export function ThreadPage({
       dispatch({ type: "thread", thread });
       if (patch.collaborationMode === "plan") setGoalMode(false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось изменить настройки");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить настройки"),
+      );
     } finally {
       setSettingsBusy(false);
     }
@@ -676,7 +914,11 @@ export function ThreadPage({
       const updated = await api.updateGoal(threadId, patch);
       dispatch({ type: "goal", threadId, goal: updated });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось изменить цель");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось изменить цель"),
+      );
     } finally {
       setGoalBusy(false);
     }
@@ -689,7 +931,11 @@ export function ThreadPage({
       await api.clearGoal(threadId);
       dispatch({ type: "goal", threadId, goal: null });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось очистить цель");
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось очистить цель"),
+      );
     } finally {
       setGoalBusy(false);
     }
@@ -708,13 +954,13 @@ export function ThreadPage({
     <div className="thread-workspace">
       <div className="conversation-pane">
         <WorkspaceHeader
-          title={summary.title}
+          title={localizeKnownServerText(language, summary.title) ?? summary.title}
           subtitle={project?.displayName ?? summary.cwd}
           badge={
             showAgentBadge ? (
               <span
                 className={`agent-chip agent-${summary.agent}`}
-                aria-label={`Агент: ${agentLabel(summary.agent)}`}
+                aria-label={t("Агент: {{agent}}", { agent: agentLabel(summary.agent) })}
               >
                 {agentLabel(summary.agent)}
               </span>
@@ -724,21 +970,21 @@ export function ThreadPage({
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
             <details className="thread-action-menu" data-dismiss-on-outside-click>
-              <summary className="icon-button" aria-label="Действия с задачей">
+              <summary className="icon-button" aria-label={t("Действия с задачей")}>
                 <MoreIcon />
               </summary>
               <div className="action-menu-popover">
                 <button onClick={togglePin}>
-                  <PinIcon /> {summary.pinned ? "Открепить" : "Закрепить"}
+                  <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
                 </button>
                 <button onClick={() => setRenaming(true)}>
-                  <PencilIcon /> Переименовать
+                  <PencilIcon /> {t("Переименовать")}
                 </button>
                 <button onClick={toggleArchive}>
-                  <ArchiveIcon /> {summary.archived ? "Вернуть из архива" : "Архивировать"}
+                  <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
                 </button>
                 <button className="danger" disabled={deleting} onClick={() => void deleteThread()}>
-                  <TrashIcon /> {deleting ? "Удаляем…" : "Удалить"}
+                  <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
                 </button>
               </div>
             </details>
@@ -756,13 +1002,13 @@ export function ThreadPage({
         >
           <section className="timeline" aria-live="polite">
             {loadingOlder && (
-              <div className="history-loader" aria-label="Загружаем старые сообщения">
+              <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
                 <span className="spinner small" />
               </div>
             )}
             {olderError && (
               <button className="history-retry" type="button" onClick={() => void loadOlder()}>
-                Повторить загрузку старых сообщений
+                {t("Повторить загрузку старых сообщений")}
               </button>
             )}
             {!detail && optimisticTurnMessages.length === 0 && (
@@ -813,12 +1059,12 @@ export function ThreadPage({
                           disabled={busy || latestPlanHasAnnotations}
                           title={
                             latestPlanHasAnnotations
-                              ? "Сначала отправьте или удалите аннотации к плану"
+                              ? t("Сначала отправьте или удалите аннотации к плану")
                               : undefined
                           }
                           onClick={() => void implementPlan()}
                         >
-                          Да, реализуй этот план
+                          {t("Да, реализуй этот план")}
                         </button>
                       )}
                     </div>
@@ -851,24 +1097,13 @@ export function ThreadPage({
               </div>
             ))}
             <AttentionPanel requests={attention} />
-            <QueuedMessages
-              messages={mergeOptimisticQueue(
-                detail?.queuedMessages ?? [],
-                optimisticQueuedMessages,
-              )}
-              sendingId={sendingQueuedId}
-              onSendNow={(messageId) => void sendQueuedNow(messageId)}
-              allowSendNow={summary.agent !== "claude"}
-              cwd={summary.cwd}
-              onDownload={downloadFile}
-            />
             {["completed", "interrupted"].includes(summary.state) && summary.unread && (
               <button
                 className="finish-thread-action"
                 disabled={finishing}
                 onClick={() => void finishThread()}
               >
-                {finishing ? "Заканчиваем…" : "Закончить"}
+                {finishing ? t("Заканчиваем…") : t("Закончить")}
               </button>
             )}
           </section>
@@ -882,7 +1117,7 @@ export function ThreadPage({
               scrollToEnd(scrollRef.current, "smooth");
             }}
           >
-            Требуется внимание <ChevronDownIcon />
+            {t("Требуется внимание")} <ChevronDownIcon />
           </button>
         )}
         {backendUnavailableReason && (
@@ -910,7 +1145,7 @@ export function ThreadPage({
           goalBusy={goalBusy}
           onGoalModeChange={(value) => {
             if (value && annotations.length) {
-              setError("Сначала отправьте или удалите аннотации");
+              setError(t("Сначала отправьте или удалите аннотации"));
               return;
             }
             setGoalMode(value);
@@ -925,13 +1160,31 @@ export function ThreadPage({
           }
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
-          onTranscribe={async (audio) => {
-            if (!transcriptionProvider) throw new Error("Распознавание речи не настроено");
-            return (await api.transcribe(audio)).text;
+          onRecordingReady={(recording) => {
+            beginTranscription(threadId, activeComposerDraft, recording);
           }}
+          transcriptionStatus={
+            activeTranscription
+              ? {
+                  belongsToComposer: activeTranscription.threadId === threadId,
+                  elapsedSeconds: transcriptionElapsedSeconds,
+                  estimatedTotalSeconds: activeTranscription.estimatedTotalSeconds,
+                }
+              : null
+          }
+          transcriptionError={transcriptionErrors[threadId] ?? null}
           error={error}
           hasSupplementalContent={annotations.length > 0}
-        />
+        >
+          <QueuedMessages
+            messages={mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)}
+            action={queueAction}
+            onSendNow={sendQueuedNow}
+            onUpdate={updateQueued}
+            onDelete={deleteQueued}
+            allowSendNow={summary.agent !== "claude"}
+          />
+        </Composer>
       </div>
       <SessionInspector
         open={inspectorOpen}
@@ -945,7 +1198,7 @@ export function ThreadPage({
       {inspectorOpen && (
         <button
           className="inspector-backdrop"
-          aria-label="Закрыть сведения"
+          aria-label={t("Закрыть сведения")}
           onClick={() => setInspectorOpen(false)}
         />
       )}
@@ -993,10 +1246,10 @@ function detachedOptimisticMessages(
 function mergeOptimisticQueue(
   messages: QueuedMessage[],
   optimistic: OptimisticMessage[],
-): QueuedMessage[] {
+): QueuedMessageView[] {
   const confirmedIds = new Set(messages.map((message) => message.id));
   return [
-    ...messages,
+    ...messages.map((message) => ({ ...message, confirmed: true })),
     ...optimistic
       .filter((message) => !confirmedIds.has(message.id))
       .map((message) => ({
@@ -1006,6 +1259,7 @@ function mergeOptimisticQueue(
         ...(message.images.length ? { images: message.images } : {}),
         createdAt: message.createdAt,
         status: "queued" as const,
+        confirmed: false,
       })),
   ];
 }
@@ -1027,6 +1281,9 @@ function MarkdownContent({
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
+        pre({ children }) {
+          return <CopyableCodeBlock>{children}</CopyableCodeBlock>;
+        },
         table({ children }) {
           return (
             <div className="markdown-table-scroll">
@@ -1053,6 +1310,55 @@ function MarkdownContent({
   );
 }
 
+function CopyableCodeBlock({ children }: { children?: React.ReactNode }) {
+  const { t } = useI18n();
+  const preRef = useRef<HTMLPreElement>(null);
+  const timerRef = useRef<number | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  async function copy() {
+    const text = (preRef.current?.textContent ?? "").replace(/\n$/, "");
+    try {
+      await copyText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopyState("idle"), 1_800);
+  }
+
+  const label =
+    copyState === "copied"
+      ? t("Блок скопирован")
+      : copyState === "failed"
+        ? t("Не удалось скопировать блок")
+        : t("Копировать блок");
+
+  return (
+    <div className="markdown-code-block" data-copy-state={copyState}>
+      <pre ref={preRef}>{children}</pre>
+      <button
+        type="button"
+        className="markdown-code-copy"
+        aria-label={label}
+        aria-live="polite"
+        title={label}
+        onClick={() => void copy()}
+      >
+        {copyState === "copied" ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </div>
+  );
+}
+
 function DownloadLink({
   href,
   path,
@@ -1066,6 +1372,7 @@ function DownloadLink({
   onDownload(path: string): Promise<void>;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const busyRef = useRef(false);
@@ -1099,11 +1406,11 @@ function DownloadLink({
         }}
       >
         {children}
-        {busy && <span className="download-link-status"> — скачиваем…</span>}
+        {busy && <span className="download-link-status"> — {t("скачиваем…")}</span>}
       </a>
       {failed && (
         <span className="download-link-error" role="alert">
-          Не удалось скачать файл. Нажмите ещё раз.
+          {t("Не удалось скачать файл. Нажмите ещё раз.")}
         </span>
       )}
     </span>
@@ -1144,6 +1451,7 @@ export function Activity({
   onUpdateAnnotation?(annotationId: string, comment: string): boolean;
   onDeleteAnnotation?(annotationId: string): boolean;
 }) {
+  const { language, t } = useI18n();
   if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
     const messageAnnotations = numberedAnnotations(annotations, item.id);
@@ -1192,7 +1500,7 @@ export function Activity({
     return (
       <article className="message plan">
         <div className="message-body">
-          <div className="activity-label">План</div>
+          <div className="activity-label">{t("План")}</div>
           <AnnotatableMarkdownContent
             text={item.text}
             messageId={item.id}
@@ -1235,22 +1543,26 @@ export function Activity({
   if (item.type === "planChecklist") {
     return (
       <article className="message plan-checklist">
-        <div className="activity-label">Ход работы</div>
+        <div className="activity-label">{t("Ход работы")}</div>
         {item.explanation && <p>{item.explanation}</p>}
         <ol>
-          {item.steps.map((step, index) => (
-            <li className={step.status} key={`${index}:${step.step}`}>
-              <input
-                aria-label={step.status === "completed" ? "Выполнено" : "Не выполнено"}
-                checked={step.status === "completed"}
-                readOnly
-                tabIndex={-1}
-                type="checkbox"
-              />
-              <span>{step.step}</span>
-              {step.status === "inProgress" && <span className="spinner small" />}
-            </li>
-          ))}
+          {item.steps.map((step, index) => {
+            const status =
+              item.status === "inProgress" || step.status === "completed" ? step.status : "pending";
+            return (
+              <li className={status} key={`${index}:${step.step}`}>
+                <input
+                  aria-label={status === "completed" ? t("Выполнено") : t("Не выполнено")}
+                  checked={status === "completed"}
+                  readOnly
+                  tabIndex={-1}
+                  type="checkbox"
+                />
+                <span>{step.step}</span>
+                {status === "inProgress" && <span className="spinner small" />}
+              </li>
+            );
+          })}
         </ol>
       </article>
     );
@@ -1259,7 +1571,7 @@ export function Activity({
     return (
       <ActivityDetails
         icon={<TerminalIcon />}
-        title={item.command || "Выполнена команда"}
+        title={item.command || t("Выполнена команда")}
         status={item.status}
       >
         {item.cwd && <div className="path">{item.cwd}</div>}
@@ -1272,7 +1584,7 @@ export function Activity({
     return (
       <ActivityDetails
         icon={<FileIcon />}
-        title={item.path ? `Изменён ${item.path}` : "Изменены файлы"}
+        title={item.path ? t("Изменён {{path}}", { path: item.path }) : t("Изменены файлы")}
         status={item.status}
       >
         <pre>{item.patch}</pre>
@@ -1282,15 +1594,15 @@ export function Activity({
   if (item.type === "tool") {
     return (
       <ActivityDetails icon={<ToolIcon />} title={item.title} status={item.status}>
-        {item.detail && <p>{item.detail}</p>}
+        {item.detail && <p>{localizeKnownServerText(language, item.detail)}</p>}
       </ActivityDetails>
     );
   }
   if (item.type === "error" || item.type === "unsupported") {
     return (
       <article className="error-banner activity-error">
-        <strong>{item.type === "unsupported" ? "Несовместимое событие" : "Ошибка"}</strong>
-        <p>{item.message}</p>
+        <strong>{item.type === "unsupported" ? t("Несовместимое событие") : t("Ошибка")}</strong>
+        <p>{localizeKnownServerText(language, item.message)}</p>
       </article>
     );
   }
@@ -1352,6 +1664,7 @@ function AnnotatableMarkdownContent({
   onUpdate?(annotationId: string, comment: string): boolean;
   onDelete?(annotationId: string): boolean;
 }) {
+  const { t } = useI18n();
   const surfaceRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFormElement>(null);
@@ -1572,7 +1885,7 @@ function AnnotatableMarkdownContent({
             type="button"
             className="annotation-marker"
             style={{ left: position.left, top: position.top }}
-            aria-label={`Аннотация ${item.number}`}
+            aria-label={t("Аннотация {{number}}", { number: item.number })}
             disabled={readOnly}
             onClick={() => openExistingEditor(item)}
             key={item.annotation.id}
@@ -1588,14 +1901,14 @@ function AnnotatableMarkdownContent({
           onPointerDown={(event) => event.preventDefault()}
         >
           <button type="button" onClick={openNewEditor}>
-            Аннотация
+            {t("Аннотация")}
           </button>
           <button type="button" onClick={() => void copySelection()}>
             {copyState === "copied"
-              ? "Скопировано"
+              ? t("Скопировано")
               : copyState === "failed"
-                ? "Ошибка копирования"
-                : "Копировать"}
+                ? t("Ошибка копирования")
+                : t("Копировать")}
           </button>
         </div>
       )}
@@ -1611,8 +1924,8 @@ function AnnotatableMarkdownContent({
         >
           <textarea
             autoFocus
-            aria-label="Комментарий к выделенному тексту"
-            placeholder="Комментарий"
+            aria-label={t("Комментарий к выделенному тексту")}
+            placeholder={t("Комментарий")}
             rows={2}
             value={comment}
             onChange={(event) => setComment(event.target.value)}
@@ -1621,7 +1934,7 @@ function AnnotatableMarkdownContent({
             <button
               className="annotation-editor-save"
               type="submit"
-              aria-label="Сохранить аннотацию"
+              aria-label={t("Сохранить аннотацию")}
               disabled={!comment.trim()}
             >
               <SendIcon />
@@ -1629,7 +1942,7 @@ function AnnotatableMarkdownContent({
             <button
               className="annotation-editor-delete"
               type="button"
-              aria-label="Удалить аннотацию"
+              aria-label={t("Удалить аннотацию")}
               onClick={() => {
                 if (!editedAnnotation || onDelete?.(editedAnnotation.annotation.id)) {
                   setEditor(null);
@@ -1671,6 +1984,7 @@ function ActivityGroup({
   cwd: string;
   onDownload(path: string): Promise<void>;
 }) {
+  const { t } = useI18n();
   const status = items.some((item) => item.status === "failed")
     ? "failed"
     : items.some((item) => item.status === "inProgress")
@@ -1678,25 +1992,25 @@ function ActivityGroup({
       : "completed";
   const labels: string[] = [];
   if (items.some((item) => item.type === "command" && item.kind === "read")) {
-    labels.push("Прочитаны файлы");
+    labels.push(t("Прочитаны файлы"));
   }
   if (items.some((item) => item.type === "command" && item.kind === "search")) {
-    labels.push("Выполнен поиск");
+    labels.push(t("Выполнен поиск"));
   }
   if (items.some((item) => item.type === "command" && item.kind === "command")) {
-    labels.push("Выполнены команды");
+    labels.push(t("Выполнены команды"));
   }
-  if (items.some((item) => item.type === "fileChange")) labels.push("Отредактированы файлы");
-  if (items.some((item) => item.type === "tool")) labels.push("Использованы инструменты");
+  if (items.some((item) => item.type === "fileChange")) labels.push(t("Отредактированы файлы"));
+  if (items.some((item) => item.type === "tool")) labels.push(t("Использованы инструменты"));
   return (
     <details className="activity-group">
       <summary>
         <span className="activity-group-icon">
           <ToolIcon />
         </span>
-        <span>{labels.join(" · ") || "Выполнены действия"}</span>
+        <span>{labels.join(" · ") || t("Выполнены действия")}</span>
         {status === "inProgress" && <span className="spinner small" />}
-        {status === "failed" && <span className="activity-group-error">Ошибка</span>}
+        {status === "failed" && <span className="activity-group-error">{t("Ошибка")}</span>}
       </summary>
       <div className="activity-group-content">
         {items.map((item) => (
@@ -1709,64 +2023,162 @@ function ActivityGroup({
 
 function QueuedMessages({
   messages,
-  sendingId,
+  action,
   onSendNow,
+  onUpdate,
+  onDelete,
   allowSendNow = true,
-  cwd,
-  onDownload,
 }: {
-  messages: QueuedMessage[];
-  sendingId: string | null;
-  onSendNow(messageId: string): void;
+  messages: QueuedMessageView[];
+  action: QueueAction | null;
+  onSendNow(messageId: string): Promise<boolean>;
+  onUpdate(messageId: string, value: string): Promise<boolean>;
+  onDelete(messageId: string): Promise<boolean>;
   /** Whether the "send now" (steer-into-turn) affordance is offered — false for Claude. */
   allowSendNow?: boolean;
-  cwd: string;
-  onDownload(path: string): Promise<void>;
 }) {
+  const { t } = useI18n();
+  const [editor, setEditor] = useState<{ messageId: string; value: string } | null>(null);
+
+  useEffect(() => {
+    if (
+      editor &&
+      !messages.some(
+        (message) =>
+          message.id === editor.messageId && message.confirmed && message.status === "queued",
+      )
+    ) {
+      setEditor(null);
+    }
+  }, [editor, messages]);
+
   if (!messages.length) return null;
   return (
-    <section className="queued-messages" aria-label="Очередь сообщений">
-      {messages.map((message) => (
-        <article
-          className="message userMessage queued-message"
-          data-message-id={message.id}
-          key={message.id}
-        >
-          <div className="message-body">
-            {message.text && (
-              <MarkdownContent text={message.text} cwd={cwd} onDownload={onDownload} />
-            )}
-            {(message.images?.length ?? 0) > 0 && <MessageImages images={message.images ?? []} />}
-          </div>
-          <MessageFooter text={message.text} timestamp={message.createdAt} />
-          <div className="queued-message-footer">
-            <span>{message.status === "dispatching" ? "Отправляется…" : "В очереди"}</span>
-            {allowSendNow && (
-              <button
-                disabled={message.status === "dispatching" || sendingId !== null}
-                onClick={() => onSendNow(message.id)}
-              >
-                Отправить сейчас
-              </button>
-            )}
-          </div>
-        </article>
-      ))}
+    <section className="queued-messages" aria-label={t("Очередь сообщений")}>
+      <header className="queued-messages-header">
+        <span>{t("Очередь сообщений")}</span>
+        <span>{messages.length}</span>
+      </header>
+      <div className="queued-messages-list">
+        {messages.map((message) => {
+          const editing = editor?.messageId === message.id;
+          const busy = action?.messageId === message.id;
+          const actionsDisabled =
+            action !== null || !message.confirmed || message.status === "dispatching";
+          const editValue = editing ? editor.value : "";
+          const canSave =
+            Boolean(editValue.trim() || message.images?.length) &&
+            editValue.trim() !== message.text;
+          const status = !message.confirmed
+            ? t("Добавляется…")
+            : action?.messageId === message.id && action.kind === "delete"
+              ? t("Удаляем…")
+              : action?.messageId === message.id && action.kind === "update"
+                ? t("Сохраняем…")
+                : message.status === "dispatching" ||
+                    (action?.messageId === message.id && action.kind === "send")
+                  ? t("Отправляется…")
+                  : t("В очереди");
+          return (
+            <article className="queued-message" data-message-id={message.id} key={message.id}>
+              <div className="queued-message-heading">
+                <span>{status}</span>
+                <div className="queued-message-actions">
+                  {!editing && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Изменить сообщение в очереди")}
+                      disabled={actionsDisabled}
+                      onClick={() => setEditor({ messageId: message.id, value: message.text })}
+                    >
+                      <PencilIcon />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    aria-label={t("Удалить сообщение из очереди")}
+                    disabled={actionsDisabled}
+                    onClick={() => void onDelete(message.id)}
+                  >
+                    <TrashIcon />
+                  </button>
+                  {allowSendNow && (
+                    <button
+                      type="button"
+                      className="queued-message-send"
+                      disabled={actionsDisabled}
+                      onClick={() => void onSendNow(message.id)}
+                    >
+                      {t("Отправить сейчас")}
+                    </button>
+                  )}
+                </div>
+              </div>
+              {editing ? (
+                <div className="queued-message-editor">
+                  <textarea
+                    autoFocus
+                    aria-label={t("Текст сообщения в очереди")}
+                    rows={3}
+                    value={editValue}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setEditor({ messageId: message.id, value: event.target.value })
+                    }
+                  />
+                  <div className="queued-message-editor-actions">
+                    <button type="button" disabled={busy} onClick={() => setEditor(null)}>
+                      {t("Отмена")}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy || !canSave}
+                      onClick={() => {
+                        void onUpdate(message.id, editValue).then((saved) => {
+                          if (saved) setEditor(null);
+                        });
+                      }}
+                    >
+                      {busy ? t("Сохраняем…") : t("Сохранить")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {message.text && <div className="queued-message-text">{message.text}</div>}
+                  {(message.images?.length ?? 0) > 0 && (
+                    <MessageImages images={message.images ?? []} />
+                  )}
+                </>
+              )}
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }
 
 function MessageImages({ images }: { images: string[] }) {
+  const { t } = useI18n();
   return (
     <div className="message-images">
       {images.map((image, index) => (
-        <img src={image} alt={`Изображение ${index + 1}`} key={`${index}:${image.slice(-24)}`} />
+        <img
+          src={image}
+          alt={t("Изображение {{number}}", { number: index + 1 })}
+          key={`${index}:${image.slice(-24)}`}
+        />
       ))}
     </div>
   );
 }
 
 function MessageFooter({ text, timestamp }: { text: string; timestamp: number | null }) {
+  const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const timerRef = useRef<number | null>(null);
   const canCopy = Boolean(text.trim());
@@ -1791,13 +2203,15 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
 
   return (
     <footer className="message-footer">
-      {copyState === "copied" && <span role="status">Скопировано</span>}
-      {copyState === "failed" && <span role="alert">Не удалось скопировать</span>}
+      {copyState === "copied" && <span role="status">{t("Скопировано")}</span>}
+      {copyState === "failed" && <span role="alert">{t("Не удалось скопировать")}</span>}
       {timestamp !== null && (
-        <time dateTime={new Date(timestamp).toISOString()}>{formatMessageTime(timestamp)}</time>
+        <time dateTime={new Date(timestamp).toISOString()}>
+          {formatMessageTime(timestamp, language)}
+        </time>
       )}
       {canCopy && (
-        <button type="button" aria-label="Копировать сообщение" onClick={() => void copy()}>
+        <button type="button" aria-label={t("Копировать сообщение")} onClick={() => void copy()}>
           <CopyIcon />
         </button>
       )}
@@ -1814,6 +2228,7 @@ export function TurnTiming({
   agent?: AgentId;
   active?: boolean;
 }) {
+  const { language, t } = useI18n();
   const startedAt = turn.startedAt ?? turn.progress.startedAt;
   if (active) return <ActiveTurnStatus agent={agent} progress={{ ...turn.progress, startedAt }} />;
   if (turn.status === "inProgress" || startedAt === null) return null;
@@ -1821,7 +2236,9 @@ export function TurnTiming({
     turn.durationMs ??
     (turn.completedAt === null ? null : Math.max(0, turn.completedAt - startedAt));
   return duration === null ? null : (
-    <div className="turn-timing">Работал {formatDuration(duration)}</div>
+    <div className="turn-timing">
+      {t("Работал {{duration}}", { duration: formatDuration(duration, language) })}
+    </div>
   );
 }
 
@@ -1832,9 +2249,11 @@ function ActiveTurnStatus({
   progress?: TurnProgress;
   agent?: AgentId;
 }) {
+  const { language, t } = useI18n();
   const startedAt = progress?.startedAt ?? null;
-  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null);
-  const label = progress?.explanation?.trim() || `${agentLabel(agent)} работает`;
+  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null, language);
+  const label =
+    progress?.explanation?.trim() || t("{{agent}} работает", { agent: agentLabel(agent) });
   return (
     <div className="turn-timing active" role="status">
       <span className="spinner small" />
@@ -1846,18 +2265,19 @@ function ActiveTurnStatus({
   );
 }
 
-export function formatMessageTime(timestamp: number): string {
+export function formatMessageTime(timestamp: number, language: UiLanguage = "ru"): string {
   const value = new Date(timestamp);
   const today = new Date();
-  const time = new Intl.DateTimeFormat(undefined, {
+  const locale = language === "ru" ? "ru-RU" : "en-US";
+  const time = new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
   }).format(value);
   if (value.toDateString() === today.toDateString()) return time;
-  return `${new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
+  return `${new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
 }
 
-function useElapsed(startedAt: number, active = true): string {
+function useElapsed(startedAt: number, active = true, language: UiLanguage = "ru"): string {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!active) return;
@@ -1865,13 +2285,17 @@ function useElapsed(startedAt: number, active = true): string {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [active, startedAt]);
-  return formatDuration(Math.max(0, now - startedAt));
+  return formatDuration(Math.max(0, now - startedAt), language);
 }
 
-function formatDuration(durationMs: number): string {
+function formatDuration(durationMs: number, language: UiLanguage = "ru"): string {
   const seconds = Math.max(0, Math.floor(durationMs / 1_000));
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
+  if (language === "en") {
+    if (hours) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+    return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  }
   if (hours) return `${hours}ч ${minutes % 60}м ${seconds % 60}с`;
   return minutes ? `${minutes}м ${seconds % 60}с` : `${seconds}с`;
 }
@@ -1883,7 +2307,7 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
     if (group.length) result.push(group);
     group = [];
   };
-  for (const item of items) {
+  for (const item of activitiesForDisplay(items)) {
     if (!hasVisibleActivity(item)) continue;
     if (["command", "fileChange", "tool"].includes(item.type)) {
       group.push(item);
@@ -1894,6 +2318,22 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
   }
   flush();
   return result;
+}
+
+function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
+  const finalAnswerIndex = items.findIndex(
+    (item) => item.type === "agentMessage" && item.phase === "final_answer",
+  );
+  if (finalAnswerIndex < 0) return items;
+  const trailingItems = items.slice(finalAnswerIndex + 1);
+  const trailingChecklists = trailingItems.filter((item) => item.type === "planChecklist");
+  if (!trailingChecklists.length) return items;
+  return [
+    ...items.slice(0, finalAnswerIndex),
+    ...trailingChecklists,
+    items[finalAnswerIndex]!,
+    ...trailingItems.filter((item) => item.type !== "planChecklist"),
+  ];
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {
@@ -1950,12 +2390,15 @@ function ActivityDetails({
   status: string;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <details className="activity-card">
       <summary>
         <span className="activity-icon">{icon}</span>
         <span className="activity-title">{title}</span>
-        <span className={`activity-status activity-status-${status}`}>{statusLabel(status)}</span>
+        <span className={`activity-status activity-status-${status}`}>
+          {statusLabel(status, t)}
+        </span>
       </summary>
       <div className="activity-content">{children}</div>
     </details>
@@ -1971,6 +2414,7 @@ function RenameDialog({
   onClose(): void;
   onRename(value: string): Promise<void>;
 }) {
+  const { language, t } = useI18n();
   const [value, setValue] = useState(initialValue);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1985,30 +2429,30 @@ function RenameDialog({
           setBusy(true);
           setError(null);
           void onRename(value.trim())
-            .catch((caught: Error) => setError(caught.message))
+            .catch((caught: Error) => setError(localizeKnownServerText(language, caught.message)))
             .finally(() => setBusy(false));
         }}
       >
         <div className="row-between">
           <div>
-            <span className="dialog-eyebrow">Задача</span>
-            <h2>Переименовать</h2>
+            <span className="dialog-eyebrow">{t("Задача")}</span>
+            <h2>{t("Переименовать")}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Закрыть" onClick={onClose}>
+          <button type="button" className="icon-button" aria-label={t("Закрыть")} onClick={onClose}>
             <XIcon />
           </button>
         </div>
         <label>
-          Название
+          {t("Название")}
           <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} />
         </label>
         {error && <div className="error-banner">{error}</div>}
         <div className="dialog-actions">
           <button type="button" onClick={onClose}>
-            Отмена
+            {t("Отмена")}
           </button>
           <button className="primary" disabled={busy || !value.trim()}>
-            {busy ? "Сохраняем…" : "Сохранить"}
+            {busy ? t("Сохраняем…") : t("Сохранить")}
           </button>
         </div>
       </form>
@@ -2016,6 +2460,10 @@ function RenameDialog({
   );
 }
 
-function statusLabel(status: string): string {
-  return status === "inProgress" ? "выполняется" : status === "failed" ? "ошибка" : "готово";
+function statusLabel(status: string, t: Translate): string {
+  return status === "inProgress"
+    ? t("выполняется")
+    : status === "failed"
+      ? t("ошибка")
+      : t("готово");
 }

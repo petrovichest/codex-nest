@@ -2,6 +2,10 @@ import { SecureStorage } from "@aparajita/capacitor-secure-storage";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
+import type { UiLanguage } from "@codexnest/protocol";
+
+import { translate } from "./i18n";
+
 export interface ConnectionSettings {
   baseUrl: string;
   token: string;
@@ -44,10 +48,10 @@ export async function clearConnectionSettings(): Promise<void> {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-export function normalizeBaseUrl(value: string): string {
+export function normalizeBaseUrl(value: string, language: UiLanguage = "ru"): string {
   const parsed = new URL(value.trim());
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("Разрешены только адреса http:// и https://");
+    throw new Error(translate(language, "Разрешены только адреса http:// и https://"));
   }
   parsed.pathname = parsed.pathname.replace(/\/$/, "");
   parsed.search = "";

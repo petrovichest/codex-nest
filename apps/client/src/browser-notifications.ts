@@ -1,8 +1,9 @@
 import { Capacitor } from "@capacitor/core";
 
-import type { AgentId, AppSnapshot, ServerEvent } from "@codexnest/protocol";
+import type { AgentId, AppSnapshot, ServerEvent, UiLanguage } from "@codexnest/protocol";
 
 import { agentLabel } from "./agents";
+import { localizeKnownServerText, translate } from "./i18n";
 
 export type BrowserNotificationPermission = NotificationPermission | "unsupported";
 
@@ -24,7 +25,15 @@ export class BrowserNotificationTracker {
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
 
+  constructor(private language: UiLanguage = "ru") {}
+
+  setLanguage(language: UiLanguage): void {
+    this.language = language;
+  }
+
   acceptSnapshot(snapshot: AppSnapshot): void {
+    this.language =
+      snapshot.uiLanguage === "en" || snapshot.uiLanguage === "ru" ? snapshot.uiLanguage : "ru";
     const cutoff = this.lastObservedAt;
     const firstConnection = cutoff === 0;
     let newest = cutoff;
@@ -62,7 +71,7 @@ export class BrowserNotificationTracker {
     for (const attention of missedAttention) {
       const agent = this.agentFor(attention.threadId);
       this.show(
-        `${agentLabel(agent)} ждёт решения`,
+        translate(this.language, "{{agent}} ждёт решения", { agent: agentLabel(agent) }),
         this.titleFor(attention.threadId, agent),
         `attention:${attention.id}`,
         attention.threadId,
@@ -72,7 +81,9 @@ export class BrowserNotificationTracker {
   }
 
   acceptEvent(event: ServerEvent): void {
-    if (event.type === "thread.upserted") {
+    if (event.type === "uiLanguage.changed") {
+      this.language = event.language;
+    } else if (event.type === "thread.upserted") {
       const previous = this.threads.get(event.thread.id)?.state;
       this.threads.set(event.thread.id, {
         state: event.thread.state,
@@ -99,7 +110,7 @@ export class BrowserNotificationTracker {
         ) {
           const agent = this.agentFor(event.attention.threadId);
           this.show(
-            `${agentLabel(agent)} ждёт решения`,
+            translate(this.language, "{{agent}} ждёт решения", { agent: agentLabel(agent) }),
             this.titleFor(event.attention.threadId, agent),
             `attention:${event.attention.id}`,
             event.attention.threadId,
@@ -119,13 +130,23 @@ export class BrowserNotificationTracker {
     agent: AgentId,
   ): void {
     if (state === "completed") {
-      this.show("Задача завершена", threadTitle, `completed:${threadId}`, threadId);
+      this.show(
+        translate(this.language, "Задача завершена"),
+        this.displayThreadTitle(threadTitle),
+        `completed:${threadId}`,
+        threadId,
+      );
     } else if (state === "failed") {
-      this.show("Задача завершилась с ошибкой", threadTitle, `failed:${threadId}`, threadId);
+      this.show(
+        translate(this.language, "Задача завершилась с ошибкой"),
+        this.displayThreadTitle(threadTitle),
+        `failed:${threadId}`,
+        threadId,
+      );
     } else if (state === "needsAttention" && !this.hasAttentionForThread(threadId)) {
       this.show(
-        `${agentLabel(agent)} ждёт решения`,
-        threadTitle,
+        translate(this.language, "{{agent}} ждёт решения", { agent: agentLabel(agent) }),
+        this.displayThreadTitle(threadTitle),
         `needs-attention:${threadId}`,
         threadId,
       );
@@ -142,8 +163,15 @@ export class BrowserNotificationTracker {
   }
 
   private titleFor(threadId: string | null, agent: AgentId): string {
-    if (!threadId) return "Откройте CodexNest для подробностей";
-    return this.threads.get(threadId)?.title ?? `Задача ${agentLabel(agent)}`;
+    if (!threadId) return translate(this.language, "Откройте CodexNest для подробностей");
+    const title = this.threads.get(threadId)?.title;
+    return title
+      ? this.displayThreadTitle(title)
+      : translate(this.language, "Задача {{agent}}", { agent: agentLabel(agent) });
+  }
+
+  private displayThreadTitle(title: string): string {
+    return localizeKnownServerText(this.language, title) ?? title;
   }
 
   private show(title: string, body: string, tag: string, threadId: string | null): void {

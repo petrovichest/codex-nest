@@ -1,0 +1,643 @@
+import {
+  createContext,
+  type PropsWithChildren,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import type { UiLanguage } from "@codexnest/protocol";
+
+const LANGUAGE_KEY = "codexnest.uiLanguage";
+const LEGACY_INSTALLATION_KEYS = [
+  "codexnest.serverUrl",
+  "codexnest.theme",
+  "codexnest.sidebarSide",
+  "codexnest.projectListDirection",
+  "codexnest.layoutDefaultsVersion",
+  "codexnest.notificationPromptDismissed",
+];
+
+const ENGLISH: Record<string, string> = {
+  "Не удалось загрузить конфигурацию": "Failed to load configuration",
+  "Браузер не выдал разрешение. Попробуйте ещё раз.":
+    "The browser did not grant permission. Try again.",
+  "Не удалось запросить разрешение у браузера": "Failed to request permission from the browser",
+  "Небезопасное HTTP-подключение: данные доступны перехватчику в LAN.":
+    "Insecure HTTP connection: data can be intercepted on the LAN.",
+  "Закрыть меню": "Close menu",
+  "{{error}}. Серверные задачи продолжат выполняться.":
+    "{{error}}. Server tasks will continue running.",
+  Повторить: "Retry",
+  "Получаем состояние Codex…": "Loading Codex state…",
+  "Разрешить уведомления?": "Allow notifications?",
+  "CodexNest сообщит, когда задача завершится или потребуется ваше решение.":
+    "CodexNest will notify you when a task finishes or needs your decision.",
+  "Не сейчас": "Not now",
+  "Запрашиваем…": "Requesting…",
+  "Разрешить уведомления": "Allow notifications",
+  "Нет открытых сессий": "No open sessions",
+  "Создайте сессию в проекте": "Create a session in a project",
+  "Откройте список проектов и нажмите + рядом с нужным проектом.":
+    "Open the project list and click + next to the project you need.",
+  "Открыть проекты": "Open projects",
+  "Путь скопирован": "Path copied",
+  "Не удалось скопировать путь": "Failed to copy path",
+  "Не удалось изменить порядок проектов": "Failed to reorder projects",
+  "Не удалось создать сессию": "Failed to create session",
+  Архив: "Archive",
+  "Состояние сервера: {{state}}": "Server status: {{state}}",
+  Настройки: "Settings",
+  "Добавить проект": "Add project",
+  Задачи: "Tasks",
+  "Без проекта": "No project",
+  "Перетащить проект {{project}}": "Drag project {{project}}",
+  "Действия с проектом {{project}}": "Actions for project {{project}}",
+  "Копировать путь": "Copy path",
+  "Переместить выше": "Move up",
+  "Переместить ниже": "Move down",
+  "Создать новую сессию в проекте {{project}}": "Create a new session in {{project}}",
+  "Показать меньше": "Show less",
+  "Показать ещё {{count}}": "Show {{count}} more",
+  "Пока нет задач": "No tasks yet",
+  "Повторить лимиты": "Retry limits",
+  "Лимиты Codex": "Codex limits",
+  "Лимиты недоступны": "Limits unavailable",
+  Лимит: "Limit",
+  "{{count}} д": "{{count}}d",
+  "{{count}} ч": "{{count}}h",
+  "{{count}} мин": "{{count}}m",
+  "Обновляем лимиты Codex": "Refreshing Codex limits",
+  "Повторить обновление лимитов Codex": "Retry refreshing Codex limits",
+  "Показать лимиты Codex": "Show Codex limits",
+  "Обновить лимиты Codex: {{text}}": "Refresh Codex limits: {{text}}",
+  Подключено: "Connected",
+  "Подключение…": "Connecting…",
+  "Нет связи": "Offline",
+  "Codex ждёт решения": "Codex needs your decision",
+  "Задача завершена": "Task completed",
+  "Задача завершилась с ошибкой": "Task failed",
+  "Откройте CodexNest для подробностей": "Open CodexNest for details",
+  "Задача Codex": "Codex task",
+  "Введите bearer token": "Enter the bearer token",
+  "Не удалось сохранить подключение": "Failed to save the connection",
+  "Подключение к CodexNest": "Connect to CodexNest",
+  "Укажите адрес домашнего сервера и bearer token.":
+    "Enter the address of your home server and its bearer token.",
+  "Адрес сервера": "Server address",
+  "HTTP не шифрует token и содержимое сессий. Используйте только доверенную LAN.":
+    "HTTP does not encrypt the token or session content. Use it only on a trusted LAN.",
+  "Проверяем…": "Checking…",
+  Подключиться: "Connect",
+  "Разрешены только адреса http:// и https://": "Only http:// and https:// addresses are allowed",
+  "Не удалось подключиться к серверу": "Failed to connect to the server",
+  "Связь с сервером потеряна": "Connection to the server was lost",
+  "Запрашивать разрешение": "Ask for permission",
+  "Codex работает в проекте и спрашивает вас перед расширением доступа.":
+    "Codex works within the project and asks before expanding access.",
+  "Подтверждать автоматически": "Approve automatically",
+  "Потенциально опасные действия проверяет отдельный reviewer Codex.":
+    "A separate Codex reviewer checks potentially dangerous actions.",
+  "Полный доступ": "Full access",
+  "Неограниченный доступ к интернету и любым файлам пользователя на сервере.":
+    "Unrestricted access to the internet and any user files on the server.",
+  "Не удалось загрузить настройки": "Failed to load settings",
+  "Конфигурация Codex изменилась. Проверьте значение и сохраните ещё раз.":
+    "The Codex configuration changed. Check the value and save again.",
+  "Не удалось сохранить настройки": "Failed to save settings",
+  "Не удалось сохранить настройки новых задач": "Failed to save new task settings",
+  "Интерфейс, Codex и подключение": "Interface, Codex, and connection",
+  "Новые задачи": "New tasks",
+  "Эти значения применяются к новым задачам на всех подключённых устройствах.":
+    "These values apply to new tasks on every connected device.",
+  "По умолчанию": "Default",
+  Дружелюбная: "Friendly",
+  Прагматичная: "Pragmatic",
+  "Без personality": "No personality",
+  "Сохраняем…": "Saving…",
+  "Сохранить настройки новых задач": "Save new task settings",
+  "Разрешения Codex": "Codex permissions",
+  "Выбранный режим применяется ко всем задачам со следующего хода.":
+    "The selected mode applies to all tasks from their next turn.",
+  "Загружаем конфигурацию…": "Loading configuration…",
+  "Режим разрешений": "Permission mode",
+  "Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.":
+    "A custom configuration was detected. Select and save one of the modes.",
+  "Настройка переопределена управляемой политикой Codex.":
+    "This setting is overridden by a managed Codex policy.",
+  "Полный доступ снимает ограничения на файлы и сеть. Используйте его только на доверенном сервере.":
+    "Full access removes file and network restrictions. Use it only on a trusted server.",
+  Сохранить: "Save",
+  "Уведомления браузера": "Browser notifications",
+  "События приходят напрямую с вашего сервера, без Google и внешнего push.":
+    "Events come directly from your server without Google or external push services.",
+  "Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.":
+    "Notifications are enabled. They arrive while the tab is open or minimized.",
+  "Уведомления заблокированы. Разрешите их в настройках сайта в браузере.":
+    "Notifications are blocked. Allow them in the browser's site settings.",
+  "Этот браузер не предоставляет системные уведомления для текущего подключения. Некоторые браузеры требуют открыть CodexNest по HTTPS.":
+    "This browser does not provide system notifications for the current connection. Some browsers require CodexNest to be opened over HTTPS.",
+  Интерфейс: "Interface",
+  "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.":
+    "The interface language is synchronized through the server; other settings apply only to this device.",
+  "Язык интерфейса": "Interface language",
+  "Не удалось сохранить язык интерфейса": "Failed to save the interface language",
+  Тема: "Theme",
+  "Системная тема": "System theme",
+  "Светлая тема": "Light theme",
+  "Тёмная тема": "Dark theme",
+  "Боковая панель": "Sidebar",
+  Слева: "Left",
+  Справа: "Right",
+  "Порядок проектов": "Project order",
+  "Сверху вниз": "Top to bottom",
+  "Снизу вверх": "Bottom to top",
+  Сервер: "Server",
+  "Подключение к CodexNest на этом устройстве.": "CodexNest connection on this device.",
+  "Сменить сервер": "Switch server",
+  "Настройки применены на сервере для всех клиентов.":
+    "Settings were applied on the server for all clients.",
+  "Не удалось сохранить настройки распознавания": "Failed to save speech recognition settings",
+  "Распознавание речи": "Speech recognition",
+  "Эти настройки общие для всех клиентов и сохраняются на сервере.":
+    "These settings are shared by all clients and stored on the server.",
+  "Не удалось получить настройки распознавания: {{error}}":
+    "Failed to load speech recognition settings: {{error}}",
+  "Загружаем настройки…": "Loading settings…",
+  Провайдер: "Provider",
+  "Провайдер распознавания речи": "Speech recognition provider",
+  "Выберите провайдера": "Select a provider",
+  "Локальная модель": "Local model",
+  "URL локального STT": "Local STT URL",
+  "Расставлять пунктуацию и исправлять очевидные ошибки через Codex":
+    "Add punctuation and correct obvious errors with Codex",
+  "Модель улучшения": "Refinement model",
+  "Модель улучшения расшифровки": "Transcript refinement model",
+  "Аудио остаётся на сервере. При включённом улучшении в Codex отправляется только распознанный текст.":
+    "Audio stays on the server. When refinement is enabled, only the recognized text is sent to Codex.",
+  "Модель OpenAI": "OpenAI model",
+  "Модель распознавания OpenAI": "OpenAI transcription model",
+  "gpt-4o-transcribe — точнее": "gpt-4o-transcribe — more accurate",
+  "gpt-4o-mini-transcribe — дешевле": "gpt-4o-mini-transcribe — cheaper",
+  "Ключ сохранён; оставьте пустым без изменений": "Key saved; leave empty to keep it unchanged",
+  Скрыть: "Hide",
+  Показать: "Show",
+  "Ключ будет удалён": "The key will be removed",
+  "API key настроен": "API key configured",
+  "Не удалять": "Keep key",
+  "Удалить ключ": "Delete key",
+  "Ввод API key доступен только через HTTPS или локальное подключение.":
+    "API key entry is available only over HTTPS or a local connection.",
+  "Аудио отправляется в OpenAI API и оплачивается отдельно от подписки ChatGPT или Codex.":
+    "Audio is sent to the OpenAI API and billed separately from a ChatGPT or Codex subscription.",
+  Язык: "Language",
+  "Язык распознавания": "Recognition language",
+  "Настройте URL локального STT или OpenAI API key, чтобы включить микрофон.":
+    "Configure a local STT URL or OpenAI API key to enable the microphone.",
+  "Выбранный провайдер настроен не полностью. Исправьте параметры и сохраните форму.":
+    "The selected provider is not fully configured. Correct the settings and save the form.",
+  "Сохранить распознавание": "Save speech recognition",
+  "Определяем…": "Detecting…",
+  "Только в Android": "Android only",
+  "Не удалось получить состояние CodexNest": "Failed to get CodexNest status",
+  "Не удалось определить": "Could not determine",
+  "Не удалось проверить обновления CodexNest": "Failed to check for CodexNest updates",
+  " до версии {{version}}": " to version {{version}}",
+  "Обновить CodexNest{{target}}? Интерфейс ненадолго переподключится.":
+    "Update CodexNest{{target}}? The interface will briefly reconnect.",
+  "Не удалось запустить обновление CodexNest": "Failed to start the CodexNest update",
+  "Не удалось открыть загрузку APK": "Failed to open the APK download",
+  "Обновление CodexNest": "CodexNest update",
+  "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.":
+    "The server and APK update from the same verified CI build with automatic rollback.",
+  "Получаем версию CodexNest…": "Loading CodexNest version…",
+  "Установлено на сервере": "Installed on server",
+  "Актуальная версия в GitHub": "Latest version on GitHub",
+  "Не проверялась": "Not checked",
+  "APK на этом устройстве": "APK on this device",
+  Состояние: "Status",
+  Результат: "Result",
+  "Обновления доступны только для установки через install.sh.":
+    "Updates are available only for installations made with install.sh.",
+  "Скачать свежий APK": "Download latest APK",
+  "Проверить обновления": "Check for updates",
+  "Обновляем…": "Updating…",
+  "Обновить CodexNest": "Update CodexNest",
+  Готово: "Ready",
+  Проверка: "Checking",
+  Подготовка: "Preparing",
+  Сборка: "Building",
+  "Переключение версии": "Switching version",
+  Перезапуск: "Restarting",
+  Обновлено: "Updated",
+  "Выполнен откат": "Rolled back",
+  Ошибка: "Error",
+  "Не удалось загрузить состояние Codex": "Failed to load Codex status",
+  "Прокси проверен и применён. Codex daemon готов к работе.":
+    "The proxy was verified and applied. The Codex daemon is ready.",
+  "Проверка Codex и соединения через прокси завершена.":
+    "Codex and its proxy connection were checked.",
+  "Обновить Codex и перезапустить daemon?": "Update Codex and restart the daemon?",
+  "Codex обновлён, проверен через прокси и перезапущен.":
+    "Codex was updated, verified through the proxy, and restarted.",
+  "Перезапустить Codex daemon?": "Restart the Codex daemon?",
+  "Codex daemon перезапущен.": "The Codex daemon was restarted.",
+  "Операция Codex завершилась ошибкой": "The Codex operation failed",
+  "Версия и состояние Codex daemon на сервере.": "Codex daemon version and status on the server.",
+  "Установленная версия Codex CLI": "Installed Codex CLI version",
+  "Актуальная версия Codex CLI": "Latest Codex CLI version",
+  "Дождитесь завершения активных ответов: {{count}}.":
+    "Wait for active responses to finish: {{count}}.",
+  "Проверить Codex CLI": "Check Codex CLI",
+  "Обновить Codex CLI": "Update Codex CLI",
+  "Перезапускаем…": "Restarting…",
+  Перезапустить: "Restart",
+  Прокси: "Proxy",
+  "Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.":
+    "Internal Codex requests use the fail-closed proxy; agent commands connect directly.",
+  "Получаем состояние прокси…": "Loading proxy status…",
+  "Текущий прокси": "Current proxy",
+  "WebSocket ChatGPT/OpenAI доступен через прокси.":
+    "The ChatGPT/OpenAI WebSocket is reachable through the proxy.",
+  "Ввод прокси с паролем доступен только через HTTPS или локальное подключение.":
+    "A password-protected proxy can be entered only over HTTPS or a local connection.",
+  "Новый HTTP/HTTPS-прокси": "New HTTP/HTTPS proxy",
+  "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.":
+    "Formats: host:port, host:port:user:password, user:password@host:port, or a full URL.",
+  "Проверяем и применяем…": "Checking and applying…",
+  "Проверить и применить": "Check and apply",
+  "Не настроен": "Not configured",
+  " · пароль сохранён": " · password saved",
+  Работает: "Running",
+  "Не поддерживается": "Unsupported",
+  Недоступен: "Unavailable",
+  "Открыть список задач": "Open task list",
+  "Показать сведения": "Show details",
+  "Не удалось создать задачу": "Failed to create task",
+  "Новая задача": "New task",
+  "Выберите проект": "Select a project",
+  "Что поручим Codex?": "What should Codex do?",
+  "Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.":
+    "Describe the task — work will continue on the server even if you close the app.",
+  "Распознавание речи не настроено": "Speech recognition is not configured",
+  "Закрыть сведения": "Close details",
+  "Не удалось открыть папку": "Failed to open folder",
+  "Не удалось создать папку": "Failed to create folder",
+  "Не удалось добавить проект": "Failed to add project",
+  "Рабочая папка на сервере": "Working folder on the server",
+  Закрыть: "Close",
+  "На уровень выше": "Up one level",
+  "Путь к папке": "Folder path",
+  "Домашняя папка": "Home folder",
+  Загрузка: "Loading",
+  "Новая папка": "New folder",
+  "Показывать скрытые": "Show hidden folders",
+  "Название новой папки": "New folder name",
+  "Создаём…": "Creating…",
+  Создать: "Create",
+  Отмена: "Cancel",
+  Папки: "Folders",
+  "Получаем папки с сервера…": "Loading folders from the server…",
+  "Скрытые папки не показаны": "Hidden folders are not shown",
+  "В этой папке нет других папок": "There are no other folders here",
+  "Добавляем…": "Adding…",
+  "Выбрать эту папку": "Select this folder",
+  Домашняя: "Home",
+  "Сведения о задаче": "Task details",
+  Сведения: "Details",
+  Статус: "Status",
+  Проект: "Project",
+  Создана: "Created",
+  Обновлена: "Updated",
+  "Рабочая папка": "Working folder",
+  Открепить: "Unpin",
+  Закрепить: "Pin",
+  "Вернуть из архива": "Restore from archive",
+  Архивировать: "Archive",
+  "Сведения о новой задаче": "New task details",
+  "Не выбран": "Not selected",
+  "Задача будет создана после отправки первого сообщения.":
+    "The task will be created after the first message is sent.",
+  "Загрузка…": "Loading…",
+  Недоступно: "Unavailable",
+  "Не Git-репозиторий": "Not a Git repository",
+  "Нет изменений": "No changes",
+  "{{count}} file": "{{count}} file",
+  "{{count}} files": "{{count}} files",
+  "{{count}} файл": "{{count}} file",
+  "{{count}} файла": "{{count}} files",
+  "{{count}} файлов": "{{count}} files",
+  "Нужно решение": "Needs attention",
+  Выполняется: "Running",
+  Завершена: "Completed",
+  Прервана: "Interrupted",
+  Готова: "Ready",
+  Недоступна: "Unavailable",
+  Модель: "Model",
+  "Уровень рассуждений": "Reasoning effort",
+  "Выключить режим планирования": "Disable Plan mode",
+  "Включить режим планирования": "Enable Plan mode",
+  "Управление целью": "Manage goal",
+  Пауза: "Pause",
+  Продолжить: "Resume",
+  Очистить: "Clear",
+  "Выключить режим цели": "Disable Goal mode",
+  "Включить режим цели": "Enable Goal mode",
+  "Цель активна": "Goal active",
+  "Цель на паузе": "Goal paused",
+  "Цель заблокирована": "Goal blocked",
+  "Достигнут лимит использования": "Usage limit reached",
+  "Достигнут бюджет цели": "Goal budget reached",
+  "Цель выполнена": "Goal complete",
+  "{{count}}м {{seconds}}с": "{{count}}m {{seconds}}s",
+  "{{count}}с": "{{count}}s",
+  "{{count}} токен": "{{count}} token",
+  "{{count}} токена": "{{count}} tokens",
+  "{{count}} токенов": "{{count}} tokens",
+  "Требуется внимание": "Attention required",
+  "Запрос уже закрыт": "The request is already closed",
+  "Разрешить команду?": "Allow this command?",
+  "Команда не указана": "No command provided",
+  "Сетевой host: {{host}}": "Network host: {{host}}",
+  "Отдельные изменения policy": "Separate policy changes",
+  "Обычное подтверждение эти правила не применяет.":
+    "A regular approval does not apply these rules.",
+  "Разрешить изменения файлов?": "Allow file changes?",
+  "Запрошенный корень: {{root}}": "Requested root: {{root}}",
+  "Несовместимое действие": "Unsupported action",
+  "Разрешить один раз": "Allow once",
+  "На сессию": "For session",
+  Отказать: "Decline",
+  "Отменить turn": "Cancel turn",
+  "Дополнительные разрешения": "Additional permissions",
+  Сеть: "Network",
+  Чтение: "Read",
+  Запись: "Write",
+  "Выдать на turn": "Grant for turn",
+  "Codex просит уточнение": "Codex needs clarification",
+  "Вопрос {{current}} из {{total}}": "Question {{current}} of {{total}}",
+  "Свой ответ": "Your answer",
+  "Отправить ответы": "Submit answers",
+  Далее: "Next",
+  "Автовыбор через {{seconds}} сек.": "Automatic selection in {{seconds}} sec.",
+  "Время автовыбора истекло": "Automatic selection time expired",
+  "Действие во внешнем сервисе": "Action in an external service",
+  "Открыть в браузере": "Open in browser",
+  Отменить: "Cancel",
+  "Форма инструмента": "Tool form",
+  Отправить: "Submit",
+  Выберите: "Select",
+  "Заполните обязательное поле «{{field}}»": "Complete the required field “{{field}}”",
+  "Выберите больше значений в поле «{{field}}»": "Select more values in “{{field}}”",
+  "Выберите меньше значений в поле «{{field}}»": "Select fewer values in “{{field}}”",
+  "Codex app-server недоступен": "Codex app-server is unavailable",
+  "Без названия": "Untitled",
+  "Инструмент завершился с ошибкой": "Tool finished with an error",
+  "MCP-инструмент": "MCP tool",
+  Инструмент: "Tool",
+  "Активность Codex": "Codex activity",
+  "Первый ход начат, но цель осталась на паузе. Продолжите её вручную.":
+    "The first turn started, but the goal remained paused. Resume it manually.",
+  "Эта версия Codex запросила действие, которое CodexNest пока не поддерживает.":
+    "This Codex version requested an action that CodexNest does not support yet.",
+  "Codex работает": "Codex is working",
+  Аннотация: "Annotate",
+  "Аннотация {{number}}": "Annotation {{number}}",
+  "В очереди": "Queued",
+  "Выбрать изображение {{name}}": "Select image {{name}}",
+  "Выполнен поиск": "Search completed",
+  "Выполнена команда": "Command executed",
+  Выполнено: "Completed",
+  "Выполнены действия": "Actions completed",
+  "Выполнены команды": "Commands executed",
+  "Да, реализуй этот план": "Yes, implement this plan",
+  "Действия с задачей": "Task actions",
+  "Для доступа к микрофону откройте CodexNest по HTTPS":
+    "Open CodexNest over HTTPS to access the microphone",
+  "Добавить в очередь": "Add to queue",
+  "Добавляется…": "Adding…",
+  "Добавить изображения": "Add images",
+  "Загружаем старые сообщения": "Loading older messages",
+  Задача: "Task",
+  "Задача не найдена": "Task not found",
+  "Заканчиваем…": "Finishing…",
+  Закончить: "Finish",
+  "Запись {{time}}": "Recording {{time}}",
+  "Запись не содержит аудио": "The recording contains no audio",
+  "Запись с микрофона не поддерживается на этом устройстве":
+    "Microphone recording is not supported on this device",
+  "Запись слишком большая": "The recording is too large",
+  "Запрашиваем доступ к микрофону": "Requesting microphone access",
+  "Запустить цель": "Start goal",
+  "Изменены файлы": "Files changed",
+  "Изменён {{path}}": "Changed {{path}}",
+  "Изображение {{number}}": "Image {{number}}",
+  Изображения: "Images",
+  "Использованы инструменты": "Tools used",
+  "Идёт распознавание в другой сессии": "A recording is being transcribed in another session",
+  Комментарий: "Comment",
+  "Комментарий к выделенному тексту": "Comment on selected text",
+  "Блок скопирован": "Block copied",
+  Копировать: "Copy",
+  "Копировать блок": "Copy block",
+  "Копировать сообщение": "Copy message",
+  "Микрофон занят другим приложением": "The microphone is in use by another app",
+  "Микрофон не найден": "Microphone not found",
+  Название: "Name",
+  "Направить текущую задачу": "Steer the current task",
+  "Направить текущую задачу…": "Steer the current task…",
+  "Начать запись": "Start recording",
+  "Не выполнено": "Not completed",
+  "Не удалось закончить сессию": "Failed to finish the session",
+  "Не удалось записать аудио": "Failed to record audio",
+  "Не удалось изменить настройки": "Failed to change settings",
+  "Не удалось изменить сообщение в очереди": "Failed to update the queued message",
+  "Не удалось изменить цель": "Failed to change the goal",
+  "Не удалось начать запись с микрофона": "Failed to start microphone recording",
+  "Не удалось начать реализацию плана": "Failed to start implementing the plan",
+  "Не удалось отправить сообщение": "Failed to send the message",
+  "Не удалось очистить цель": "Failed to clear the goal",
+  "Не удалось прочитать выбранное изображение": "Failed to read the selected image",
+  "Не удалось распознать запись": "Failed to transcribe the recording",
+  "Не удалось скачать файл. Нажмите ещё раз.": "Failed to download the file. Click again.",
+  "Не удалось скопировать": "Failed to copy",
+  "Не удалось скопировать блок": "Failed to copy block",
+  "Не удалось сохранить черновик": "Failed to save the draft",
+  "Не удалось удалить сессию": "Failed to delete the session",
+  "Не удалось удалить сообщение из очереди": "Failed to delete the queued message",
+  "Несовместимое событие": "Unsupported event",
+  "Нет доступа к микрофону. Разрешите его в настройках приложения или браузера":
+    "Microphone access is denied. Allow it in the app or browser settings",
+  "Опишите проверяемый результат цели…": "Describe a verifiable goal outcome…",
+  "Остановить задачу": "Stop task",
+  "Остановить запись": "Stop recording",
+  "Отправить сейчас": "Send now",
+  "Отправляется…": "Sending…",
+  "Отредактированы файлы": "Files edited",
+  "Очередь сообщений": "Message queue",
+  "Ошибка копирования": "Copy failed",
+  Переименовать: "Rename",
+  "Изменить сообщение в очереди": "Edit queued message",
+  План: "Plan",
+  "Повторить загрузку старых сообщений": "Retry loading older messages",
+  "Прочитаны файлы": "Files read",
+  "Работал {{duration}}": "Worked for {{duration}}",
+  "Распознавание не вернуло текст": "Speech recognition returned no text",
+  "Распознаём · дольше прогноза на {{time}}": "Transcribing · {{time}} longer than estimated",
+  "Распознаём · осталось ≈ {{time}}": "Transcribing · about {{time}} remaining",
+  "Распознаём · прошло {{time}}": "Transcribing · {{time}} elapsed",
+  "Распознаём запись": "Transcribing recording",
+  "Распознаём…": "Transcribing…",
+  Скопировано: "Copied",
+  "Сначала отправьте или удалите аннотации": "Send or delete the annotations first",
+  "Сначала отправьте или удалите аннотации к плану": "Send or delete the plan annotations first",
+  "Сообщение будет добавлено в очередь": "The message will be added to the queue",
+  "Сообщение для Codex": "Message for Codex",
+  "Сохранить аннотацию": "Save annotation",
+  "Спросите что угодно": "Ask anything",
+  Удалить: "Delete",
+  "Удалить сообщение из очереди": "Delete queued message",
+  "Удалить аннотацию": "Delete annotation",
+  "Удалить изображение {{name}}": "Delete image {{name}}",
+  "Удалить эту сессию? Это действие нельзя отменить.":
+    "Delete this session? This action cannot be undone.",
+  "Удаляем…": "Deleting…",
+  "Текст сообщения в очереди": "Queued message text",
+  "Ход работы": "Progress",
+  "Чтобы начать задачу, добавьте рабочую папку.": "Add a workspace folder to start a task.",
+  "Этот браузер не поддерживает запись WebM или MP4":
+    "This browser does not support WebM or MP4 recording",
+  выполняется: "in progress",
+  готово: "completed",
+  ошибка: "failed",
+  "скачиваем…": "downloading…",
+  "Установка не управляется installer'ом CodexNest":
+    "This installation is not managed by the CodexNest installer",
+  "Управление доступно только при daemon-режиме Codex":
+    "Management is available only when Codex runs in daemon mode",
+  "Codex CLI или daemon недоступны. Установите Codex, выполните вход и запустите codexnest repair.":
+    "Codex CLI or daemon is unavailable. Install Codex, sign in, and run codexnest repair.",
+  "Файл прокси доступен группе или другим пользователям":
+    "The proxy file is accessible to the group or other users",
+  "Не удалось прочитать конфигурацию прокси": "Failed to read the proxy configuration",
+  "Конфигурация прокси повреждена или противоречива":
+    "The proxy configuration is corrupt or inconsistent",
+  "Получаем состояние сервера…": "Loading server state…",
+  Агент: "Agent",
+  "Агент: {{agent}}": "Agent: {{agent}}",
+  "Что поручим {{agent}}?": "What should {{agent}} do?",
+  "Сообщение для {{agent}}": "Message for {{agent}}",
+  "{{agent}} работает": "{{agent}} is working",
+  "{{agent}} ждёт решения": "{{agent}} needs your decision",
+  "{{agent}} просит уточнение": "{{agent}} needs clarification",
+  "{{agent}} недоступен": "{{agent}} is unavailable",
+  "Задача {{agent}}": "{{agent}} task",
+  Спрашивать: "Ask",
+  Авто: "Auto",
+  "Версия и состояние Claude Code на сервере.": "Claude Code version and status on the server.",
+  "Получаем состояние Claude Code…": "Loading Claude Code status…",
+  "Управление Claude Code недоступно на этой версии сервера.":
+    "Claude Code management is not available on this server version.",
+  "Установленная версия Claude Code": "Installed Claude Code version",
+  "Путь к CLI": "CLI path",
+  "Claude Code не найден на сервере.": "Claude Code was not found on the server.",
+  "Установите Claude Code и выполните вход командой":
+    "Install Claude Code and sign in with the command",
+  "на сервере.": "on the server.",
+  "Агент Claude отключён.": "The Claude agent is disabled.",
+  "Чтобы включить агента Claude, задайте переменную окружения":
+    "To enable the Claude agent, set the environment variable",
+  "Claude Code найден и готов к работе.": "Claude Code found and ready.",
+  "Claude Code недоступен.": "Claude Code is unavailable.",
+  "Не удалось загрузить состояние Claude Code": "Failed to load Claude Code status",
+  "Проверка Claude Code завершилась ошибкой": "The Claude Code check failed",
+  Проверить: "Check",
+};
+
+export type TranslationVariables = Record<string, string | number>;
+export type Translate = (key: string, variables?: TranslationVariables) => string;
+
+type I18nContextValue = {
+  language: UiLanguage;
+  setLanguage(language: UiLanguage): void;
+  t: Translate;
+};
+
+const fallbackContext: I18nContextValue = {
+  language: "ru",
+  setLanguage: () => undefined,
+  t: (key, variables) => interpolate(key, variables),
+};
+
+const I18nContext = createContext<I18nContextValue>(fallbackContext);
+
+export function I18nProvider({ children }: PropsWithChildren) {
+  const [language, setLanguageState] = useState<UiLanguage>(readInitialLanguage);
+
+  const setLanguage = useCallback((next: UiLanguage) => {
+    setLanguageState(next);
+    localStorage.setItem(LANGUAGE_KEY, next);
+    document.documentElement.lang = next;
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(LANGUAGE_KEY, language);
+    document.documentElement.lang = language;
+  }, [language]);
+
+  const value = useMemo<I18nContextValue>(
+    () => ({
+      language,
+      setLanguage,
+      t: (key, variables) => translate(language, key, variables),
+    }),
+    [language, setLanguage],
+  );
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n(): I18nContextValue {
+  return useContext(I18nContext);
+}
+
+export function translate(
+  language: UiLanguage,
+  key: string,
+  variables?: TranslationVariables,
+): string {
+  const template = language === "en" ? (ENGLISH[key] ?? key) : key;
+  return interpolate(template, variables);
+}
+
+export function localizeKnownServerText(
+  language: UiLanguage,
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  if (language === "ru") return value;
+  const direct = ENGLISH[value];
+  if (direct) return direct;
+  const execAmendment = /^Разрешать похожую команду: (.*)$/s.exec(value);
+  if (execAmendment) return `Allow similar command: ${execAmendment[1]}`;
+  const networkAmendment = /^(Разрешать|Запрещать) сеть для (.*)$/s.exec(value);
+  if (networkAmendment) {
+    return `${networkAmendment[1] === "Разрешать" ? "Allow" : "Deny"} network access for ${networkAmendment[2]}`;
+  }
+  return value;
+}
+
+export function readInitialLanguage(): UiLanguage {
+  const stored = localStorage.getItem(LANGUAGE_KEY);
+  if (stored === "en" || stored === "ru") return stored;
+  return LEGACY_INSTALLATION_KEYS.some((key) => localStorage.getItem(key) !== null) ? "ru" : "en";
+}
+
+function interpolate(template: string, variables?: TranslationVariables): string {
+  if (!variables) return template;
+  return template.replace(/\{\{(\w+)\}\}/g, (_match, name: string) =>
+    String(variables[name] ?? ""),
+  );
+}

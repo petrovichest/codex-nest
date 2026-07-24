@@ -34,15 +34,18 @@ import type {
   TaskDefaults,
   TranscriptionConfigResponse,
   TranscriptionResponse,
+  UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
+  UpdateQueuedMessageRequest,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   UpdateThreadRequest,
   UpdateTranscriptionSettingsRequest,
+  UpdateUiLanguageRequest,
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
@@ -65,6 +68,7 @@ import { RpcError } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
+import { safeError } from "./logging";
 import {
   assertUniqueProjectPath,
   canonicalProjectPath,
@@ -79,12 +83,22 @@ import {
 } from "./projects";
 import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
-import { MessageQueue, MessageQueueNotFoundError, MessageQueuePausedError } from "./message-queue";
+import {
+  MessageQueue,
+  MessageQueueConflictError,
+  MessageQueueNotFoundError,
+  MessageQueuePausedError,
+  MessageQueueValidationError,
+} from "./message-queue";
 import type { StateStore } from "./state/store";
 import {
+  appendTranscriptionTimingSample,
   MAX_TRANSCRIPTION_BYTES,
+  MAX_RECORDING_SECONDS,
   normalizeAudioType,
   TranscriptionError,
+  transcriptionTimingEstimate,
+  transcriptionTimingProfile,
   type TranscriptionService,
 } from "./transcription";
 
@@ -224,7 +238,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   }));
 
   app.get("/api/v1/transcriptions/config", async (): Promise<TranscriptionConfigResponse> => {
-    return (
+    return withTranscriptionTiming(
       services.transcription?.configuration() ?? {
         providers: [],
         provider: null,
@@ -236,7 +250,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: MAX_TRANSCRIPTION_BYTES,
-      }
+        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+      },
+      store,
     );
   });
 
@@ -256,7 +272,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "OpenAI API key can only be set over HTTPS or a local connection",
         );
       }
-      return services.transcription.updateConfiguration(request.body);
+      return withTranscriptionTiming(
+        await services.transcription.updateConfiguration(request.body),
+        store,
+      );
     },
   );
 
@@ -279,8 +298,33 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!services.transcription) {
         return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
       }
+      const audioDurationMs = parseAudioDurationHeader(
+        request.headers["x-codexnest-audio-duration-ms"],
+      );
+      const config = withTranscriptionTiming(services.transcription.configuration(), store);
+      const timingProfile = transcriptionTimingProfile(config);
+      const startedAt = Date.now();
       const text = await services.transcription.transcribe(request.body, contentType);
-      return { text };
+      let timingEstimate = config.timingEstimate;
+      if (audioDurationMs !== null && timingProfile) {
+        const processingMs = Math.max(1, Date.now() - startedAt);
+        const sample = processingMs / (audioDurationMs / 1_000);
+        try {
+          const nextState = await store.update((state) => {
+            state.transcriptionTimings ??= {};
+            state.transcriptionTimings[timingProfile] = appendTranscriptionTimingSample(
+              state.transcriptionTimings[timingProfile],
+              sample,
+            );
+          });
+          timingEstimate = transcriptionTimingEstimate(
+            nextState.transcriptionTimings?.[timingProfile],
+          );
+        } catch (error) {
+          app.log.warn({ err: safeError(error) }, "Failed to save transcription timing");
+        }
+      }
+      return { text, timingEstimate };
     },
   );
 
@@ -353,6 +397,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       };
       await projection.setTaskDefaults(taskDefaults);
       return taskDefaults;
+    },
+  );
+
+  app.put<{ Body: UpdateUiLanguageRequest }>(
+    "/api/v1/settings/ui-language",
+    async (request): Promise<UiLanguageSettings> => {
+      const body = requireRecord<Record<string, unknown>>(request.body);
+      if (
+        Object.keys(body).some((key) => key !== "language") ||
+        !["en", "ru"].includes(String(body.language))
+      ) {
+        throw new ProjectValidationError("language must be en or ru");
+      }
+      const language = body.language as UiLanguageSettings["language"];
+      await projection.setUiLanguage(language);
+      return { language };
     },
   );
 
@@ -484,20 +544,53 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/projects/:id/move",
     async (request, reply) => {
       const body = requireRecord<MoveProjectRequest>(request.body);
-      if (body.direction !== "up" && body.direction !== "down") {
+      const hasDirection = body.direction !== undefined;
+      const hasTargetIndex = body.targetIndex !== undefined;
+      if (hasDirection === hasTargetIndex) {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "exactly one of direction or targetIndex is required",
+        );
+      }
+      if (hasDirection && body.direction !== "up" && body.direction !== "down") {
         return apiError(reply, 400, "validation_failed", "direction must be up or down");
       }
       const projects = store.snapshot().projects;
       const index = projects.findIndex((project) => project.id === request.params.id);
       if (index < 0) return apiError(reply, 404, "not_found", "Project not found");
-      const targetIndex = body.direction === "up" ? index - 1 : index + 1;
+      let targetIndex: number;
+      if (hasTargetIndex) {
+        if (
+          typeof body.targetIndex !== "number" ||
+          !Number.isInteger(body.targetIndex) ||
+          body.targetIndex < 0
+        ) {
+          return apiError(
+            reply,
+            400,
+            "validation_failed",
+            "targetIndex must be a non-negative integer",
+          );
+        }
+        targetIndex = body.targetIndex;
+      } else {
+        targetIndex = body.direction === "up" ? index - 1 : index + 1;
+      }
+      if (hasTargetIndex && targetIndex >= projects.length) {
+        return apiError(reply, 400, "validation_failed", "targetIndex is outside the project list");
+      }
       if (targetIndex < 0 || targetIndex >= projects.length) return projects;
+      if (targetIndex === index) return projects;
 
       const updated = await store.update((state) => {
-        [state.projects[index], state.projects[targetIndex]] = [
-          state.projects[targetIndex]!,
-          state.projects[index]!,
-        ];
+        const currentIndex = state.projects.findIndex(
+          (project) => project.id === request.params.id,
+        );
+        if (currentIndex < 0) throw new ProjectNotFoundError("Project not found");
+        const [project] = state.projects.splice(currentIndex, 1);
+        state.projects.splice(targetIndex, 0, project!);
       });
       hub.publishProjectsReordered(updated.projects);
       return updated.projects;
@@ -800,6 +893,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }),
   );
 
+  app.patch<{
+    Params: { id: string; messageId: string };
+    Body: UpdateQueuedMessageRequest;
+  }>(
+    "/api/v1/threads/:id/queue/:messageId",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const body = requireRecord<UpdateQueuedMessageRequest>(request.body);
+      if (typeof body.input !== "string") {
+        return apiError(reply, 400, "validation_failed", "input must be a string");
+      }
+      return queue.update(request.params.id, request.params.messageId, body.input);
+    },
+  );
+
+  app.delete<{ Params: { id: string; messageId: string } }>(
+    "/api/v1/threads/:id/queue/:messageId",
+    async (request, reply) => {
+      await queue.cancel(request.params.id, request.params.messageId);
+      return reply.code(204).send();
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: SteerTurnRequest }>(
     "/api/v1/threads/:id/steer",
     { bodyLimit: CHAT_BODY_LIMIT },
@@ -950,7 +1066,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof TurnInProgressError)
       return apiError(reply, 409, "conflict", error.message);
-    if (error instanceof MessageQueuePausedError)
+    if (error instanceof MessageQueueValidationError)
+      return apiError(reply, 400, "validation_failed", error.message);
+    if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof CodexManagementError) {
       if (error.kind === "validation")
@@ -968,6 +1086,38 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 409, "conflict", error.message);
     return apiError(reply, 500, "internal_error", "Internal server error");
   });
+}
+
+function withTranscriptionTiming(
+  config: TranscriptionConfigResponse,
+  store: StateStore,
+): TranscriptionConfigResponse {
+  const profile = transcriptionTimingProfile(config);
+  return {
+    ...config,
+    timingEstimate: transcriptionTimingEstimate(
+      profile ? store.snapshot().transcriptionTimings?.[profile] : undefined,
+    ),
+  };
+}
+
+function parseAudioDurationHeader(value: string | string[] | undefined): number | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new TranscriptionError("validation", "Audio duration must be an integer");
+  }
+  const durationMs = Number(value);
+  if (
+    !Number.isSafeInteger(durationMs) ||
+    durationMs < 1 ||
+    durationMs > MAX_RECORDING_SECONDS * 1_000
+  ) {
+    throw new TranscriptionError(
+      "validation",
+      `Audio duration must be between 1 and ${MAX_RECORDING_SECONDS * 1_000} milliseconds`,
+    );
+  }
+  return durationMs;
 }
 
 function requireCodexManager(manager: CodexManager | undefined): CodexManager {

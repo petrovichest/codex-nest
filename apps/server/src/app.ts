@@ -45,7 +45,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
       callback(null, !origin || config.allowedOrigins.has(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["authorization", "content-type"],
+    allowedHeaders: ["authorization", "content-type", "x-codexnest-audio-duration-ms"],
   });
   await app.register(websocket, {
     options: { maxPayload: 64 * 1024 },

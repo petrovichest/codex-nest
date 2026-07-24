@@ -30,6 +30,19 @@ export type SummaryResponse = {
 
 export type TranscriptionProvider = "local" | "openai";
 
+export type UiLanguage = "en" | "ru";
+
+export type TranscriptionTimingEstimate = {
+  sampleCount: number;
+  estimatedProcessingMsPerAudioSecond: number | null;
+};
+
+export type UiLanguageSettings = {
+  language: UiLanguage;
+};
+
+export type UpdateUiLanguageRequest = UiLanguageSettings;
+
 export type TranscriptionConfigResponse = {
   providers: TranscriptionProvider[];
   provider: TranscriptionProvider | null;
@@ -41,6 +54,7 @@ export type TranscriptionConfigResponse = {
   refinementModel: string;
   maxRecordingSeconds: number;
   maxUploadBytes: number;
+  timingEstimate: TranscriptionTimingEstimate;
 };
 
 export type UpdateTranscriptionSettingsRequest = {
@@ -55,6 +69,7 @@ export type UpdateTranscriptionSettingsRequest = {
 
 export type TranscriptionResponse = {
   text: string;
+  timingEstimate: TranscriptionTimingEstimate;
 };
 
 export type GitChangesSummary = {
@@ -547,6 +562,7 @@ export type BackendStatus = {
 
 export type AppSnapshot = {
   sequence: number;
+  uiLanguage: UiLanguage;
   connection: ConnectionView;
   projects: Project[];
   threads: ThreadSummary[];
@@ -574,6 +590,7 @@ export type ServerEvent =
   | { type: "backend.changed"; backend: BackendStatus }
   | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
   | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
+  | { type: "uiLanguage.changed"; language: UiLanguage }
   | { type: "goal.changed"; threadId: string; goal: ThreadGoal | null }
   | { type: "resync.required" };
 
@@ -594,9 +611,8 @@ export type UpdateProjectRequest = {
   path?: string;
 };
 
-export type MoveProjectRequest = {
-  direction: "up" | "down";
-};
+export type MoveProjectRequest =
+  { direction: "up" | "down"; targetIndex?: never } | { direction?: never; targetIndex: number };
 
 export type CreateDirectoryRequest = {
   parentPath: string;
@@ -637,6 +653,10 @@ export type QueueMessageRequest = {
   input: string;
   images?: string[];
   clientMessageId?: string;
+};
+
+export type UpdateQueuedMessageRequest = {
+  input: string;
 };
 
 export type UpdateThreadSettingsRequest = {

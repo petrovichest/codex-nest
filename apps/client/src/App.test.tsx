@@ -471,8 +471,9 @@ describe("App routing and navigation", () => {
     const toggle = screen.getByRole("button", { name: "Проект" });
     const projectTitle = toggle.closest(".project-title") as HTMLElement;
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(projectTitle.children[1]).toHaveClass("project-action-menu");
-    expect(projectTitle.children[2]).toHaveAccessibleName("Создать новую сессию в проекте Проект");
+    expect(projectTitle.children[1]).toHaveClass("project-drag-handle");
+    expect(projectTitle.children[2]).toHaveClass("project-action-menu");
+    expect(projectTitle.children[3]).toHaveAccessibleName("Создать новую сессию в проекте Проект");
 
     fireEvent.click(screen.getByLabelText("Действия с проектом Проект"));
     expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -556,6 +557,117 @@ describe("App routing and navigation", () => {
     await waitFor(() =>
       expect(api.moveProject).toHaveBeenCalledWith("project", { direction: "down" }),
     );
+  });
+
+  it("drags a project to a server target index with one pointer request", async () => {
+    const secondProject = testProject("second", "Второй");
+    const thirdProject = testProject("third", "Третий");
+    const projects = [defaultProject(), secondProject, thirdProject];
+    const api = mockConnection(snapshot([baseThread], projects));
+    api.moveProject.mockResolvedValue([secondProject, thirdProject, defaultProject()]);
+
+    const view = renderApp("/threads/newer");
+    setProjectDragBounds(view.container, [80, 120, 160]);
+    const handle = screen.getByTitle("Перетащить проект Проект");
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 90, pointerId: 1 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 180, pointerId: 1 });
+
+    expect(api.moveProject).not.toHaveBeenCalled();
+    expect(view.container.querySelector(".project-list")).toHaveClass("project-list-dragging");
+    expect(screen.getByRole("button", { name: "Третий" }).closest(".project-group")).toHaveClass(
+      "project-drop-after",
+    );
+
+    fireProjectPointer(handle, "pointerup", { clientX: 12, clientY: 180, pointerId: 1 });
+
+    await waitFor(() =>
+      expect(api.moveProject).toHaveBeenCalledWith("project", { targetIndex: 2 }),
+    );
+    expect(api.moveProject).toHaveBeenCalledTimes(1);
+    expect(view.container.querySelector(".project-list")).not.toHaveClass("project-list-dragging");
+  });
+
+  it("maps touch dragging in a bottom-up list back to server order", async () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
+    localStorage.setItem("codexnest.projectListDirection", "bottom-up");
+    const secondProject = testProject("second", "Второй");
+    const thirdProject = testProject("third", "Третий");
+    const api = mockConnection(
+      snapshot([baseThread], [defaultProject(), secondProject, thirdProject]),
+    );
+    api.moveProject.mockResolvedValue([defaultProject(), thirdProject, secondProject]);
+
+    const view = renderApp("/threads/newer");
+    setProjectDragBounds(view.container, [80, 120, 160]);
+    const handle = screen.getByTitle("Перетащить проект Третий");
+
+    fireProjectPointer(handle, "pointerdown", {
+      clientX: 12,
+      clientY: 90,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+    fireProjectPointer(handle, "pointermove", {
+      clientX: 12,
+      clientY: 140,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+    fireProjectPointer(handle, "pointerup", {
+      clientX: 12,
+      clientY: 140,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+
+    await waitFor(() => expect(api.moveProject).toHaveBeenCalledWith("third", { targetIndex: 1 }));
+    expect(api.moveProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reorder for a short or cancelled project drag", () => {
+    const secondProject = testProject("second", "Второй");
+    const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+
+    const view = renderApp("/threads/newer");
+    setProjectDragBounds(view.container, [80, 120]);
+    const handle = screen.getByTitle("Перетащить проект Проект");
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 90, pointerId: 3 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 94, pointerId: 3 });
+    fireProjectPointer(handle, "pointerup", { clientX: 12, clientY: 94, pointerId: 3 });
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 90, pointerId: 6 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 110, pointerId: 6 });
+    fireProjectPointer(handle, "pointerup", { clientX: 12, clientY: 110, pointerId: 6 });
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 90, pointerId: 4 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 140, pointerId: 4 });
+    fireProjectPointer(handle, "pointercancel", { clientX: 12, clientY: 140, pointerId: 4 });
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 90, pointerId: 5 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 140, pointerId: 5 });
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(api.moveProject).not.toHaveBeenCalled();
+    expect(view.container.querySelector(".project-list")).not.toHaveClass("project-list-dragging");
+  });
+
+  it("auto-scrolls the project list while dragging near its edge", async () => {
+    const secondProject = testProject("second", "Второй");
+    const thirdProject = testProject("third", "Третий");
+    mockConnection(snapshot([baseThread], [defaultProject(), secondProject, thirdProject]));
+
+    const view = renderApp("/threads/newer");
+    setProjectDragBounds(view.container, [60, 100, 140], { top: 0, height: 180 });
+    const navigation = view.container.querySelector(".thread-nav") as HTMLElement;
+    const handle = screen.getByTitle("Перетащить проект Проект");
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 12, clientY: 70, pointerId: 5 });
+    fireProjectPointer(handle, "pointermove", { clientX: 12, clientY: 176, pointerId: 5 });
+
+    await waitFor(() => expect(navigation.scrollTop).toBeGreaterThan(0));
+    fireProjectPointer(handle, "pointercancel", { clientX: 12, clientY: 176, pointerId: 5 });
   });
 
   it("shows a project-scoped error when reordering fails", async () => {
@@ -652,6 +764,27 @@ describe("App routing and navigation", () => {
 
     expect(frame).not.toHaveClass("drawer-dragging");
     expect(sidebar).toHaveClass("open");
+  });
+
+  it("does not treat a touch on the project drag handle as a drawer swipe", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const handle = screen.getByTitle("Перетащить проект Проект");
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(handle, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 200, clientY: 204 }] });
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
   });
 
   it("tracks a reverse swipe and closes the open session drawer after the threshold", () => {
@@ -952,6 +1085,78 @@ function mockMobileViewport() {
   } as unknown as MediaQueryList);
 }
 
+function fireProjectPointer(
+  target: Element,
+  type: "pointercancel" | "pointerdown" | "pointermove" | "pointerup",
+  {
+    clientX,
+    clientY,
+    pointerId,
+    pointerType = "mouse",
+  }: {
+    clientX: number;
+    clientY: number;
+    pointerId: number;
+    pointerType?: "mouse" | "touch";
+  },
+) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+    clientX,
+    clientY,
+  });
+  Object.defineProperties(event, {
+    isPrimary: { value: true },
+    pointerId: { value: pointerId },
+    pointerType: { value: pointerType },
+  });
+  fireEvent(target, event);
+}
+
+function setProjectDragBounds(
+  container: HTMLElement,
+  projectTops: number[],
+  navigationBounds: { top: number; height: number } = { top: 0, height: 400 },
+) {
+  const projectTitles = Array.from(container.querySelectorAll<HTMLElement>(".project-title"));
+  if (projectTitles.length !== projectTops.length) {
+    throw new Error("Project drag test bounds do not match the rendered project count");
+  }
+  projectTitles.forEach((title, index) => {
+    vi.spyOn(title, "getBoundingClientRect").mockReturnValue(testBounds(projectTops[index]!, 31));
+  });
+  const navigation = container.querySelector(".thread-nav") as HTMLElement;
+  vi.spyOn(navigation, "getBoundingClientRect").mockReturnValue(
+    testBounds(navigationBounds.top, navigationBounds.height),
+  );
+}
+
+function testBounds(top: number, height: number): DOMRect {
+  return {
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 300,
+    top,
+    width: 300,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  };
+}
+
+function testProject(id: string, displayName: string): Project {
+  return {
+    id,
+    displayName,
+    path: `/work/${id}`,
+    createdAt: "2026-01-02",
+    updatedAt: "2026-01-02",
+  };
+}
+
 function defaultProject(): Project {
   return {
     id: "project",
@@ -965,6 +1170,7 @@ function defaultProject(): Project {
 function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProject()]): AppSnapshot {
   return {
     sequence: 1,
+    uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: null },
     projects,
     threads,

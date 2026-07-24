@@ -66,6 +66,7 @@ export class SessionHub extends EventEmitter {
       defaultReasoningEffort: state.defaultReasoningEffort,
       taskDefaults: state.taskDefaults ?? {},
       pushConfigured: this.pushConfigured,
+      uiLanguage: state.uiLanguage,
       backends: this.backends.map((backend) => this.backendStatus(backend)),
     };
   }

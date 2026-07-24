@@ -17,6 +17,7 @@ import { isServerFrame, type AppSnapshot, type ThreadDetail } from "@codexnest/p
 
 import { ApiClient } from "./api";
 import { BrowserNotificationTracker } from "./browser-notifications";
+import { translate, useI18n } from "./i18n";
 import { clientReducer, initialState, type ClientAction, type ClientState } from "./state";
 import type { ConnectionSettings } from "./storage";
 
@@ -38,8 +39,10 @@ export function ConnectionProvider({
   settings,
   children,
 }: PropsWithChildren<{ settings: ConnectionSettings }>) {
+  const { language } = useI18n();
   const api = useMemo(() => new ApiClient(settings), [settings]);
   const [state, dispatch] = useReducer(clientReducer, initialState);
+  const languageRef = useRef(language);
   const [generation, setGeneration] = useState(0);
   const generationRef = useRef(0);
   const streamSequence = useRef<number | null>(null);
@@ -51,6 +54,11 @@ export function ConnectionProvider({
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
     [],
   );
+
+  useEffect(() => {
+    languageRef.current = language;
+    browserNotifications?.setLanguage(language);
+  }, [browserNotifications, language]);
 
   const reconnect = useCallback(() => {
     const next = generationRef.current + 1;
@@ -199,7 +207,11 @@ export function ConnectionProvider({
         socket = undefined;
         clearHeartbeat();
         streamSequence.current = null;
-        dispatch({ type: "network", network: "offline", error: "Связь с сервером потеряна" });
+        dispatch({
+          type: "network",
+          network: "offline",
+          error: translate(languageRef.current, "Связь с сервером потеряна"),
+        });
         const delay = delays[Math.min(retry, delays.length - 1)] ?? 15_000;
         retry += 1;
         retryTimer = window.setTimeout(connect, delay);

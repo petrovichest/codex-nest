@@ -77,9 +77,7 @@ describe("AppManager", () => {
           result: "none",
         }),
       );
-      const runCommand = vi.fn(async () => {
-        throw new Error("inactive");
-      });
+      const runCommand = vi.fn(async () => ({ stdout: "inactive\n", stderr: "" }));
       const manager = new AppManager({
         currentVersion: "0.1.0",
         managedInstall: true,
@@ -95,9 +93,42 @@ describe("AppManager", () => {
       });
       expect(runCommand).toHaveBeenCalledWith(
         "systemctl",
-        ["--user", "is-active", "--quiet", "codexnest-update.service"],
+        ["--user", "show", "--property=ActiveState", "--value", "codexnest-update.service"],
         { timeout: 2_000 },
       );
+    } finally {
+      await rm(statusDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a oneshot update in progress while systemd reports it as activating", async () => {
+    const statusDirectory = await mkdtemp(join(tmpdir(), "codexnest-running-update-"));
+    const statusPath = join(statusDirectory, "update.json");
+    try {
+      await writeFile(
+        statusPath,
+        JSON.stringify({
+          latestVersion: "0.2.0",
+          updateAvailable: true,
+          operation: "restarting",
+          result: "none",
+          message: "Restarting CodexNest 0.2.0",
+        }),
+      );
+      const runCommand = vi.fn(async () => ({ stdout: "activating\n", stderr: "" }));
+      const manager = new AppManager({
+        currentVersion: "0.1.0",
+        managedInstall: true,
+        statusPath,
+        managementCli: "codexnest",
+        runCommand,
+      });
+
+      await expect(manager.status()).resolves.toMatchObject({
+        operation: "restarting",
+        result: "none",
+        message: "Restarting CodexNest 0.2.0",
+      });
     } finally {
       await rm(statusDirectory, { recursive: true, force: true });
     }

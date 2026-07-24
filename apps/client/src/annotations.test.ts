@@ -60,6 +60,9 @@ describe("pending annotations", () => {
     );
     expect(formatAnnotatedMessage("", [annotation])).toContain("### Аннотация 1");
     expect(formatAnnotatedMessage("  ", [])).toBe("");
+    expect(formatAnnotatedMessage("Continue", [annotation], "en")).toContain(
+      "## Annotations for the agent's previous response\n\n### Annotation 1",
+    );
   });
 
   it("restores a DOM range and falls back to the closest matching quote", () => {

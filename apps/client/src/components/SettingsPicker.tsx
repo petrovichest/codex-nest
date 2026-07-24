@@ -8,7 +8,8 @@ import type {
   UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
-import { BrainIcon, ChevronDownIcon, ModelIcon, PlanIcon, ShieldIcon, TargetIcon } from "./Icons";
+import { useI18n, type Translate } from "../i18n";
+import { BrainIcon, ModelIcon, PlanIcon, ShieldIcon, TargetIcon } from "./Icons";
 
 const PERMISSION_PRESET_LABELS: Record<PermissionPreset, string> = {
   ask: "Спрашивать",
@@ -41,30 +42,35 @@ export function SettingsPicker({
   onGoalUpdate?(value: UpdateThreadGoalRequest): void;
   onGoalClear?(): void;
 }) {
+  const { language, t } = useI18n();
   const model = effectiveModel(models, value.model);
   // Goals and the service-tier/personality knobs are Codex-only; Claude exposes a per-session
   // permission preset instead. The plan (collaborationMode) toggle stays for both agents.
   const isClaude = agent === "claude";
+  const modelDisplayName = model ? compactModelName(model.displayName) : t("Модель");
 
   return (
     <div className="settings-picker">
       <SettingSelect
-        ariaLabel="Модель"
+        ariaLabel={t("Модель")}
         disabled={disabled || models.length === 0}
+        displayValue={modelDisplayName}
         icon={<ModelIcon />}
         value={value.model ?? ""}
         onChange={(selected) => changeModel(selected || null)}
       >
-        <option value="">{model?.displayName ?? "Модель"}</option>
+        <option value="">
+          {t("По умолчанию")} · {modelDisplayName}
+        </option>
         {models.map((option) => (
           <option value={option.id} key={option.id}>
-            {option.displayName}
+            {compactModelName(option.displayName)}
           </option>
         ))}
       </SettingSelect>
 
       <SettingSelect
-        ariaLabel="Уровень рассуждений"
+        ariaLabel={t("Уровень рассуждений")}
         disabled={disabled || !model}
         icon={<BrainIcon />}
         iconOnly
@@ -81,7 +87,7 @@ export function SettingsPicker({
 
       {isClaude && (
         <SettingSelect
-          ariaLabel="Режим разрешений"
+          ariaLabel={t("Режим разрешений")}
           disabled={disabled}
           icon={<ShieldIcon />}
           value={value.permissionPreset ?? "ask"}
@@ -89,7 +95,7 @@ export function SettingsPicker({
         >
           {(Object.keys(PERMISSION_PRESET_LABELS) as PermissionPreset[]).map((preset) => (
             <option value={preset} key={preset}>
-              {PERMISSION_PRESET_LABELS[preset]}
+              {t(PERMISSION_PRESET_LABELS[preset])}
             </option>
           ))}
         </SettingSelect>
@@ -98,8 +104,8 @@ export function SettingsPicker({
       <button
         aria-label={
           value.collaborationMode === "plan"
-            ? "Выключить режим планирования"
-            : "Включить режим планирования"
+            ? t("Выключить режим планирования")
+            : t("Включить режим планирования")
         }
         aria-pressed={value.collaborationMode === "plan"}
         className={`setting-control plan-toggle${value.collaborationMode === "plan" ? " active" : ""}`}
@@ -118,13 +124,16 @@ export function SettingsPicker({
       {!isClaude &&
         (goal ? (
           <details className="goal-picker" data-dismiss-on-outside-click>
-            <summary className="setting-control goal-toggle active" aria-label="Управление целью">
+            <summary
+              className="setting-control goal-toggle active"
+              aria-label={t("Управление целью")}
+            >
               <TargetIcon />
             </summary>
             <div className="goal-popover">
               <div className="goal-popover-heading">
-                <strong>{goalStatusLabel(goal.status)}</strong>
-                <span>{formatGoalUsage(goal)}</span>
+                <strong>{goalStatusLabel(goal.status, t)}</strong>
+                <span>{formatGoalUsage(goal, language, t)}</span>
               </div>
               <p>{goal.objective}</p>
               <div className="goal-popover-actions">
@@ -134,7 +143,7 @@ export function SettingsPicker({
                     disabled={goalBusy}
                     onClick={() => onGoalUpdate?.({ status: "paused" })}
                   >
-                    Пауза
+                    {t("Пауза")}
                   </button>
                 )}
                 {["paused", "blocked"].includes(goal.status) && (
@@ -143,18 +152,18 @@ export function SettingsPicker({
                     disabled={goalBusy}
                     onClick={() => onGoalUpdate?.({ status: "active" })}
                   >
-                    Продолжить
+                    {t("Продолжить")}
                   </button>
                 )}
                 <button type="button" disabled={goalBusy} onClick={onGoalClear}>
-                  Очистить
+                  {t("Очистить")}
                 </button>
               </div>
             </div>
           </details>
         ) : (
           <button
-            aria-label={goalMode ? "Выключить режим цели" : "Включить режим цели"}
+            aria-label={goalMode ? t("Выключить режим цели") : t("Включить режим цели")}
             aria-pressed={goalMode}
             className={`setting-control goal-toggle${goalMode ? " active" : ""}`}
             disabled={disabled || !model}
@@ -194,7 +203,7 @@ export function SettingsPicker({
   }
 }
 
-function goalStatusLabel(status: ThreadGoal["status"]): string {
+function goalStatusLabel(status: ThreadGoal["status"], t: Translate): string {
   const labels: Record<ThreadGoal["status"], string> = {
     active: "Цель активна",
     paused: "Цель на паузе",
@@ -203,24 +212,42 @@ function goalStatusLabel(status: ThreadGoal["status"]): string {
     budgetLimited: "Достигнут бюджет цели",
     complete: "Цель выполнена",
   };
-  return labels[status];
+  return t(labels[status]);
 }
 
-function formatGoalUsage(goal: ThreadGoal): string {
+function formatGoalUsage(goal: ThreadGoal, language: "en" | "ru", t: Translate): string {
   const minutes = Math.floor(goal.timeUsedSeconds / 60);
   const seconds = goal.timeUsedSeconds % 60;
-  const time = minutes ? `${minutes}м ${seconds}с` : `${seconds}с`;
-  return `${goal.tokensUsed.toLocaleString()} токенов · ${time}`;
+  const time = minutes
+    ? t("{{count}}м {{seconds}}с", { count: minutes, seconds })
+    : t("{{count}}с", { count: seconds });
+  const modulo100 = goal.tokensUsed % 100;
+  const modulo10 = goal.tokensUsed % 10;
+  const tokenLabel =
+    language === "en"
+      ? goal.tokensUsed === 1
+        ? "{{count}} токен"
+        : "{{count}} токенов"
+      : modulo100 >= 11 && modulo100 <= 14
+        ? "{{count}} токенов"
+        : modulo10 === 1
+          ? "{{count}} токен"
+          : modulo10 >= 2 && modulo10 <= 4
+            ? "{{count}} токена"
+            : "{{count}} токенов";
+  return `${t(tokenLabel, { count: goal.tokensUsed.toLocaleString(language) })} · ${time}`;
 }
 
 function SettingSelect({
   ariaLabel,
+  displayValue,
   icon,
   iconOnly = false,
   children,
   ...props
 }: {
   ariaLabel: string;
+  displayValue?: string;
   icon: React.ReactNode;
   iconOnly?: boolean;
   children: React.ReactNode;
@@ -231,6 +258,7 @@ function SettingSelect({
   return (
     <label className={`setting-control setting-select${iconOnly ? " icon-only" : ""}`}>
       {icon}
+      {!iconOnly && <span className="setting-select-value">{displayValue}</span>}
       <select
         aria-label={ariaLabel}
         disabled={props.disabled}
@@ -239,7 +267,6 @@ function SettingSelect({
       >
         {children}
       </select>
-      {!iconOnly && <ChevronDownIcon className="setting-select-chevron" />}
     </label>
   );
 }
@@ -247,4 +274,11 @@ function SettingSelect({
 function effectiveModel(models: ModelOption[], modelId?: string): ModelOption | undefined {
   if (modelId) return models.find((model) => model.id === modelId);
   return models.find((model) => model.isDefault) ?? models[0];
+}
+
+function compactModelName(displayName: string): string {
+  const match = /^gpt-([0-9]+(?:\.[0-9]+)*)(?:-(.+))?$/i.exec(displayName.trim());
+  if (!match) return displayName;
+  const [, version, variant] = match;
+  return variant ? `${version}${variant.replaceAll("-", "").toLowerCase()}` : version;
 }

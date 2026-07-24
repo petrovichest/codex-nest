@@ -139,6 +139,39 @@ describe("HTTP authentication", () => {
     ).toBe(200);
 
     const authorization = { authorization: "Bearer correct" };
+    const languageChanged = new Promise<Record<string, unknown>>((resolve) => {
+      const listener = (_sequence: number, event: Record<string, unknown>) => {
+        if (event.type !== "uiLanguage.changed") return;
+        projection.off("event", listener);
+        resolve(event);
+      };
+      projection.on("event", listener);
+    });
+    const languageUpdate = await app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/ui-language",
+      headers: authorization,
+      payload: { language: "ru" },
+    });
+    expect(languageUpdate.statusCode).toBe(200);
+    expect(languageUpdate.json()).toEqual({ language: "ru" });
+    expect(store.snapshot().uiLanguage).toBe("ru");
+    expect(projection.snapshot().uiLanguage).toBe("ru");
+    await expect(languageChanged).resolves.toEqual({
+      type: "uiLanguage.changed",
+      language: "ru",
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/settings/ui-language",
+          headers: authorization,
+          payload: { language: "de" },
+        })
+      ).statusCode,
+    ).toBe(400);
+
     const workspace = join(directory, "workspace");
     await mkdir(workspace);
     const listing = await app.inject({ url: "/api/v1/directories", headers: authorization });
@@ -223,9 +256,36 @@ describe("HTTP authentication", () => {
       "new-project",
     ]);
 
+    const targetReorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
+      const listener = (_sequence: number, event: Record<string, unknown>) => {
+        if (event.type !== "projects.reordered") return;
+        services.hub.off("event", listener);
+        resolve(event);
+      };
+      services.hub.on("event", listener);
+    });
+    const targetMovedProject = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${legacyProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { targetIndex: 1 },
+    });
+    expect(targetMovedProject.statusCode).toBe(200);
+    expect(
+      targetMovedProject.json().map((project: { displayName: string }) => project.displayName),
+    ).toEqual(["new-project", "legacy-project"]);
+    await expect(targetReorderedEvent).resolves.toMatchObject({
+      type: "projects.reordered",
+      projects: [{ displayName: "new-project" }, { displayName: "legacy-project" }],
+    });
+    expect(store.snapshot().projects.map((project) => project.displayName)).toEqual([
+      "new-project",
+      "legacy-project",
+    ]);
+
     const boundaryMove = await app.inject({
       method: "POST",
-      url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+      url: `/api/v1/projects/${legacyProject.json().id as string}/move`,
       headers: authorization,
       payload: { direction: "down" },
     });
@@ -253,6 +313,38 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(400);
+    const publishProjectsReordered = vi.spyOn(projection, "publishProjectsReordered");
+    const unchangedTargetMove = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+      headers: authorization,
+      payload: { targetIndex: 0 },
+    });
+    expect(unchangedTargetMove.statusCode).toBe(200);
+    expect(
+      unchangedTargetMove.json().map((project: { displayName: string }) => project.displayName),
+    ).toEqual(["new-project", "legacy-project"]);
+    expect(publishProjectsReordered).not.toHaveBeenCalled();
+
+    for (const payload of [
+      {},
+      { direction: "up", targetIndex: 0 },
+      { targetIndex: -1 },
+      { targetIndex: 0.5 },
+      { targetIndex: null },
+      { targetIndex: 2 },
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/v1/projects/${createdProject.json().id as string}/move`,
+            headers: authorization,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
 
     const outside = await app.inject({
       url: `/api/v1/directories?path=${encodeURIComponent(join(directory, ".."))}`,
@@ -322,6 +414,20 @@ describe("HTTP authentication", () => {
       event: { type: "thread.upserted" },
     });
     expect(secondBroadcast).toEqual(firstBroadcast);
+
+    const resynced = new Promise<Record<string, unknown>>((resolve) => {
+      authorized.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    projection.emit("event", 999, { type: "resync.required" });
+    await expect(resynced).resolves.toMatchObject({
+      type: "snapshot",
+      snapshot: {
+        threads: [expect.objectContaining({ id: "broadcast" })],
+      },
+    });
+
     authorized.terminate();
     secondAuthorized.terminate();
 
@@ -416,6 +522,7 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
       })),
       updateConfiguration: vi.fn(async () => ({
         providers: ["local" as const, "openai" as const],
@@ -428,6 +535,7 @@ describe("audio transcriptions", () => {
         refinementModel: "gpt-5.6-luna",
         maxRecordingSeconds: 300,
         maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
       })),
       transcribe: vi.fn(async () => "распознанный текст"),
     };
@@ -460,11 +568,43 @@ describe("audio transcriptions", () => {
       payload: Buffer.from("audio"),
     });
     expect(transcribed.statusCode).toBe(200);
-    expect(transcribed.json()).toEqual({ text: "распознанный текст" });
+    expect(transcribed.json()).toEqual({
+      text: "распознанный текст",
+      timingEstimate: { sampleCount: 0, estimatedProcessingMsPerAudioSecond: null },
+    });
     expect(transcription.transcribe).toHaveBeenCalledWith(
       Buffer.from("audio"),
       "audio/webm;codecs=opus",
     );
+
+    const timed = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions",
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(timed.statusCode).toBe(200);
+    expect(timed.json().timingEstimate).toMatchObject({
+      sampleCount: 1,
+      estimatedProcessingMsPerAudioSecond: expect.any(Number),
+    });
+    expect(Object.values(store.snapshot().transcriptionTimings ?? {})).toHaveLength(1);
+
+    const invalidDuration = await app.inject({
+      method: "POST",
+      url: "/api/v1/transcriptions",
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "unknown",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(invalidDuration.statusCode).toBe(400);
 
     const updated = await app.inject({
       method: "PUT",
@@ -1002,6 +1142,42 @@ describe("thread settings", () => {
         status: "queued",
       }),
     ]);
+    const editedQueued = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/thread/queue/${queued.json().id}`,
+      headers,
+      payload: { input: "  Исправленный текст  " },
+    });
+    expect(editedQueued.statusCode).toBe(200);
+    expect(editedQueued.json()).toMatchObject({
+      id: "client-queued",
+      text: "Исправленный текст",
+      status: "queued",
+    });
+    const invalidQueuedEdit = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/thread/queue/${queued.json().id}`,
+      headers,
+      payload: { input: " " },
+    });
+    expect(invalidQueuedEdit.statusCode).toBe(400);
+
+    const cancellable = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Удалить из очереди", clientMessageId: "client-cancelled" },
+    });
+    const cancelled = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/threads/thread/queue/${cancellable.json().id}`,
+      headers,
+    });
+    expect(cancelled.statusCode).toBe(204);
+    expect(store.snapshot().messageQueues?.thread).toEqual([
+      expect.objectContaining({ id: "client-queued", text: "Исправленный текст" }),
+    ]);
+
     const sentNow = await app.inject({
       method: "POST",
       url: `/api/v1/threads/thread/queue/${queued.json().id}/send`,
@@ -1014,12 +1190,12 @@ describe("thread settings", () => {
       bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],
     ).toMatchObject({
       clientUserMessageId: queued.json().id,
-      input: [{ type: "text", text: "Поставь в очередь", text_elements: [] }],
+      input: [{ type: "text", text: "Исправленный текст", text_elements: [] }],
     });
     expect(activityEvents.at(-1)).toMatchObject({
       threadId: "thread",
       turnId: "steered",
-      item: { type: "userMessage", id: "client-queued", text: "Поставь в очередь" },
+      item: { type: "userMessage", id: "client-queued", text: "Исправленный текст" },
     });
 
     const invalid = await app.inject({
