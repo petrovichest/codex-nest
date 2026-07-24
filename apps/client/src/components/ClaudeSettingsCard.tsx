@@ -53,8 +53,11 @@ export function ClaudeSettingsCard() {
     try {
       const updated = await api.checkClaude();
       setStatus(updated);
+      // Report the actual probe: "ready" means the server offers management AND the CLI was
+      // found. supported alone is not enough — the CLI can still be missing (cliVersion null).
+      const ready = updated.supported && updated.cliVersion !== null;
       setFeedback(
-        updated.supported
+        ready
           ? { kind: "success", message: "Claude Code найден и готов к работе." }
           : { kind: "error", message: updated.unavailableReason ?? "Claude Code недоступен." },
       );
@@ -70,6 +73,10 @@ export function ClaudeSettingsCard() {
   }
 
   const supported = status?.supported ?? false;
+  // The server offers Claude management, but the CLI itself was not found (cliVersion null).
+  const cliMissing = supported && status?.cliVersion === null;
+  // The Claude agent is off entirely — disabled by flag, or auto-mode found no CLI at startup.
+  const disabled = status !== null && !supported;
 
   return (
     <section className="settings-card codex-settings-card">
@@ -104,10 +111,16 @@ export function ClaudeSettingsCard() {
             </div>
           </dl>
 
-          {!supported && (
+          {cliMissing && (
             <div className="settings-notice warning" role="status">
               {status?.unavailableReason ?? "Claude Code не найден на сервере."} Установите Claude
               Code и выполните вход командой <code>claude login</code> на сервере.
+            </div>
+          )}
+          {disabled && (
+            <div className="settings-notice warning" role="status">
+              {status?.unavailableReason ?? "Агент Claude отключён."} Чтобы включить агента Claude,
+              задайте переменную окружения <code>CODEXNEST_CLAUDE_ENABLED=true</code> на сервере.
             </div>
           )}
           {loadError && (

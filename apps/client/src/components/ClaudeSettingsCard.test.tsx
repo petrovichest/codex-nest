@@ -25,10 +25,27 @@ describe("ClaudeSettingsCard", () => {
     expect(screen.queryByText(/claude login/)).toBeNull();
   });
 
-  it("shows an install/login hint when Claude Code is unavailable", async () => {
+  it("shows an install/login hint when management is offered but the CLI is missing", async () => {
+    // Mixed state: the server offers Claude management (supported) yet the CLI probe failed
+    // (cliVersion null, unavailableReason set). The card must warn — not report readiness.
+    const readClaudeSettings = vi.fn().mockResolvedValue({
+      supported: true,
+      unavailableReason: "Claude Code CLI не найден",
+      cliVersion: null,
+      path: "/usr/local/bin/claude",
+    });
+    connection.mockReturnValue({ api: { readClaudeSettings, checkClaude: vi.fn() } });
+
+    render(<ClaudeSettingsCard />);
+
+    expect(await screen.findByText(/claude login/)).toBeInTheDocument();
+    expect(screen.getByText(/Claude Code CLI не найден/)).toBeInTheDocument();
+  });
+
+  it("suggests enabling the flag when the Claude agent is disabled", async () => {
     const readClaudeSettings = vi.fn().mockResolvedValue({
       supported: false,
-      unavailableReason: "Claude Code CLI не найден",
+      unavailableReason: "Агент Claude отключён",
       cliVersion: null,
       path: null,
     });
@@ -36,7 +53,10 @@ describe("ClaudeSettingsCard", () => {
 
     render(<ClaudeSettingsCard />);
 
-    expect(await screen.findByText(/claude login/)).toBeInTheDocument();
+    expect(await screen.findByText(/CODEXNEST_CLAUDE_ENABLED=true/)).toBeInTheDocument();
+    expect(screen.getByText(/Агент Claude отключён/)).toBeInTheDocument();
+    // Disabled is not the same as "install the CLI" — that advice must not appear here.
+    expect(screen.queryByText(/claude login/)).toBeNull();
   });
 
   it("shows a neutral note instead of a red error when the server lacks the route", async () => {
@@ -71,10 +91,10 @@ describe("ClaudeSettingsCard", () => {
 
   it("re-probes Claude Code through the check button", async () => {
     const readClaudeSettings = vi.fn().mockResolvedValue({
-      supported: false,
+      supported: true,
       unavailableReason: "Claude Code CLI не найден",
       cliVersion: null,
-      path: null,
+      path: "/bin/claude",
     });
     const checkClaude = vi.fn().mockResolvedValue({
       supported: true,
@@ -92,5 +112,32 @@ describe("ClaudeSettingsCard", () => {
     await waitFor(() => expect(checkClaude).toHaveBeenCalled());
     expect(await screen.findByText("2.2.0")).toBeInTheDocument();
     expect(screen.getByText("Claude Code найден и готов к работе.")).toBeInTheDocument();
+  });
+
+  it("reports the probe error from check when management is offered but the CLI is missing", async () => {
+    const readClaudeSettings = vi.fn().mockResolvedValue({
+      supported: true,
+      unavailableReason: "Claude Code CLI не найден",
+      cliVersion: null,
+      path: "/bin/claude",
+    });
+    // supported stays true (server offers management) but the CLI is still missing — check()
+    // must surface the failure, not the unconditional "готов к работе" success.
+    const checkClaude = vi.fn().mockResolvedValue({
+      supported: true,
+      unavailableReason: "Claude Code CLI не найден",
+      cliVersion: null,
+      path: "/bin/claude",
+    });
+    connection.mockReturnValue({ api: { readClaudeSettings, checkClaude } });
+
+    render(<ClaudeSettingsCard />);
+    await screen.findByText(/claude login/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить" }));
+
+    await waitFor(() => expect(checkClaude).toHaveBeenCalled());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Claude Code CLI не найден");
+    expect(screen.queryByText("Claude Code найден и готов к работе.")).toBeNull();
   });
 });
