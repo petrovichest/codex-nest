@@ -297,3 +297,39 @@ describe("reading a Claude thread over HTTP", () => {
     await app.close();
   });
 });
+
+describe("Claude queue is paused until Stage 3 (no drain livelock)", () => {
+  it("keeps an enqueued message durably queued and never storms startTurn", async () => {
+    const { app, store, claudeBackend } = await setup();
+    const summary = await claudeBackend!.createThread("p1", "/work", {
+      collaborationMode: "default",
+    });
+    const startSpy = vi.spyOn(claudeBackend!, "startTurn");
+
+    const enqueue = await app.inject({
+      method: "POST",
+      url: `/api/v1/threads/${summary.id}/queue`,
+      headers,
+      payload: { input: "позже" },
+    });
+    expect(enqueue.statusCode).toBe(202);
+    // Let any fire-and-forget drain (and the thread.upserted-triggered redrain) settle.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(startSpy).not.toHaveBeenCalled();
+    const queued = store.snapshot().messageQueues?.[summary.id] ?? [];
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ status: "queued" });
+    expect(claudeBackend!.summary(summary.id)?.queuedMessageCount).toBe(1);
+
+    // sendNow surfaces the meaningful 409 instead of looping.
+    const send = await app.inject({
+      method: "POST",
+      url: `/api/v1/threads/${summary.id}/queue/${queued[0]!.id}/send`,
+      headers,
+    });
+    expect(send.statusCode).toBe(409);
+    expect(send.json().error.message).toBe("Ходы Claude появятся на следующем этапе");
+    await app.close();
+  });
+});

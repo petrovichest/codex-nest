@@ -28,13 +28,15 @@ import {
   setThreadPinned,
   setThreadSettings,
 } from "../backends/thread-meta";
-import type { ClaudeSessionState, StateStore } from "../state/store";
+import type { ClaudeSessionState, CodexNestState, StateStore } from "../state/store";
 import { buildClaudeTurns, paginateClaudeTurns } from "./projection";
 import { deleteClaudeSession, patchClaudeSession, upsertClaudeSession } from "./registry";
 import { ClaudeVersionError, readClaudeVersion, type ClaudeSdk, type VersionRunner } from "./sdk";
 
 const TURNS_UNSUPPORTED = "Ходы Claude появятся на следующем этапе";
 const CLI_MISSING = "Claude Code CLI не найден. Установите и выполните вход: claude login";
+/** Bounds retained transcripts (parsed TurnViews can hold base64 images) to ~8 threads. */
+const TRANSCRIPT_CACHE_LIMIT = 8;
 
 export interface ClaudeProbeResult {
   version: string | null;
@@ -143,29 +145,36 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
   }
 
   threads(): ThreadSummary[] {
-    const sessions = this.store.snapshot().claudeSessions ?? {};
-    return Object.keys(sessions).map((threadId) => this.toSummary(threadId, sessions[threadId]!));
+    // One snapshot for the whole list — toSummary must not clone per entry (O(n²)).
+    const state = this.store.snapshot();
+    const sessions = state.claudeSessions ?? {};
+    return Object.keys(sessions).map((threadId) =>
+      this.toSummary(threadId, sessions[threadId]!, state),
+    );
   }
 
   summary(threadId: string): ThreadSummary | undefined {
-    const entry = this.entry(threadId);
-    return entry ? this.toSummary(threadId, entry) : undefined;
+    const state = this.store.snapshot();
+    const entry = state.claudeSessions?.[threadId];
+    return entry ? this.toSummary(threadId, entry, state) : undefined;
   }
 
   async readThread(threadId: string, cursor?: string | null): Promise<ThreadDetail> {
-    const entry = this.entry(threadId);
+    const state = this.store.snapshot();
+    const entry = state.claudeSessions?.[threadId];
     if (!entry) throw new ThreadNotFoundError();
-    const summary = this.toSummary(threadId, entry);
-    const draft = this.store.snapshot().threadMeta[threadId]?.draft ?? null;
+    const summary = this.toSummary(threadId, entry, state);
+    const draft = state.threadMeta[threadId]?.draft ?? null;
+    const queuedMessages = state.messageQueues?.[threadId] ?? [];
     if (!entry.sessionId) {
-      return { summary, turns: [], queuedMessages: [], olderTurnsCursor: null, draft };
+      return { summary, turns: [], queuedMessages, olderTurnsCursor: null, draft };
     }
     const turns = await this.loadTurns(threadId, entry);
     const page = paginateClaudeTurns(turns, cursor ?? null);
     return {
       summary,
       turns: page.turns,
-      queuedMessages: [],
+      queuedMessages,
       olderTurnsCursor: page.olderTurnsCursor,
       draft,
     };
@@ -178,7 +187,12 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
   ): Promise<ThreadSummary> {
     const reusable = this.findReusableThread(projectId);
     const threadId = reusable ?? randomUUID();
-    if (!reusable) {
+    if (reusable) {
+      // Reused empty thread may predate a project path change — keep cwd current.
+      if (reusable && this.entry(reusable)?.cwd !== cwd) {
+        await patchClaudeSession(this.store, threadId, { cwd });
+      }
+    } else {
       const entry: ClaudeSessionState = {
         sessionId: null,
         cwd,
@@ -240,6 +254,9 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     return setThreadDraft(this.store, threadId, value);
   }
 
+  // Stage 2 has no live updatedAt, so a summary's updatedAt is entry.createdAt; the
+  // clamp keeps a client's observedUpdatedAt from ever exceeding it. Stage 3 will
+  // clamp to the live updatedAt instead (matching Codex's toSummary).
   async markRead(threadId: string, observedUpdatedAt: number): Promise<void> {
     const entry = this.entry(threadId);
     if (!entry) throw new ThreadNotFoundError();
@@ -266,7 +283,10 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
   }
 
   pauseReason(): string | null {
-    return null;
+    // Until Stage 3 lands live turns, Claude cannot run one. Reporting the queue as
+    // paused makes MessageQueue.drain() early-return (messages stay durably queued,
+    // no startTurn dispatch storm) and makes sendNow reject with a meaningful 409.
+    return TURNS_UNSUPPORTED;
   }
 
   currentTurnId(): string | null {
@@ -281,23 +301,39 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     const info = await this.sdk.getSessionInfo(entry.sessionId!, { dir: entry.cwd });
     const cacheKey = info ? `${info.lastModified}:${info.fileSize ?? 0}` : null;
     const cached = this.transcriptCache.get(threadId);
-    if (cacheKey && cached && cached.cacheKey === cacheKey) return cached.turns;
+    if (cacheKey && cached && cached.cacheKey === cacheKey) {
+      this.touchCache(threadId, cached);
+      return cached.turns;
+    }
     const messages = await this.sdk.getSessionMessages(entry.sessionId!, { dir: entry.cwd });
     const turns = buildClaudeTurns(messages, entry.cwd);
-    if (cacheKey) this.transcriptCache.set(threadId, { cacheKey, turns });
+    if (cacheKey) this.touchCache(threadId, { cacheKey, turns });
     else this.transcriptCache.delete(threadId);
     return turns;
   }
 
+  /** Inserts/refreshes a cache entry and evicts the least-recently-used over the cap. */
+  private touchCache(threadId: string, entry: TranscriptCacheEntry): void {
+    this.transcriptCache.delete(threadId);
+    this.transcriptCache.set(threadId, entry);
+    while (this.transcriptCache.size > TRANSCRIPT_CACHE_LIMIT) {
+      const oldest = this.transcriptCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.transcriptCache.delete(oldest);
+    }
+  }
+
   private findReusableThread(projectId: string): string | null {
-    const sessions = this.store.snapshot().claudeSessions ?? {};
+    const state = this.store.snapshot();
+    const sessions = state.claudeSessions ?? {};
     for (const [threadId, entry] of Object.entries(sessions)) {
       if (
         entry.projectId === projectId &&
         entry.sessionId === null &&
         !entry.archived &&
         !entry.title &&
-        entry.preview.trim() === ""
+        entry.preview.trim() === "" &&
+        (state.messageQueues?.[threadId]?.length ?? 0) === 0
       ) {
         return threadId;
       }
@@ -305,8 +341,11 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
     return null;
   }
 
-  private toSummary(threadId: string, entry: ClaudeSessionState): ThreadSummary {
-    const state = this.store.snapshot();
+  private toSummary(
+    threadId: string,
+    entry: ClaudeSessionState,
+    state: CodexNestState,
+  ): ThreadSummary {
     const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
     const updatedAt = entry.createdAt;
     const threadState: ThreadState = "idle";
@@ -326,7 +365,7 @@ export class ClaudeBackend extends EventEmitter implements AgentBackend {
       createdAt: entry.createdAt,
       updatedAt,
       currentTurnId: null,
-      queuedMessageCount: 0,
+      queuedMessageCount: state.messageQueues?.[threadId]?.length ?? 0,
       settings: meta.settings ?? this.newSessionSettings,
     };
   }

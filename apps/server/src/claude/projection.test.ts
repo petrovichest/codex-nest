@@ -312,6 +312,43 @@ describe("turn status and interruption", () => {
   });
 });
 
+describe("malformed transcripts", () => {
+  it("skips corrupt entries and blocks instead of throwing", () => {
+    const malformed = [
+      null,
+      { type: "user", uuid: "no-message", parent_tool_use_id: null, parent_agent_id: null },
+      {
+        type: "user",
+        uuid: "null-content",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: { role: "user", content: null },
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      userPrompt("real prompt"),
+      {
+        type: "assistant",
+        uuid: "bad-blocks",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: {
+          role: "assistant",
+          content: [null, { type: "text", text: "hi" }, { notype: true }],
+          stop_reason: "end_turn",
+        },
+        timestamp: "2026-01-01T00:00:05.000Z",
+      },
+    ] as unknown as ClaudeTranscriptMessage[];
+
+    const turns = buildClaudeTurns(malformed, SANDBOX_CWD);
+    // Only the one real user prompt starts a turn; the corrupt entries are dropped.
+    expect(turns).toHaveLength(1);
+    const texts = turns[0]!.items.filter((item) => item.type === "agentMessage");
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatchObject({ text: "hi" });
+  });
+});
+
 describe("paginateClaudeTurns", () => {
   function turnList(count: number) {
     return Array.from(

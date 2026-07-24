@@ -42,8 +42,11 @@ export function projectClaudeTurns(
 /** Groups every transcript message into ordered turns (oldest→newest). */
 export function buildClaudeTurns(messages: ClaudeTranscriptMessage[], cwd?: string): TurnView[] {
   // Only the main session is projected; sub-agent messages (parent_tool_use_id set)
-  // are represented by their parent Task tool_use in the main thread.
-  const mainThread = messages.filter((message) => message.parent_tool_use_id === null);
+  // are represented by their parent Task tool_use in the main thread. Non-record
+  // entries (a corrupt transcript line) are dropped rather than crashing the read.
+  const mainThread = messages.filter(
+    (message) => isRecord(message) && message.parent_tool_use_id === null,
+  );
   const groups: ClaudeTranscriptMessage[][] = [];
   for (const message of mainThread) {
     if (isUserPrompt(message)) {
@@ -85,9 +88,7 @@ function buildTurn(
   let lastAgentMessageId: string | null = null;
 
   for (const message of group) {
-    const content = message.message.content;
-    const blocks = typeof content === "string" ? [textBlock(content)] : content;
-    blocks.forEach((block, blockIndex) => {
+    contentBlocks(message).forEach((block, blockIndex) => {
       const item = mapBlock(message, block, blockIndex, results, cwd, items.at(-1)?.id ?? null);
       if (!item) return;
       if (item.type === "agentMessage") lastAgentMessageId = item.id;
@@ -289,11 +290,10 @@ interface ToolResult {
 function collectToolResults(group: ClaudeTranscriptMessage[]): Map<string, ToolResult> {
   const results = new Map<string, ToolResult>();
   for (const message of group) {
-    const content = message.message.content;
-    if (typeof content === "string") continue;
-    for (const block of content) {
+    for (const block of contentBlocks(message)) {
       if (block.type !== "tool_result") continue;
       const result = block as ToolResultBlock;
+      if (typeof result.tool_use_id !== "string") continue;
       results.set(result.tool_use_id, {
         text: toolResultText(result.content),
         isError: result.is_error === true,
@@ -301,6 +301,20 @@ function collectToolResults(group: ClaudeTranscriptMessage[]): Map<string, ToolR
     }
   }
   return results;
+}
+
+/**
+ * Safely extracts a message's content blocks, tolerating a malformed transcript
+ * entry (missing `message`, non-array content, or null/non-record blocks).
+ */
+function contentBlocks(message: ClaudeTranscriptMessage): ClaudeContentBlock[] {
+  const apiMessage = (message as { message?: unknown }).message;
+  const content = isRecord(apiMessage) ? apiMessage.content : undefined;
+  if (typeof content === "string") return [textBlock(content)];
+  if (!Array.isArray(content)) return [];
+  return content.filter(
+    (block): block is ClaudeContentBlock => isRecord(block) && typeof block.type === "string",
+  );
 }
 
 function toolResultText(content: ToolResultContent): string {
@@ -419,17 +433,20 @@ function buildProgress(items: ActivityItem[], startedAt: number | null): TurnPro
 }
 
 function isUserPrompt(message: ClaudeTranscriptMessage): boolean {
-  if (message.type !== "user") return false;
-  const content = message.message.content;
+  if (!isRecord(message) || message.type !== "user") return false;
+  const apiMessage = (message as { message?: unknown }).message;
+  const content = isRecord(apiMessage) ? apiMessage.content : undefined;
   if (typeof content === "string") return content.trim().length > 0;
-  return content.some((block) => block.type !== "tool_result");
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => isRecord(block) && block.type !== "tool_result");
 }
 
 function isTurnClosed(group: ClaudeTranscriptMessage[]): boolean {
   for (let index = group.length - 1; index >= 0; index -= 1) {
     const message = group[index]!;
-    if (message.type !== "assistant") continue;
-    const stopReason = message.message.stop_reason;
+    if (!isRecord(message) || message.type !== "assistant") continue;
+    const apiMessage = (message as { message?: unknown }).message;
+    const stopReason = isRecord(apiMessage) ? apiMessage.stop_reason : undefined;
     return typeof stopReason === "string" && CLOSED_STOP_REASONS.has(stopReason);
   }
   return false;
@@ -455,8 +472,9 @@ function diffPath(path: string, cwd: string | undefined): string {
 }
 
 function timestampMs(message: ClaudeTranscriptMessage): number | null {
-  if (!message.timestamp) return null;
-  const parsed = Date.parse(message.timestamp);
+  const timestamp = (message as { timestamp?: unknown }).timestamp;
+  if (typeof timestamp !== "string") return null;
+  const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? null : parsed;
 }
 

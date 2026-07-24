@@ -194,7 +194,8 @@ describe("ClaudeBackend turn operations are unsupported in Stage 2", () => {
       backend.steerTurn(id, "t", { text: "hi", images: [], clientMessageId: null }),
     ).rejects.toThrow();
     await expect(backend.interruptTurn(id, "t")).rejects.toThrow();
-    expect(backend.pauseReason()).toBeNull();
+    // Queue treats Claude as paused until Stage 3 so drain never storms startTurn.
+    expect(backend.pauseReason()).toBe("Ходы Claude появятся на следующем этапе");
     expect(backend.currentTurnId(id)).toBeNull();
     await expect(backend.wasDelivered(id, "m")).resolves.toBe(false);
   });
