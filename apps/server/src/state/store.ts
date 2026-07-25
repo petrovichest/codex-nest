@@ -12,6 +12,8 @@ import type {
   ThreadDraft,
   ThreadOutcome,
   UiLanguage,
+  VoiceInputMode,
+  VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
 export type TimelineArtifact = Extract<
@@ -43,6 +45,25 @@ export interface TranscriptionTimingSampleState {
   processingMs: number;
 }
 
+export interface VoiceTranscriptionState {
+  id: string;
+  threadId: string;
+  mode: VoiceInputMode;
+  status: VoiceTranscriptionStatus;
+  createdAt: number;
+  startedAt: number | null;
+  audioDurationMs: number;
+  estimatedTotalSeconds: number | null;
+  error: string | null;
+  contentType: "audio/webm" | "audio/mp4";
+  audioFile?: string;
+  audioBytes: number;
+  selectionStart: number;
+  selectionEnd: number;
+  timingProfile?: string;
+  transcript?: string;
+}
+
 export interface CodexNestState {
   schemaVersion: 1;
   auth: { tokenSha256?: string };
@@ -55,6 +76,7 @@ export interface CodexNestState {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
+  voiceTranscriptions?: Record<string, VoiceTranscriptionState>;
 }
 
 export function emptyState(): CodexNestState {
@@ -66,6 +88,7 @@ export function emptyState(): CodexNestState {
     devices: {},
     uiLanguage: "en",
     messageQueues: {},
+    voiceTranscriptions: {},
   };
 }
 
@@ -190,6 +213,9 @@ function validateState(value: unknown): CodexNestState {
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
   }
+  if (value.voiceTranscriptions !== undefined && !isRecord(value.voiceTranscriptions)) {
+    throw new Error("Corrupt voice transcriptions in CodexNest state");
+  }
   if (
     value.defaultReasoningEffort !== undefined &&
     (typeof value.defaultReasoningEffort !== "string" || !value.defaultReasoningEffort.trim())
@@ -242,6 +268,11 @@ function validateState(value: unknown): CodexNestState {
       messages.some((message) => !isQueuedMessage(message, threadId))
     ) {
       throw new Error("Corrupt queued message in CodexNest state");
+    }
+  }
+  for (const [threadId, job] of Object.entries(value.voiceTranscriptions ?? {})) {
+    if (!isVoiceTranscription(job, threadId)) {
+      throw new Error("Corrupt voice transcription in CodexNest state");
     }
   }
   const verifier = value.auth.tokenSha256;
@@ -348,10 +379,59 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     typeof value.text === "string" &&
     (value.images === undefined ||
       (Array.isArray(value.images) && value.images.every(isInlineImage))) &&
+    (value.goal === undefined || typeof value.goal === "boolean") &&
     (Boolean(value.text.trim()) || (Array.isArray(value.images) && value.images.length > 0)) &&
     typeof value.createdAt === "number" &&
     ["queued", "dispatching"].includes(String(value.status))
   );
+}
+
+function isVoiceTranscription(value: unknown, threadId: string): value is VoiceTranscriptionState {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    !value.id ||
+    value.threadId !== threadId ||
+    !["draft", "send"].includes(String(value.mode)) ||
+    !["queued", "transcribing", "applying", "failed"].includes(String(value.status)) ||
+    typeof value.createdAt !== "number" ||
+    !Number.isFinite(value.createdAt) ||
+    (value.startedAt !== null &&
+      (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt))) ||
+    typeof value.audioDurationMs !== "number" ||
+    !Number.isFinite(value.audioDurationMs) ||
+    value.audioDurationMs <= 0 ||
+    (value.estimatedTotalSeconds !== null &&
+      (typeof value.estimatedTotalSeconds !== "number" ||
+        !Number.isFinite(value.estimatedTotalSeconds) ||
+        value.estimatedTotalSeconds <= 0)) ||
+    (value.error !== null && typeof value.error !== "string") ||
+    !["audio/webm", "audio/mp4"].includes(String(value.contentType)) ||
+    typeof value.audioBytes !== "number" ||
+    !Number.isSafeInteger(value.audioBytes) ||
+    value.audioBytes <= 0 ||
+    typeof value.selectionStart !== "number" ||
+    !Number.isSafeInteger(value.selectionStart) ||
+    value.selectionStart < 0 ||
+    typeof value.selectionEnd !== "number" ||
+    !Number.isSafeInteger(value.selectionEnd) ||
+    value.selectionEnd < value.selectionStart ||
+    (value.timingProfile !== undefined &&
+      (typeof value.timingProfile !== "string" || !value.timingProfile.trim())) ||
+    (value.transcript !== undefined &&
+      (typeof value.transcript !== "string" || !value.transcript.trim()))
+  ) {
+    return false;
+  }
+  if (
+    value.audioFile !== undefined &&
+    (typeof value.audioFile !== "string" ||
+      !/^[a-zA-Z0-9._-]+$/.test(value.audioFile) ||
+      value.audioFile.includes(".."))
+  ) {
+    return false;
+  }
+  return value.status === "failed" || Boolean(value.audioFile) || Boolean(value.transcript);
 }
 
 function isTaskDefaults(value: unknown): value is TaskDefaults {

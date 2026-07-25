@@ -45,6 +45,8 @@ import type {
   UpdateThreadRequest,
   UpdateTranscriptionSettingsRequest,
   UpdateUiLanguageRequest,
+  VoiceInputMode,
+  VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
@@ -97,6 +99,11 @@ import {
   transcriptionTimingProfile,
   type TranscriptionService,
 } from "./transcription";
+import {
+  VoiceTranscriptionConflictError,
+  VoiceTranscriptionManager,
+  VoiceTranscriptionQueueFullError,
+} from "./voice-transcriptions";
 
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
@@ -292,9 +299,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     paused: () => codexManager?.maintenanceActive ?? false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
     start: (threadId, message) =>
-      startTurn(threadId, message.text, message.images ?? [], message.id).then(
-        (result) => result.turnId,
-      ),
+      startTurn(
+        threadId,
+        message.text,
+        message.images ?? [],
+        message.id,
+        message.goal ?? false,
+      ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
     wasDelivered: async (threadId, messageId) => {
@@ -307,6 +318,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
   });
+  const voiceTranscriptions = services.transcription
+    ? new VoiceTranscriptionManager({
+        store,
+        projection,
+        transcription: services.transcription,
+        queue,
+        onWarning: (error, message) => app.log.warn({ err: safeError(error) }, message),
+      })
+    : null;
+  if (voiceTranscriptions) {
+    void voiceTranscriptions.start().catch((error: unknown) => {
+      app.log.error({ err: safeError(error) }, "Failed to start voice transcription worker");
+    });
+    app.addHook("onClose", async () => voiceTranscriptions.stop());
+  }
 
   projection.on("event", (_sequence, event) => {
     if (event.type === "resync.required") {
@@ -444,6 +470,84 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         }
       }
       return { text, timingEstimate };
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Querystring: {
+      mode?: string;
+      selectionStart?: string;
+      selectionEnd?: string;
+      draftUpdatedAt?: string;
+    };
+    Body: Buffer;
+  }>(
+    "/api/v1/threads/:id/voice-transcriptions",
+    { bodyLimit: MAX_TRANSCRIPTION_BYTES },
+    async (request, reply): Promise<VoiceTranscriptionJob | undefined> => {
+      if (!projection.summary(request.params.id)) {
+        return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      if (!voiceTranscriptions || !services.transcription) {
+        return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
+      }
+      if (!Buffer.isBuffer(request.body) || request.body.length === 0) {
+        return apiError(reply, 400, "validation_failed", "Audio body is required");
+      }
+      const normalizedType = normalizeAudioType(request.headers["content-type"] ?? "");
+      if (normalizedType !== "audio/webm" && normalizedType !== "audio/mp4") {
+        return apiError(reply, 400, "validation_failed", "Audio must be WebM or MP4");
+      }
+      if (request.query.mode !== "draft" && request.query.mode !== "send") {
+        return apiError(reply, 400, "validation_failed", "Voice input mode is invalid");
+      }
+      const selectionStart = parseNonNegativeInteger(request.query.selectionStart);
+      const selectionEnd = parseNonNegativeInteger(request.query.selectionEnd);
+      if (selectionStart === null || selectionEnd === null || selectionEnd < selectionStart) {
+        return apiError(reply, 400, "validation_failed", "Voice selection is invalid");
+      }
+      const inputLength = store.snapshot().threadMeta[request.params.id]?.draft?.input.length ?? 0;
+      if (selectionStart > inputLength || selectionEnd > inputLength) {
+        return apiError(reply, 400, "validation_failed", "Voice selection is outside the draft");
+      }
+      const expectedDraftUpdatedAt =
+        request.query.draftUpdatedAt === "none"
+          ? null
+          : parseNonNegativeInteger(request.query.draftUpdatedAt);
+      const currentDraftUpdatedAt =
+        store.snapshot().threadMeta[request.params.id]?.draft?.updatedAt ?? null;
+      if (
+        expectedDraftUpdatedAt === null
+          ? request.query.draftUpdatedAt !== "none" || currentDraftUpdatedAt !== null
+          : currentDraftUpdatedAt !== expectedDraftUpdatedAt
+      ) {
+        return apiError(reply, 409, "conflict", "The draft changed before voice upload");
+      }
+      const audioDurationMs = parseAudioDurationHeader(
+        request.headers["x-codexnest-audio-duration-ms"],
+      );
+      if (audioDurationMs === null) {
+        return apiError(reply, 400, "validation_failed", "Audio duration is required");
+      }
+      const config = withTranscriptionTiming(services.transcription.configuration(), store);
+      if (!config.provider || !config.providers.includes(config.provider)) {
+        return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
+      }
+      return reply.code(202).send(
+        await voiceTranscriptions.accept({
+          threadId: request.params.id,
+          mode: request.query.mode as VoiceInputMode,
+          audio: request.body,
+          contentType: normalizedType,
+          audioDurationMs,
+          estimatedTotalSeconds: estimatedTranscriptionSeconds(config, audioDurationMs),
+          selectionStart,
+          selectionEnd,
+          expectedDraftUpdatedAt,
+          timingProfile: transcriptionTimingProfile(config),
+        }),
+      );
     },
   );
 
@@ -780,6 +884,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!projection.summary(request.params.id)) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
+      if (voiceTranscriptions?.active(request.params.id)) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "The composer is locked while voice transcription is active",
+        );
+      }
+      await voiceTranscriptions?.clearFailure(request.params.id);
       return projection.setDraft(request.params.id, validateThreadDraft(request.body));
     },
   );
@@ -940,6 +1053,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", "Thread not found");
     }
     await bridge.request("thread/delete", { threadId: request.params.id });
+    await voiceTranscriptions?.cancelThread(request.params.id);
     await queue.removeThread(request.params.id);
     await store.update((state) => {
       delete state.threadMeta[request.params.id];
@@ -977,6 +1091,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/turns",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      if (voiceTranscriptions?.active(request.params.id)) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "The composer is locked while voice transcription is active",
+        );
+      }
+      await voiceTranscriptions?.clearFailure(request.params.id);
       const body = validateStartTurnBody(request.body, reply);
       if (!body) return;
       const summary = projection.summary(request.params.id);
@@ -996,6 +1119,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/queue",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      if (voiceTranscriptions?.active(request.params.id)) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "The composer is locked while voice transcription is active",
+        );
+      }
+      await voiceTranscriptions?.clearFailure(request.params.id);
       const body = requireRecord<QueueMessageRequest>(request.body);
       const images = validateImages(body.images);
       const clientMessageId = optionalClientMessageId(body.clientMessageId);
@@ -1052,6 +1184,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/steer",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      if (voiceTranscriptions?.active(request.params.id)) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "The composer is locked while voice transcription is active",
+        );
+      }
+      await voiceTranscriptions?.clearFailure(request.params.id);
       const body = requireRecord<SteerTurnRequest>(request.body);
       const images = validateImages(body.images);
       if (
@@ -1189,6 +1330,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 400, "validation_failed", error.message);
     if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
+    if (
+      error instanceof VoiceTranscriptionConflictError ||
+      error instanceof VoiceTranscriptionQueueFullError
+    ) {
+      return apiError(reply, 409, "conflict", error.message);
+    }
     if (error instanceof CodexManagementError) {
       if (error.kind === "validation")
         return apiError(reply, 400, "validation_failed", error.message);
@@ -1237,6 +1384,22 @@ function parseAudioDurationHeader(value: string | string[] | undefined): number 
     );
   }
   return durationMs;
+}
+
+function parseNonNegativeInteger(value: string | undefined): number | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function estimatedTranscriptionSeconds(
+  config: TranscriptionConfigResponse,
+  audioDurationMs: number,
+): number | null {
+  const fixed = config.timingEstimate.estimatedFixedProcessingMs;
+  const perSecond = config.timingEstimate.estimatedProcessingMsPerAudioSecond;
+  if (fixed === null || perSecond === null) return null;
+  return Math.max(1, Math.ceil((fixed + (audioDurationMs / 1_000) * perSecond) / 1_000));
 }
 
 function requireCodexManager(manager: CodexManager | undefined): CodexManager {

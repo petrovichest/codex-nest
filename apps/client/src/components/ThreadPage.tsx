@@ -19,13 +19,13 @@ import type {
   ThreadDraft,
   TranscriptionConfigResponse,
   TranscriptionProvider,
-  TranscriptionTimingEstimate,
   TurnProgress,
   TurnView,
   UiLanguage,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
+  VoiceInputMode,
 } from "@codexnest/protocol";
 
 import {
@@ -67,13 +67,6 @@ type ComposerDraftState = {
   value: UpdateThreadDraftRequest;
 };
 
-type ActiveTranscription = {
-  id: string;
-  threadId: string;
-  startedAt: number;
-  estimatedTotalSeconds: number | null;
-};
-
 type QueueAction = {
   messageId: string;
   kind: "send" | "update" | "delete";
@@ -87,36 +80,19 @@ function emptyComposerDraft(): UpdateThreadDraftRequest {
   return { input: "", images: [], goalMode: false, annotations: [] };
 }
 
-function insertTranscriptIntoDraft(
-  draft: UpdateThreadDraftRequest,
-  selection: { start: number; end: number },
-  transcript: string,
-  t: Translate,
-): UpdateThreadDraftRequest {
-  const clean = transcript.trim();
-  if (!clean) throw new Error(t("Распознавание не вернуло текст"));
-  const start = Math.min(selection.start, draft.input.length);
-  const end = Math.max(start, Math.min(selection.end, draft.input.length));
-  const before = draft.input.slice(0, start);
-  const after = draft.input.slice(end);
-  const leading = before && !/\s$/.test(before) ? " " : "";
-  const trailing = after && !/^\s/.test(after) ? " " : "";
-  const completeInsertion = `${leading}${clean}${trailing}`;
-  const inserted = draft.goalMode
-    ? completeInsertion.slice(0, Math.max(0, 4_000 - before.length - after.length))
-    : completeInsertion;
-  return { ...draft, input: `${before}${inserted}${after}` };
+const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
+
+function readVoiceInputMode(): VoiceInputMode {
+  return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
 }
 
 export function ThreadPage({
   transcriptionConfig = null,
   transcriptionProvider = null,
-  onTranscriptionTimingChange,
   onOpenNavigation,
 }: {
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
-  onTranscriptionTimingChange?(estimate: TranscriptionTimingEstimate): void;
   onOpenNavigation(): void;
 }) {
   const { threadId = "" } = useParams();
@@ -125,9 +101,6 @@ export function ThreadPage({
   const { language, t } = useI18n();
   const languageRef = useRef(language);
   languageRef.current = language;
-  const currentThreadIdRef = useRef(threadId);
-  currentThreadIdRef.current = threadId;
-  const pageAliveRef = useRef(true);
   const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const project =
@@ -147,10 +120,10 @@ export function ThreadPage({
   const [deleting, setDeleting] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeTranscription, setActiveTranscription] = useState<ActiveTranscription | null>(null);
-  const activeTranscriptionRef = useRef<ActiveTranscription | null>(null);
+  const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
+  const [uploadingVoiceThreads, setUploadingVoiceThreads] = useState<Set<string>>(() => new Set());
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
-  const [transcriptionErrors, setTranscriptionErrors] = useState<Record<string, string>>({});
+  const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
   const [attentionJump, setAttentionJump] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -178,10 +151,10 @@ export function ThreadPage({
   const pendingDraftsRef = useRef(
     new Map<string, { revision: number; value: UpdateThreadDraftRequest }>(),
   );
+  const savedDraftUpdatedAtRef = useRef(new Map<string, number | null>());
   const draftRevisionRef = useRef(0);
   const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const draftTouchedThreadsRef = useRef(new Set<string>());
-  const transcriptionDraftThreadsRef = useRef(new Set<string>());
   const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
   const legacyAnnotationThreadsRef = useRef(new Set<string>());
   const attention = useMemo(
@@ -189,6 +162,10 @@ export function ThreadPage({
     [state.snapshot?.attention, threadId],
   );
   const goal = state.goals?.[threadId];
+  const voiceJob =
+    state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
+  const voiceRemoval = state.voiceRemovals?.[threadId];
+  const activeVoiceJob = voiceJob?.status === "failed" ? null : voiceJob;
   const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
   const optimisticTurnMessages = optimisticMessages.filter(
     (message) => message.destination === "turn",
@@ -233,7 +210,7 @@ export function ThreadPage({
           const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
           if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
           pendingDraftsRef.current.delete(targetThreadId);
-          transcriptionDraftThreadsRef.current.delete(targetThreadId);
+          savedDraftUpdatedAtRef.current.set(targetThreadId, saved?.updatedAt ?? null);
           dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
           if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
             try {
@@ -312,112 +289,75 @@ export function ThreadPage({
     return persistPendingDraft(targetThreadId, keepalive);
   }
 
-  function persistDraftImmediatelyForThread(
+  async function beginTranscription(
     targetThreadId: string,
-    value: UpdateThreadDraftRequest,
-  ): void {
-    const revision = ++draftRevisionRef.current;
-    pendingDraftsRef.current.set(targetThreadId, { revision, value });
-    transcriptionDraftThreadsRef.current.add(targetThreadId);
-    draftTouchedThreadsRef.current.add(targetThreadId);
-    if (currentThreadIdRef.current === targetThreadId) {
-      const next = { threadId: targetThreadId, value };
-      composerDraftRef.current = next;
-      setComposerDraftState(next);
-    }
-    void persistPendingDraft(targetThreadId);
-  }
-
-  function setTranscriptionError(targetThreadId: string, message: string | null): void {
-    if (!pageAliveRef.current) return;
-    setTranscriptionErrors((current) => {
-      if (message) return { ...current, [targetThreadId]: message };
-      if (!(targetThreadId in current)) return current;
-      const next = { ...current };
-      delete next[targetThreadId];
-      return next;
-    });
-  }
-
-  function beginTranscription(
-    targetThreadId: string,
-    targetDraft: UpdateThreadDraftRequest,
     recording: ComposerRecording,
-  ): void {
-    if (activeTranscriptionRef.current || !transcriptionProvider) return;
-    const fixedProcessingMs =
-      transcriptionConfig?.timingEstimate.estimatedFixedProcessingMs ?? null;
-    const processingMsPerAudioSecond =
-      transcriptionConfig?.timingEstimate.estimatedProcessingMsPerAudioSecond ?? null;
-    const estimatedTotalSeconds =
-      fixedProcessingMs === null || processingMsPerAudioSecond === null
-        ? null
-        : Math.max(
-            1,
-            Math.ceil(
-              (fixedProcessingMs + (recording.durationMs / 1_000) * processingMsPerAudioSecond) /
-                1_000,
-            ),
-          );
-    const job: ActiveTranscription = {
-      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-      threadId: targetThreadId,
-      startedAt: Date.now(),
-      estimatedTotalSeconds,
-    };
-    activeTranscriptionRef.current = job;
-    setActiveTranscription(job);
-    setTranscriptionElapsedSeconds(0);
-    setTranscriptionError(targetThreadId, null);
-
-    void api
-      .transcribe(recording.audio, recording.durationMs)
-      .then((response) => {
-        onTranscriptionTimingChange?.(response.timingEstimate);
-        const nextDraft = insertTranscriptIntoDraft(
-          targetDraft,
-          recording.selection,
-          response.text,
-          t,
-        );
-        persistDraftImmediatelyForThread(targetThreadId, nextDraft);
-        setTranscriptionError(targetThreadId, null);
-      })
-      .catch((caught: unknown) => {
-        setTranscriptionError(
-          targetThreadId,
-          caught instanceof Error
-            ? (localizeKnownServerText(languageRef.current, caught.message) ?? caught.message)
-            : t("Не удалось распознать запись"),
-        );
-      })
-      .finally(() => {
-        if (activeTranscriptionRef.current?.id !== job.id) return;
-        activeTranscriptionRef.current = null;
-        if (pageAliveRef.current) {
-          setActiveTranscription(null);
-          setTranscriptionElapsedSeconds(0);
-        }
+  ): Promise<void> {
+    if (!transcriptionProvider || activeVoiceJob || uploadingVoiceThreads.has(targetThreadId))
+      return;
+    setUploadingVoiceThreads((current) => new Set(current).add(targetThreadId));
+    try {
+      await flushDraft(targetThreadId);
+      if (pendingDraftsRef.current.has(targetThreadId)) {
+        throw new Error(t("Не удалось сохранить черновик"));
+      }
+      const expectedDraftUpdatedAt = savedDraftUpdatedAtRef.current.has(targetThreadId)
+        ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
+        : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
+      const accepted = await api.createVoiceTranscription(targetThreadId, recording.audio, {
+        recordingDurationMs: recording.durationMs,
+        mode: voiceMode,
+        selectionStart: recording.selection.start,
+        selectionEnd: recording.selection.end,
+        draftUpdatedAt: expectedDraftUpdatedAt,
       });
+      dispatch({ type: "voice.accepted", job: accepted });
+    } finally {
+      setUploadingVoiceThreads((current) => {
+        const next = new Set(current);
+        next.delete(targetThreadId);
+        return next;
+      });
+    }
   }
 
   useEffect(() => {
-    pageAliveRef.current = true;
-    return () => {
-      pageAliveRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!activeTranscription) return;
+    if (!activeVoiceJob || activeVoiceJob.status === "queued") {
+      setTranscriptionElapsedSeconds(0);
+      return;
+    }
+    const startedAt = activeVoiceJob.startedAt ?? activeVoiceJob.createdAt;
     const updateElapsed = () =>
-      setTranscriptionElapsedSeconds(
-        Math.max(0, Math.floor((Date.now() - activeTranscription.startedAt) / 1_000)),
-      );
+      setTranscriptionElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)));
     updateElapsed();
     const timer = window.setInterval(updateElapsed, 250);
     return () => window.clearInterval(timer);
-  }, [activeTranscription]);
+  }, [activeVoiceJob]);
+
+  useEffect(() => {
+    localStorage.setItem(VOICE_INPUT_MODE_KEY, voiceMode);
+  }, [voiceMode]);
+
+  useEffect(() => {
+    if (!voiceRemoval || handledVoiceRemovalsRef.current.has(voiceRemoval.jobId)) {
+      return;
+    }
+    handledVoiceRemovalsRef.current.add(voiceRemoval.jobId);
+    if (voiceRemoval.outcome === "cancelled") return;
+    if (voiceRemoval.outcome === "send") {
+      pendingDraftsRef.current.delete(threadId);
+      savedDraftUpdatedAtRef.current.set(threadId, null);
+      replaceComposerDraft(emptyComposerDraft(), false);
+      dispatch({ type: "draft", threadId, draft: null });
+      clearLegacyAnnotations();
+      return;
+    }
+    draftTouchedThreadsRef.current.delete(threadId);
+    hydratedDraftSourcesRef.current.delete(threadId);
+    void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
+      setError(localizeKnownServerText(languageRef.current, caught.message));
+    });
+  }, [refreshDetail, threadId, voiceRemoval]);
 
   useEffect(() => {
     if (goal) setGoalMode(false);
@@ -433,19 +373,9 @@ export function ThreadPage({
 
   useEffect(() => {
     if (!detail) return;
-    const pending = transcriptionDraftThreadsRef.current.has(threadId)
-      ? pendingDraftsRef.current.get(threadId)?.value
-      : undefined;
-    if (pending) {
-      draftTouchedThreadsRef.current.add(threadId);
-      const next = { threadId, value: pending };
-      composerDraftRef.current = next;
-      setComposerDraftState(next);
-      void persistPendingDraft(threadId);
-      return;
-    }
     if (draftTouchedThreadsRef.current.has(threadId)) return;
     const detailDraft = detail.draft ?? null;
+    savedDraftUpdatedAtRef.current.set(threadId, detailDraft?.updatedAt ?? null);
     if (hydratedDraftSourcesRef.current.get(threadId) === detailDraft) return;
     const localAnnotations = loadPendingAnnotations(threadId);
     const serverDraft = detailDraft
@@ -721,6 +651,7 @@ export function ThreadPage({
         if (result.goalWarning) setError(localizeKnownServerText(language, result.goalWarning));
       }
       pendingDraftsRef.current.delete(threadId);
+      savedDraftUpdatedAtRef.current.set(threadId, null);
       dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
     } catch (caught) {
@@ -1130,19 +1061,25 @@ export function ThreadPage({
           }
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
-          onRecordingReady={(recording) => {
-            beginTranscription(threadId, activeComposerDraft, recording);
-          }}
+          voiceMode={voiceMode}
+          onVoiceModeChange={setVoiceMode}
+          voiceUploadPending={uploadingVoiceThreads.has(threadId)}
+          onRecordingReady={(recording) => beginTranscription(threadId, recording)}
           transcriptionStatus={
-            activeTranscription
+            activeVoiceJob
               ? {
-                  belongsToComposer: activeTranscription.threadId === threadId,
+                  belongsToComposer: true,
                   elapsedSeconds: transcriptionElapsedSeconds,
-                  estimatedTotalSeconds: activeTranscription.estimatedTotalSeconds,
+                  estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
+                  status: activeVoiceJob.status === "failed" ? "queued" : activeVoiceJob.status,
                 }
               : null
           }
-          transcriptionError={transcriptionErrors[threadId] ?? null}
+          transcriptionError={
+            voiceJob?.status === "failed"
+              ? (localizeKnownServerText(language, voiceJob.error) ?? voiceJob.error)
+              : null
+          }
           error={error}
           hasSupplementalContent={annotations.length > 0}
         >

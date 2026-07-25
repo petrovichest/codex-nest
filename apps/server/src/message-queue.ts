@@ -39,12 +39,14 @@ export class MessageQueue {
     text: string,
     images: string[] = [],
     messageId: string = randomUUID(),
+    options: { goal?: boolean; completeVoiceTranscriptionId?: string } = {},
   ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
       id: messageId,
       threadId,
       text: text.trim(),
       ...(images.length ? { images } : {}),
+      ...(options.goal ? { goal: true } : {}),
       createdAt: Date.now(),
       status: "queued",
     };
@@ -57,11 +59,23 @@ export class MessageQueue {
         stored = existing;
         const meta = state.threadMeta[threadId];
         if (meta) delete meta.draft;
+        if (
+          options.completeVoiceTranscriptionId &&
+          state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
+        ) {
+          delete state.voiceTranscriptions[threadId];
+        }
         return;
       }
       queue.push(message);
       const meta = state.threadMeta[threadId];
       if (meta) delete meta.draft;
+      if (
+        options.completeVoiceTranscriptionId &&
+        state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
+      ) {
+        delete state.voiceTranscriptions[threadId];
+      }
     });
     this.publish(threadId);
     void this.drain(threadId).catch(() => undefined);

@@ -785,6 +785,123 @@ describe("audio transcriptions", () => {
 
     await app.close();
   });
+
+  it("durably accepts a thread voice job and locks its composer until completion", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-voice-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    await projection.sync();
+    projection.upsertThread(testThread("voice"));
+    await projection.setDraft("voice", {
+      input: "Начало конец",
+      images: [],
+      goalMode: false,
+      annotations: [],
+    });
+    let resolveTranscript: ((value: string) => void) | undefined;
+    const transcription = {
+      configuration: vi.fn(() => ({
+        providers: ["local" as const],
+        provider: "local" as const,
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKeyConfigured: false,
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: false,
+        refinementModel: "gpt-5.6-luna",
+        maxRecordingSeconds: 300,
+        maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: {
+          sampleCount: 0,
+          estimatedFixedProcessingMs: null,
+          estimatedProcessingMsPerAudioSecond: null,
+        },
+      })),
+      updateConfiguration: vi.fn(),
+      transcribe: vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveTranscript = resolve;
+          }),
+      ),
+    };
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        transcription,
+      },
+    );
+    const authorization = { authorization: "Bearer correct" };
+    const updatedAt = store.snapshot().threadMeta.voice!.draft!.updatedAt;
+
+    const accepted = await app.inject({
+      method: "POST",
+      url:
+        "/api/v1/threads/voice/voice-transcriptions?" +
+        new URLSearchParams({
+          mode: "draft",
+          selectionStart: "7",
+          selectionEnd: "7",
+          draftUpdatedAt: String(updatedAt),
+        }),
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(accepted.json()).toMatchObject({
+      threadId: "voice",
+      mode: "draft",
+      status: "queued",
+    });
+    expect(store.snapshot().voiceTranscriptions?.voice).toBeDefined();
+
+    const locked = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/voice/draft",
+      headers: authorization,
+      payload: { input: "Нельзя", images: [], goalMode: false, annotations: [] },
+    });
+    expect(locked.statusCode).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/voice/turns",
+          headers: authorization,
+          payload: { input: "Нельзя отправить" },
+        })
+      ).statusCode,
+    ).toBe(409);
+
+    await vi.waitFor(() => expect(transcription.transcribe).toHaveBeenCalledOnce());
+    resolveTranscript?.("голос");
+    await vi.waitFor(() => {
+      expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
+    });
+    expect(store.snapshot().threadMeta.voice?.draft?.input).toBe("Начало голос конец");
+
+    await app.close();
+  });
 });
 
 describe("file downloads", () => {

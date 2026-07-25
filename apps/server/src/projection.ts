@@ -23,6 +23,7 @@ import type {
   TurnProgress,
   TurnView,
   UiLanguage,
+  VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "./attention";
@@ -31,7 +32,12 @@ import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
 import { parseModelList, parseThreadList, parseThreadResume, parseTurnsList } from "./codex/guards";
 import { pathContains, projectForCwd } from "./projects";
-import type { CodexNestState, StateStore, TimelineArtifact } from "./state/store";
+import type {
+  CodexNestState,
+  StateStore,
+  TimelineArtifact,
+  VoiceTranscriptionState,
+} from "./state/store";
 
 interface CachedThread {
   thread: Thread;
@@ -118,6 +124,10 @@ export class AppProjection extends EventEmitter {
       defaultReasoningEffort: this.store.snapshot().defaultReasoningEffort,
       taskDefaults: this.store.snapshot().taskDefaults ?? {},
       pushConfigured: this.pushConfigured,
+      voiceTranscriptions: Object.values(state.voiceTranscriptions ?? {})
+        .filter((job) => visibleThreadIds.has(job.threadId))
+        .map(publicVoiceTranscription)
+        .sort((left, right) => left.createdAt - right.createdAt),
     };
   }
 
@@ -353,6 +363,20 @@ export class AppProjection extends EventEmitter {
       this.publish({ type: "queue.changed", threadId, messages });
     }
     this.publishThread(threadId);
+  }
+
+  publishVoiceTranscription(job: VoiceTranscriptionState): void {
+    if (!this.isThreadVisible(job.threadId)) return;
+    this.publish({ type: "voiceTranscription.upserted", job: publicVoiceTranscription(job) });
+  }
+
+  removeVoiceTranscription(
+    threadId: string,
+    jobId: string,
+    outcome: "draft" | "send" | "cancelled",
+  ): void {
+    if (!this.isThreadVisible(threadId)) return;
+    this.publish({ type: "voiceTranscription.removed", threadId, jobId, outcome });
   }
 
   upsertThread(thread: Thread, archived = false): ThreadSummary {
@@ -1538,6 +1562,20 @@ function activityKey(threadId: string, turnId: string, itemId: string): string {
 
 function turnKey(threadId: string, turnId: string): string {
   return `${threadId}:${turnId}`;
+}
+
+function publicVoiceTranscription(job: VoiceTranscriptionState): VoiceTranscriptionJob {
+  return {
+    id: job.id,
+    threadId: job.threadId,
+    mode: job.mode,
+    status: job.status,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    audioDurationMs: job.audioDurationMs,
+    estimatedTotalSeconds: job.estimatedTotalSeconds,
+    error: job.error,
+  };
 }
 
 function isTerminal(state: ThreadState): state is ThreadOutcome {

@@ -65,6 +65,22 @@ export type TranscriptionResponse = {
   timingEstimate: TranscriptionTimingEstimate;
 };
 
+export type VoiceInputMode = "draft" | "send";
+
+export type VoiceTranscriptionStatus = "queued" | "transcribing" | "applying" | "failed";
+
+export type VoiceTranscriptionJob = {
+  id: string;
+  threadId: string;
+  mode: VoiceInputMode;
+  status: VoiceTranscriptionStatus;
+  createdAt: number;
+  startedAt: number | null;
+  audioDurationMs: number;
+  estimatedTotalSeconds: number | null;
+  error: string | null;
+};
+
 export type GitChangesSummary = {
   state: "clean" | "dirty" | "notRepository";
   filesChanged: number;
@@ -197,6 +213,7 @@ export type QueuedMessage = {
   threadId: string;
   text: string;
   images?: string[];
+  goal?: boolean;
   createdAt: number;
   status: "queued" | "dispatching";
 };
@@ -549,6 +566,7 @@ export type AppSnapshot = {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   pushConfigured: boolean;
+  voiceTranscriptions?: VoiceTranscriptionJob[];
 };
 
 export type ServerEvent =
@@ -568,6 +586,13 @@ export type ServerEvent =
   | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
   | { type: "uiLanguage.changed"; language: UiLanguage }
   | { type: "goal.changed"; threadId: string; goal: ThreadGoal | null }
+  | { type: "voiceTranscription.upserted"; job: VoiceTranscriptionJob }
+  | {
+      type: "voiceTranscription.removed";
+      threadId: string;
+      jobId: string;
+      outcome: "draft" | "send" | "cancelled";
+    }
   | { type: "resync.required" };
 
 export type ClientFrame = { type: "authenticate"; token: string } | { type: "ping" };

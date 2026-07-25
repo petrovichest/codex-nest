@@ -18,10 +18,12 @@ import type {
   TranscriptionProvider,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
+  VoiceInputMode,
+  VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
-import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, XIcon } from "./Icons";
+import { CheckIcon, MicrophoneIcon, PlusIcon, SendIcon, StopIcon, XIcon } from "./Icons";
 import { SettingsPicker } from "./SettingsPicker";
 
 export type ComposerImage = {
@@ -40,12 +42,13 @@ export type ComposerTranscriptionStatus = {
   belongsToComposer: boolean;
   elapsedSeconds: number;
   estimatedTotalSeconds: number | null;
+  status?: Exclude<VoiceTranscriptionStatus, "failed">;
 };
 
 const KEYBOARD_VIEWPORT_DELTA = 120;
 const RECORDING_MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
-type SpeechState = "idle" | "requesting" | "recording" | "transcribing";
+type SpeechState = "idle" | "requesting" | "recording" | "uploading" | "transcribing";
 
 function viewportHeight(): number {
   return Math.min(window.innerHeight, window.visualViewport?.height ?? window.innerHeight);
@@ -78,6 +81,9 @@ export function Composer({
   transcriptionProvider = null,
   onTranscribe,
   onRecordingReady,
+  voiceMode,
+  onVoiceModeChange,
+  voiceUploadPending = false,
   transcriptionStatus = null,
   transcriptionError = null,
   error,
@@ -110,7 +116,10 @@ export function Composer({
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
   onTranscribe?(audio: Blob, durationMs: number): Promise<string>;
-  onRecordingReady?(recording: ComposerRecording): void;
+  onRecordingReady?(recording: ComposerRecording): Promise<void>;
+  voiceMode?: VoiceInputMode;
+  onVoiceModeChange?(mode: VoiceInputMode): void;
+  voiceUploadPending?: boolean;
   transcriptionStatus?: ComposerTranscriptionStatus | null;
   transcriptionError?: string | null;
   error: string | null;
@@ -145,7 +154,8 @@ export function Composer({
   const [transcribingSeconds, setTranscribingSeconds] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const localSpeechBusy = speechState !== "idle";
-  const speechBusy = localSpeechBusy || Boolean(transcriptionStatus?.belongsToComposer);
+  const speechBusy =
+    localSpeechBusy || voiceUploadPending || Boolean(transcriptionStatus?.belongsToComposer);
   const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
   const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
   const canSubmit =
@@ -160,18 +170,27 @@ export function Composer({
     Boolean(onTranscribe || onRecordingReady),
     t,
   );
+  const remoteTranscriptionStatus = transcriptionStatus?.status ?? "transcribing";
   const transcriptionStatusText = transcriptionStatus?.belongsToComposer
-    ? formatTranscriptionStatus(
-        transcriptionStatus.elapsedSeconds,
-        transcriptionStatus.estimatedTotalSeconds,
-        t,
-      )
+    ? remoteTranscriptionStatus === "queued"
+      ? t("Запись на сервере · можно закрыть")
+      : remoteTranscriptionStatus === "applying"
+        ? t("На сервере · готовим результат")
+        : t("На сервере · {{status}}", {
+            status: formatTranscriptionStatus(
+              transcriptionStatus.elapsedSeconds,
+              transcriptionStatus.estimatedTotalSeconds,
+              t,
+            ).toLocaleLowerCase(language),
+          })
     : null;
   const transcriptionTimerText = transcriptionStatus?.belongsToComposer
-    ? formatTranscriptionTimer(
-        transcriptionStatus.elapsedSeconds,
-        transcriptionStatus.estimatedTotalSeconds,
-      )
+    ? remoteTranscriptionStatus === "transcribing"
+      ? formatTranscriptionTimer(
+          transcriptionStatus.elapsedSeconds,
+          transcriptionStatus.estimatedTotalSeconds,
+        )
+      : null
     : speechState === "transcribing"
       ? formatRecordingTime(transcribingSeconds)
       : null;
@@ -181,9 +200,13 @@ export function Composer({
     speechState === "recording"
       ? t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })
       : (transcriptionStatusText ??
-        (speechState === "transcribing"
-          ? formatTranscriptionStatus(transcribingSeconds, null, t)
-          : null));
+        (speechState === "uploading"
+          ? t("Отправляем запись — не закрывайте")
+          : speechState === "transcribing"
+            ? formatTranscriptionStatus(transcribingSeconds, null, t)
+            : voiceUploadPending
+              ? t("Отправляем запись — не закрывайте")
+              : null));
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -314,7 +337,7 @@ export function Composer({
   }
 
   async function startRecording() {
-    if (speechState !== "idle" || transcriptionStatus || busy) return;
+    if (speechState !== "idle" || transcriptionStatus || voiceUploadPending || busy) return;
     const unavailable = microphoneUnavailableReason(
       transcriptionConfig,
       transcriptionProvider,
@@ -396,8 +419,12 @@ export function Composer({
     clearRecordingTimers();
     recordingStoppedRef.current = true;
     if (aliveRef.current) {
-      startTranscriptionTimer();
-      setSpeechState("transcribing");
+      if (onRecordingReady) {
+        setSpeechState("uploading");
+      } else {
+        startTranscriptionTimer();
+        setSpeechState("transcribing");
+      }
     }
     recorder.stop();
     stopMediaStream();
@@ -437,10 +464,22 @@ export function Composer({
       selection: insertionRef.current ?? { start: input.length, end: input.length },
     };
     if (onRecordingReady) {
-      onRecordingReady(recording);
-      if (aliveRef.current) {
-        clearTranscriptionTimer();
-        setSpeechState("idle");
+      try {
+        await onRecordingReady(recording);
+        if (aliveRef.current) setSpeechError(null);
+      } catch (caught) {
+        if (aliveRef.current) {
+          setSpeechError(
+            caught instanceof Error
+              ? localizeKnownServerText(language, caught.message)
+              : t("Не удалось отправить запись на сервер"),
+          );
+        }
+      } finally {
+        if (aliveRef.current) {
+          clearTranscriptionTimer();
+          setSpeechState("idle");
+        }
       }
       return;
     }
@@ -645,25 +684,47 @@ export function Composer({
           <div className="composer-actions">
             {transcriptionConfig && (
               <>
+                {voiceMode && onVoiceModeChange && (
+                  <label className="voice-mode-picker">
+                    <span className="sr-only">{t("Режим голосового ввода")}</span>
+                    <select
+                      aria-label={t("Режим голосового ввода")}
+                      disabled={busy || speechBusy}
+                      value={voiceMode}
+                      onChange={(event) => onVoiceModeChange(event.target.value as VoiceInputMode)}
+                    >
+                      <option value="draft">{t("Вставить в поле")}</option>
+                      <option value="send">{t("Распознать и отправить")}</option>
+                    </select>
+                  </label>
+                )}
                 <button
                   aria-label={
                     speechState === "recording"
                       ? t("Остановить запись")
                       : speechState === "requesting"
                         ? t("Запрашиваем доступ к микрофону")
-                        : transcriptionStatus && !transcriptionStatus.belongsToComposer
-                          ? t("Идёт распознавание в другой сессии")
-                          : transcriptionBusy
-                            ? t("Распознаём запись")
-                            : speechUnavailable
-                              ? speechUnavailable
-                              : t("Начать запись")
+                        : speechState === "uploading"
+                          ? t("Отправляем запись — не закрывайте")
+                          : voiceUploadPending
+                            ? t("Отправляем запись — не закрывайте")
+                            : transcriptionStatus && !transcriptionStatus.belongsToComposer
+                              ? t("Идёт распознавание в другой сессии")
+                              : transcriptionStatus && remoteTranscriptionStatus === "queued"
+                                ? t("Запись на сервере · можно закрыть")
+                                : transcriptionBusy
+                                  ? t("Распознаём запись")
+                                  : speechUnavailable
+                                    ? speechUnavailable
+                                    : t("Начать запись")
                   }
                   aria-pressed={speechState === "recording"}
                   className={`composer-action microphone${speechState === "recording" ? " recording" : ""}${speechTimerText ? " timing" : ""}`}
                   disabled={
                     speechState === "requesting" ||
+                    speechState === "uploading" ||
                     speechState === "transcribing" ||
+                    voiceUploadPending ||
                     Boolean(transcriptionStatus) ||
                     (speechState === "idle" && (busy || Boolean(speechUnavailable)))
                   }
@@ -682,17 +743,17 @@ export function Composer({
                     <span className="composer-action-timer" aria-hidden="true">
                       {speechTimerText}
                     </span>
-                  ) : speechState === "requesting" ? (
+                  ) : speechState === "requesting" ||
+                    speechState === "uploading" ||
+                    voiceUploadPending ||
+                    remoteTranscriptionStatus === "applying" ? (
                     <span className="spinner small" />
+                  ) : transcriptionStatus && remoteTranscriptionStatus === "queued" ? (
+                    <CheckIcon />
                   ) : (
                     <MicrophoneIcon />
                   )}
                 </button>
-                {speechStatusText && (
-                  <span className="sr-only" role="status">
-                    {speechStatusText}
-                  </span>
-                )}
               </>
             )}
             {running && onStop && (
@@ -717,6 +778,11 @@ export function Composer({
             </button>
           </div>
         </div>
+        {speechStatusText && (
+          <span className="composer-speech-status" role="status">
+            {speechStatusText}
+          </span>
+        )}
       </div>
       {(error || attachmentError || speechError || transcriptionError) && (
         <div className="composer-error">

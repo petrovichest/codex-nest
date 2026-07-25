@@ -77,6 +77,51 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([first]);
   });
 
+  it("atomically converts a completed voice job into a goal message", async () => {
+    const { queue, store } = await setup("active");
+    await store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        draft: {
+          input: "Черновик",
+          images: [],
+          goalMode: true,
+          annotations: [],
+          updatedAt: 1,
+        },
+      };
+      state.voiceTranscriptions = {
+        thread: {
+          id: "voice",
+          threadId: "thread",
+          mode: "send",
+          status: "applying",
+          createdAt: 1,
+          startedAt: 2,
+          audioDurationMs: 1_000,
+          estimatedTotalSeconds: null,
+          error: null,
+          contentType: "audio/webm",
+          audioFile: "voice.webm",
+          audioBytes: 5,
+          selectionStart: 0,
+          selectionEnd: 0,
+          transcript: "Текст",
+        },
+      };
+    });
+
+    const message = await queue.enqueue("thread", "Голос", [], "voice", {
+      goal: true,
+      completeVoiceTranscriptionId: "voice",
+    });
+
+    expect(message.goal).toBe(true);
+    expect(store.snapshot().threadMeta.thread?.draft).toBeUndefined();
+    expect(store.snapshot().voiceTranscriptions?.thread).toBeUndefined();
+  });
+
   it("updates queued text without changing its metadata or images", async () => {
     const { queue, delivery } = await setup("active");
     const image = "data:image/png;base64,aW1hZ2U=";

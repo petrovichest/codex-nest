@@ -42,6 +42,8 @@ import type {
   UpdateThreadRequest,
   UpdateUiLanguageRequest,
   TaskDefaults,
+  VoiceInputMode,
+  VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
@@ -93,6 +95,39 @@ export class ApiClient {
             },
       timeoutMs: null,
     });
+  }
+
+  createVoiceTranscription(
+    threadId: string,
+    audio: Blob,
+    options: {
+      recordingDurationMs: number;
+      mode: VoiceInputMode;
+      selectionStart: number;
+      selectionEnd: number;
+      draftUpdatedAt: number | null;
+    },
+  ): Promise<VoiceTranscriptionJob> {
+    const query = new URLSearchParams({
+      mode: options.mode,
+      selectionStart: String(options.selectionStart),
+      selectionEnd: String(options.selectionEnd),
+      draftUpdatedAt: options.draftUpdatedAt === null ? "none" : String(options.draftUpdatedAt),
+    });
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions?${query}`,
+      {
+        method: "POST",
+        rawBody: audio,
+        contentType: audio.type,
+        headers: {
+          "X-CodexNest-Audio-Duration-Ms": String(
+            Math.max(1, Math.round(options.recordingDurationMs)),
+          ),
+        },
+        timeoutMs: null,
+      },
+    );
   }
 
   readCodexRateLimits(): Promise<CodexRateLimitsResponse> {

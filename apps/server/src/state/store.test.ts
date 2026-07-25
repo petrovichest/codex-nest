@@ -139,6 +139,25 @@ describe("StateStore", () => {
           { audioDurationMs: 3_000, processingMs: 7_000 },
         ],
       };
+      state.voiceTranscriptions = {
+        thread: {
+          id: "voice",
+          threadId: "thread",
+          mode: "draft",
+          status: "queued",
+          createdAt: 1,
+          startedAt: null,
+          audioDurationMs: 2_000,
+          estimatedTotalSeconds: 6,
+          error: null,
+          contentType: "audio/webm",
+          audioFile: "voice.webm",
+          audioBytes: 5,
+          selectionStart: 0,
+          selectionEnd: 0,
+          timingProfile: "local:test",
+        },
+      };
       state.threadMeta.thread = {
         pinned: false,
         lastReadUpdatedAt: 0,
@@ -186,6 +205,11 @@ describe("StateStore", () => {
         { audioDurationMs: 2_000, processingMs: 6_000 },
         { audioDurationMs: 3_000, processingMs: 7_000 },
       ],
+    });
+    expect(reloaded.snapshot().voiceTranscriptions?.thread).toMatchObject({
+      id: "voice",
+      status: "queued",
+      audioFile: "voice.webm",
     });
   });
 

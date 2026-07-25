@@ -122,6 +122,47 @@ describe("clientReducer", () => {
     expect(state.goals.one).toEqual(goal);
   });
 
+  it("tracks durable voice jobs from responses and server events", () => {
+    const job = {
+      id: "voice",
+      threadId: "one",
+      mode: "draft" as const,
+      status: "queued" as const,
+      createdAt: 10,
+      startedAt: null,
+      audioDurationMs: 2_000,
+      estimatedTotalSeconds: null,
+      error: null,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, { type: "voice.accepted", job });
+    expect(state.snapshot?.voiceTranscriptions).toEqual([job]);
+
+    const transcribing = { ...job, status: "transcribing" as const, startedAt: 11 };
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "voiceTranscription.upserted", job: transcribing },
+    });
+    expect(state.snapshot?.voiceTranscriptions).toEqual([transcribing]);
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "voiceTranscription.removed",
+        threadId: "one",
+        jobId: "voice",
+        outcome: "draft",
+      },
+    });
+    expect(state.snapshot?.voiceTranscriptions).toEqual([]);
+    expect(state.voiceRemovals.one).toEqual({ jobId: "voice", outcome: "draft" });
+
+    state = clientReducer(state, { type: "voice.accepted", job });
+    expect(state.snapshot?.voiceTranscriptions).toEqual([]);
+  });
+
   it("replaces an item completion after ordered streaming deltas", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

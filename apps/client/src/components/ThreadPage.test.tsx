@@ -10,6 +10,7 @@ import type {
   TranscriptionConfigResponse,
   TurnProgress,
   UpdateThreadDraftRequest,
+  VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
@@ -1921,26 +1922,28 @@ describe("Activity", () => {
     delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
   });
 
-  it("keeps transcription attached to its source draft while switching sessions", async () => {
+  it("uploads voice for its source session and leaves other sessions usable", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
     });
-    let resolveTranscription:
+    let resolveAccepted:
       | ((value: {
-          text: string;
-          timingEstimate: {
-            sampleCount: number;
-            estimatedFixedProcessingMs: number;
-            estimatedProcessingMsPerAudioSecond: number;
-          };
+          id: string;
+          threadId: string;
+          mode: "send";
+          status: "queued";
+          createdAt: number;
+          startedAt: null;
+          audioDurationMs: number;
+          estimatedTotalSeconds: null;
+          error: null;
         }) => void)
       | undefined;
     const api = threadApi();
-    api.updateThreadDraft.mockRejectedValueOnce(new Error("offline"));
-    api.transcribe.mockImplementation(
+    api.createVoiceTranscription.mockImplementation(
       () =>
         new Promise((resolve) => {
-          resolveTranscription = resolve;
+          resolveAccepted = resolve;
         }),
     );
     const initialDraft: ThreadDraft = {
@@ -1961,66 +1964,153 @@ describe("Activity", () => {
       olderTurnsCursor: null,
       draft: null,
     };
-    context.dispatch.mockImplementation((action) => {
-      if (action.type !== "draft") return;
-      const current = details[action.threadId];
-      if (current) details[action.threadId] = { ...current, draft: action.draft };
-    });
-    const timingChanged = vi.fn();
-    render(voiceThreadRoute(timingChanged));
+    render(voiceThreadRoute());
 
     const textarea = (await screen.findByRole("textbox", {
       name: "Сообщение для Codex",
     })) as HTMLTextAreaElement;
     await waitFor(() => expect(textarea).toHaveValue("Начало конец"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Режим голосового ввода" }), {
+      target: { value: "send" },
+    });
+    expect(localStorage.getItem("codexnest.voiceInputMode")).toBe("send");
     textarea.setSelectionRange(7, 7);
     fireEvent.select(textarea);
     fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
     fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
 
-    await waitFor(() => expect(api.transcribe).toHaveBeenCalledOnce());
-    expect(screen.getByText("Распознаём · осталось ≈ 0:03")).toBeInTheDocument();
+    await waitFor(() => expect(api.createVoiceTranscription).toHaveBeenCalledOnce());
+    expect(screen.getByText("Отправляем запись — не закрывайте")).toBeInTheDocument();
+    expect(api.updateThreadDraft).not.toHaveBeenCalled();
+    expect(api.createVoiceTranscription).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({ type: "audio/webm;codecs=opus" }),
+      expect.objectContaining({
+        mode: "send",
+        selectionStart: 7,
+        selectionEnd: 7,
+        draftUpdatedAt: expect.any(Number),
+      }),
+    );
     fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
 
     await screen.findByRole("heading", { name: "Другая задача" });
-    expect(
-      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
       "readonly",
     );
-    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
-
-    await act(async () =>
-      resolveTranscription?.({
-        text: "голос",
-        timingEstimate: {
-          sampleCount: 2,
-          estimatedFixedProcessingMs: 2_500,
-          estimatedProcessingMsPerAudioSecond: 4_000,
-        },
-      }),
-    );
-    await waitFor(() =>
-      expect(api.updateThreadDraft).toHaveBeenCalledWith(
-        "thread",
-        expect.objectContaining({ input: "Начало голос конец" }),
-        { keepalive: false },
-      ),
-    );
-    expect(timingChanged).toHaveBeenCalledWith({
-      sampleCount: 2,
-      estimatedFixedProcessingMs: 2_500,
-      estimatedProcessingMsPerAudioSecond: 4_000,
+    resolveAccepted?.({
+      id: "voice",
+      threadId: "thread",
+      mode: "send",
+      status: "queued",
+      createdAt: Date.now(),
+      startedAt: null,
+      audioDurationMs: 1,
+      estimatedTotalSeconds: null,
+      error: null,
     });
+  });
 
-    fireEvent.click(screen.getByRole("link", { name: "Открыть A" }));
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
-        "Начало голос конец",
-      ),
+  it("restores a server voice job and blocks only its composer", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    context.state.snapshot.voiceTranscriptions = [
+      {
+        id: "voice",
+        threadId: "thread",
+        mode: "draft",
+        status: "queued",
+        createdAt: Date.now(),
+        startedAt: null,
+        audioDurationMs: 2_000,
+        estimatedTotalSeconds: null,
+        error: null,
+      },
+    ];
+    render(voiceThreadRoute());
+
+    expect(await screen.findByText("Запись на сервере · можно закрыть")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+      "readonly",
     );
-    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledTimes(2));
+    expect(
+      screen.getByRole("button", { name: "Запись на сервере · можно закрыть" }),
+    ).toBeDisabled();
+  });
+
+  it("restores a failed voice job without keeping the composer locked", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    const context = mockThreadConnection(threadApi(), summary);
+    context.state.snapshot.voiceTranscriptions = [
+      {
+        id: "voice",
+        threadId: "thread",
+        mode: "draft",
+        status: "failed",
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+        audioDurationMs: 2_000,
+        estimatedTotalSeconds: null,
+        error: "STT failed",
+      },
+    ];
+    render(voiceThreadRoute());
+
+    expect(await screen.findByText("STT failed")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+      "readonly",
+    );
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
+  });
+
+  it("refreshes the draft after a background transcription completes", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    const view = render(voiceThreadRoute());
+    await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    context.refreshDetail.mockClear();
+
+    context.state.voiceRemovals.thread = {
+      jobId: "voice-draft",
+      outcome: "draft",
+    };
+    view.rerender(voiceThreadRoute());
+
+    await waitFor(() =>
+      expect(context.refreshDetail).toHaveBeenCalledWith("thread", { force: true }),
+    );
+  });
+
+  it("clears the local composer after background auto-send completes", async () => {
+    const context = mockThreadConnection(threadApi(), summary, {
+      draft: {
+        input: "Текст и голос",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      },
+    });
+    const view = render(voiceThreadRoute());
+    const textarea = await screen.findByRole("textbox", {
+      name: "Сообщение для Codex",
+    });
+    await waitFor(() => expect(textarea).toHaveValue("Текст и голос"));
+    context.dispatch.mockClear();
+
+    context.state.voiceRemovals.thread = {
+      jobId: "voice-send",
+      outcome: "send",
+    };
+    view.rerender(voiceThreadRoute());
+
+    await waitFor(() => expect(textarea).toHaveValue(""));
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "draft",
+      threadId: "thread",
+      draft: null,
+    });
   });
 });
 
@@ -2042,13 +2132,7 @@ function threadRoute(state?: Record<string, unknown>) {
   );
 }
 
-function voiceThreadRoute(
-  onTimingChange: (estimate: {
-    sampleCount: number;
-    estimatedFixedProcessingMs: number | null;
-    estimatedProcessingMsPerAudioSecond: number | null;
-  }) => void,
-) {
+function voiceThreadRoute() {
   return (
     <MemoryRouter initialEntries={["/threads/thread"]}>
       <Link to="/threads/thread">Открыть A</Link>
@@ -2060,7 +2144,6 @@ function voiceThreadRoute(
             <ThreadPage
               transcriptionConfig={transcriptionConfig}
               transcriptionProvider="local"
-              onTranscriptionTimingChange={onTimingChange}
               onOpenNavigation={() => undefined}
             />
           }
@@ -2168,6 +2251,17 @@ function threadApi() {
         estimatedProcessingMsPerAudioSecond: 4_000,
       },
     }),
+    createVoiceTranscription: vi.fn().mockResolvedValue({
+      id: "voice",
+      threadId: "thread",
+      mode: "draft",
+      status: "queued",
+      createdAt: Date.now(),
+      startedAt: null,
+      audioDurationMs: 1_000,
+      estimatedTotalSeconds: null,
+      error: null,
+    }),
   };
 }
 
@@ -2219,6 +2313,7 @@ function mockThreadConnection(
         ],
         threads: [thread] as ThreadSummary[],
         attention: detailPatch.attention ?? [],
+        voiceTranscriptions: [] as VoiceTranscriptionJob[],
         models: [
           {
             id: "gpt",
@@ -2235,6 +2330,10 @@ function mockThreadConnection(
       details: { thread: detail },
       expandedHistory: {},
       optimisticMessages: {} as Record<string, OptimisticMessage[]>,
+      voiceRemovals: {} as Record<
+        string,
+        { jobId: string; outcome: "draft" | "send" | "cancelled" }
+      >,
       network: "connected",
       snapshotEpoch: 1,
     },

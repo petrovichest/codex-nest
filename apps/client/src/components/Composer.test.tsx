@@ -306,7 +306,9 @@ describe("Composer", () => {
     expect(
       within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("≈0:08"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · осталось ≈ 0:08");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "На сервере · распознаём · осталось ≈ 0:08",
+    );
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
@@ -325,7 +327,9 @@ describe("Composer", () => {
     expect(
       within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("+0:03"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · дольше прогноза на 0:03");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "На сервере · распознаём · дольше прогноза на 0:03",
+    );
 
     view.rerender(
       <Harness
@@ -341,7 +345,7 @@ describe("Composer", () => {
     expect(
       within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("0:04"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Распознаём · прошло 0:04");
+    expect(screen.getByRole("status")).toHaveTextContent("На сервере · распознаём · прошло 0:04");
 
     view.rerender(
       <Harness

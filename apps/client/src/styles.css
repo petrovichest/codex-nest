@@ -1949,6 +1949,28 @@ pre {
   flex: 0 0 auto;
 }
 
+.voice-mode-picker select {
+  width: auto;
+  max-width: 150px;
+  height: 30px;
+  padding: 0 24px 0 8px;
+  border-color: transparent;
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 11px;
+}
+
+.composer-speech-status {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 14px 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-picker {
   display: block;
 }

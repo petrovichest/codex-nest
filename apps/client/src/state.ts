@@ -8,6 +8,7 @@ import type {
   ThreadDraft,
   ThreadGoal,
   ThreadSummary,
+  VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
 export interface ClientState {
@@ -16,6 +17,7 @@ export interface ClientState {
   expandedHistory: Record<string, boolean>;
   optimisticMessages: Record<string, OptimisticMessage[]>;
   goals: Record<string, ThreadGoal | null>;
+  voiceRemovals: Record<string, { jobId: string; outcome: "draft" | "send" | "cancelled" }>;
   network: "connecting" | "connected" | "offline";
   error: string | null;
   snapshotEpoch: number;
@@ -41,6 +43,7 @@ export type ClientAction =
   | { type: "thread.remove"; threadId: string }
   | { type: "project.remove"; projectId: string; threadIds: string[] }
   | { type: "goal"; threadId: string; goal: ThreadGoal | null }
+  | { type: "voice.accepted"; job: VoiceTranscriptionJob }
   | { type: "optimistic.add"; message: OptimisticMessage }
   | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
   | { type: "optimistic.remove"; threadId: string; messageId: string }
@@ -52,6 +55,7 @@ export const initialState: ClientState = {
   expandedHistory: {},
   optimisticMessages: {},
   goals: {},
+  voiceRemovals: {},
   network: "connecting",
   error: null,
   snapshotEpoch: 0,
@@ -102,6 +106,17 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     }
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
+    case "voice.accepted":
+      if (!state.snapshot) return state;
+      if (state.voiceRemovals[action.job.threadId]?.jobId === action.job.id) return state;
+      return {
+        ...state,
+        snapshot: {
+          ...state.snapshot,
+          voiceTranscriptions: upsert(state.snapshot.voiceTranscriptions ?? [], action.job),
+        },
+        voiceRemovals: withoutKey(state.voiceRemovals, action.job.threadId),
+      };
     case "optimistic.add":
       if (isMessageConfirmed(state, action.message)) return state;
       return {
@@ -173,6 +188,25 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         snapshot,
         goals: { ...state.goals, [event.threadId]: event.goal },
       };
+    case "voiceTranscription.upserted":
+      snapshot.voiceTranscriptions = upsert(snapshot.voiceTranscriptions ?? [], event.job);
+      return {
+        ...state,
+        snapshot,
+        voiceRemovals: withoutKey(state.voiceRemovals, event.job.threadId),
+      };
+    case "voiceTranscription.removed":
+      snapshot.voiceTranscriptions = (snapshot.voiceTranscriptions ?? []).filter(
+        (job) => job.threadId !== event.threadId,
+      );
+      return {
+        ...state,
+        snapshot,
+        voiceRemovals: {
+          ...state.voiceRemovals,
+          [event.threadId]: { jobId: event.jobId, outcome: event.outcome },
+        },
+      };
     case "activity.upserted":
       return removeOptimisticMessage(
         applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item),
@@ -200,6 +234,9 @@ function removeThreadState(state: ClientState, threadId: string): ClientState {
       ? {
           ...state.snapshot,
           threads: state.snapshot.threads.filter((thread) => thread.id !== threadId),
+          voiceTranscriptions: (state.snapshot.voiceTranscriptions ?? []).filter(
+            (job) => job.threadId !== threadId,
+          ),
         }
       : null,
     details: withoutKey(state.details, threadId),
@@ -208,6 +245,7 @@ function removeThreadState(state: ClientState, threadId: string): ClientState {
     goals: Object.fromEntries(
       Object.entries(state.goals).filter(([candidateId]) => candidateId !== threadId),
     ),
+    voiceRemovals: withoutKey(state.voiceRemovals, threadId),
   };
 }
 
