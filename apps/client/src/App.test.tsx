@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
 
-import type { AppSnapshot, Project, ThreadSummary } from "@codexnest/protocol";
+import type { AppSnapshot, AppUpdateStatus, Project, ThreadSummary } from "@codexnest/protocol";
 
 import { App } from "./App";
 
@@ -10,6 +10,7 @@ const connection = vi.hoisted(() => vi.fn());
 const capacitor = vi.hoisted(() => ({
   addListener: vi.fn(),
   backHandler: null as (() => void) | null,
+  getInfo: vi.fn(),
   getPlatform: vi.fn(() => "web"),
   isNativePlatform: vi.fn(() => false),
   removeListener: vi.fn(),
@@ -27,7 +28,7 @@ vi.mock("@capacitor/core", () => ({
   },
 }));
 vi.mock("@capacitor/app", () => ({
-  App: { addListener: capacitor.addListener },
+  App: { addListener: capacitor.addListener, getInfo: capacitor.getInfo },
 }));
 
 const baseThread: ThreadSummary = {
@@ -59,6 +60,12 @@ beforeEach(() => {
   capacitor.backHandler = null;
   capacitor.getPlatform.mockReturnValue("web");
   capacitor.isNativePlatform.mockReturnValue(false);
+  capacitor.getInfo.mockResolvedValue({
+    name: "CodexNest",
+    id: "com.codexnest.app",
+    version: "0.1.4",
+    build: "2",
+  });
   capacitor.removeListener.mockResolvedValue(undefined);
   capacitor.addListener.mockImplementation(async (_event: string, listener: () => void) => {
     capacitor.backHandler = listener;
@@ -196,6 +203,72 @@ describe("App routing and navigation", () => {
     expect(status.querySelector("svg")).toBeNull();
     expect(screen.queryByText("pi.local")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+  });
+
+  it("checks for an update once after connecting and opens settings from the icon", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.checkAppUpdate.mockResolvedValue(
+      appUpdateStatus({
+        latestVersion: "0.1.4-abcdef0",
+        updateAvailable: true,
+        checkedAt: "2026-07-25T12:00:00Z",
+        updatedAt: "2026-07-25T12:00:00Z",
+      }),
+    );
+
+    renderApp("/threads/newer");
+
+    const indicator = await screen.findByRole("link", {
+      name: "Доступно обновление CodexNest",
+    });
+    expect(api.checkAppUpdate).toHaveBeenCalledOnce();
+    expect(indicator).toHaveTextContent("");
+
+    fireEvent.click(indicator);
+    expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
+  });
+
+  it("shows the same icon when only the installed rolling APK is outdated", async () => {
+    capacitor.isNativePlatform.mockReturnValue(true);
+    capacitor.getInfo.mockResolvedValue({
+      name: "CodexNest",
+      id: "com.codexnest.app",
+      version: "0.1.4-1111111",
+      build: "1000001",
+    });
+    const api = mockConnection(snapshot([baseThread]));
+    api.checkAppUpdate.mockResolvedValue(
+      appUpdateStatus({
+        currentVersion: "0.1.4-abcdef0",
+        latestVersion: "0.1.4-abcdef0",
+        updateAvailable: false,
+        checkedAt: "2026-07-25T12:00:00Z",
+        updatedAt: "2026-07-25T12:00:00Z",
+      }),
+    );
+
+    renderApp("/threads/newer");
+
+    expect(
+      await screen.findByRole("link", { name: "Доступно обновление CodexNest" }),
+    ).toBeInTheDocument();
+    expect(capacitor.getInfo).toHaveBeenCalledOnce();
+  });
+
+  it("keeps update-check failures out of the connection status", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.checkAppUpdate.mockRejectedValue(new Error("GitHub unavailable"));
+    api.readAppSettings.mockRejectedValue(new Error("status unavailable"));
+
+    renderApp("/threads/newer");
+
+    await waitFor(() => expect(api.readAppSettings).toHaveBeenCalledOnce());
+    expect(
+      screen.getByRole("status", { name: "Состояние сервера: Подключено" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Доступно обновление CodexNest" }),
+    ).not.toBeInTheDocument();
   });
 
   it("loads and refreshes both Codex limits only when clicked", async () => {
@@ -1193,6 +1266,9 @@ function mockConnection(
     }),
     updateTranscriptionSettings: vi.fn(),
     readCodexRateLimits: vi.fn(),
+    readAppSettings: vi.fn().mockResolvedValue(appUpdateStatus()),
+    checkAppUpdate: vi.fn().mockResolvedValue(appUpdateStatus()),
+    updateApp: vi.fn().mockResolvedValue(appUpdateStatus()),
     readCodexSettings: vi.fn().mockResolvedValue({
       supported: true,
       unavailableReason: null,
@@ -1251,4 +1327,19 @@ function mockConnection(
     })),
   });
   return api;
+}
+
+function appUpdateStatus(overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus {
+  return {
+    supported: true,
+    currentVersion: "0.1.4",
+    latestVersion: "0.1.4",
+    updateAvailable: false,
+    operation: "idle",
+    result: "none",
+    message: null,
+    checkedAt: null,
+    updatedAt: null,
+    ...overrides,
+  };
 }

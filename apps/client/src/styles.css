@@ -747,10 +747,40 @@ pre {
   min-height: 36px;
   display: flex;
   align-items: center;
-  gap: 7px;
   padding: 0 10px;
   color: var(--muted-strong);
   font-size: 13px;
+}
+
+.server-connection {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+}
+
+.app-update-indicator {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  border-radius: 8px;
+  background: var(--warning);
+  color: var(--warning-text);
+}
+
+.app-update-indicator:hover,
+.app-update-indicator.active {
+  background: color-mix(in srgb, var(--warning-text) 14%, var(--warning));
+}
+
+.app-update-indicator svg {
+  width: 15px;
+  height: 15px;
 }
 
 .content {

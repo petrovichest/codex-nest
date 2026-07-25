@@ -52,6 +52,7 @@ const ENGLISH: Record<string, string> = {
     "A project cannot be removed while its sessions are running, awaiting a decision, or have queued messages",
   Архив: "Archive",
   "Состояние сервера: {{state}}": "Server status: {{state}}",
+  "Доступно обновление CodexNest": "CodexNest update available",
   Настройки: "Settings",
   "Добавить проект": "Add project",
   Задачи: "Tasks",

@@ -2,6 +2,7 @@ import { Capacitor } from "@capacitor/core";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import type {
+  AppUpdateStatus,
   GlobalPermissionSettings,
   PermissionPreset,
   TaskDefaults,
@@ -61,6 +62,7 @@ export function SettingsPage({
   transcriptionConfig = null,
   transcriptionConfigError = null,
   onTranscriptionConfigChange = () => undefined,
+  onAppUpdateStatusChange,
 }: {
   onOpenNavigation(): void;
   onSwitchServer(): void;
@@ -73,6 +75,7 @@ export function SettingsPage({
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionConfigError?: string | null;
   onTranscriptionConfigChange?(config: TranscriptionConfigResponse): void;
+  onAppUpdateStatusChange?(status: AppUpdateStatus): void;
 }) {
   const { api, state } = useConnection();
   const { language, setLanguage, t } = useI18n();
@@ -217,7 +220,7 @@ export function SettingsPage({
       <main className="settings-scroll">
         <CodexSettingsProvider>
           <div className="settings-stack">
-            <ApplicationSettingsCard />
+            <ApplicationSettingsCard onStatusChange={onAppUpdateStatusChange} />
 
             <CodexSettingsCard />
 

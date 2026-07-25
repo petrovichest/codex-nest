@@ -29,6 +29,7 @@ describe("ApplicationSettingsCard", () => {
   it("checks GitHub only after an explicit click", async () => {
     const initial = updateStatus();
     const checked = updateStatus({ latestVersion: "0.1.4-abcdef0", updateAvailable: true });
+    const onStatusChange = vi.fn();
     const api = {
       readAppSettings: vi.fn(async () => initial),
       checkAppUpdate: vi.fn(async () => checked),
@@ -36,7 +37,7 @@ describe("ApplicationSettingsCard", () => {
     };
     connection.mockReturnValue({ api, state: { network: "connected" } });
 
-    render(<ApplicationSettingsCard />);
+    render(<ApplicationSettingsCard onStatusChange={onStatusChange} />);
 
     expect(await screen.findByText("Не проверялась")).toBeInTheDocument();
     expect(api.checkAppUpdate).not.toHaveBeenCalled();
@@ -44,6 +45,8 @@ describe("ApplicationSettingsCard", () => {
 
     expect(await screen.findByText("0.1.4-abcdef0")).toBeInTheDocument();
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
+    expect(onStatusChange).toHaveBeenNthCalledWith(1, initial);
+    expect(onStatusChange).toHaveBeenLastCalledWith(checked);
     expect(screen.getByRole("button", { name: "Обновить CodexNest" })).toBeEnabled();
     expect(screen.getByText("Установлено на сервере")).toBeInTheDocument();
     expect(screen.getByText("Актуальная версия в GitHub")).toBeInTheDocument();

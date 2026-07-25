@@ -14,7 +14,11 @@ type Action = "checking" | "updating" | null;
 const LATEST_ANDROID_APK_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk";
 
-export function ApplicationSettingsCard() {
+export function ApplicationSettingsCard({
+  onStatusChange,
+}: {
+  onStatusChange?(status: AppUpdateStatus): void;
+}) {
   const { api, state } = useConnection();
   const { language, t } = useI18n();
   const localizationRef = useRef({ language, t });
@@ -33,7 +37,9 @@ export function ApplicationSettingsCard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setStatus(await api.readAppSettings());
+      const next = await api.readAppSettings();
+      setStatus(next);
+      onStatusChange?.(next);
       setError(null);
     } catch (caught) {
       const localization = localizationRef.current;
@@ -47,7 +53,7 @@ export function ApplicationSettingsCard() {
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, onStatusChange]);
 
   useEffect(() => {
     if (state.network !== "connected") return;
@@ -76,18 +82,21 @@ export function ApplicationSettingsCard() {
         .readAppSettings()
         .then((updated) => {
           setStatus(updated);
+          onStatusChange?.(updated);
           if (updated.operation === "idle") setAction(null);
         })
         .catch(() => undefined);
     }, 1_500);
     return () => window.clearInterval(timer);
-  }, [api, status]);
+  }, [api, onStatusChange, status]);
 
   async function check() {
     setAction("checking");
     setError(null);
     try {
-      setStatus(await api.checkAppUpdate());
+      const next = await api.checkAppUpdate();
+      setStatus(next);
+      onStatusChange?.(next);
     } catch (caught) {
       setError(message(caught, t("Не удалось проверить обновления CodexNest"), language));
     } finally {
@@ -109,7 +118,9 @@ export function ApplicationSettingsCard() {
     setAction("updating");
     setError(null);
     try {
-      setStatus(await api.updateApp());
+      const next = await api.updateApp();
+      setStatus(next);
+      onStatusChange?.(next);
     } catch (caught) {
       setAction(null);
       setError(message(caught, t("Не удалось запустить обновление CodexNest"), language));

@@ -1,13 +1,17 @@
 import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  useCallback,
   useEffect,
   useRef,
   useState,
 } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router";
 
+import { App as CapacitorApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 import type {
+  AppUpdateStatus,
   CodexRateLimitWindow,
   CodexRateLimitsResponse,
   MoveProjectRequest,
@@ -112,6 +116,10 @@ export function App({
   const [transcriptionConfig, setTranscriptionConfig] =
     useState<TranscriptionConfigResponse | null>(null);
   const [transcriptionConfigError, setTranscriptionConfigError] = useState<string | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [installedApkVersion, setInstalledApkVersion] = useState<string | null>(null);
+  const appUpdateCheckAttemptedRef = useRef(false);
+  const previousNetworkRef = useRef<typeof state.network | null>(null);
   const {
     dragging: drawerDragging,
     frameRef,
@@ -126,11 +134,60 @@ export function App({
   usePushNotifications(navigate, language);
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
+  const acceptAppUpdateStatus = useCallback((next: AppUpdateStatus) => {
+    setAppUpdateStatus((current) =>
+      appUpdateStatusTimestamp(next) >= appUpdateStatusTimestamp(current) ? next : current,
+    );
+  }, []);
 
   useEffect(() => {
     const serverLanguage = state.snapshot?.uiLanguage;
     if (serverLanguage === "en" || serverLanguage === "ru") setLanguage(serverLanguage);
   }, [setLanguage, state.snapshot?.uiLanguage]);
+
+  useEffect(() => {
+    const previous = previousNetworkRef.current;
+    previousNetworkRef.current = state.network;
+    if (state.network !== "connected" || previous === "connected") return;
+
+    let active = true;
+    const accept = (status: AppUpdateStatus) => {
+      if (active) acceptAppUpdateStatus(status);
+    };
+    if (!appUpdateCheckAttemptedRef.current) {
+      appUpdateCheckAttemptedRef.current = true;
+      void api
+        .checkAppUpdate()
+        .then(accept)
+        .catch(() =>
+          api
+            .readAppSettings()
+            .then(accept)
+            .catch(() => undefined),
+        );
+    } else {
+      void api
+        .readAppSettings()
+        .then(accept)
+        .catch(() => undefined);
+    }
+    return () => {
+      active = false;
+    };
+  }, [acceptAppUpdateStatus, api, state.network]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let active = true;
+    void CapacitorApp.getInfo()
+      .then((info) => {
+        if (active) setInstalledApkVersion(info.version);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -208,6 +265,12 @@ export function App({
 
   const snapshot = state.snapshot;
   const attention = snapshot?.attention ?? [];
+  const updateAvailable =
+    appUpdateStatus?.updateAvailable === true ||
+    (appUpdateStatus?.supported === true &&
+      isRollingVersion(appUpdateStatus.latestVersion) &&
+      installedApkVersion !== null &&
+      installedApkVersion !== appUpdateStatus.latestVersion);
   return (
     <div
       className={`app-frame${drawerDragging ? " drawer-dragging" : ""}`}
@@ -225,6 +288,7 @@ export function App({
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
         projectListDirection={projectListDirection}
+        updateAvailable={updateAvailable}
       />
       {(drawer || drawerDragging) && (
         <button
@@ -288,6 +352,7 @@ export function App({
                   transcriptionConfig={transcriptionConfig}
                   transcriptionConfigError={transcriptionConfigError}
                   onTranscriptionConfigChange={setTranscriptionConfig}
+                  onAppUpdateStatusChange={acceptAppUpdateStatus}
                 />
               }
             />
@@ -408,12 +473,14 @@ function Sidebar({
   onClose,
   onNewProject,
   projectListDirection,
+  updateAvailable,
 }: {
   containerRef: RefObject<HTMLElement | null>;
   drawer: boolean;
   onClose(): void;
   onNewProject(): void;
   projectListDirection: ProjectListDirection;
+  updateAvailable: boolean;
 }) {
   const { api, state, dispatch } = useConnection();
   const { language, t } = useI18n();
@@ -814,15 +881,28 @@ function Sidebar({
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
       <div className="sidebar-controls">
-        <div
-          aria-label={t("Состояние сервера: {{state}}", {
-            state: networkLabel(state.network, t),
-          })}
-          className="server-status"
-          role="status"
-        >
-          <ConnectionDot state={state.network} />
-          <span>{networkLabel(state.network, t)}</span>
+        <div className="server-status">
+          <div
+            aria-label={t("Состояние сервера: {{state}}", {
+              state: networkLabel(state.network, t),
+            })}
+            className="server-connection"
+            role="status"
+          >
+            <ConnectionDot state={state.network} />
+            <span>{networkLabel(state.network, t)}</span>
+          </div>
+          {updateAvailable && (
+            <NavLink
+              aria-label={t("Доступно обновление CodexNest")}
+              className="app-update-indicator"
+              onClick={onClose}
+              title={t("Доступно обновление CodexNest")}
+              to="/settings"
+            >
+              <ArrowDownIcon />
+            </NavLink>
+          )}
         </div>
         <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
           <SlidersIcon />
@@ -1117,4 +1197,14 @@ function networkLabel(state: "connecting" | "connected" | "offline", t: Translat
     : state === "connecting"
       ? t("Подключение…")
       : t("Нет связи");
+}
+
+function appUpdateStatusTimestamp(status: AppUpdateStatus | null): number {
+  if (!status) return 0;
+  const timestamp = Date.parse(status.updatedAt ?? status.checkedAt ?? "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function isRollingVersion(version: string | null): version is string {
+  return version !== null && /^\d+\.\d+\.\d+-[0-9a-f]{7}$/.test(version);
 }
