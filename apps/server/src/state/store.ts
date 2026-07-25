@@ -12,7 +12,7 @@ import type {
   ThreadDraft,
   ThreadOutcome,
   UiLanguage,
-  VoiceInputMode,
+  VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
@@ -48,7 +48,7 @@ export interface TranscriptionTimingSampleState {
 export interface VoiceTranscriptionState {
   id: string;
   threadId: string;
-  mode: VoiceInputMode;
+  mode: VoiceTranscriptionMode;
   status: VoiceTranscriptionStatus;
   createdAt: number;
   startedAt: number | null;
@@ -392,7 +392,7 @@ function isVoiceTranscription(value: unknown, threadId: string): value is VoiceT
     typeof value.id !== "string" ||
     !value.id ||
     value.threadId !== threadId ||
-    !["draft", "send"].includes(String(value.mode)) ||
+    !["draft", "send", "queue", "steer"].includes(String(value.mode)) ||
     !["queued", "transcribing", "applying", "failed"].includes(String(value.status)) ||
     typeof value.createdAt !== "number" ||
     !Number.isFinite(value.createdAt) ||

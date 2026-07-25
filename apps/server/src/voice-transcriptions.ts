@@ -5,8 +5,8 @@ import { basename, dirname, join } from "node:path";
 import type {
   ThreadDraft,
   UiLanguage,
-  VoiceInputMode,
   VoiceTranscriptionJob,
+  VoiceTranscriptionMode,
 } from "@codexnest/protocol";
 
 import type { MessageQueue } from "./message-queue";
@@ -20,13 +20,13 @@ type VoiceTranscriptionManagerOptions = {
   store: StateStore;
   projection: Pick<AppProjection, "publishVoiceTranscription" | "removeVoiceTranscription">;
   transcription: Pick<TranscriptionService, "transcribe">;
-  queue: Pick<MessageQueue, "enqueue">;
+  queue: Pick<MessageQueue, "enqueue" | "sendNow">;
   onWarning?(error: unknown, message: string): void;
 };
 
 type AcceptVoiceTranscription = {
   threadId: string;
-  mode: VoiceInputMode;
+  mode: VoiceTranscriptionMode;
   audio: Buffer;
   contentType: "audio/webm" | "audio/mp4";
   audioDurationMs: number;
@@ -341,6 +341,13 @@ export class VoiceTranscriptionManager {
         completeVoiceTranscriptionId: job.id,
       },
     );
+    if (job.mode === "steer") {
+      try {
+        await this.options.queue.sendNow(job.threadId, job.id);
+      } catch (error) {
+        this.options.onWarning?.(error, "Voice steering failed; the message remains in the queue");
+      }
+    }
     this.options.projection.removeVoiceTranscription(job.threadId, job.id, "send");
   }
 

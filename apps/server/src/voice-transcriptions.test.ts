@@ -172,7 +172,7 @@ describe("VoiceTranscriptionManager", () => {
     expect(store.snapshot().threadMeta.other?.draft?.input).toBe("вторая");
   });
 
-  it("converts an automatic result into one durable queued message with the full draft", async () => {
+  it("queues an automatic result with the complete draft while the agent is running", async () => {
     const { store } = await createStore("Проверь");
     await store.update((state) => {
       state.threadMeta.thread!.draft!.images = [
@@ -192,19 +192,20 @@ describe("VoiceTranscriptionManager", () => {
         },
       ];
     });
-    const enqueue = queueMock(store).enqueue;
+    const queue = queueMock(store);
+    const { enqueue } = queue;
     const manager = new VoiceTranscriptionManager({
       store,
       projection: projectionMock(),
       transcription: { transcribe: vi.fn(async () => "голос") },
-      queue: { enqueue },
+      queue,
     });
     await manager.start();
     const updatedAt = store.snapshot().threadMeta.thread!.draft!.updatedAt;
 
     const job = await manager.accept({
       threadId: "thread",
-      mode: "send",
+      mode: "queue",
       audio: Buffer.from("audio"),
       contentType: "audio/webm",
       audioDurationMs: 1_000,
@@ -224,8 +225,49 @@ describe("VoiceTranscriptionManager", () => {
       { goal: true, completeVoiceTranscriptionId: job.id },
     );
     expect(enqueue.mock.calls[0]?.[1]).toContain("## Annotations");
+    expect(queue.sendNow).not.toHaveBeenCalled();
     expect(store.snapshot().voiceTranscriptions?.thread).toBeUndefined();
     expect(store.snapshot().threadMeta.thread?.draft).toBeUndefined();
+  });
+
+  it("steers a durable automatic result and leaves failed delivery in the queue", async () => {
+    const { store } = await createStore("Проверь");
+    const queue = queueMock(store);
+    queue.sendNow.mockRejectedValueOnce(new Error("Turn already completed"));
+    const projection = projectionMock();
+    const onWarning = vi.fn();
+    const manager = new VoiceTranscriptionManager({
+      store,
+      projection,
+      transcription: { transcribe: vi.fn(async () => "голос") },
+      queue,
+      onWarning,
+    });
+    await manager.start();
+    const updatedAt = store.snapshot().threadMeta.thread!.draft!.updatedAt;
+
+    const job = await manager.accept({
+      threadId: "thread",
+      mode: "steer",
+      audio: Buffer.from("audio"),
+      contentType: "audio/webm",
+      audioDurationMs: 1_000,
+      estimatedTotalSeconds: null,
+      selectionStart: 7,
+      selectionEnd: 7,
+      expectedDraftUpdatedAt: updatedAt,
+      timingProfile: null,
+    });
+
+    await vi.waitFor(() =>
+      expect(projection.removeVoiceTranscription).toHaveBeenCalledWith("thread", job.id, "send"),
+    );
+    expect(queue.sendNow).toHaveBeenCalledWith("thread", job.id);
+    expect(store.snapshot().messageQueues?.thread?.[0]?.text).toBe("Проверь голос");
+    expect(onWarning).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Turn already completed" }),
+      "Voice steering failed; the message remains in the queue",
+    );
   });
 
   it("keeps a failed job visible but unlocks the thread", async () => {
@@ -349,5 +391,6 @@ function queueMock(store: StateStore) {
         return message;
       },
     ),
+    sendNow: vi.fn(async () => "turn"),
   };
 }

@@ -67,12 +67,14 @@ export type TranscriptionResponse = {
 
 export type VoiceInputMode = "draft" | "send";
 
+export type VoiceTranscriptionMode = VoiceInputMode | "queue" | "steer";
+
 export type VoiceTranscriptionStatus = "queued" | "transcribing" | "applying" | "failed";
 
 export type VoiceTranscriptionJob = {
   id: string;
   threadId: string;
-  mode: VoiceInputMode;
+  mode: VoiceTranscriptionMode;
   status: VoiceTranscriptionStatus;
   createdAt: number;
   startedAt: number | null;

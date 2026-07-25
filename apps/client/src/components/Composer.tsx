@@ -434,6 +434,16 @@ export function Composer({
     stopMediaStream();
   }
 
+  function cancelRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    discardRecordingRef.current = true;
+    recordingStoppedRef.current = true;
+    clearRecordingTimers();
+    recorder.stop();
+    stopMediaStream();
+  }
+
   async function finishRecording(mimeType: string) {
     clearRecordingTimers();
     stopMediaStream();
@@ -444,6 +454,10 @@ export function Composer({
     audioBytesRef.current = 0;
     if (discardRecordingRef.current) {
       clearTranscriptionTimer();
+      if (aliveRef.current) {
+        setRecordingSeconds(0);
+        setSpeechState("idle");
+      }
       return;
     }
     if (!chunks.length || !bytes) {
@@ -779,16 +793,31 @@ export function Composer({
                 <StopIcon />
               </button>
             )}
-            <button
-              aria-label={
-                running ? t("Добавить в очередь") : goalMode ? t("Запустить цель") : t("Отправить")
-              }
-              className="composer-action send"
-              disabled={!canSubmit}
-              type="submit"
-            >
-              <SendIcon />
-            </button>
+            {speechState === "recording" ? (
+              <button
+                aria-label={t("Отменить запись")}
+                className="composer-action stop"
+                type="button"
+                onClick={cancelRecording}
+              >
+                <XIcon />
+              </button>
+            ) : (
+              <button
+                aria-label={
+                  running
+                    ? t("Добавить в очередь")
+                    : goalMode
+                      ? t("Запустить цель")
+                      : t("Отправить")
+                }
+                className="composer-action send"
+                disabled={!canSubmit}
+                type="submit"
+              >
+                <SendIcon />
+              </button>
+            )}
           </div>
         </div>
         {speechStatusText && (

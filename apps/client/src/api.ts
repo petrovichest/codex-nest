@@ -42,8 +42,8 @@ import type {
   UpdateThreadRequest,
   UpdateUiLanguageRequest,
   TaskDefaults,
-  VoiceInputMode,
   VoiceTranscriptionJob,
+  VoiceTranscriptionMode,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
@@ -102,7 +102,7 @@ export class ApiClient {
     audio: Blob,
     options: {
       recordingDurationMs: number;
-      mode: VoiceInputMode;
+      mode: VoiceTranscriptionMode;
       selectionStart: number;
       selectionEnd: number;
       draftUpdatedAt: number | null;

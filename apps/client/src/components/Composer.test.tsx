@@ -273,7 +273,8 @@ describe("Composer", () => {
       screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
     ).toBeDisabled();
     expect(textarea).toHaveAttribute("readonly");
-    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Отправить" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Отменить запись" })).toBeEnabled();
     view.rerender(
       <Harness
         busy
@@ -307,6 +308,40 @@ describe("Composer", () => {
       screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
     ).toBeEnabled();
   });
+
+  it.each(["local", "background"] as const)(
+    "discards an active %s recording without transcription or upload",
+    async (path) => {
+      const track = { stop: vi.fn() };
+      installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
+      const onTranscribe = vi.fn(async () => "не вставлять");
+      const onRecordingReady = vi.fn(async () => undefined);
+      render(
+        <Harness
+          initialInput="Не менять"
+          transcriptionConfig={transcriptionConfig}
+          onTranscribe={path === "local" ? onTranscribe : undefined}
+          onRecordingReady={path === "background" ? onRecordingReady : undefined}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+      await screen.findByRole("button", { name: "Остановить запись" });
+      expect(screen.queryByRole("button", { name: "Отправить" })).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Отменить запись" }));
+
+      await screen.findByRole("button", { name: "Начать запись" });
+      expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("Не менять");
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+        "readonly",
+      );
+      expect(onTranscribe).not.toHaveBeenCalled();
+      expect(onRecordingReady).not.toHaveBeenCalled();
+      expect(track.stop).toHaveBeenCalledOnce();
+    },
+  );
 
   it("keeps the existing text when microphone permission is denied", async () => {
     installMediaRecorder(async () => {
@@ -442,6 +477,7 @@ function Harness({
   initialInput = "",
   transcriptionConfig: speechConfig,
   onTranscribe,
+  onRecordingReady,
   transcriptionStatus = null,
   voiceInputLocked = false,
 }: {
@@ -450,6 +486,7 @@ function Harness({
   initialInput?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
+  onRecordingReady?: Parameters<typeof Composer>[0]["onRecordingReady"];
   transcriptionStatus?: ComposerTranscriptionStatus | null;
   voiceInputLocked?: boolean;
 }) {
@@ -480,6 +517,7 @@ function Harness({
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
+      onRecordingReady={onRecordingReady}
       voiceMode={voiceMode}
       onVoiceModeChange={setVoiceMode}
       voiceInputLocked={voiceInputLocked}

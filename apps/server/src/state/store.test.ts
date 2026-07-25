@@ -143,7 +143,7 @@ describe("StateStore", () => {
         thread: {
           id: "voice",
           threadId: "thread",
-          mode: "draft",
+          mode: "steer",
           status: "queued",
           createdAt: 1,
           startedAt: null,
@@ -208,6 +208,7 @@ describe("StateStore", () => {
     });
     expect(reloaded.snapshot().voiceTranscriptions?.thread).toMatchObject({
       id: "voice",
+      mode: "steer",
       status: "queued",
       audioFile: "voice.webm",
     });

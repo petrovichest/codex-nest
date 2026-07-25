@@ -2184,6 +2184,89 @@ describe("Activity", () => {
     });
   });
 
+  it.each([
+    { running: false, autoSend: false, expectedMode: "draft", chatProgress: false },
+    { running: false, autoSend: true, expectedMode: "send", chatProgress: true },
+    { running: true, autoSend: false, expectedMode: "queue", chatProgress: true },
+    { running: true, autoSend: true, expectedMode: "steer", chatProgress: true },
+  ] as const)(
+    "routes voice to $expectedMode when running=$running and autoSend=$autoSend",
+    async ({ running, autoSend, expectedMode, chatProgress }) => {
+      installMediaRecorder(async () => {
+        return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+      });
+      const api = threadApi();
+      api.createVoiceTranscription.mockImplementation(() => new Promise(() => undefined));
+      const thread = running
+        ? { ...summary, state: "running" as const, currentTurnId: "turn" }
+        : summary;
+      mockThreadConnection(api, thread, {
+        draft: {
+          input: "Черновик",
+          images: [],
+          goalMode: false,
+          annotations: [],
+          updatedAt: 1,
+        },
+      });
+      const view = render(voiceThreadRoute());
+      await waitFor(() =>
+        expect(
+          screen.getByRole("textbox", {
+            name: running ? "Направить текущую задачу" : "Сообщение для Codex",
+          }),
+        ).toHaveValue("Черновик"),
+      );
+      if (autoSend) {
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: "Включить автоотправку голосового ввода",
+          }),
+        );
+      }
+
+      fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+
+      await waitFor(() =>
+        expect(api.createVoiceTranscription).toHaveBeenCalledWith(
+          "thread",
+          expect.any(Blob),
+          expect.objectContaining({ mode: expectedMode }),
+        ),
+      );
+      expect(Boolean(view.container.querySelector(".voice-transcription-message"))).toBe(
+        chatProgress,
+      );
+    },
+  );
+
+  it("uses the agent state at recording stop rather than recording start", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    const api = threadApi();
+    api.createVoiceTranscription.mockImplementation(() => new Promise(() => undefined));
+    const context = mockThreadConnection(api, summary);
+    const view = render(voiceThreadRoute());
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    const stop = await screen.findByRole("button", { name: "Остановить запись" });
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    context.state.snapshot.threads = [running];
+    context.state.details.thread.summary = running;
+    view.rerender(voiceThreadRoute());
+    fireEvent.click(stop);
+
+    await waitFor(() =>
+      expect(api.createVoiceTranscription).toHaveBeenCalledWith(
+        "thread",
+        expect.any(Blob),
+        expect.objectContaining({ mode: "queue" }),
+      ),
+    );
+  });
+
   it("restores a server voice job and blocks only its composer", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     context.state.snapshot.voiceTranscriptions = [
@@ -2211,47 +2294,50 @@ describe("Activity", () => {
     expect(within(microphone).getByText("0:00")).toBeInTheDocument();
   });
 
-  it("restores an automatic transcription countdown as a user bubble", async () => {
-    const context = mockThreadConnection(threadApi(), {
-      ...summary,
-      state: "completed",
-      unread: true,
-    });
-    context.state.snapshot.voiceTranscriptions = [
-      {
-        id: "voice",
-        threadId: "thread",
-        mode: "send",
-        status: "queued",
-        createdAt: Date.now(),
-        startedAt: null,
-        audioDurationMs: 2_000,
-        estimatedTotalSeconds: 10,
-        error: null,
-      },
-    ];
-    const view = render(voiceThreadRoute());
+  it.each(["send", "queue", "steer"] as const)(
+    "restores a %s transcription countdown as a user bubble",
+    async (mode) => {
+      const context = mockThreadConnection(threadApi(), {
+        ...summary,
+        state: "completed",
+        unread: true,
+      });
+      context.state.snapshot.voiceTranscriptions = [
+        {
+          id: "voice",
+          threadId: "thread",
+          mode,
+          status: "queued",
+          createdAt: Date.now(),
+          startedAt: null,
+          audioDurationMs: 2_000,
+          estimatedTotalSeconds: 10,
+          error: null,
+        },
+      ];
+      const view = render(voiceThreadRoute());
 
-    const queued = await screen.findByRole("status", { name: "На сервере · ожидание" });
-    expect(queued).toHaveTextContent("0:00");
+      const queued = await screen.findByRole("status", { name: "На сервере · ожидание" });
+      expect(queued).toHaveTextContent("0:00");
 
-    context.state.snapshot.voiceTranscriptions[0] = {
-      ...context.state.snapshot.voiceTranscriptions[0]!,
-      status: "transcribing",
-      startedAt: Date.now() - 2_000,
-    };
-    view.rerender(voiceThreadRoute());
+      context.state.snapshot.voiceTranscriptions[0] = {
+        ...context.state.snapshot.voiceTranscriptions[0]!,
+        status: "transcribing",
+        startedAt: Date.now() - 2_000,
+      };
+      view.rerender(voiceThreadRoute());
 
-    const progress = await screen.findByRole("status", { name: "Распознаём" });
-    expect(progress).toHaveClass("message", "userMessage", "voice-transcription-message");
-    expect(progress).toHaveTextContent("Распознаём");
-    expect(progress).toHaveTextContent("≈0:08");
-    expect(view.container.querySelector(".composer .microphone")).not.toHaveClass("timing");
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
-      "readonly",
-    );
-    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
-  });
+      const progress = await screen.findByRole("status", { name: "Распознаём" });
+      expect(progress).toHaveClass("message", "userMessage", "voice-transcription-message");
+      expect(progress).toHaveTextContent("Распознаём");
+      expect(progress).toHaveTextContent("≈0:08");
+      expect(view.container.querySelector(".composer .microphone")).not.toHaveClass("timing");
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+        "readonly",
+      );
+      expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+    },
+  );
 
   it("hides an automatic transcription bubble once its queued message materializes", () => {
     const context = mockThreadConnection(threadApi(), summary, {

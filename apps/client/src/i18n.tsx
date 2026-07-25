@@ -490,6 +490,7 @@ const ENGLISH: Record<string, string> = {
   "Опишите проверяемый результат цели…": "Describe a verifiable goal outcome…",
   "Остановить задачу": "Stop task",
   "Остановить запись": "Stop recording",
+  "Отменить запись": "Discard recording",
   "Отправить сейчас": "Send now",
   "Отправляем запись": "Uploading recording",
   "Отправляем запись — не закрывайте": "Uploading recording — do not close",

@@ -28,6 +28,7 @@ import type {
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   VoiceInputMode,
+  VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
@@ -82,7 +83,7 @@ type QueuedMessageView = QueuedMessage & {
 };
 
 type VoiceUploadState = {
-  mode: VoiceInputMode;
+  mode: VoiceTranscriptionMode;
   startedAt: number;
 };
 
@@ -101,6 +102,14 @@ const COMPLETED_CHAT_RETRY_MS = 500;
 
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
+}
+
+function resolveVoiceTranscriptionMode(
+  preference: VoiceInputMode,
+  currentTurnId: string | null,
+): VoiceTranscriptionMode {
+  if (!currentTurnId) return preference;
+  return preference === "send" ? "steer" : "queue";
 }
 
 export function ThreadPage({
@@ -138,6 +147,10 @@ export function ThreadPage({
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
+  const voiceModeRef = useRef(voiceMode);
+  voiceModeRef.current = voiceMode;
+  const currentTurnIdRef = useRef(summary?.currentTurnId ?? null);
+  currentTurnIdRef.current = summary?.currentTurnId ?? null;
   const [voiceUploads, setVoiceUploads] = useState<Record<string, VoiceUploadState>>({});
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
   const handledVoiceRemovalsRef = useRef(new Set<string>());
@@ -236,13 +249,13 @@ export function ThreadPage({
           }
         : null;
   const autoVoiceProgress: VoiceProgress | null =
-    activeVoiceJob?.mode === "send" && !voiceMessageMaterialized
+    activeVoiceJob && activeVoiceJob.mode !== "draft" && !voiceMessageMaterialized
       ? {
           status: activeVoiceJob.status as Exclude<VoiceTranscriptionStatus, "failed">,
           elapsedSeconds: transcriptionElapsedSeconds,
           estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
         }
-      : voiceUpload?.mode === "send"
+      : voiceUpload && voiceUpload.mode !== "draft"
         ? {
             status: "uploading",
             elapsedSeconds: transcriptionElapsedSeconds,
@@ -373,7 +386,10 @@ export function ThreadPage({
     recording: ComposerRecording,
   ): Promise<void> {
     if (!transcriptionProvider || activeVoiceJob || voiceUploads[targetThreadId]) return;
-    const uploadMode = voiceMode;
+    const uploadMode = resolveVoiceTranscriptionMode(
+      voiceModeRef.current,
+      currentTurnIdRef.current,
+    );
     setVoiceUploads((current) => ({
       ...current,
       [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },

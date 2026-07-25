@@ -45,7 +45,7 @@ import type {
   UpdateThreadRequest,
   UpdateTranscriptionSettingsRequest,
   UpdateUiLanguageRequest,
-  VoiceInputMode,
+  VoiceTranscriptionMode,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
@@ -499,7 +499,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (normalizedType !== "audio/webm" && normalizedType !== "audio/mp4") {
         return apiError(reply, 400, "validation_failed", "Audio must be WebM or MP4");
       }
-      if (request.query.mode !== "draft" && request.query.mode !== "send") {
+      if (!["draft", "send", "queue", "steer"].includes(request.query.mode ?? "")) {
         return apiError(reply, 400, "validation_failed", "Voice input mode is invalid");
       }
       const selectionStart = parseNonNegativeInteger(request.query.selectionStart);
@@ -537,7 +537,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return reply.code(202).send(
         await voiceTranscriptions.accept({
           threadId: request.params.id,
-          mode: request.query.mode as VoiceInputMode,
+          mode: request.query.mode as VoiceTranscriptionMode,
           audio: request.body,
           contentType: normalizedType,
           audioDurationMs,
