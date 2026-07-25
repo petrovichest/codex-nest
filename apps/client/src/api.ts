@@ -214,9 +214,11 @@ export class ApiClient {
     });
   }
 
-  readThread(id: string, cursor?: string): Promise<ThreadDetail> {
+  readThread(id: string, cursor?: string, options?: { fresh?: boolean }): Promise<ThreadDetail> {
     const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`);
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`, {
+      cache: options?.fresh ? "no-store" : undefined,
+    });
   }
 
   updateThreadDraft(
@@ -379,6 +381,7 @@ export class ApiClient {
       timeoutMs?: number | null;
       keepalive?: boolean;
       headers?: Record<string, string>;
+      cache?: RequestCache;
     } = {},
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
@@ -405,6 +408,7 @@ export class ApiClient {
           (options.body === undefined ? undefined : JSON.stringify(options.body)),
         signal: controller.signal,
         keepalive: options.keepalive,
+        cache: options.cache,
       });
     } catch {
       throw new ApiClientError(

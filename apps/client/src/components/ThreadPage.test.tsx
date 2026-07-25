@@ -1880,6 +1880,103 @@ describe("Activity", () => {
     await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
   });
 
+  it("retries one completed chat read when only a plan is available", () => {
+    vi.useFakeTimers();
+    try {
+      const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+      const context = mockThreadConnection(threadApi(), completed, {
+        turns: [
+          {
+            id: "turn",
+            status: "completed",
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            progress: progress(),
+            items: [
+              {
+                type: "plan",
+                id: "plan",
+                status: "completed",
+                text: "План",
+                images: [],
+                timestamp: 2,
+                phase: null,
+              },
+            ],
+          },
+        ],
+      });
+      renderThread();
+
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(499));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(1));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(2);
+      expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
+      act(() => vi.advanceTimersByTime(5_000));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry a completed chat that already has a final answer", () => {
+    vi.useFakeTimers();
+    try {
+      const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+      const context = mockThreadConnection(threadApi(), completed, {
+        turns: [completedAgentTurn()],
+      });
+      renderThread();
+
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(500));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending completed chat retry when the page closes", () => {
+    vi.useFakeTimers();
+    try {
+      const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+      const context = mockThreadConnection(threadApi(), completed, {
+        turns: [
+          {
+            id: "turn",
+            status: "completed",
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            progress: progress(),
+            items: [
+              {
+                type: "plan",
+                id: "plan",
+                status: "completed",
+                text: "План",
+                images: [],
+                timestamp: 2,
+                phase: null,
+              },
+            ],
+          },
+        ],
+      });
+      const view = renderThread();
+
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+      view.unmount();
+      act(() => vi.advanceTimersByTime(500));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows a fallback working row and refreshes only when turn details disagree", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "missing-turn" };

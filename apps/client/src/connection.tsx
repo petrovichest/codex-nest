@@ -90,7 +90,7 @@ export function ConnectionProvider({
       const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
       detailRequestVersions.current.set(key, version);
       const request = api
-        .readThread(threadId, cursor)
+        .readThread(threadId, cursor, { fresh: force })
         .then((detail) => {
           if (detailRequestVersions.current.get(key) === version) {
             dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });

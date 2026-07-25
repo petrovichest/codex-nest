@@ -17,6 +17,7 @@ import type {
   QueuedMessage,
   ThreadDetail,
   ThreadDraft,
+  ThreadState,
   TranscriptionConfigResponse,
   TranscriptionProvider,
   TurnProgress,
@@ -81,6 +82,7 @@ function emptyComposerDraft(): UpdateThreadDraftRequest {
 }
 
 const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
+const COMPLETED_CHAT_RETRY_MS = 500;
 
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
@@ -132,6 +134,10 @@ export function ThreadPage({
   const previousAttentionIds = useRef<string | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
   const detailReconcileKey = useRef<string | null>(null);
+  const completedChatRetry = useRef<{
+    key: string;
+    timer: number | null;
+  } | null>(null);
   const scrollTargetMessageId = useRef<string | null>(null);
   const olderScrollAnchor = useRef<{
     threadId: string;
@@ -451,6 +457,43 @@ export function ThreadPage({
       );
     }
   }, [threadId, refreshDetail, state.snapshotEpoch]);
+
+  useEffect(
+    () => () => {
+      const retry = completedChatRetry.current;
+      if (retry?.timer !== null && retry?.timer !== undefined) {
+        window.clearTimeout(retry.timer);
+      }
+      completedChatRetry.current = null;
+    },
+    [threadId],
+  );
+
+  useEffect(() => {
+    if (!summary || !completedChatLooksIncomplete(summary.state, detail)) {
+      const retry = completedChatRetry.current;
+      if (retry?.timer !== null && retry?.timer !== undefined) {
+        window.clearTimeout(retry.timer);
+      }
+      completedChatRetry.current = null;
+      return;
+    }
+    const key = `${threadId}:${summary.updatedAt}`;
+    if (completedChatRetry.current?.key === key) return;
+    const previous = completedChatRetry.current;
+    if (previous?.timer !== null && previous?.timer !== undefined) {
+      window.clearTimeout(previous.timer);
+    }
+    const timer = window.setTimeout(() => {
+      if (completedChatRetry.current?.timer !== timer) return;
+      completedChatRetry.current = { key, timer: null };
+      void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
+        if (completedChatRetry.current?.key !== key) return;
+        setError(localizeKnownServerText(languageRef.current, caught.message));
+      });
+    }, COMPLETED_CHAT_RETRY_MS);
+    completedChatRetry.current = { key, timer };
+  }, [detail, refreshDetail, summary, threadId]);
 
   useEffect(() => {
     if (!detail) return;
@@ -2226,6 +2269,21 @@ function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
     items[finalAnswerIndex]!,
     ...trailingItems.filter((item) => item.type !== "planChecklist"),
   ];
+}
+
+function completedChatLooksIncomplete(
+  state: ThreadState,
+  detail: ThreadDetail | undefined,
+): boolean {
+  if (state !== "completed" || !detail?.turns.length) return false;
+  const latestTurn = detail.turns.at(-1)!;
+  if (latestTurn.status === "inProgress") return true;
+  return !latestTurn.items.some(
+    (item) =>
+      item.type === "agentMessage" &&
+      item.phase === "final_answer" &&
+      Boolean(item.text.trim() || item.images.length),
+  );
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {

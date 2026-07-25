@@ -143,6 +143,10 @@ describe("ConnectionProvider", () => {
       </ConnectionProvider>,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread"),
+      expect.objectContaining({ cache: "no-store" }),
+    );
 
     act(() => responses[1]?.(new Response(JSON.stringify(detail("Новый ответ")))));
     expect(await screen.findByText("Новый ответ")).toBeInTheDocument();
