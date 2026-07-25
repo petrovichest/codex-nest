@@ -241,6 +241,70 @@ describe("clientReducer", () => {
     ]);
   });
 
+  it("inserts delayed activities by timestamp without disturbing untimed activities", () => {
+    const message = (id: string, timestamp: number | null) => ({
+      type: "agentMessage" as const,
+      id,
+      status: "completed" as const,
+      text: id,
+      images: [],
+      timestamp,
+      phase: "commentary" as const,
+    });
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [
+              message("+50", 31),
+              {
+                type: "command",
+                id: "command",
+                status: "completed",
+                kind: "command",
+                command: "true",
+                cwd: null,
+                output: "",
+                exitCode: 0,
+              },
+              message("+55", 36),
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+      page: "latest",
+    });
+
+    for (const [sequence, item] of [
+      [5, message("+40", 20)],
+      [6, message("same-time", 36)],
+      [7, message("unknown-time", null)],
+    ] as const) {
+      state = clientReducer(state, {
+        type: "event",
+        sequence,
+        event: { type: "activity.upserted", threadId: "one", turnId: "turn", item },
+      });
+    }
+
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "+40",
+      "+50",
+      "command",
+      "+55",
+      "same-time",
+      "unknown-time",
+    ]);
+  });
+
   it("applies server-owned settings to the list and loaded detail", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

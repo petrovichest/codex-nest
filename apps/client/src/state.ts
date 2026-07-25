@@ -352,9 +352,11 @@ function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem
         (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&
         candidate.afterItemId === item.id,
     );
-    if (anchoredArtifact < 0) return [...items, item];
+    const insertion =
+      anchoredArtifact >= 0 ? anchoredArtifact : chronologicalActivityPosition(items, item);
+    if (insertion === items.length) return [...items, item];
     const next = [...items];
-    next.splice(anchoredArtifact, 0, item);
+    next.splice(insertion, 0, item);
     return next;
   }
   const anchor = item.afterItemId
@@ -375,6 +377,16 @@ function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem
   const next = [...items];
   next.splice(insertion, 0, item);
   return next;
+}
+
+function chronologicalActivityPosition(items: ActivityItem[], item: ActivityItem): number {
+  if (!("timestamp" in item) || item.timestamp === null) return items.length;
+  const timestamp = item.timestamp;
+  const later = items.findIndex(
+    (candidate) =>
+      "timestamp" in candidate && candidate.timestamp !== null && candidate.timestamp > timestamp,
+  );
+  return later < 0 ? items.length : later;
 }
 
 function fallbackActivityPosition(
