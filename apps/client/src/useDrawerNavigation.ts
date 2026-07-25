@@ -168,6 +168,11 @@ export function useDrawerNavigation({
   }, [open]);
 
   useEffect(() => {
+    if (!mobile || (!open && !dragging)) return;
+    blurActiveTextInput();
+  }, [dragging, mobile, open]);
+
+  useEffect(() => {
     if (Capacitor.getPlatform() !== "android" || !mobile || (!threadActive && !open)) return;
 
     let disposed = false;
@@ -187,4 +192,15 @@ export function useDrawerNavigation({
   }, [mobile, open, setOpen, threadActive]);
 
   return { dragging, frameRef, sidebarRef };
+}
+
+function blurActiveTextInput() {
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    (active instanceof HTMLElement && active.isContentEditable)
+  ) {
+    active.blur();
+  }
 }

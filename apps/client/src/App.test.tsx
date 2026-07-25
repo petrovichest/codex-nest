@@ -821,10 +821,13 @@ describe("App routing and navigation", () => {
       ...sidebar.getBoundingClientRect(),
       width: 300,
     });
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    textarea.focus();
 
     fireEvent.touchStart(frame, { touches: [{ clientX: 80, clientY: 200 }] });
     fireEvent.touchMove(frame, { touches: [{ clientX: 180, clientY: 204 }] });
 
+    expect(textarea).not.toHaveFocus();
     expect(frame).toHaveClass("drawer-dragging");
     expect(frame.style.getPropertyValue("--drawer-drag-progress")).toBe(String(100 / 300));
     expect(view.container.querySelector(".drawer-backdrop")).not.toBeNull();
@@ -867,8 +870,11 @@ describe("App routing and navigation", () => {
       ...sidebar.getBoundingClientRect(),
       width: 300,
     });
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    textarea.focus();
     fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
 
+    expect(textarea).not.toHaveFocus();
     fireEvent.touchStart(frame, { touches: [{ clientX: 220, clientY: 200 }] });
     fireEvent.touchMove(frame, { touches: [{ clientX: 120, clientY: 204 }] });
 
@@ -1012,8 +1018,11 @@ describe("App routing and navigation", () => {
     const view = renderApp("/threads/newer");
     const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
     await waitFor(() => expect(capacitor.addListener).toHaveBeenCalledOnce());
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    textarea.focus();
 
     act(() => capacitor.backHandler?.());
+    expect(textarea).not.toHaveFocus();
     expect(sidebar).toHaveClass("open");
 
     await waitFor(() => expect(capacitor.addListener).toHaveBeenCalledTimes(2));

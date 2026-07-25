@@ -1186,6 +1186,34 @@ describe("Activity", () => {
     );
   });
 
+  it("does not rerender unchanged history while the composer draft changes", () => {
+    let textReads = 0;
+    const userMessage: Parameters<typeof Activity>[0]["item"] = {
+      type: "userMessage",
+      id: "older-user-message",
+      status: "completed",
+      get text() {
+        textReads += 1;
+        return "Старое сообщение";
+      },
+      images: [],
+      timestamp: 1,
+      phase: null,
+    };
+    const turn = completedAgentTurn();
+    mockThreadConnection(threadApi(), summary, {
+      turns: [{ ...turn, items: [userMessage, ...turn.items] }],
+    });
+    renderThread();
+    const readsAfterInitialRender = textReads;
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Новый черновик" },
+    });
+
+    expect(textReads).toBe(readsAfterInitialRender);
+  });
+
   it("coalesces draft revisions queued behind a slow save", async () => {
     const api = threadApi();
     const saves: Array<{

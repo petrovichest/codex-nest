@@ -1,5 +1,6 @@
 import {
   type FormEvent,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -176,6 +177,24 @@ export function ThreadPage({
   const draftTouchedThreadsRef = useRef(new Set<string>());
   const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
   const legacyAnnotationThreadsRef = useRef(new Set<string>());
+  const annotationActionsRef = useRef<{
+    create(draft: AnnotationDraft): boolean;
+    update(annotationId: string, comment: string): boolean;
+    delete(annotationId: string): boolean;
+  } | null>(null);
+  const createAnnotationEvent = useCallback(
+    (draft: AnnotationDraft) => annotationActionsRef.current?.create(draft) ?? false,
+    [],
+  );
+  const updateAnnotationEvent = useCallback(
+    (annotationId: string, comment: string) =>
+      annotationActionsRef.current?.update(annotationId, comment) ?? false,
+    [],
+  );
+  const deleteAnnotationEvent = useCallback(
+    (annotationId: string) => annotationActionsRef.current?.delete(annotationId) ?? false,
+    [],
+  );
   const attention = useMemo(
     () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
@@ -192,6 +211,11 @@ export function ThreadPage({
   );
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
+  );
+  const groupedTurnActivities = useMemo(
+    () =>
+      new Map((detail?.turns ?? []).map((turn) => [turn.id, groupActivities(turn.items)] as const)),
+    [detail?.turns],
   );
   const voiceMessageMaterialized = activeVoiceJob
     ? hasMaterializedVoiceMessage(detail, optimisticMessages, activeVoiceJob.id)
@@ -651,13 +675,6 @@ export function ThreadPage({
     }
   }, [detail?.olderTurnsCursor, loadOlderDetail, loadingOlder, threadId]);
 
-  if (!summary)
-    return (
-      <div className="center-state">
-        <h2>{t("Задача не найдена")}</h2>
-      </div>
-    );
-
   function persistAnnotations(next: PendingAnnotation[]): boolean {
     replaceComposerDraft(
       { ...currentComposerDraft(), annotations: next, ...(next.length ? { goalMode: false } : {}) },
@@ -888,8 +905,8 @@ export function ThreadPage({
     }
   }
 
-  const togglePin = () => void api.updateThread(threadId, { pinned: !summary.pinned });
-  const toggleArchive = () => void api.archive(threadId, !summary.archived);
+  const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
+  const toggleArchive = () => void api.archive(threadId, !summary!.archived);
 
   async function deleteThread() {
     if (!window.confirm(t("Удалить эту сессию? Это действие нельзя отменить."))) return;
@@ -960,6 +977,21 @@ export function ThreadPage({
       setGoalBusy(false);
     }
   }
+
+  useLayoutEffect(() => {
+    annotationActionsRef.current = {
+      create: createAnnotation,
+      update: updateAnnotation,
+      delete: deleteAnnotation,
+    };
+  });
+
+  if (!summary)
+    return (
+      <div className="center-state">
+        <h2>{t("Задача не найдена")}</h2>
+      </div>
+    );
 
   const latestPlanId =
     !summary.currentTurnId && summary.settings.collaborationMode === "plan"
@@ -1042,9 +1074,9 @@ export function ThreadPage({
                       key={message.id}
                     />
                   ))}
-                {groupActivities(turn.items).map((entry) =>
+                {groupedTurnActivities.get(turn.id)!.map((entry) =>
                   Array.isArray(entry) ? (
-                    <ActivityGroup
+                    <MemoizedActivityGroup
                       items={entry}
                       cwd={summary.cwd}
                       onDownload={downloadFile}
@@ -1052,16 +1084,16 @@ export function ThreadPage({
                     />
                   ) : (
                     <div key={entry.id}>
-                      <Activity
+                      <MemoizedActivity
                         item={entry}
                         cwd={summary.cwd}
                         onDownload={downloadFile}
                         annotations={annotations}
                         annotationEnabled={!busy && entry.id === latestAnnotatableId}
                         annotationBusy={busy}
-                        onCreateAnnotation={createAnnotation}
-                        onUpdateAnnotation={updateAnnotation}
-                        onDeleteAnnotation={deleteAnnotation}
+                        onCreateAnnotation={createAnnotationEvent}
+                        onUpdateAnnotation={updateAnnotationEvent}
+                        onDeleteAnnotation={deleteAnnotationEvent}
                       />
                       {entry.id === latestPlanId && (
                         <button
@@ -1080,7 +1112,7 @@ export function ThreadPage({
                     </div>
                   ),
                 )}
-                <TurnTiming turn={turn} active={summary.currentTurnId === turn.id} />
+                <MemoizedTurnTiming turn={turn} active={summary.currentTurnId === turn.id} />
               </div>
             ))}
             {summary.currentTurnId &&
@@ -1677,6 +1709,8 @@ export function Activity({
   return null;
 }
 
+const MemoizedActivity = memo(Activity);
+
 type NumberedAnnotation = {
   annotation: PendingAnnotation;
   number: number;
@@ -2082,12 +2116,14 @@ function ActivityGroup({
       </summary>
       <div className="activity-group-content">
         {items.map((item) => (
-          <Activity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
+          <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
         ))}
       </div>
     </details>
   );
 }
+
+const MemoizedActivityGroup = memo(ActivityGroup);
 
 function QueuedMessages({
   messages,
@@ -2302,6 +2338,8 @@ export function TurnTiming({
     </div>
   );
 }
+
+const MemoizedTurnTiming = memo(TurnTiming);
 
 function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
   const { language, t } = useI18n();
