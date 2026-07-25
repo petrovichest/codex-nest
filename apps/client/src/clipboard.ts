@@ -17,7 +17,7 @@ export async function copyText(text: string): Promise<void> {
   textarea.style.opacity = "0";
   document.body.append(textarea);
   textarea.select();
-  let copied = false;
+  let copied: boolean;
   try {
     copied = document.execCommand("copy");
   } finally {
