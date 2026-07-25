@@ -1956,10 +1956,6 @@ pre {
   height: 16px;
 }
 
-.activity-group-error {
-  color: var(--danger);
-}
-
 .activity-group-content {
   display: grid;
   gap: 8px;

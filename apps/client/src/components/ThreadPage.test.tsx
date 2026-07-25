@@ -245,6 +245,46 @@ describe("Activity", () => {
     expect(screen.getByText("+new line")).toBeInTheDocument();
   });
 
+  it("shows failed activity only after its group is expanded", () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "command",
+              id: "failed-command",
+              status: "failed",
+              kind: "command",
+              command: "npm test",
+              cwd: "/work/project",
+              output: "1 test failed",
+              exitCode: 1,
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    const groupSummary = screen.getByText("Выполнены команды").closest("summary")!;
+    const group = groupSummary.closest("details")!;
+    const failedStatus = within(group).getByText("ошибка");
+
+    expect(groupSummary).not.toHaveTextContent("Ошибка");
+    expect(failedStatus).not.toBeVisible();
+
+    fireEvent.click(groupSummary);
+
+    expect(failedStatus).toBeVisible();
+  });
+
   it("copies message text and formats timestamps for today and older days", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {

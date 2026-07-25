@@ -2096,11 +2096,7 @@ function ActivityGroup({
   onDownload(path: string): Promise<void>;
 }) {
   const { t } = useI18n();
-  const status = items.some((item) => item.status === "failed")
-    ? "failed"
-    : items.some((item) => item.status === "inProgress")
-      ? "inProgress"
-      : "completed";
+  const inProgress = items.some((item) => item.status === "inProgress");
   const labels: string[] = [];
   if (items.some((item) => item.type === "command" && item.kind === "read")) {
     labels.push(t("Прочитаны файлы"));
@@ -2120,8 +2116,7 @@ function ActivityGroup({
           <ToolIcon />
         </span>
         <span>{labels.join(" · ") || t("Выполнены действия")}</span>
-        {status === "inProgress" && <span className="spinner small" />}
-        {status === "failed" && <span className="activity-group-error">{t("Ошибка")}</span>}
+        {inProgress && <span className="spinner small" />}
       </summary>
       <div className="activity-group-content">
         {items.map((item) => (
