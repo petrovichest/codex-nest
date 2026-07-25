@@ -193,6 +193,7 @@ describe("Activity", () => {
     );
 
     expect(screen.getByAltText("Изображение 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Открыть изображение 1" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
 
     view.rerender(

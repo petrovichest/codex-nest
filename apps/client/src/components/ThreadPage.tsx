@@ -63,6 +63,7 @@ import {
   TrashIcon,
   XIcon,
 } from "./Icons";
+import { ImageViewer } from "./ImageViewer";
 import { SessionInspector, type GitChangesView } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
@@ -2271,16 +2272,41 @@ function QueuedMessages({
 
 function MessageImages({ images }: { images: string[] }) {
   const { t } = useI18n();
+  const [viewer, setViewer] = useState<{ index: number; opener: HTMLButtonElement } | null>(null);
+  const viewerImages = images.map((src, index) => ({
+    src,
+    alt: t("Изображение {{number}}", { number: index + 1 }),
+  }));
+
+  useEffect(() => {
+    if (viewer && viewer.index >= images.length) setViewer(null);
+  }, [images.length, viewer]);
+
   return (
-    <div className="message-images">
-      {images.map((image, index) => (
-        <img
-          src={image}
-          alt={t("Изображение {{number}}", { number: index + 1 })}
-          key={`${index}:${image.slice(-24)}`}
+    <>
+      <div className="message-images">
+        {viewerImages.map((image, index) => (
+          <button
+            type="button"
+            className="message-image-preview"
+            aria-label={t("Открыть изображение {{number}}", { number: index + 1 })}
+            key={`${index}:${image.src.slice(-24)}`}
+            onClick={(event) => setViewer({ index, opener: event.currentTarget })}
+          >
+            <img src={image.src} alt={image.alt} />
+          </button>
+        ))}
+      </div>
+      {viewer && (
+        <ImageViewer
+          images={viewerImages}
+          index={viewer.index}
+          opener={viewer.opener}
+          onIndexChange={(index) => setViewer({ ...viewer, index })}
+          onClose={() => setViewer(null)}
         />
-      ))}
-    </div>
+      )}
+    </>
   );
 }
 

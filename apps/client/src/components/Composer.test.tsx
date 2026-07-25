@@ -112,7 +112,7 @@ describe("Composer", () => {
     expect(textarea).toHaveStyle({ height: "52px", overflowY: "hidden" });
   });
 
-  it("adds multiple images and removes a preview only after selecting it", async () => {
+  it("opens draft images as a gallery and keeps their remove buttons visible", async () => {
     const view = render(<Harness />);
     const input = view.container.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, {
@@ -124,15 +124,24 @@ describe("Composer", () => {
       },
     });
 
-    const first = await screen.findByRole("button", { name: "Выбрать изображение one.png" });
-    expect(screen.getByRole("button", { name: "Выбрать изображение two.jpg" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Удалить изображение one.png" })).toBeNull();
+    const first = await screen.findByRole("button", { name: "Открыть изображение one.png" });
+    expect(screen.getByRole("button", { name: "Открыть изображение two.jpg" })).toBeInTheDocument();
+    const removeFirst = screen.getByRole("button", { name: "Удалить изображение one.png" });
+    expect(screen.getByRole("button", { name: "Удалить изображение two.jpg" })).toBeInTheDocument();
 
     fireEvent.click(first);
-    fireEvent.click(screen.getByRole("button", { name: "Удалить изображение one.png" }));
+    const dialog = screen.getByRole("dialog", { name: "Просмотр изображений" });
+    expect(within(dialog).getByAltText("one.png")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Следующее изображение" }));
+    expect(within(dialog).getByAltText("two.jpg")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Закрыть" }));
+    expect(first).toHaveFocus();
+
+    fireEvent.click(removeFirst);
 
     await waitFor(() => expect(screen.queryByAltText("one.png")).toBeNull());
     expect(screen.getByAltText("two.jpg")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Просмотр изображений" })).toBeNull();
   });
 
   it("attaches pasted clipboard images without cancelling ordinary paste behavior", async () => {

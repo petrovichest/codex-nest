@@ -24,6 +24,7 @@ import type {
 
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, VoiceSendIcon, XIcon } from "./Icons";
+import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
 
 export type ComposerImage = {
@@ -132,7 +133,6 @@ export function Composer({
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const attachmentsRef = useRef<HTMLDivElement>(null);
   const viewportBaselineRef = useRef(viewportHeight());
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -147,7 +147,7 @@ export function Composer({
   const transcriptionStartedAtRef = useRef(0);
   const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const [viewer, setViewer] = useState<{ index: number; opener: HTMLButtonElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
@@ -227,10 +227,8 @@ export function Composer({
   }, [input]);
 
   useEffect(() => {
-    if (selectedImageId && !images.some((image) => image.id === selectedImageId)) {
-      setSelectedImageId(null);
-    }
-  }, [images, selectedImageId]);
+    if (viewer && viewer.index >= images.length) setViewer(null);
+  }, [images.length, viewer]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -277,17 +275,6 @@ export function Composer({
       window.visualViewport?.removeEventListener("resize", updateKeyboardState);
     };
   }, []);
-
-  useEffect(() => {
-    if (!selectedImageId) return;
-    function clearSelection(event: PointerEvent) {
-      if (event.target instanceof Node && !attachmentsRef.current?.contains(event.target)) {
-        setSelectedImageId(null);
-      }
-    }
-    document.addEventListener("pointerdown", clearSelection);
-    return () => document.removeEventListener("pointerdown", clearSelection);
-  }, [selectedImageId]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -595,34 +582,37 @@ export function Composer({
         </div>
       )}
       {images.length > 0 && (
-        <div className="composer-attachments" ref={attachmentsRef} aria-label={t("Изображения")}>
-          {images.map((image) => {
-            const selected = selectedImageId === image.id;
-            return (
-              <div className={`composer-attachment${selected ? " selected" : ""}`} key={image.id}>
-                <button
-                  type="button"
-                  className="composer-attachment-preview"
-                  aria-label={t("Выбрать изображение {{name}}", { name: image.name })}
-                  aria-pressed={selected}
-                  onClick={() => setSelectedImageId(image.id)}
-                >
-                  <img src={image.url} alt={image.name} />
-                </button>
-                {selected && (
-                  <button
-                    type="button"
-                    className="composer-attachment-remove"
-                    aria-label={t("Удалить изображение {{name}}", { name: image.name })}
-                    onClick={() => onImagesChange(images.filter((item) => item.id !== image.id))}
-                  >
-                    <XIcon />
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        <div className="composer-attachments" aria-label={t("Изображения")}>
+          {images.map((image, index) => (
+            <div className="composer-attachment" key={image.id}>
+              <button
+                type="button"
+                className="composer-attachment-preview"
+                aria-label={t("Открыть изображение {{name}}", { name: image.name })}
+                onClick={(event) => setViewer({ index, opener: event.currentTarget })}
+              >
+                <img src={image.url} alt={image.name} />
+              </button>
+              <button
+                type="button"
+                className="composer-attachment-remove"
+                aria-label={t("Удалить изображение {{name}}", { name: image.name })}
+                onClick={() => onImagesChange(images.filter((item) => item.id !== image.id))}
+              >
+                <XIcon />
+              </button>
+            </div>
+          ))}
         </div>
+      )}
+      {viewer && (
+        <ImageViewer
+          images={images.map((image) => ({ src: image.url, alt: image.name }))}
+          index={viewer.index}
+          opener={viewer.opener}
+          onIndexChange={(index) => setViewer({ ...viewer, index })}
+          onClose={() => setViewer(null)}
+        />
       )}
       {children}
       <div className="composer-box">
