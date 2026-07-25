@@ -27,6 +27,7 @@ import type {
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
   VoiceInputMode,
+  VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
 import {
@@ -52,6 +53,7 @@ import {
   CopyIcon,
   FileIcon,
   MoreIcon,
+  MicrophoneIcon,
   PencilIcon,
   PinIcon,
   SendIcon,
@@ -75,6 +77,17 @@ type QueueAction = {
 
 type QueuedMessageView = QueuedMessage & {
   confirmed: boolean;
+};
+
+type VoiceUploadState = {
+  mode: VoiceInputMode;
+  startedAt: number;
+};
+
+type VoiceProgress = {
+  status: "uploading" | Exclude<VoiceTranscriptionStatus, "failed">;
+  elapsedSeconds: number;
+  estimatedTotalSeconds: number | null;
 };
 
 function emptyComposerDraft(): UpdateThreadDraftRequest {
@@ -123,7 +136,7 @@ export function ThreadPage({
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
-  const [uploadingVoiceThreads, setUploadingVoiceThreads] = useState<Set<string>>(() => new Set());
+  const [voiceUploads, setVoiceUploads] = useState<Record<string, VoiceUploadState>>({});
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
   const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
@@ -172,6 +185,7 @@ export function ThreadPage({
     state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
   const voiceRemoval = state.voiceRemovals?.[threadId];
   const activeVoiceJob = voiceJob?.status === "failed" ? null : voiceJob;
+  const voiceUpload = voiceUploads[threadId] ?? null;
   const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
   const optimisticTurnMessages = optimisticMessages.filter(
     (message) => message.destination === "turn",
@@ -179,6 +193,40 @@ export function ThreadPage({
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
   );
+  const voiceMessageMaterialized = activeVoiceJob
+    ? hasMaterializedVoiceMessage(detail, optimisticMessages, activeVoiceJob.id)
+    : false;
+  const draftVoiceProgress: VoiceProgress | null =
+    activeVoiceJob?.mode === "draft"
+      ? {
+          status: activeVoiceJob.status as Exclude<VoiceTranscriptionStatus, "failed">,
+          elapsedSeconds: transcriptionElapsedSeconds,
+          estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
+        }
+      : voiceUpload?.mode === "draft"
+        ? {
+            status: "uploading",
+            elapsedSeconds: transcriptionElapsedSeconds,
+            estimatedTotalSeconds: null,
+          }
+        : null;
+  const autoVoiceProgress: VoiceProgress | null =
+    activeVoiceJob?.mode === "send" && !voiceMessageMaterialized
+      ? {
+          status: activeVoiceJob.status as Exclude<VoiceTranscriptionStatus, "failed">,
+          elapsedSeconds: transcriptionElapsedSeconds,
+          estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
+        }
+      : voiceUpload?.mode === "send"
+        ? {
+            status: "uploading",
+            elapsedSeconds: transcriptionElapsedSeconds,
+            estimatedTotalSeconds: null,
+          }
+        : null;
+  const autoVoiceProgressKey = autoVoiceProgress
+    ? `${activeVoiceJob?.id ?? `upload:${threadId}`}:${autoVoiceProgress.status}`
+    : null;
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
     : undefined;
@@ -299,9 +347,12 @@ export function ThreadPage({
     targetThreadId: string,
     recording: ComposerRecording,
   ): Promise<void> {
-    if (!transcriptionProvider || activeVoiceJob || uploadingVoiceThreads.has(targetThreadId))
-      return;
-    setUploadingVoiceThreads((current) => new Set(current).add(targetThreadId));
+    if (!transcriptionProvider || activeVoiceJob || voiceUploads[targetThreadId]) return;
+    const uploadMode = voiceMode;
+    setVoiceUploads((current) => ({
+      ...current,
+      [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
+    }));
     try {
       await flushDraft(targetThreadId);
       if (pendingDraftsRef.current.has(targetThreadId)) {
@@ -312,33 +363,37 @@ export function ThreadPage({
         : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
       const accepted = await api.createVoiceTranscription(targetThreadId, recording.audio, {
         recordingDurationMs: recording.durationMs,
-        mode: voiceMode,
+        mode: uploadMode,
         selectionStart: recording.selection.start,
         selectionEnd: recording.selection.end,
         draftUpdatedAt: expectedDraftUpdatedAt,
       });
       dispatch({ type: "voice.accepted", job: accepted });
     } finally {
-      setUploadingVoiceThreads((current) => {
-        const next = new Set(current);
-        next.delete(targetThreadId);
+      setVoiceUploads((current) => {
+        const next = { ...current };
+        delete next[targetThreadId];
         return next;
       });
     }
   }
 
   useEffect(() => {
-    if (!activeVoiceJob || activeVoiceJob.status === "queued") {
+    const startedAt = activeVoiceJob
+      ? activeVoiceJob.status === "queued"
+        ? activeVoiceJob.createdAt
+        : (activeVoiceJob.startedAt ?? activeVoiceJob.createdAt)
+      : voiceUpload?.startedAt;
+    if (startedAt === undefined) {
       setTranscriptionElapsedSeconds(0);
       return;
     }
-    const startedAt = activeVoiceJob.startedAt ?? activeVoiceJob.createdAt;
     const updateElapsed = () =>
       setTranscriptionElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)));
     updateElapsed();
     const timer = window.setInterval(updateElapsed, 250);
     return () => window.clearInterval(timer);
-  }, [activeVoiceJob]);
+  }, [activeVoiceJob, voiceUpload]);
 
   useEffect(() => {
     localStorage.setItem(VOICE_INPUT_MODE_KEY, voiceMode);
@@ -542,7 +597,7 @@ export function ThreadPage({
   useLayoutEffect(() => {
     if (!detail || initialScrollThread.current !== threadId || !followsTail.current) return;
     scrollToEnd(scrollRef.current);
-  }, [attention, detail, threadId]);
+  }, [attention, autoVoiceProgressKey, detail, threadId]);
 
   useLayoutEffect(() => {
     const messageId = scrollTargetMessageId.current;
@@ -1047,6 +1102,7 @@ export function ThreadPage({
                 />
               </div>
             ))}
+            {autoVoiceProgress && <VoiceTranscriptionBubble progress={autoVoiceProgress} />}
             <AttentionPanel requests={attention} />
             {["completed", "interrupted"].includes(summary.state) && summary.unread && (
               <button
@@ -1106,18 +1162,10 @@ export function ThreadPage({
           transcriptionProvider={transcriptionProvider}
           voiceMode={voiceMode}
           onVoiceModeChange={setVoiceMode}
-          voiceUploadPending={uploadingVoiceThreads.has(threadId)}
+          voiceUploadPending={Boolean(voiceUpload)}
+          voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
           onRecordingReady={(recording) => beginTranscription(threadId, recording)}
-          transcriptionStatus={
-            activeVoiceJob
-              ? {
-                  belongsToComposer: true,
-                  elapsedSeconds: transcriptionElapsedSeconds,
-                  estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
-                  status: activeVoiceJob.status === "failed" ? "queued" : activeVoiceJob.status,
-                }
-              : null
-          }
+          transcriptionStatus={draftVoiceProgress}
           transcriptionError={
             voiceJob?.status === "failed"
               ? (localizeKnownServerText(language, voiceJob.error) ?? voiceJob.error)
@@ -1162,6 +1210,77 @@ export function ThreadPage({
         />
       )}
     </div>
+  );
+}
+
+export function VoiceTranscriptionBubble({ progress }: { progress: VoiceProgress }) {
+  const { t } = useI18n();
+  const label =
+    progress.status === "uploading"
+      ? t("Отправляем запись")
+      : progress.status === "queued"
+        ? t("На сервере · ожидание")
+        : progress.status === "applying"
+          ? t("Готовим отправку")
+          : t("Распознаём");
+  const timer =
+    progress.status === "transcribing"
+      ? formatVoiceTranscriptionTimer(progress.elapsedSeconds, progress.estimatedTotalSeconds)
+      : formatVoiceClock(progress.elapsedSeconds);
+
+  return (
+    <article
+      aria-label={label}
+      aria-live="polite"
+      className="message userMessage voice-transcription-message"
+      role="status"
+    >
+      <div className="message-body">
+        <span className="voice-transcription-icon" aria-hidden="true">
+          {progress.status === "uploading" || progress.status === "applying" ? (
+            <span className="spinner small" />
+          ) : progress.status === "queued" ? (
+            <CheckIcon />
+          ) : (
+            <MicrophoneIcon />
+          )}
+        </span>
+        <span>{label}</span>
+        <span className="voice-transcription-timer" aria-hidden="true">
+          {timer}
+        </span>
+      </div>
+    </article>
+  );
+}
+
+function formatVoiceClock(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatVoiceTranscriptionTimer(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+): string {
+  if (estimatedTotalSeconds === null) return formatVoiceClock(elapsedSeconds);
+  if (elapsedSeconds <= estimatedTotalSeconds) {
+    return `≈${formatVoiceClock(Math.max(0, estimatedTotalSeconds - elapsedSeconds))}`;
+  }
+  return `+${formatVoiceClock(elapsedSeconds - estimatedTotalSeconds)}`;
+}
+
+function hasMaterializedVoiceMessage(
+  detail: ThreadDetail | undefined,
+  optimisticMessages: OptimisticMessage[],
+  voiceJobId: string,
+): boolean {
+  return Boolean(
+    detail?.queuedMessages.some((message) => message.id === voiceJobId) ||
+    optimisticMessages.some((message) => message.id === voiceJobId) ||
+    detail?.turns.some((turn) =>
+      turn.items.some((item) => item.type === "userMessage" && item.id === voiceJobId),
+    ),
   );
 }
 

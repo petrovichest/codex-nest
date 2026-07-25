@@ -78,6 +78,24 @@ describe("Composer", () => {
     expect(reasoning).toHaveValue("high");
   });
 
+  it("renders voice auto-send as a compact remembered toggle", () => {
+    render(<Harness transcriptionConfig={transcriptionConfig} />);
+    const toggle = screen.getByRole("button", {
+      name: "Включить автоотправку голосового ввода",
+    });
+
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(toggle).toHaveClass("voice-send-toggle");
+    expect(toggle.querySelectorAll("svg")).toHaveLength(1);
+
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("button", {
+        name: "Выключить автоотправку голосового ввода",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("starts at two rows, grows to its cap, and then enables internal scrolling", () => {
     render(<Harness />);
     const textarea = screen.getByRole("textbox", {
@@ -242,6 +260,9 @@ describe("Composer", () => {
     const stop = await screen.findByRole("button", { name: "Остановить запись" });
     expect(within(stop).getByText("0:00")).toBeInTheDocument();
     expect(stop).toHaveClass("timing");
+    expect(
+      screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
+    ).toBeDisabled();
     expect(textarea).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     view.rerender(
@@ -266,6 +287,16 @@ describe("Composer", () => {
     );
     expect(track.stop).toHaveBeenCalled();
     expect(textarea).not.toHaveAttribute("readonly");
+    view.rerender(
+      <Harness
+        initialInput="Начало конец"
+        transcriptionConfig={transcriptionConfig}
+        onTranscribe={onTranscribe}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
+    ).toBeEnabled();
   });
 
   it("keeps the existing text when microphone permission is denied", async () => {
@@ -290,13 +321,12 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: "Распознавание речи не настроено" })).toBeDisabled();
   });
 
-  it("shows learned countdowns only in the source composer", () => {
+  it("shows upload, queue, and learned countdowns in the draft composer", () => {
     const view = render(
       <Harness
         initialInput="Черновик"
         transcriptionConfig={transcriptionConfig}
         transcriptionStatus={{
-          belongsToComposer: true,
           elapsedSeconds: 2,
           estimatedTotalSeconds: 10,
         }}
@@ -309,6 +339,7 @@ describe("Composer", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "На сервере · распознаём · осталось ≈ 0:08",
     );
+    expect(screen.getByRole("status")).toHaveClass("sr-only");
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
@@ -318,7 +349,6 @@ describe("Composer", () => {
         initialInput="Черновик"
         transcriptionConfig={transcriptionConfig}
         transcriptionStatus={{
-          belongsToComposer: true,
           elapsedSeconds: 13,
           estimatedTotalSeconds: 10,
         }}
@@ -336,7 +366,6 @@ describe("Composer", () => {
         initialInput="Черновик"
         transcriptionConfig={transcriptionConfig}
         transcriptionStatus={{
-          belongsToComposer: true,
           elapsedSeconds: 4,
           estimatedTotalSeconds: null,
         }}
@@ -352,22 +381,31 @@ describe("Composer", () => {
         initialInput="Черновик"
         transcriptionConfig={transcriptionConfig}
         transcriptionStatus={{
-          belongsToComposer: false,
           elapsedSeconds: 4,
-          estimatedTotalSeconds: 10,
+          estimatedTotalSeconds: null,
+          status: "queued",
         }}
       />,
     );
-    expect(screen.queryByText(/Распознаём ·/)).toBeNull();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
+    expect(
+      within(screen.getByRole("button", { name: "Запись на сервере · можно закрыть" })).getByText(
+        "0:04",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("На сервере · ожидание 0:04");
+
+    view.rerender(
+      <Harness
+        initialInput="Черновик"
+        transcriptionConfig={transcriptionConfig}
+        voiceInputLocked
+      />,
+    );
+    expect(view.container.querySelector(".microphone")).toBeDisabled();
+    expect(view.container.querySelector(".microphone")).not.toHaveClass("timing");
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
-    expect(
-      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Идёт распознавание в другой сессии" }),
-    ).not.toHaveClass("timing");
   });
 });
 
@@ -396,6 +434,7 @@ function Harness({
   transcriptionConfig: speechConfig,
   onTranscribe,
   transcriptionStatus = null,
+  voiceInputLocked = false,
 }: {
   busy?: boolean;
   hasSupplementalContent?: boolean;
@@ -403,10 +442,12 @@ function Harness({
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   transcriptionStatus?: ComposerTranscriptionStatus | null;
+  voiceInputLocked?: boolean;
 }) {
   const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>([]);
   const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
+  const [voiceMode, setVoiceMode] = useState<"draft" | "send">("draft");
   return (
     <Composer
       input={input}
@@ -430,6 +471,9 @@ function Harness({
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
+      voiceMode={voiceMode}
+      onVoiceModeChange={setVoiceMode}
+      voiceInputLocked={voiceInputLocked}
       transcriptionStatus={transcriptionStatus}
       error={null}
       hasSupplementalContent={hasSupplementalContent}

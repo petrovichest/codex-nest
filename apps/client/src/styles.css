@@ -1456,6 +1456,40 @@ pre {
   background: var(--surface-muted);
 }
 
+.message.voice-transcription-message > .message-body {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 13px;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.voice-transcription-icon {
+  width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.voice-transcription-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.voice-transcription-timer {
+  min-width: 36px;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .message.reasoning {
   color: var(--muted-strong);
   font-size: 14px;
@@ -1949,28 +1983,6 @@ pre {
   flex: 0 0 auto;
 }
 
-.voice-mode-picker select {
-  width: auto;
-  max-width: 150px;
-  height: 30px;
-  padding: 0 24px 0 8px;
-  border-color: transparent;
-  background: var(--surface-muted);
-  color: var(--muted-strong);
-  font-size: 11px;
-}
-
-.composer-speech-status {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  padding: 0 14px 8px;
-  color: var(--muted-strong);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .project-picker {
   display: block;
 }
@@ -2064,7 +2076,8 @@ pre {
 
 .setting-control.icon-only,
 .plan-toggle,
-.goal-toggle {
+.goal-toggle,
+.voice-send-toggle {
   width: 32px;
   min-width: 32px;
   justify-content: center;
@@ -2073,7 +2086,8 @@ pre {
 }
 
 .plan-toggle.active,
-.goal-toggle.active {
+.goal-toggle.active,
+.voice-send-toggle.active {
   background: color-mix(in srgb, var(--accent) 13%, var(--surface-muted));
   color: var(--text-strong);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);

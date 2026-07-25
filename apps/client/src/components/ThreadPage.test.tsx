@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 
@@ -2067,9 +2067,11 @@ describe("Activity", () => {
       name: "Сообщение для Codex",
     })) as HTMLTextAreaElement;
     await waitFor(() => expect(textarea).toHaveValue("Начало конец"));
-    fireEvent.change(screen.getByRole("combobox", { name: "Режим голосового ввода" }), {
-      target: { value: "send" },
-    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Включить автоотправку голосового ввода",
+      }),
+    );
     expect(localStorage.getItem("codexnest.voiceInputMode")).toBe("send");
     textarea.setSelectionRange(7, 7);
     fireEvent.select(textarea);
@@ -2077,7 +2079,11 @@ describe("Activity", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
 
     await waitFor(() => expect(api.createVoiceTranscription).toHaveBeenCalledOnce());
-    expect(screen.getByText("Отправляем запись — не закрывайте")).toBeInTheDocument();
+    const progress = screen.getByRole("status", { name: "Отправляем запись" });
+    expect(progress).toHaveClass("voice-transcription-message");
+    expect(progress).toHaveTextContent("Отправляем запись");
+    expect(progress).toHaveTextContent("0:00");
+    expect(document.querySelector(".composer .microphone")).not.toHaveClass("timing");
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
     expect(api.createVoiceTranscription).toHaveBeenCalledWith(
       "thread",
@@ -2126,13 +2132,82 @@ describe("Activity", () => {
     ];
     render(voiceThreadRoute());
 
-    expect(await screen.findByText("Запись на сервере · можно закрыть")).toBeInTheDocument();
+    const microphone = await screen.findByRole("button", {
+      name: "Запись на сервере · можно закрыть",
+    });
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
-    expect(
-      screen.getByRole("button", { name: "Запись на сервере · можно закрыть" }),
-    ).toBeDisabled();
+    expect(microphone).toBeDisabled();
+    expect(within(microphone).getByText("0:00")).toBeInTheDocument();
+  });
+
+  it("restores an automatic transcription countdown as a user bubble", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    context.state.snapshot.voiceTranscriptions = [
+      {
+        id: "voice",
+        threadId: "thread",
+        mode: "send",
+        status: "queued",
+        createdAt: Date.now(),
+        startedAt: null,
+        audioDurationMs: 2_000,
+        estimatedTotalSeconds: 10,
+        error: null,
+      },
+    ];
+    const view = render(voiceThreadRoute());
+
+    const queued = await screen.findByRole("status", { name: "На сервере · ожидание" });
+    expect(queued).toHaveTextContent("0:00");
+
+    context.state.snapshot.voiceTranscriptions[0] = {
+      ...context.state.snapshot.voiceTranscriptions[0]!,
+      status: "transcribing",
+      startedAt: Date.now() - 2_000,
+    };
+    view.rerender(voiceThreadRoute());
+
+    const progress = await screen.findByRole("status", { name: "Распознаём" });
+    expect(progress).toHaveClass("message", "userMessage", "voice-transcription-message");
+    expect(progress).toHaveTextContent("Распознаём");
+    expect(progress).toHaveTextContent("≈0:08");
+    expect(view.container.querySelector(".composer .microphone")).not.toHaveClass("timing");
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+      "readonly",
+    );
+  });
+
+  it("hides an automatic transcription bubble once its queued message materializes", () => {
+    const context = mockThreadConnection(threadApi(), summary, {
+      queuedMessages: [
+        {
+          id: "voice",
+          threadId: "thread",
+          text: "Распознанный текст",
+          createdAt: Date.now(),
+          status: "queued",
+        },
+      ],
+    });
+    context.state.snapshot.voiceTranscriptions = [
+      {
+        id: "voice",
+        threadId: "thread",
+        mode: "send",
+        status: "applying",
+        createdAt: Date.now() - 3_000,
+        startedAt: Date.now() - 2_000,
+        audioDurationMs: 2_000,
+        estimatedTotalSeconds: 2,
+        error: null,
+      },
+    ];
+    const view = render(voiceThreadRoute());
+
+    expect(view.container.querySelector(".voice-transcription-message")).toBeNull();
+    expect(screen.getByText("Распознанный текст")).toBeInTheDocument();
   });
 
   it("restores a failed voice job without keeping the composer locked", async () => {

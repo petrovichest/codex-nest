@@ -191,6 +191,14 @@ export const MicrophoneIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const VoiceSendIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect width="6" height="10" x="3.5" y="4" rx="3" />
+    <path d="M2 10a4.5 4.5 0 0 0 9 0M6.5 14.5V19M4 19h5" />
+    <path d="m13 9 4-4 4 4M17 5v14" />
+  </Icon>
+);
+
 export const StopIcon = (props: IconProps) => (
   <Icon {...props}>
     <rect width="8" height="8" x="8" y="8" rx="1" fill="currentColor" />
