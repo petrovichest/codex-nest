@@ -27,6 +27,7 @@ describe("AppManager", () => {
       managedInstall: true,
       statusPath: "/missing/update.json",
       managementCli: "/home/user/.local/bin/codexnest",
+      activeTurnCount: () => 0,
       runCommand,
     });
 
@@ -53,6 +54,7 @@ describe("AppManager", () => {
       managedInstall: true,
       statusPath: "/missing/update.json",
       managementCli: "/home/user/.local/bin/codexnest",
+      activeTurnCount: () => 0,
       runCommand,
     });
 
@@ -62,6 +64,21 @@ describe("AppManager", () => {
       ["--user", "start", "--no-block", "codexnest-update.service"],
       { timeout: 10_000 },
     );
+  });
+
+  it("does not start an update while an agent turn is active", async () => {
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    const manager = new AppManager({
+      currentVersion: "0.1.0",
+      managedInstall: true,
+      statusPath: "/missing/update.json",
+      managementCli: "/home/user/.local/bin/codexnest",
+      activeTurnCount: () => 1,
+      runCommand,
+    });
+
+    await expect(manager.update()).rejects.toMatchObject({ kind: "active_turns" });
+    expect(runCommand).not.toHaveBeenCalled();
   });
 
   it("recovers a stale in-progress status after a reboot", async () => {
@@ -83,6 +100,7 @@ describe("AppManager", () => {
         managedInstall: true,
         statusPath,
         managementCli: "codexnest",
+        activeTurnCount: () => 0,
         runCommand,
       });
 
@@ -121,6 +139,7 @@ describe("AppManager", () => {
         managedInstall: true,
         statusPath,
         managementCli: "codexnest",
+        activeTurnCount: () => 0,
         runCommand,
       });
 
@@ -153,6 +172,7 @@ describe("AppManager", () => {
         managedInstall: true,
         statusPath,
         managementCli: "codexnest",
+        activeTurnCount: () => 0,
       });
       await expect(managed.status()).resolves.toMatchObject({
         result: "rolled_back",
@@ -164,6 +184,7 @@ describe("AppManager", () => {
         managedInstall: false,
         statusPath,
         managementCli: "codexnest",
+        activeTurnCount: () => 0,
       });
       await expect(unmanaged.update()).rejects.toEqual(
         expect.objectContaining({ kind: "unsupported" }),

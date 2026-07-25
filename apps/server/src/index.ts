@@ -79,6 +79,8 @@ const appManager = new AppManager({
   managedInstall: config.managedInstall,
   statusPath: config.updateStatusPath,
   managementCli: config.managementCli,
+  activeTurnCount: () =>
+    projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
 });
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);

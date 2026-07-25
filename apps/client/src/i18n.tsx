@@ -257,6 +257,8 @@ const ENGLISH: Record<string, string> = {
   "Актуальная версия Codex CLI": "Latest Codex CLI version",
   "Дождитесь завершения активных ответов: {{count}}.":
     "Wait for active responses to finish: {{count}}.",
+  "Дождитесь завершения активных ответов перед обновлением CodexNest.":
+    "Wait for active responses to finish before updating CodexNest.",
   "Проверить Codex CLI": "Check Codex CLI",
   "Обновить Codex CLI": "Update Codex CLI",
   "Перезапускаем…": "Restarting…",

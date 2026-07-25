@@ -17,13 +17,14 @@ export type AppManagerOptions = {
   managedInstall: boolean;
   statusPath: string;
   managementCli: string;
+  activeTurnCount(): number;
   systemctlBin?: string;
   runCommand?: RunCommand;
 };
 
 export class AppManagementError extends Error {
   constructor(
-    public readonly kind: "unsupported" | "busy" | "failed",
+    public readonly kind: "unsupported" | "busy" | "active_turns" | "failed",
     message: string,
   ) {
     super(message);
@@ -86,6 +87,12 @@ export class AppManager {
 
   async update(): Promise<AppUpdateStatus> {
     this.assertSupported();
+    if (this.options.activeTurnCount() > 0) {
+      throw new AppManagementError(
+        "active_turns",
+        "Дождитесь завершения активных ответов перед обновлением CodexNest.",
+      );
+    }
     const current = await this.status();
     if (current.operation !== "idle") {
       throw new AppManagementError("busy", "CodexNest update is already in progress");

@@ -119,6 +119,33 @@ describe("ApplicationSettingsCard", () => {
     expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("до версии 0.1.4-abcdef0"));
   });
 
+  it("blocks the update while an agent turn is active", async () => {
+    const current = updateStatus({ latestVersion: "0.1.4-abcdef0", updateAvailable: true });
+    const api = {
+      readAppSettings: vi.fn(async () => current),
+      checkAppUpdate: vi.fn(async () => current),
+      updateApp: vi.fn(async () => current),
+    };
+    connection.mockReturnValue({
+      api,
+      state: {
+        network: "connected",
+        snapshot: { threads: [{ currentTurnId: "turn-1" }] },
+      },
+    });
+    const confirm = vi.spyOn(window, "confirm");
+
+    render(<ApplicationSettingsCard />);
+
+    expect(
+      await screen.findByText("Дождитесь завершения активных ответов: 1."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Обновить CodexNest" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Обновить CodexNest" }));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.updateApp).not.toHaveBeenCalled();
+  });
+
   it("explains when the current checkout is not managed", async () => {
     const api = {
       readAppSettings: vi.fn(async () =>
