@@ -2171,7 +2171,11 @@ describe("Activity", () => {
   });
 
   it("restores an automatic transcription countdown as a user bubble", async () => {
-    const context = mockThreadConnection(threadApi(), summary);
+    const context = mockThreadConnection(threadApi(), {
+      ...summary,
+      state: "completed",
+      unread: true,
+    });
     context.state.snapshot.voiceTranscriptions = [
       {
         id: "voice",
@@ -2205,6 +2209,7 @@ describe("Activity", () => {
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
+    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
   });
 
   it("hides an automatic transcription bubble once its queued message materializes", () => {
@@ -2298,6 +2303,7 @@ describe("Activity", () => {
     });
     await waitFor(() => expect(textarea).toHaveValue("Текст и голос"));
     context.dispatch.mockClear();
+    context.refreshDetail.mockClear();
 
     context.state.voiceRemovals.thread = {
       jobId: "voice-send",
@@ -2311,6 +2317,7 @@ describe("Activity", () => {
       threadId: "thread",
       draft: null,
     });
+    expect(context.refreshDetail).toHaveBeenCalledWith("thread", { force: true });
   });
 });
 

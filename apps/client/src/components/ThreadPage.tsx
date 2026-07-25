@@ -432,9 +432,14 @@ export function ThreadPage({
     if (voiceRemoval.outcome === "send") {
       pendingDraftsRef.current.delete(threadId);
       savedDraftUpdatedAtRef.current.set(threadId, null);
+      draftTouchedThreadsRef.current.delete(threadId);
+      hydratedDraftSourcesRef.current.delete(threadId);
       replaceComposerDraft(emptyComposerDraft(), false);
       dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
+      void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
+        setError(localizeKnownServerText(languageRef.current, caught.message));
+      });
       return;
     }
     draftTouchedThreadsRef.current.delete(threadId);
@@ -1136,15 +1141,18 @@ export function ThreadPage({
             ))}
             {autoVoiceProgress && <VoiceTranscriptionBubble progress={autoVoiceProgress} />}
             <AttentionPanel requests={attention} />
-            {["completed", "interrupted"].includes(summary.state) && summary.unread && (
-              <button
-                className="finish-thread-action"
-                disabled={finishing}
-                onClick={() => void finishThread()}
-              >
-                {finishing ? t("Заканчиваем…") : t("Закончить")}
-              </button>
-            )}
+            {!activeVoiceJob &&
+              !voiceUpload &&
+              ["completed", "interrupted"].includes(summary.state) &&
+              summary.unread && (
+                <button
+                  className="finish-thread-action"
+                  disabled={finishing}
+                  onClick={() => void finishThread()}
+                >
+                  {finishing ? t("Заканчиваем…") : t("Закончить")}
+                </button>
+              )}
           </section>
         </div>
         {attentionJump && (
