@@ -56,6 +56,8 @@ export class AppProjection extends EventEmitter {
   private readonly progress = new Map<string, TurnProgress>();
   private readonly subscribedThreads = new Set<string>();
   private readonly hiddenThreads = new Set<string>();
+  private readonly pendingSubagentTitles = new Map<string, string>();
+  private readonly subagentTitleUpdates = new Set<string>();
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -72,6 +74,8 @@ export class AppProjection extends EventEmitter {
       if (state !== "ready") {
         this.subscribedThreads.clear();
         this.hiddenThreads.clear();
+        this.pendingSubagentTitles.clear();
+        this.subagentTitleUpdates.clear();
         for (const cached of this.threads.values()) cached.goalStatus = undefined;
       }
       this.publish({ type: "connection.changed", connection: this.connection });
@@ -176,6 +180,7 @@ export class AppProjection extends EventEmitter {
 
   async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
+    const subagent = local ? isSpawnedSubagent(local.thread) : false;
     if (local && this.isUnmaterialized(id)) {
       const state = this.store.snapshot();
       return {
@@ -191,7 +196,7 @@ export class AppProjection extends EventEmitter {
         "thread/turns/list",
         {
           threadId: id,
-          cursor,
+          cursor: subagent ? null : cursor,
           limit: THREAD_TURN_PAGE_SIZE,
           sortDirection: "desc",
           itemsView: "full",
@@ -203,21 +208,22 @@ export class AppProjection extends EventEmitter {
     if (!cached) throw new Error("Thread not found");
     const state = this.store.snapshot();
     const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
+    const chronologicalTurns = page.data.slice().reverse();
+    const visibleTurns = subagent
+      ? subagentTranscriptTurns(cached.thread, chronologicalTurns)
+      : chronologicalTurns;
     return {
       summary: this.toSummary(cached),
-      turns: page.data
-        .slice()
-        .reverse()
-        .map((turn) =>
-          normalizeTurn(
-            turn,
-            this.progress.get(turnKey(id, turn.id)),
-            this.liveActivities(id, turn.id),
-            artifacts[turn.id] ?? [],
-          ),
+      turns: visibleTurns.map((turn) =>
+        normalizeTurn(
+          turn,
+          this.progress.get(turnKey(id, turn.id)),
+          this.liveActivities(id, turn.id),
+          artifacts[turn.id] ?? [],
         ),
+      ),
       queuedMessages: state.messageQueues?.[id] ?? [],
-      olderTurnsCursor: page.nextCursor,
+      olderTurnsCursor: subagent ? null : page.nextCursor,
       draft: state.threadMeta[id]?.draft ?? null,
     };
   }
@@ -593,6 +599,58 @@ export class AppProjection extends EventEmitter {
     this.syncedAt = new Date().toISOString();
     this.publish({ type: "models.changed", models });
     this.publish({ type: "resync.required" });
+    this.backfillSubagentTitles();
+  }
+
+  private backfillSubagentTitles(): void {
+    const candidates = [...this.threads.values()]
+      .filter(
+        (cached) =>
+          isSpawnedSubagent(cached.thread) &&
+          !cached.thread.name?.trim() &&
+          !this.subagentTitleUpdates.has(cached.thread.id),
+      )
+      .map((cached) => cached.thread.id);
+    if (!candidates.length) return;
+
+    void (async () => {
+      for (const threadId of candidates) {
+        const cached = this.threads.get(threadId);
+        if (
+          !cached ||
+          !isSpawnedSubagent(cached.thread) ||
+          cached.thread.name?.trim() ||
+          this.subagentTitleUpdates.has(threadId)
+        ) {
+          continue;
+        }
+        this.subagentTitleUpdates.add(threadId);
+        try {
+          const page = parseTurnsList(
+            await this.bridge.request<unknown>(
+              "thread/turns/list",
+              {
+                threadId,
+                limit: THREAD_TURN_PAGE_SIZE,
+                sortDirection: "desc",
+                itemsView: "full",
+              },
+              30_000,
+            ),
+          );
+          const title = subagentTitleFromTurns(page.data);
+          const current = this.threads.get(threadId);
+          if (!title || !current || current.thread.name?.trim()) continue;
+          current.thread.name = title;
+          this.publishThread(threadId);
+          await this.bridge.request("thread/name/set", { threadId, name: title });
+        } catch (error) {
+          this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+        } finally {
+          this.subagentTitleUpdates.delete(threadId);
+        }
+      }
+    })();
   }
 
   private async rejoinActiveThread(thread: Thread): Promise<Thread> {
@@ -766,9 +824,15 @@ export class AppProjection extends EventEmitter {
         });
         break;
       }
-      case "thread/started":
+      case "thread/started": {
         this.upsertThread(notification.params.thread);
+        const pendingTitle = this.pendingSubagentTitles.get(notification.params.thread.id);
+        if (pendingTitle) {
+          this.pendingSubagentTitles.delete(notification.params.thread.id);
+          this.setSubagentTitle(notification.params.thread.id, pendingTitle);
+        }
         break;
+      }
       case "thread/status/changed": {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
@@ -829,6 +893,8 @@ export class AppProjection extends EventEmitter {
         this.threads.delete(notification.params.threadId);
         this.subscribedThreads.delete(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
+        this.pendingSubagentTitles.delete(notification.params.threadId);
+        this.subagentTitleUpdates.delete(notification.params.threadId);
         for (const key of this.progress.keys()) {
           if (key.startsWith(`${notification.params.threadId}:`)) this.progress.delete(key);
         }
@@ -960,6 +1026,7 @@ export class AppProjection extends EventEmitter {
       }
       case "item/started":
       case "item/completed": {
+        this.captureSubagentTitles(notification.params.item);
         let key = activityKey(
           notification.params.threadId,
           notification.params.turnId,
@@ -1046,6 +1113,40 @@ export class AppProjection extends EventEmitter {
       default:
         break;
     }
+  }
+
+  private captureSubagentTitles(item: Turn["items"][number]): void {
+    if (item.type !== "collabAgentToolCall" || item.tool !== "spawnAgent" || !item.prompt) return;
+    const title = subagentTaskTitle(item.prompt);
+    if (!title) return;
+    for (const threadId of item.receiverThreadIds) {
+      if (this.threads.has(threadId)) {
+        this.setSubagentTitle(threadId, title);
+      } else {
+        this.pendingSubagentTitles.set(threadId, title);
+      }
+    }
+  }
+
+  private setSubagentTitle(threadId: string, title: string): void {
+    const cached = this.threads.get(threadId);
+    if (
+      !cached ||
+      !isSpawnedSubagent(cached.thread) ||
+      cached.thread.name?.trim() ||
+      this.subagentTitleUpdates.has(threadId)
+    ) {
+      return;
+    }
+    this.subagentTitleUpdates.add(threadId);
+    cached.thread.name = title;
+    this.publishThread(threadId);
+    void this.bridge
+      .request("thread/name/set", { threadId, name: title })
+      .catch((error: unknown) => {
+        this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+      })
+      .finally(() => this.subagentTitleUpdates.delete(threadId));
   }
 
   private appendTextDelta(
@@ -1181,6 +1282,79 @@ function notificationThreadId(notification: ServerNotification): string | undefi
 
 function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
+}
+
+function subagentTranscriptTurns(thread: Thread, turns: Turn[]): Turn[] {
+  if (!turns.length) return [];
+  const expectedTitle = thread.name?.trim() || null;
+  let boundary: { turnIndex: number; itemIndex: number } | null = null;
+
+  for (let turnIndex = turns.length - 1; turnIndex >= 0 && !boundary; turnIndex -= 1) {
+    const turn = turns[turnIndex]!;
+    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = turn.items[itemIndex]!;
+      if (item.type !== "userMessage") continue;
+      if (expectedTitle && subagentTaskTitle(userMessageText(item)) !== expectedTitle) continue;
+      boundary = { turnIndex, itemIndex };
+      break;
+    }
+  }
+
+  if (!boundary) return [];
+
+  let keptInput = false;
+  return turns.slice(boundary.turnIndex).map((turn, index) => ({
+    ...turn,
+    items: (index === 0 ? turn.items.slice(boundary.itemIndex) : turn.items).filter((item) => {
+      if (item.type !== "userMessage") return true;
+      if (keptInput) return false;
+      keptInput = true;
+      return true;
+    }),
+  }));
+}
+
+function subagentTitleFromTurns(turns: Turn[]): string | null {
+  for (const turn of turns) {
+    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = turn.items[itemIndex]!;
+      if (item.type !== "userMessage") continue;
+      const title = subagentTaskTitle(userMessageText(item));
+      if (title) return title;
+    }
+  }
+  return null;
+}
+
+function userMessageText(item: Extract<Turn["items"][number], { type: "userMessage" }>): string {
+  return item.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function subagentTaskTitle(prompt: string): string | null {
+  const firstLine = prompt
+    .split(/\r?\n/u)
+    .find((line) => line.trim())
+    ?.trim();
+  const explicitTitle = firstLine?.match(
+    /^(?:#{1,6}\s*)?(?:task|задача(?: субагента)?)\s*:\s*(.+)$/iu,
+  )?.[1];
+  let normalized = (explicitTitle ?? prompt).replace(/\s+/gu, " ").trim();
+  normalized = normalized
+    .replace(/^(?:#{1,6}\s*|[-*]\s+|>\s*)/u, "")
+    .replace(/^(?:task|задача(?: субагента)?)\s*:\s*/iu, "")
+    .trim();
+  if (!normalized) return null;
+
+  const characters = [...normalized];
+  if (characters.length <= 60) return normalized;
+  let title = characters.slice(0, 59).join("");
+  const wordBoundary = title.lastIndexOf(" ");
+  if (wordBoundary >= 36) title = title.slice(0, wordBoundary);
+  title = title.replace(/[\s,.:;!?—-]+$/u, "");
+  return title ? `${title}…` : null;
 }
 
 function threadRelation(thread: Thread): ThreadSummary["relation"] {

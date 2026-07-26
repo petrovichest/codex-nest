@@ -43,6 +43,7 @@ class FakeBridge extends EventEmitter {
     }
     if (method === "thread/resume") return { thread: liveThread() };
     if (method === "thread/read") return { thread: liveThread() };
+    if (method === "thread/name/set") return {};
     if (method === "thread/goal/get") {
       return { goal: this.activeGoal ? goalNotification("active").params.goal : null };
     }
@@ -174,16 +175,45 @@ describe("AppProjection", () => {
     };
 
     bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "parent-turn",
+        item: {
+          type: "collabAgentToolCall",
+          id: "spawn-child",
+          tool: "spawnAgent",
+          status: "completed",
+          senderThreadId: "one",
+          receiverThreadIds: ["child"],
+          prompt: "Task: Проверить мобильную вёрстку субагента\n\nПроверить экран на узкой ширине.",
+          model: null,
+          reasoningEffort: null,
+          agentsStates: {},
+        },
+        completedAtMs: 1_000,
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
       method: "thread/started",
       params: { thread: child },
     } satisfies ServerNotification);
 
-    expect(projection.summary("child")?.relation).toEqual({
-      kind: "subagent",
-      sessionId: "child",
-      parentThreadId: "one",
-      nickname: "tester",
-      role: "worker",
+    await vi.waitFor(() =>
+      expect(projection.summary("child")).toMatchObject({
+        title: "Проверить мобильную вёрстку субагента",
+        relation: {
+          kind: "subagent",
+          sessionId: "child",
+          parentThreadId: "one",
+          nickname: "tester",
+          role: "worker",
+        },
+      }),
+    );
+    expect(bridge.request).toHaveBeenCalledWith("thread/name/set", {
+      threadId: "child",
+      name: "Проверить мобильную вёрстку субагента",
     });
 
     bridge.emit("notification", {
@@ -196,6 +226,254 @@ describe("AppProjection", () => {
       state: "idle",
       currentTurnId: null,
     });
+  });
+
+  it("backfills an unnamed subagent from its own first input", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const parent = thread("parent", "/work", 2, { type: "notLoaded" });
+    const child = {
+      ...thread("child", "/work", 3, { type: "notLoaded" }),
+      parentThreadId: "parent",
+      preview: parent.preview,
+      ephemeral: true,
+      agentNickname: "reviewer",
+      agentRole: "worker",
+    };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [child, parent],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        expect(params).toMatchObject({
+          threadId: "child",
+          limit: 20,
+          sortDirection: "desc",
+          itemsView: "full",
+        });
+        return {
+          data: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "child-input",
+                  clientId: null,
+                  content: [
+                    {
+                      type: "text",
+                      text: "Проверить восстановление названий старых субагентов",
+                      text_elements: [],
+                    },
+                  ],
+                },
+              ],
+              itemsView: "full",
+              status: "completed",
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+              durationMs: 1_000,
+            },
+            {
+              id: "inherited-parent-turn",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "parent-input",
+                  clientId: null,
+                  content: [
+                    {
+                      type: "text",
+                      text: "Родительская задача, которую нельзя использовать",
+                      text_elements: [],
+                    },
+                  ],
+                },
+              ],
+              itemsView: "full",
+              status: "completed",
+              error: null,
+              startedAt: 0,
+              completedAt: 1,
+              durationMs: 1_000,
+            },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/name/set") return {};
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    await vi.waitFor(() =>
+      expect(projection.summary("child")?.title).toBe(
+        "Проверить восстановление названий старых субагентов",
+      ),
+    );
+    expect(bridge.request).toHaveBeenCalledWith("thread/name/set", {
+      threadId: "child",
+      name: "Проверить восстановление названий старых субагентов",
+    });
+  });
+
+  it("returns only one coordinator input and the subagent's own history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      expect(params).toMatchObject({
+        threadId: "child",
+        cursor: null,
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "full",
+      });
+      return {
+        data: [
+          {
+            id: "child-followup",
+            items: [
+              {
+                type: "userMessage",
+                id: "child-steer",
+                clientId: null,
+                content: [{ type: "text", text: "Уточнение от координатора", text_elements: [] }],
+              },
+              {
+                type: "agentMessage",
+                id: "child-final",
+                text: "Финальный результат субагента",
+                phase: "final_answer",
+                memoryCitation: null,
+              },
+            ],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 3,
+            completedAt: 4,
+            durationMs: 1_000,
+          },
+          {
+            id: "child-task",
+            items: [
+              {
+                type: "userMessage",
+                id: "child-input",
+                clientId: null,
+                content: [
+                  {
+                    type: "text",
+                    text: "Проверить мобильную вёрстку субагента",
+                    text_elements: [],
+                  },
+                ],
+              },
+              {
+                type: "agentMessage",
+                id: "child-progress",
+                text: "Проверяю мобильную вёрстку",
+                phase: "commentary",
+                memoryCitation: null,
+              },
+            ],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 2,
+            completedAt: 3,
+            durationMs: 1_000,
+          },
+          {
+            id: "inherited-parent",
+            items: [
+              {
+                type: "userMessage",
+                id: "parent-input",
+                clientId: null,
+                content: [
+                  { type: "text", text: "Вся история родительской сессии", text_elements: [] },
+                ],
+              },
+              {
+                type: "agentMessage",
+                id: "parent-answer",
+                text: "Старый ответ главного агента",
+                phase: "final_answer",
+                memoryCitation: null,
+              },
+            ],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1_000,
+          },
+        ],
+        nextCursor: "parent-history",
+        backwardsCursor: null,
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread({
+      ...thread("child", "/work", 4, { type: "notLoaded" }),
+      parentThreadId: "parent",
+      ephemeral: true,
+      name: "Проверить мобильную вёрстку субагента",
+      agentNickname: "reviewer",
+      agentRole: "worker",
+    });
+
+    const detail = await projection.readThread("child", "stale-parent-cursor");
+
+    expect(detail.olderTurnsCursor).toBeNull();
+    expect(detail.turns.map((turn) => turn.id)).toEqual(["child-task", "child-followup"]);
+    expect(detail.turns.flatMap((turn) => turn.items.map((item) => item.id))).toEqual([
+      "child-input",
+      "child-progress",
+      "child-final",
+    ]);
+    expect(
+      detail.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage"),
+    ).toHaveLength(1);
+
+    projection.upsertThread({
+      ...thread("child", "/work", 4, { type: "notLoaded" }),
+      parentThreadId: "parent",
+      ephemeral: true,
+      name: "Несовпадающая задача",
+      agentNickname: "reviewer",
+      agentRole: "worker",
+    });
+    expect((await projection.readThread("child")).turns).toEqual([]);
   });
 
   it("sorts sessions only by most recent activity", async () => {

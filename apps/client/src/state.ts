@@ -257,17 +257,26 @@ function applyDetail(
   const threadId = detail.summary.id;
   const current = state.details[threadId];
   const expanded = state.expandedHistory[threadId] ?? false;
+  const subagent = detail.summary.relation.kind === "subagent";
   const merged = current
     ? {
         ...detail,
-        turns:
-          page === "older"
+        turns: subagent
+          ? page === "older"
+            ? current.turns
+            : detail.turns
+          : page === "older"
             ? mergeTurns(detail.turns, current.turns)
             : mergeTurns(current.turns, detail.turns),
-        olderTurnsCursor:
-          page === "latest" && expanded ? current.olderTurnsCursor : detail.olderTurnsCursor,
+        olderTurnsCursor: subagent
+          ? null
+          : page === "latest" && expanded
+            ? current.olderTurnsCursor
+            : detail.olderTurnsCursor,
       }
-    : detail;
+    : subagent
+      ? { ...detail, olderTurnsCursor: null }
+      : detail;
   const confirmedUserIds = userMessageIds(merged);
   const reconciled = {
     ...merged,
@@ -280,8 +289,11 @@ function applyDetail(
   return {
     ...state,
     details: { ...state.details, [threadId]: reconciled },
-    expandedHistory:
-      page === "older" ? { ...state.expandedHistory, [threadId]: true } : state.expandedHistory,
+    expandedHistory: subagent
+      ? { ...state.expandedHistory, [threadId]: false }
+      : page === "older"
+        ? { ...state.expandedHistory, [threadId]: true }
+        : state.expandedHistory,
     optimisticMessages: setOptimisticMessages(
       state.optimisticMessages,
       threadId,

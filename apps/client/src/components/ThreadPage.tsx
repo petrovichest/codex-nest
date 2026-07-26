@@ -680,7 +680,7 @@ export function ThreadPage({
   const loadOlder = useCallback(async () => {
     const cursor = detail?.olderTurnsCursor;
     const node = scrollRef.current;
-    if (!cursor || !node || loadingOlder) return;
+    if (isSubagent || !cursor || !node || loadingOlder) return;
     olderScrollAnchor.current = {
       threadId,
       scrollHeight: node.scrollHeight,
@@ -696,7 +696,7 @@ export function ThreadPage({
     } finally {
       setLoadingOlder(false);
     }
-  }, [detail?.olderTurnsCursor, loadOlderDetail, loadingOlder, threadId]);
+  }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, threadId]);
 
   function persistAnnotations(next: PendingAnnotation[]): boolean {
     replaceComposerDraft(

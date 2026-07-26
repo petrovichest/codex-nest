@@ -468,6 +468,54 @@ describe("clientReducer", () => {
     expect(state.details.one?.olderTurnsCursor).toBe("page-3");
   });
 
+  it("replaces inherited history when a subagent detail refreshes", () => {
+    const subagent: ThreadSummary = {
+      ...baseThread,
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: "parent",
+        nickname: "reviewer",
+        role: "worker",
+      },
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: subagent,
+        turns: [turn("inherited-parent"), turn("child")],
+        queuedMessages: [],
+        olderTurnsCursor: "parent-page",
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "older",
+      detail: {
+        summary: subagent,
+        turns: [turn("older-parent")],
+        queuedMessages: [],
+        olderTurnsCursor: "more-parent",
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: subagent,
+        turns: [turn("child")],
+        queuedMessages: [],
+        olderTurnsCursor: "ignored-parent-page",
+      },
+    });
+
+    expect(state.details.one?.turns.map((item) => item.id)).toEqual(["child"]);
+    expect(state.details.one?.olderTurnsCursor).toBeNull();
+    expect(state.expandedHistory.one).toBe(false);
+  });
+
   it("reconciles an optimistic message whether the event arrives before or after acceptance", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

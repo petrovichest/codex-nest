@@ -1422,7 +1422,9 @@ describe("thread settings", () => {
       additionalContext: {
         "codexnest.team": {
           kind: "application",
-          value: expect.stringMatching(/native subagents.*parallel delegation/i),
+          value: expect.stringMatching(
+            /parent session may only schedule its executable steps, wait, and report results.*every executable plan step.*fresh native subagent session.*exactly one self-contained task prompt.*fork_turns="none".*Task: <concise task-specific title>.*only the minimum context.*never copy or summarize the conversation, the full plan.*do not execute any plan step in the parent session.*do not steer it, send follow-up input.*sequential or parallel delegation/i,
+          ),
         },
       },
     });

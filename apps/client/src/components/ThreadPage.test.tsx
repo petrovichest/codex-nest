@@ -1074,6 +1074,7 @@ describe("Activity", () => {
       },
     };
     const context = mockThreadConnection(api, child, {
+      olderTurnsCursor: "parent-history",
       turns: [
         {
           id: "child-turn",
@@ -1250,6 +1251,10 @@ describe("Activity", () => {
     );
     expect(api.readGoal).not.toHaveBeenCalled();
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    scroll.scrollTop = 0;
+    fireEvent.scroll(scroll);
+    expect(context.loadOlderDetail).not.toHaveBeenCalled();
   });
 
   it("keeps live status and approval requests in the filtered subagent view", () => {

@@ -109,11 +109,18 @@ const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
 const TEAM_MODE_CONTEXT = [
-  "This session is in CodexNest Team mode. Act as the root coordinator.",
-  "Use native subagents for suitable, independently scoped parts of the user's plan.",
+  "This session is in CodexNest Team mode. Act only as the root coordinator.",
+  "Once a plan exists, the parent session may only schedule its executable steps, wait, and report results.",
+  "For every executable plan step, create a fresh native subagent session and send exactly one self-contained task prompt.",
+  'Always spawn it with fork_turns="none" so the child receives no parent conversation history.',
+  "Start the prompt with one line in the exact form `Task: <concise task-specific title>`; put the execution details after it.",
+  "Include only the minimum context needed to complete that step: its objective, relevant constraints, affected scope, and expected result.",
+  "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
+  "Do not execute any plan step in the parent session.",
+  "After spawning a subagent, do not steer it, send follow-up input, or resume or reuse that session for another step; only wait for its result.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
   "Never run parallel subagents that may write to overlapping files.",
-  "Wait for required subagent results, integrate them, and return one consolidated result to the user.",
+  "When the required results are ready, return one consolidated result to the user.",
   "The user should not need to coordinate subagents directly.",
 ].join(" ");
 
