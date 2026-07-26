@@ -491,13 +491,16 @@ export function ThreadPage({
       replaceComposerDraft(emptyComposerDraft(), false);
       dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
-      void refreshDetail(threadId, { force: true }).catch(() => undefined);
+      void deleteLocalDraft(api.settings, threadId)
+        .catch(() => undefined)
+        .then(() => refreshDetail(threadId, { force: true }))
+        .catch(() => undefined);
       return;
     }
     draftTouchedThreadsRef.current.delete(threadId);
     hydratedDraftSourcesRef.current.delete(threadId);
     void refreshDetail(threadId, { force: true }).catch(() => undefined);
-  }, [refreshDetail, threadId, voiceRemoval]);
+  }, [api.settings, refreshDetail, threadId, voiceRemoval]);
 
   useEffect(() => {
     if (detail) void acknowledgePendingThread(threadId);

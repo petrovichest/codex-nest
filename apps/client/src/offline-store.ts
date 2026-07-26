@@ -176,7 +176,17 @@ export async function confirmLocalDraft(
       confirmed.goalMode ||
       confirmed.annotations.length)
   ) {
-    await saveLocalDraft(settings, threadId, confirmed, confirmed.updatedAt);
+    await saveLocalDraft(
+      settings,
+      threadId,
+      {
+        input: confirmed.input,
+        images: confirmed.images,
+        goalMode: confirmed.goalMode,
+        annotations: confirmed.annotations,
+      },
+      confirmed.updatedAt,
+    );
     return;
   }
   await deleteValue(DRAFT_STORE, current.key);

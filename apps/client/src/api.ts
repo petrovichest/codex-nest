@@ -250,7 +250,12 @@ export class ApiClient {
   ): Promise<ThreadDraft | null> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/draft`, {
       method: "PUT",
-      body,
+      body: {
+        input: body.input,
+        images: body.images,
+        goalMode: body.goalMode,
+        annotations: body.annotations,
+      },
       keepalive: options?.keepalive,
       timeoutMs: 15_000,
       retry: options?.retry ?? false,

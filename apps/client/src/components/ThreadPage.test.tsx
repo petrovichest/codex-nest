@@ -19,9 +19,16 @@ import { Activity, ThreadPage, TurnTiming, formatMessageTime } from "./ThreadPag
 
 const connection = vi.hoisted(() => vi.fn());
 const openDownloadUrl = vi.hoisted(() => vi.fn());
+const deleteLocalDraft = vi.hoisted(() =>
+  vi.fn<(settings: unknown, threadId: string) => Promise<void>>(() => Promise.resolve()),
+);
 
 vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../downloads", () => ({ openDownloadUrl }));
+vi.mock("../offline-store", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  deleteLocalDraft,
+}));
 
 const summary: ThreadSummary = {
   id: "thread",
@@ -2762,11 +2769,25 @@ describe("Activity", () => {
     );
   });
 
-  it("clears the local composer after background auto-send completes", async () => {
-    const context = mockThreadConnection(threadApi(), summary, {
+  it("clears text and images after background auto-send before refreshing the draft", async () => {
+    let finishLocalDraftDelete: (() => void) | undefined;
+    deleteLocalDraft.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLocalDraftDelete = resolve;
+        }),
+    );
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, {
       draft: {
         input: "Текст и голос",
-        images: [],
+        images: [
+          {
+            id: "voice-image",
+            name: "screenshot.png",
+            url: "data:image/png;base64,AA==",
+          },
+        ],
         goalMode: false,
         annotations: [],
         updatedAt: 1,
@@ -2777,6 +2798,7 @@ describe("Activity", () => {
       name: "Сообщение для Codex",
     });
     await waitFor(() => expect(textarea).toHaveValue("Текст и голос"));
+    expect(screen.getByAltText("screenshot.png")).toBeInTheDocument();
     context.dispatch.mockClear();
     context.refreshDetail.mockClear();
 
@@ -2787,11 +2809,17 @@ describe("Activity", () => {
     view.rerender(voiceThreadRoute());
 
     await waitFor(() => expect(textarea).toHaveValue(""));
+    expect(screen.queryByAltText("screenshot.png")).toBeNull();
     expect(context.dispatch).toHaveBeenCalledWith({
       type: "draft",
       threadId: "thread",
       draft: null,
     });
+    expect(deleteLocalDraft).toHaveBeenCalledWith(api.settings, "thread");
+    expect(context.refreshDetail).not.toHaveBeenCalled();
+
+    await act(async () => finishLocalDraftDelete?.());
+
     expect(context.refreshDetail).toHaveBeenCalledWith("thread", { force: true });
   });
 });
