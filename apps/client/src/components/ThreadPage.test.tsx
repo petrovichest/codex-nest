@@ -1084,6 +1084,95 @@ describe("Activity", () => {
           progress: progress(),
           items: [
             {
+              type: "userMessage",
+              id: "input",
+              status: "completed",
+              text: "Проверь результат",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+            {
+              type: "reasoning",
+              id: "reasoning",
+              status: "completed",
+              text: "Скрытое рассуждение",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+            {
+              type: "agentMessage",
+              id: "commentary",
+              status: "completed",
+              text: "Проверяю результат",
+              images: [],
+              timestamp: 1,
+              phase: "commentary",
+            },
+            {
+              type: "command",
+              id: "command",
+              status: "completed",
+              kind: "command",
+              command: "npm test",
+              cwd: "/work",
+              output: "passed",
+              exitCode: 0,
+            },
+            {
+              type: "tool",
+              id: "tool",
+              status: "completed",
+              title: "Внутренний инструмент",
+              detail: "Служебные детали",
+            },
+            {
+              type: "plan",
+              id: "plan",
+              status: "completed",
+              text: "Скрытый план",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+            {
+              type: "fileChange",
+              id: "file",
+              status: "completed",
+              path: "/work/file.ts",
+              patch: "+change",
+            },
+            {
+              type: "planChecklist",
+              id: "checklist",
+              status: "completed",
+              explanation: "Скрытый checklist",
+              steps: [{ step: "Скрытый шаг", status: "completed" }],
+              timestamp: 1,
+              afterItemId: null,
+            },
+            {
+              type: "userInputResponse",
+              id: "response",
+              status: "completed",
+              entries: [
+                {
+                  header: "Скрытый ответ",
+                  question: "Скрытый вопрос",
+                  answers: ["Скрытое значение"],
+                },
+              ],
+              timestamp: 1,
+              afterItemId: null,
+            },
+            {
+              type: "error",
+              id: "error",
+              status: "failed",
+              message: "Скрытая ошибка",
+            },
+            {
               type: "agentMessage",
               id: "answer",
               status: "completed",
@@ -1091,6 +1180,23 @@ describe("Activity", () => {
               images: [],
               timestamp: 2,
               phase: "final_answer",
+            },
+          ],
+        },
+        {
+          id: "technical-only",
+          status: "completed",
+          startedAt: 3,
+          completedAt: 4,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "tool",
+              id: "technical-tool",
+              status: "completed",
+              title: "Только техническое действие",
+              detail: "",
             },
           ],
         },
@@ -1102,9 +1208,35 @@ describe("Activity", () => {
       title: "Главная сессия",
     });
 
-    renderThread();
+    const view = renderThread();
 
+    const input = screen.getByText("Проверь результат").closest("article")!;
+    const commentary = screen.getByText("Проверяю результат").closest("article")!;
+    const answer = screen.getByText("Результат субагента").closest("article")!;
+    expect(input).toHaveClass("userMessage");
+    expect(commentary).toHaveClass("agentMessage");
+    expect(answer).toHaveClass("agentMessage");
+    expect(
+      input.compareDocumentPosition(commentary) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      commentary.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.getByText("Результат субагента")).toBeInTheDocument();
+    for (const hidden of [
+      "Скрытое рассуждение",
+      "Внутренний инструмент",
+      "Скрытый план",
+      "Скрытый checklist",
+      "Скрытый шаг",
+      "Скрытый ответ",
+      "Скрытая ошибка",
+      "Только техническое действие",
+    ]) {
+      expect(screen.queryByText(hidden)).toBeNull();
+    }
+    expect(view.container.querySelectorAll(".turn")).toHaveLength(1);
+    expect(view.container.querySelector(".turn-timing")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).toBeNull();
     expect(screen.queryByLabelText("Действия с задачей")).toBeNull();
     expect(
@@ -1118,6 +1250,66 @@ describe("Activity", () => {
     );
     expect(api.readGoal).not.toHaveBeenCalled();
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
+  });
+
+  it("keeps live status and approval requests in the filtered subagent view", () => {
+    const api = threadApi();
+    const child: ThreadSummary = {
+      ...summary,
+      state: "running",
+      currentTurnId: "child-turn",
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: "parent",
+        nickname: null,
+        role: "worker",
+      },
+    };
+    mockThreadConnection(api, child, {
+      turns: [
+        {
+          id: "child-turn",
+          status: "inProgress",
+          startedAt: Date.now() - 1_000,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            {
+              type: "tool",
+              id: "running-tool",
+              status: "inProgress",
+              title: "Скрытый активный инструмент",
+              detail: "",
+            },
+          ],
+        },
+      ],
+      attention: [
+        {
+          id: "child-attention",
+          threadId: "thread",
+          turnId: "child-turn",
+          itemId: null,
+          createdAt: 1,
+          kind: "commandApproval",
+          command: "npm test",
+          cwd: "/work",
+          reason: null,
+          networkHost: null,
+          canAcceptForSession: false,
+          proposedPolicyChanges: [],
+        },
+      ],
+    });
+
+    renderThread();
+
+    expect(screen.queryByText("Скрытый активный инструмент")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Codex работает");
+    expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Разрешить один раз" })).toBeInTheDocument();
   });
 
   it("loads Git changes when the inspector opens and refreshes after a turn completes", async () => {
@@ -1238,7 +1430,7 @@ describe("Activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
     expect(api.interrupt).toHaveBeenCalledWith("thread", "turn");
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Модель" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
   });
 
   it("restores the complete server draft and debounces text autosave", async () => {
@@ -1402,8 +1594,13 @@ describe("Activity", () => {
     expect(
       screen.queryByRole("combobox", { name: "Уровень подтверждений" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Модель" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
+    const modelDialog = screen.getByRole("dialog", { name: "Настройки модели" });
+    expect(within(modelDialog).getByRole("radiogroup", { name: "Модель" })).toBeInTheDocument();
+    expect(
+      within(modelDialog).getByRole("radiogroup", { name: "Уровень рассуждений" }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(modelDialog).getByRole("button", { name: "Закрыть" }));
     expect(
       screen.queryByRole("combobox", { name: "Проверка подтверждений" }),
     ).not.toBeInTheDocument();

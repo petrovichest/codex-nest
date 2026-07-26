@@ -234,8 +234,13 @@ export function ThreadPage({
   );
   const groupedTurnActivities = useMemo(
     () =>
-      new Map((detail?.turns ?? []).map((turn) => [turn.id, groupActivities(turn.items)] as const)),
-    [detail?.turns],
+      new Map(
+        (detail?.turns ?? []).map(
+          (turn) =>
+            [turn.id, groupActivities(activitiesForThreadDisplay(turn.items, isSubagent))] as const,
+        ),
+      ),
+    [detail?.turns, isSubagent],
   );
   const voiceMessageMaterialized = activeVoiceJob
     ? hasMaterializedVoiceMessage(detail, optimisticMessages, activeVoiceJob.id)
@@ -1085,15 +1090,25 @@ export function ThreadPage({
                 <div className="spinner" />
               </div>
             )}
-            {detail?.turns.map((turn) => (
-              <div className="turn" key={turn.id}>
-                {optimisticTurnMessages
-                  .filter(
-                    (message) =>
-                      message.turnId === turn.id ||
-                      (!message.turnId && summary.currentTurnId === turn.id),
-                  )
-                  .map((message) => (
+            {detail?.turns.map((turn) => {
+              const entries = groupedTurnActivities.get(turn.id)!;
+              const turnOptimisticMessages = optimisticTurnMessages.filter(
+                (message) =>
+                  message.turnId === turn.id ||
+                  (!message.turnId && summary.currentTurnId === turn.id),
+              );
+              const active = summary.currentTurnId === turn.id;
+              if (
+                isSubagent &&
+                entries.length === 0 &&
+                turnOptimisticMessages.length === 0 &&
+                !active
+              ) {
+                return null;
+              }
+              return (
+                <div className="turn" key={turn.id}>
+                  {turnOptimisticMessages.map((message) => (
                     <Activity
                       item={optimisticActivity(message)}
                       cwd={summary.cwd}
@@ -1101,47 +1116,61 @@ export function ThreadPage({
                       key={message.id}
                     />
                   ))}
-                {groupedTurnActivities.get(turn.id)!.map((entry) =>
-                  Array.isArray(entry) ? (
-                    <MemoizedActivityGroup
-                      items={entry}
-                      cwd={summary.cwd}
-                      onDownload={downloadFile}
-                      key={entry.map((item) => item.id).join(":")}
-                    />
-                  ) : (
-                    <div key={entry.id}>
-                      <MemoizedActivity
-                        item={entry}
+                  {entries.map((entry) =>
+                    Array.isArray(entry) ? (
+                      <MemoizedActivityGroup
+                        items={entry}
                         cwd={summary.cwd}
                         onDownload={downloadFile}
-                        annotations={annotations}
-                        annotationEnabled={!isSubagent && !busy && entry.id === latestAnnotatableId}
-                        annotationBusy={busy}
-                        onCreateAnnotation={createAnnotationEvent}
-                        onUpdateAnnotation={updateAnnotationEvent}
-                        onDeleteAnnotation={deleteAnnotationEvent}
+                        key={entry.map((item) => item.id).join(":")}
                       />
-                      {!isSubagent && entry.id === latestPlanId && (
-                        <button
-                          className="implement-plan"
-                          disabled={busy || latestPlanHasAnnotations}
-                          title={
-                            latestPlanHasAnnotations
-                              ? t("Сначала отправьте или удалите аннотации к плану")
-                              : undefined
+                    ) : (
+                      <div key={entry.id}>
+                        <MemoizedActivity
+                          item={entry}
+                          cwd={summary.cwd}
+                          onDownload={downloadFile}
+                          annotations={annotations}
+                          annotationEnabled={
+                            !isSubagent && !busy && entry.id === latestAnnotatableId
                           }
-                          onClick={() => void implementPlan()}
-                        >
-                          {t("Да, реализуй этот план")}
-                        </button>
-                      )}
-                    </div>
-                  ),
-                )}
-                <MemoizedTurnTiming turn={turn} active={summary.currentTurnId === turn.id} />
-              </div>
-            ))}
+                          annotationBusy={busy}
+                          onCreateAnnotation={createAnnotationEvent}
+                          onUpdateAnnotation={updateAnnotationEvent}
+                          onDeleteAnnotation={deleteAnnotationEvent}
+                        />
+                        {!isSubagent && entry.id === latestPlanId && (
+                          <button
+                            className="implement-plan"
+                            disabled={busy || latestPlanHasAnnotations}
+                            title={
+                              latestPlanHasAnnotations
+                                ? t("Сначала отправьте или удалите аннотации к плану")
+                                : undefined
+                            }
+                            onClick={() => void implementPlan()}
+                          >
+                            {t("Да, реализуй этот план")}
+                          </button>
+                        )}
+                      </div>
+                    ),
+                  )}
+                  {isSubagent ? (
+                    active && (
+                      <ActiveTurnStatus
+                        progress={{
+                          ...turn.progress,
+                          startedAt: turn.startedAt ?? turn.progress.startedAt,
+                        }}
+                      />
+                    )
+                  ) : (
+                    <MemoizedTurnTiming turn={turn} active={active} />
+                  )}
+                </div>
+              );
+            })}
             {summary.currentTurnId &&
               !detail?.turns.some((turn) => turn.id === summary.currentTurnId) && (
                 <div className="turn active-turn-placeholder">
@@ -1161,7 +1190,9 @@ export function ThreadPage({
                 />
               </div>
             ))}
-            {autoVoiceProgress && <VoiceTranscriptionBubble progress={autoVoiceProgress} />}
+            {!isSubagent && autoVoiceProgress && (
+              <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+            )}
             <AttentionPanel requests={attention} />
             {!isSubagent &&
               !activeVoiceJob &&
@@ -1180,13 +1211,13 @@ export function ThreadPage({
         </div>
         {isSubagent ? (
           <div className="subagent-readonly">
-            <span>
+            <div className="subagent-readonly-copy">
               {t("Субагент управляется родительской сессией. Здесь доступен только просмотр.")}
-            </span>
+            </div>
             {parentThreadId && (
               <Link to={`/threads/${encodeURIComponent(parentThreadId)}`}>
-                {t("Открыть родительскую сессию")}
-                {parentSummary ? ` · ${parentSummary.title}` : ""}
+                <span>{t("Открыть родительскую сессию")}</span>
+                {parentSummary && <small>{parentSummary.title}</small>}
               </Link>
             )}
           </div>
@@ -2482,6 +2513,11 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
   }
   flush();
   return result;
+}
+
+function activitiesForThreadDisplay(items: ActivityItem[], isSubagent: boolean): ActivityItem[] {
+  if (!isSubagent) return items;
+  return items.filter((item) => item.type === "userMessage" || item.type === "agentMessage");
 }
 
 function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {

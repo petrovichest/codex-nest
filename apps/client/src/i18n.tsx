@@ -347,6 +347,7 @@ const ENGLISH: Record<string, string> = {
   Готова: "Ready",
   Недоступна: "Unavailable",
   Модель: "Model",
+  "Настройки модели": "Model settings",
   "Модель и уровень рассуждений": "Model and reasoning effort",
   "Уровень рассуждений": "Reasoning effort",
   "Выключить режим планирования": "Disable Plan mode",

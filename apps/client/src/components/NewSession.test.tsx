@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
@@ -172,7 +172,13 @@ describe("NewSession", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toHaveValue("high");
+    fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
+    const effortOptions = screen.getByRole("radiogroup", { name: "Уровень рассуждений" });
+    expect(within(effortOptions).getByRole("radio", { name: "high" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
       target: { value: "Продолжай глубоко рассуждать" },
     });

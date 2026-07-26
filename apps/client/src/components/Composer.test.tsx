@@ -42,22 +42,46 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
-  it("keeps model and reasoning effort in one compact picker", () => {
+  it("opens model and reasoning effort in one popup", () => {
     render(<Harness />);
     const toggle = screen.getByLabelText("Модель и уровень рассуждений");
     expect(toggle).toHaveTextContent("5.6sol");
+    expect(toggle).toHaveAttribute("aria-haspopup", "dialog");
+    expect(screen.queryByRole("dialog", { name: "Настройки модели" })).toBeNull();
+
     fireEvent.click(toggle);
-    const model = screen.getByRole("combobox", { name: "Модель" });
+    const dialog = screen.getByRole("dialog", { name: "Настройки модели" });
+    const modelOptions = within(dialog).getByRole("radiogroup", { name: "Модель" });
+    const effortOptions = within(dialog).getByRole("radiogroup", {
+      name: "Уровень рассуждений",
+    });
 
-    expect(
-      within(model)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
-    ).toEqual(["По умолчанию · 5.6sol", "GPT-5.6-Sol", "GPT-5.6-Terra", "Other Model"]);
-    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toHaveValue("");
+    expect(within(modelOptions).getAllByRole("radio")).toHaveLength(4);
+    expect(within(modelOptions).getByRole("radio", { name: /По умолчанию/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(within(effortOptions).getByRole("radio", { name: /По умолчанию/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
 
-    fireEvent.change(model, { target: { value: "gpt-terra" } });
+    fireEvent.click(within(modelOptions).getByRole("radio", { name: "GPT-5.6-Terra" }));
     expect(toggle).toHaveTextContent("5.6terra");
+    expect(within(modelOptions).getByRole("radio", { name: "GPT-5.6-Terra" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    fireEvent.click(within(effortOptions).getByRole("radio", { name: "high" }));
+    expect(within(effortOptions).getByRole("radio", { name: "high" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Настройки модели" })).toBeNull();
+    expect(toggle).toHaveFocus();
   });
 
   it("renders plan, team, and goal as compact mutually exclusive controls", () => {
