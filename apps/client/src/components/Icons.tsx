@@ -169,6 +169,15 @@ export const PlanIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const TeamIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx="12" cy="7" r="2.5" />
+    <circle cx="5.5" cy="16" r="2.5" />
+    <circle cx="18.5" cy="16" r="2.5" />
+    <path d="M12 9.5v2.5M5.5 13.5V12h13v1.5" />
+  </Icon>
+);
+
 export const TargetIcon = (props: IconProps) => (
   <Icon {...props}>
     <circle cx="12" cy="12" r="8.5" />

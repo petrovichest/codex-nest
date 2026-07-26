@@ -22,6 +22,7 @@ export function SessionInspector({
   onClose,
   onPin,
   onArchive,
+  readOnly = false,
 }: {
   open: boolean;
   summary: ThreadSummary;
@@ -30,6 +31,7 @@ export function SessionInspector({
   onClose(): void;
   onPin(): void;
   onArchive(): void;
+  readOnly?: boolean;
 }) {
   const { language, t } = useI18n();
   if (!open) return null;
@@ -65,14 +67,16 @@ export function SessionInspector({
         <span>{t("Рабочая папка")}</span>
         <code>{summary.cwd}</code>
       </div>
-      <div className="inspector-actions">
-        <button onClick={onPin}>
-          <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
-        </button>
-        <button onClick={onArchive}>
-          <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
-        </button>
-      </div>
+      {!readOnly && (
+        <div className="inspector-actions">
+          <button onClick={onPin}>
+            <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
+          </button>
+          <button onClick={onArchive}>
+            <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

@@ -143,7 +143,9 @@ export function NewSession({
           busy={busy}
           settings={settings}
           onSettingsChange={(patch) => {
-            if (patch.collaborationMode === "plan") setGoalMode(false);
+            if (patch.collaborationMode !== undefined && patch.collaborationMode !== "default") {
+              setGoalMode(false);
+            }
             setSettings((current) => applySettingsPatch(current, patch));
           }}
           goalMode={goalMode}

@@ -42,40 +42,49 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
-  it("renders compact model names without a chevron and tracks the selected label width", () => {
+  it("keeps model and reasoning effort in one compact picker", () => {
     render(<Harness />);
+    const toggle = screen.getByLabelText("Модель и уровень рассуждений");
+    expect(toggle).toHaveTextContent("5.6sol");
+    fireEvent.click(toggle);
     const model = screen.getByRole("combobox", { name: "Модель" });
-    const control = model.closest("label");
 
     expect(
       within(model)
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["По умолчанию · 5.6sol", "5.6sol", "5.6terra", "Other Model"]);
-    expect(control?.querySelector(".setting-select-value")).toHaveTextContent("5.6sol");
-    expect(control?.querySelector(".setting-select-chevron")).toBeNull();
+    ).toEqual(["По умолчанию · 5.6sol", "GPT-5.6-Sol", "GPT-5.6-Terra", "Other Model"]);
+    expect(screen.getByRole("combobox", { name: "Уровень рассуждений" })).toHaveValue("");
 
     fireEvent.change(model, { target: { value: "gpt-terra" } });
-    expect(control?.querySelector(".setting-select-value")).toHaveTextContent("5.6terra");
+    expect(toggle).toHaveTextContent("5.6terra");
   });
 
-  it("renders reasoning, plan, and goal as compact icon-only controls", () => {
+  it("renders plan, team, and goal as compact mutually exclusive controls", () => {
     const view = render(<Harness />);
     const settings = view.container.querySelector(".settings-picker");
-    const reasoning = screen.getByRole("combobox", { name: "Уровень рассуждений" });
     const plan = screen.getByRole("button", { name: "Включить режим планирования" });
+    const team = screen.getByRole("button", { name: "Включить командный режим" });
     const goal = screen.getByRole("button", { name: "Включить режим цели" });
 
     expect(settings).toBeInTheDocument();
-    expect(reasoning.closest("label")).toHaveClass("icon-only");
-    expect(reasoning.closest("label")?.querySelectorAll("svg")).toHaveLength(1);
     expect(plan.querySelector("span")).toBeNull();
     expect(plan.querySelectorAll("svg")).toHaveLength(1);
+    expect(team.querySelector("span")).toBeNull();
+    expect(team.querySelectorAll("svg")).toHaveLength(1);
     expect(goal.querySelector("span")).toBeNull();
     expect(goal.querySelectorAll("svg")).toHaveLength(1);
 
-    fireEvent.change(reasoning, { target: { value: "high" } });
-    expect(reasoning).toHaveValue("high");
+    fireEvent.click(team);
+    expect(screen.getByRole("button", { name: "Выключить командный режим" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(plan);
+    expect(screen.getByRole("button", { name: "Выключить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("renders voice auto-send as a compact remembered toggle", () => {

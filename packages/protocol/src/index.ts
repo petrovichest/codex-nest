@@ -192,6 +192,19 @@ export type ThreadOutcome = "completed" | "failed" | "interrupted";
 
 export type ThreadState = "needsAttention" | "running" | ThreadOutcome | "idle" | "unavailable";
 
+export type ThreadRelation =
+  | {
+      kind: "session";
+      sessionId: string;
+    }
+  | {
+      kind: "subagent";
+      sessionId: string;
+      parentThreadId: string;
+      nickname: string | null;
+      role: string | null;
+    };
+
 export type ThreadSummary = {
   id: string;
   projectId: string | null;
@@ -208,6 +221,7 @@ export type ThreadSummary = {
   currentTurnId: string | null;
   queuedMessageCount: number;
   settings: SessionSettings;
+  relation: ThreadRelation;
 };
 
 export type QueuedMessage = {
@@ -359,7 +373,7 @@ export type ModelOption = {
   supportsPersonality: boolean;
 };
 
-export type CollaborationMode = "default" | "plan";
+export type CollaborationMode = "default" | "plan" | "team";
 
 export type PermissionPreset = "ask" | "auto" | "full-access";
 

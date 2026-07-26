@@ -6,6 +6,7 @@ import { clientReducer, initialState, sortThreads } from "./state";
 
 const baseThread: ThreadSummary = {
   id: "one",
+  relation: { kind: "session", sessionId: "session" },
   projectId: null,
   title: "One",
   preview: "",

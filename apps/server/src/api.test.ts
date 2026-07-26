@@ -1118,6 +1118,49 @@ describe("thread settings", () => {
       ).statusCode,
     ).toBe(404);
 
+    projection.upsertThread({
+      ...testThread("child"),
+      parentThreadId: "thread",
+      ephemeral: true,
+      agentNickname: "reviewer",
+      agentRole: "worker",
+    });
+    expect(projection.summary("child")?.relation).toEqual({
+      kind: "subagent",
+      sessionId: "child",
+      parentThreadId: "thread",
+      nickname: "reviewer",
+      role: "worker",
+    });
+    expect((await app.inject({ url: "/api/v1/threads/child", headers })).statusCode).toBe(200);
+    for (const request of [
+      {
+        method: "PUT",
+        url: "/api/v1/threads/child/draft",
+        payload: { input: "Нет", images: [], goalMode: false, annotations: [] },
+      },
+      {
+        method: "PATCH",
+        url: "/api/v1/threads/child/settings",
+        payload: { collaborationMode: "team" },
+      },
+      {
+        method: "POST",
+        url: "/api/v1/threads/child/turns",
+        payload: { input: "Нет" },
+      },
+      { method: "DELETE", url: "/api/v1/threads/child" },
+    ]) {
+      const response = await app.inject({ ...request, headers });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: "conflict",
+          message: "Subagent threads are managed by their parent session",
+        },
+      });
+    }
+
     const turnsBeforeEmptyThread = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/start",
     ).length;
@@ -1347,6 +1390,60 @@ describe("thread settings", () => {
       turnId: "turn",
       item: { type: "userMessage", id: "client-started", text: "Составь план" },
     });
+
+    const teamCreated = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers,
+      payload: {
+        projectId: "project",
+        input: "Выполни многошаговый план",
+        settings: {
+          collaborationMode: "team",
+          model: "gpt-a",
+          reasoningEffort: "high",
+        },
+      },
+    });
+    expect(teamCreated.statusCode).toBe(201);
+    expect(teamCreated.json().thread.settings).toEqual({
+      collaborationMode: "team",
+      model: "gpt-a",
+      reasoningEffort: "high",
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({
+      effort: "high",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-a", reasoning_effort: "high" },
+      },
+      additionalContext: {
+        "codexnest.team": {
+          kind: "application",
+          value: expect.stringMatching(/native subagents.*parallel delegation/i),
+        },
+      },
+    });
+    const startsBeforeInvalidTeamGoal = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/start",
+    ).length;
+    const invalidTeamGoal = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers,
+      payload: {
+        projectId: "project",
+        input: "Несовместимо",
+        goal: true,
+        settings: { collaborationMode: "team" },
+      },
+    });
+    expect(invalidTeamGoal.statusCode).toBe(409);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+      startsBeforeInvalidTeamGoal,
+    );
 
     await app.inject({
       method: "PUT",

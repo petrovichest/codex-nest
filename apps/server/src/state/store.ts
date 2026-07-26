@@ -494,7 +494,7 @@ function isThreadDraftAnnotation(value: unknown): boolean {
 }
 
 function isSessionSettings(value: unknown): value is SessionSettings {
-  if (!isRecord(value) || !["default", "plan"].includes(String(value.collaborationMode))) {
+  if (!isRecord(value) || !["default", "plan", "team"].includes(String(value.collaborationMode))) {
     return false;
   }
   for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {

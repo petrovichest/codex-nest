@@ -25,6 +25,7 @@ vi.mock("../downloads", () => ({ openDownloadUrl }));
 
 const summary: ThreadSummary = {
   id: "thread",
+  relation: { kind: "session", sessionId: "session" },
   projectId: "project",
   title: "Тестовая задача",
   preview: "",
@@ -1057,6 +1058,66 @@ describe("Activity", () => {
     expect(confirm).toHaveBeenCalledWith("Удалить эту сессию? Это действие нельзя отменить.");
     await waitFor(() => expect(api.deleteThread).toHaveBeenCalledWith("thread"));
     confirm.mockRestore();
+  });
+
+  it("shows a subagent transcript as read-only and links back to its parent", () => {
+    const api = threadApi();
+    const child: ThreadSummary = {
+      ...summary,
+      title: "Worker",
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: "parent",
+        nickname: "reviewer",
+        role: "worker",
+      },
+    };
+    const context = mockThreadConnection(api, child, {
+      turns: [
+        {
+          id: "child-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "completed",
+              text: "Результат субагента",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    context.state.snapshot.threads.push({
+      ...summary,
+      id: "parent",
+      title: "Главная сессия",
+    });
+
+    renderThread();
+
+    expect(screen.getByText("Результат субагента")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).toBeNull();
+    expect(screen.queryByLabelText("Действия с задачей")).toBeNull();
+    expect(
+      screen.getByText(
+        "Субагент управляется родительской сессией. Здесь доступен только просмотр.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Открыть родительскую сессию/ })).toHaveAttribute(
+      "href",
+      "/threads/parent",
+    );
+    expect(api.readGoal).not.toHaveBeenCalled();
+    expect(api.updateThreadDraft).not.toHaveBeenCalled();
   });
 
   it("loads Git changes when the inspector opens and refreshes after a turn completes", async () => {

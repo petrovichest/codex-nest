@@ -33,6 +33,7 @@ vi.mock("@capacitor/app", () => ({
 
 const baseThread: ThreadSummary = {
   id: "newer",
+  relation: { kind: "session", sessionId: "session" },
   projectId: "project",
   title: "Новая задача в истории",
   preview: "",
@@ -533,6 +534,32 @@ describe("App routing and navigation", () => {
     fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 1" }));
     expect(sessionTitles()).toEqual(["Свежая", "Вторая", "Третья", "Четвёртая", "Пятая", "Старая"]);
     expect(sessions.lastElementChild).toHaveTextContent("Показать меньше");
+  });
+
+  it("nests native subagents under their parent session", () => {
+    const child: ThreadSummary = {
+      ...baseThread,
+      id: "child",
+      title: "Проверить тесты",
+      state: "running",
+      updatedAt: 30,
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: baseThread.id,
+        nickname: "tester",
+        role: "worker",
+      },
+    };
+    mockConnection(snapshot([child, baseThread]));
+
+    const view = renderApp("/threads/newer");
+
+    const childLink = screen.getByRole("link", { name: /tester · Проверить тесты/ });
+    expect(childLink.closest(".thread-branch-children")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Свернуть субагентов" }));
+    expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
+    expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(1);
   });
 
   it("collapses project sessions without toggling from project actions", () => {

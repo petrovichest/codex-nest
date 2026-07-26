@@ -10,7 +10,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useLocation, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
 
 import type {
   ActivityItem,
@@ -130,6 +130,12 @@ export function ThreadPage({
   languageRef.current = language;
   const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
+  const parentThreadId =
+    summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
+  const isSubagent = parentThreadId !== null;
+  const parentSummary = parentThreadId
+    ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
+    : undefined;
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const detail = state.details[threadId];
@@ -479,6 +485,7 @@ export function ThreadPage({
   }, [threadId]);
 
   useEffect(() => {
+    if (isSubagent) return;
     if (!detail) return;
     if (draftTouchedThreadsRef.current.has(threadId)) return;
     const detailDraft = detail.draft ?? null;
@@ -502,7 +509,7 @@ export function ThreadPage({
     hydratedDraftSourcesRef.current.set(threadId, detailDraft);
     replaceComposerDraft(next, localAnnotations.length ? "immediate" : false);
     if (localAnnotations.length) legacyAnnotationThreadsRef.current.add(threadId);
-  }, [detail, threadId]);
+  }, [detail, isSubagent, threadId]);
 
   useEffect(() => {
     const flushBeforePageExit = () => {
@@ -513,7 +520,7 @@ export function ThreadPage({
   }, [threadId]);
 
   useEffect(() => {
-    if (!threadId) return;
+    if (!threadId || isSubagent) return;
     const request = api.readGoal?.(threadId);
     if (!request) return;
     void request
@@ -521,7 +528,7 @@ export function ThreadPage({
       .catch((caught: Error) =>
         setError(localizeKnownServerText(languageRef.current, caught.message)),
       );
-  }, [api, dispatch, threadId]);
+  }, [api, dispatch, isSubagent, threadId]);
 
   useEffect(() => {
     const notice = (location.state as { notice?: unknown } | null)?.notice;
@@ -943,7 +950,9 @@ export function ThreadPage({
     try {
       const thread = await api.updateThreadSettings(threadId, patch);
       dispatch({ type: "thread", thread });
-      if (patch.collaborationMode === "plan") setGoalMode(false);
+      if (patch.collaborationMode !== undefined && patch.collaborationMode !== "default") {
+        setGoalMode(false);
+      }
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -1022,25 +1031,31 @@ export function ThreadPage({
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
-            <details className="thread-action-menu" data-dismiss-on-outside-click>
-              <summary className="icon-button" aria-label={t("Действия с задачей")}>
-                <MoreIcon />
-              </summary>
-              <div className="action-menu-popover">
-                <button onClick={togglePin}>
-                  <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
-                </button>
-                <button onClick={() => setRenaming(true)}>
-                  <PencilIcon /> {t("Переименовать")}
-                </button>
-                <button onClick={toggleArchive}>
-                  <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
-                </button>
-                <button className="danger" disabled={deleting} onClick={() => void deleteThread()}>
-                  <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
-                </button>
-              </div>
-            </details>
+            isSubagent ? undefined : (
+              <details className="thread-action-menu" data-dismiss-on-outside-click>
+                <summary className="icon-button" aria-label={t("Действия с задачей")}>
+                  <MoreIcon />
+                </summary>
+                <div className="action-menu-popover">
+                  <button onClick={togglePin}>
+                    <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
+                  </button>
+                  <button onClick={() => setRenaming(true)}>
+                    <PencilIcon /> {t("Переименовать")}
+                  </button>
+                  <button onClick={toggleArchive}>
+                    <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={deleting}
+                    onClick={() => void deleteThread()}
+                  >
+                    <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
+                  </button>
+                </div>
+              </details>
+            )
           }
         />
         <div
@@ -1101,13 +1116,13 @@ export function ThreadPage({
                         cwd={summary.cwd}
                         onDownload={downloadFile}
                         annotations={annotations}
-                        annotationEnabled={!busy && entry.id === latestAnnotatableId}
+                        annotationEnabled={!isSubagent && !busy && entry.id === latestAnnotatableId}
                         annotationBusy={busy}
                         onCreateAnnotation={createAnnotationEvent}
                         onUpdateAnnotation={updateAnnotationEvent}
                         onDeleteAnnotation={deleteAnnotationEvent}
                       />
-                      {entry.id === latestPlanId && (
+                      {!isSubagent && entry.id === latestPlanId && (
                         <button
                           className="implement-plan"
                           disabled={busy || latestPlanHasAnnotations}
@@ -1148,7 +1163,8 @@ export function ThreadPage({
             ))}
             {autoVoiceProgress && <VoiceTranscriptionBubble progress={autoVoiceProgress} />}
             <AttentionPanel requests={attention} />
-            {!activeVoiceJob &&
+            {!isSubagent &&
+              !activeVoiceJob &&
               !voiceUpload &&
               ["completed", "interrupted"].includes(summary.state) &&
               summary.unread && (
@@ -1162,74 +1178,93 @@ export function ThreadPage({
               )}
           </section>
         </div>
-        <Composer
-          key={threadId}
-          autoFocus={(location.state as { focusComposer?: unknown } | null)?.focusComposer === true}
-          input={input}
-          onInput={setInput}
-          images={images}
-          onImagesChange={setImages}
-          onSubmit={submit}
-          busy={busy}
-          running={Boolean(summary.currentTurnId)}
-          settings={summary.settings}
-          onSettingsChange={(patch) => void updateSettings(patch)}
-          settingsBusy={settingsBusy}
-          goalMode={goalMode}
-          goal={goal}
-          goalBusy={goalBusy}
-          onGoalModeChange={(value) => {
-            if (value && annotations.length) {
-              setError(t("Сначала отправьте или удалите аннотации"));
-              return;
+        {isSubagent ? (
+          <div className="subagent-readonly">
+            <span>
+              {t("Субагент управляется родительской сессией. Здесь доступен только просмотр.")}
+            </span>
+            {parentThreadId && (
+              <Link to={`/threads/${encodeURIComponent(parentThreadId)}`}>
+                {t("Открыть родительскую сессию")}
+                {parentSummary ? ` · ${parentSummary.title}` : ""}
+              </Link>
+            )}
+          </div>
+        ) : (
+          <Composer
+            key={threadId}
+            autoFocus={
+              (location.state as { focusComposer?: unknown } | null)?.focusComposer === true
             }
-            setGoalMode(value);
-          }}
-          onGoalUpdate={(patch) => void updateGoal(patch)}
-          onGoalClear={() => void clearGoal()}
-          models={state.snapshot?.models ?? []}
-          onStop={
-            summary.currentTurnId
-              ? () => void api.interrupt(threadId, summary.currentTurnId!)
-              : undefined
-          }
-          transcriptionConfig={transcriptionConfig}
-          transcriptionProvider={transcriptionProvider}
-          voiceMode={voiceMode}
-          onVoiceModeChange={setVoiceMode}
-          voiceUploadPending={Boolean(voiceUpload)}
-          voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
-          onRecordingReady={(recording) => beginTranscription(threadId, recording)}
-          transcriptionStatus={draftVoiceProgress}
-          transcriptionError={
-            voiceJob?.status === "failed"
-              ? (localizeKnownServerText(language, voiceJob.error) ?? voiceJob.error)
-              : null
-          }
-          error={error}
-          hasSupplementalContent={annotations.length > 0}
-        >
-          {showScrollToBottom && (
-            <button
-              type="button"
-              className="scroll-to-bottom"
-              aria-label={t("Прокрутить к последнему сообщению")}
-              onClick={() => {
-                followsTail.current = true;
-                scrollToEnd(scrollRef.current, "smooth");
-              }}
-            >
-              <ArrowDownIcon />
-            </button>
-          )}
-          <QueuedMessages
-            messages={mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)}
-            action={queueAction}
-            onSendNow={sendQueuedNow}
-            onUpdate={updateQueued}
-            onDelete={deleteQueued}
-          />
-        </Composer>
+            input={input}
+            onInput={setInput}
+            images={images}
+            onImagesChange={setImages}
+            onSubmit={submit}
+            busy={busy}
+            running={Boolean(summary.currentTurnId)}
+            settings={summary.settings}
+            onSettingsChange={(patch) => void updateSettings(patch)}
+            settingsBusy={settingsBusy}
+            goalMode={goalMode}
+            goal={goal}
+            goalBusy={goalBusy}
+            onGoalModeChange={(value) => {
+              if (value && annotations.length) {
+                setError(t("Сначала отправьте или удалите аннотации"));
+                return;
+              }
+              setGoalMode(value);
+            }}
+            onGoalUpdate={(patch) => void updateGoal(patch)}
+            onGoalClear={() => void clearGoal()}
+            models={state.snapshot?.models ?? []}
+            onStop={
+              summary.currentTurnId
+                ? () => void api.interrupt(threadId, summary.currentTurnId!)
+                : undefined
+            }
+            transcriptionConfig={transcriptionConfig}
+            transcriptionProvider={transcriptionProvider}
+            voiceMode={voiceMode}
+            onVoiceModeChange={setVoiceMode}
+            voiceUploadPending={Boolean(voiceUpload)}
+            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
+            onRecordingReady={(recording) => beginTranscription(threadId, recording)}
+            transcriptionStatus={draftVoiceProgress}
+            transcriptionError={
+              voiceJob?.status === "failed"
+                ? (localizeKnownServerText(language, voiceJob.error) ?? voiceJob.error)
+                : null
+            }
+            error={error}
+            hasSupplementalContent={annotations.length > 0}
+          >
+            {showScrollToBottom && (
+              <button
+                type="button"
+                className="scroll-to-bottom"
+                aria-label={t("Прокрутить к последнему сообщению")}
+                onClick={() => {
+                  followsTail.current = true;
+                  scrollToEnd(scrollRef.current, "smooth");
+                }}
+              >
+                <ArrowDownIcon />
+              </button>
+            )}
+            <QueuedMessages
+              messages={mergeOptimisticQueue(
+                detail?.queuedMessages ?? [],
+                optimisticQueuedMessages,
+              )}
+              action={queueAction}
+              onSendNow={sendQueuedNow}
+              onUpdate={updateQueued}
+              onDelete={deleteQueued}
+            />
+          </Composer>
+        )}
       </div>
       <SessionInspector
         open={inspectorOpen}
@@ -1239,6 +1274,7 @@ export function ThreadPage({
         onClose={() => setInspectorOpen(false)}
         onPin={togglePin}
         onArchive={toggleArchive}
+        readOnly={isSubagent}
       />
       {inspectorOpen && (
         <button

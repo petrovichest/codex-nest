@@ -573,6 +573,49 @@ pre {
   white-space: nowrap;
 }
 
+.thread-branch-row {
+  display: flex;
+  align-items: center;
+}
+
+.thread-branch-row > .thread-link {
+  min-width: 0;
+  flex: 1;
+  padding-left: 2px;
+}
+
+.thread-branch-toggle,
+.thread-branch-spacer {
+  width: 28px;
+  height: 32px;
+  flex: 0 0 28px;
+}
+
+.thread-branch-toggle {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.thread-branch-toggle:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.thread-branch-toggle svg {
+  width: 14px;
+  height: 14px;
+}
+
+.thread-branch-children {
+  margin-left: 14px;
+  padding-left: 5px;
+  border-left: 1px solid var(--line);
+}
+
 .status,
 .connection-dot {
   display: inline-block;
@@ -2215,6 +2258,7 @@ pre {
 
 .setting-control.icon-only,
 .plan-toggle,
+.team-toggle,
 .goal-toggle,
 .voice-send-toggle {
   width: 32px;
@@ -2225,11 +2269,62 @@ pre {
 }
 
 .plan-toggle.active,
+.team-toggle.active,
 .goal-toggle.active,
 .voice-send-toggle.active {
   background: color-mix(in srgb, var(--accent) 13%, var(--surface-muted));
   color: var(--text-strong);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.model-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.model-picker > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.model-picker > summary::-webkit-details-marker {
+  display: none;
+}
+
+.model-picker > summary.disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.model-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 65;
+  width: min(320px, calc(100vw - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+
+.model-popover label {
+  display: grid;
+  gap: 6px;
+}
+
+.model-popover label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-popover select {
+  width: 100%;
+  min-width: 0;
 }
 
 .goal-picker {
@@ -2687,6 +2782,27 @@ pre {
 
 .session-inspector:not(.open) {
   display: none;
+}
+
+.subagent-readonly {
+  min-height: 58px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 16px 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.subagent-readonly a {
+  flex: 0 0 auto;
+  color: var(--accent);
 }
 
 .inspector-heading {

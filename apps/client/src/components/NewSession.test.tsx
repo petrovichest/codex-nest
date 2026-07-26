@@ -191,7 +191,7 @@ describe("NewSession", () => {
     );
   });
 
-  it("keeps Plan and Goal mutually exclusive and starts a native goal", async () => {
+  it("keeps Plan, Team, and Goal mutually exclusive and starts a native goal", async () => {
     const createThread = vi.fn().mockResolvedValue({ thread: { id: "created" }, turnId: "turn" });
     connection.mockReturnValue({
       api: { createThread },
@@ -225,10 +225,19 @@ describe("NewSession", () => {
       </MemoryRouter>,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Включить командный режим" }));
+    expect(screen.getByRole("button", { name: "Выключить командный режим" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
     expect(screen.getByRole("button", { name: "Выключить режим планирования" })).toHaveAttribute(
       "aria-pressed",
       "true",
+    );
+    expect(screen.getByRole("button", { name: "Включить командный режим" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
     );
     fireEvent.click(screen.getByRole("button", { name: "Включить режим цели" }));
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toHaveAttribute(

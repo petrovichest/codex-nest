@@ -7,6 +7,7 @@ import { NewSessionInspector, SessionInspector, type GitChangesView } from "./Se
 
 const summary: ThreadSummary = {
   id: "thread",
+  relation: { kind: "session", sessionId: "session" },
   projectId: "project",
   title: "Задача",
   preview: "",

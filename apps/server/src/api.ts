@@ -108,6 +108,14 @@ import {
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
+const TEAM_MODE_CONTEXT = [
+  "This session is in CodexNest Team mode. Act as the root coordinator.",
+  "Use native subagents for suitable, independently scoped parts of the user's plan.",
+  "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
+  "Never run parallel subagents that may write to overlapping files.",
+  "Wait for required subagent results, integrate them, and return one consolidated result to the user.",
+  "The user should not need to coordinate subagents directly.",
+].join(" ");
 
 interface DownloadTicket {
   root: string;
@@ -165,9 +173,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   ): Promise<TurnStartResult> => {
     let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    assertWritableThread(summary);
     const shouldGenerateTitle =
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (goal) {
+      if (summary.settings.collaborationMode === "team") {
+        throw new ProjectConflictError("Team mode cannot be combined with a goal");
+      }
       if (summary.settings.collaborationMode === "plan") {
         summary = await projection.setSettings(threadId, {
           ...summary.settings,
@@ -486,9 +498,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/voice-transcriptions",
     { bodyLimit: MAX_TRANSCRIPTION_BYTES },
     async (request, reply): Promise<VoiceTranscriptionJob | undefined> => {
-      if (!projection.summary(request.params.id)) {
+      const summary = projection.summary(request.params.id);
+      if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
+      assertWritableThread(summary);
       if (!voiceTranscriptions || !services.transcription) {
         return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
       }
@@ -881,9 +895,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/draft",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
-      if (!projection.summary(request.params.id)) {
+      const summary = projection.summary(request.params.id);
+      if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
+      assertWritableThread(summary);
       if (voiceTranscriptions?.active(request.params.id)) {
         return apiError(
           reply,
@@ -907,17 +923,24 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.patch<{ Params: { id: string }; Body: UpdateThreadGoalRequest }>(
     "/api/v1/threads/:id/goal",
     async (request, reply) => {
-      if (!projection.summary(request.params.id)) {
+      const summary = projection.summary(request.params.id);
+      if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      assertWritableThread(summary);
+      if (summary.settings.collaborationMode === "team") {
+        throw new ProjectConflictError("Team mode cannot be combined with a goal");
       }
       return setThreadGoal(bridge, request.params.id, validateGoalPatch(request.body));
     },
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
-    if (!projection.summary(request.params.id)) {
+    const summary = projection.summary(request.params.id);
+    if (!summary) {
       return apiError(reply, 404, "not_found", "Thread not found");
     }
+    assertWritableThread(summary);
     await clearThreadGoal(bridge, request.params.id);
     return reply.code(204).send();
   });
@@ -999,6 +1022,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.settings ?? {},
         projection.availableModels,
       );
+      if (body.goal && settings.collaborationMode === "team") {
+        throw new ProjectConflictError("Team mode cannot be combined with a goal");
+      }
       const started = parseThreadStart(
         await bridge.request<unknown>("thread/start", {
           cwd: project.path,
@@ -1029,8 +1055,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id",
     async (request, reply) => {
       const body = requireRecord<UpdateThreadRequest>(request.body);
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       if (body.name !== undefined) {
         if (typeof body.name !== "string" || !body.name.trim())
           return apiError(reply, 400, "validation_failed", "name must not be empty");
@@ -1049,9 +1076,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
-    if (!projection.summary(request.params.id)) {
+    const summary = projection.summary(request.params.id);
+    if (!summary) {
       return apiError(reply, 404, "not_found", "Thread not found");
     }
+    assertWritableThread(summary);
     await bridge.request("thread/delete", { threadId: request.params.id });
     await voiceTranscriptions?.cancelThread(request.params.id);
     await queue.removeThread(request.params.id);
@@ -1070,6 +1099,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       if (summary.currentTurnId) {
         return apiError(
           reply,
@@ -1079,6 +1109,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         );
       }
       const settings = mergeSettings(summary.settings, patch, projection.availableModels);
+      if (
+        settings.collaborationMode === "team" &&
+        summary.settings.collaborationMode !== "team" &&
+        (await readThreadGoal(bridge, request.params.id))
+      ) {
+        throw new ProjectConflictError("Team mode cannot be combined with a goal");
+      }
       const thread = await projection.setSettings(request.params.id, settings);
       if (patch.reasoningEffort !== undefined) {
         await projection.setDefaultReasoningEffort(settings.reasoningEffort);
@@ -1104,6 +1141,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!body) return;
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       const result = await startTurn(
         request.params.id,
         body.input,
@@ -1137,9 +1175,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (body.clientMessageId !== undefined && clientMessageId === null) {
         return apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
       }
-      if (!projection.summary(request.params.id)) {
+      const summary = projection.summary(request.params.id);
+      if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
+      assertWritableThread(summary);
       const message = await queue.enqueue(
         request.params.id,
         body.input,
@@ -1152,9 +1192,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.post<{ Params: { id: string; messageId: string } }>(
     "/api/v1/threads/:id/queue/:messageId/send",
-    async (request) => ({
-      turnId: await queue.sendNow(request.params.id, request.params.messageId),
-    }),
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      return { turnId: await queue.sendNow(request.params.id, request.params.messageId) };
+    },
   );
 
   app.patch<{
@@ -1164,6 +1207,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/queue/:messageId",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       const body = requireRecord<UpdateQueuedMessageRequest>(request.body);
       if (typeof body.input !== "string") {
         return apiError(reply, 400, "validation_failed", "input must be a string");
@@ -1175,6 +1221,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.delete<{ Params: { id: string; messageId: string } }>(
     "/api/v1/threads/:id/queue/:messageId",
     async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       await queue.cancel(request.params.id, request.params.messageId);
       return reply.code(204).send();
     },
@@ -1184,6 +1233,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads/:id/steer",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       if (voiceTranscriptions?.active(request.params.id)) {
         return apiError(
           reply,
@@ -1211,6 +1263,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.post<{ Params: { id: string }; Body: InterruptTurnRequest }>(
     "/api/v1/threads/:id/interrupt",
     async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       const body = requireRecord<InterruptTurnRequest>(request.body);
       if (typeof body.turnId !== "string")
         return apiError(reply, 400, "validation_failed", "turnId is required");
@@ -1224,8 +1279,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     ["unarchive", "thread/unarchive"],
   ] as const) {
     app.post<{ Params: { id: string } }>(`/api/v1/threads/:id/${route}`, async (request, reply) => {
-      if (!projection.summary(request.params.id))
-        return apiError(reply, 404, "not_found", "Thread not found");
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
       await bridge.request(method, { threadId: request.params.id });
       return reply.code(204).send();
     });
@@ -1438,14 +1494,29 @@ function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<
     effort: settings.reasoningEffort,
     personality: settings.personality,
     collaborationMode: {
-      mode: settings.collaborationMode,
+      mode: settings.collaborationMode === "plan" ? "plan" : "default",
       settings: {
         model: model.id,
         reasoning_effort: reasoningEffort,
         developer_instructions: null,
       },
     },
+    additionalContext:
+      settings.collaborationMode === "team"
+        ? {
+            "codexnest.team": {
+              kind: "application",
+              value: TEAM_MODE_CONTEXT,
+            },
+          }
+        : undefined,
   });
+}
+
+function assertWritableThread(summary: ThreadSummary): void {
+  if (summary.relation.kind === "subagent") {
+    throw new ProjectConflictError("Subagent threads are managed by their parent session");
+  }
 }
 
 function compact(value: Record<string, unknown>): Record<string, unknown> {
@@ -1678,7 +1749,7 @@ function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
   }
   if (
     settings.collaborationMode !== undefined &&
-    !["default", "plan"].includes(String(settings.collaborationMode))
+    !["default", "plan", "team"].includes(String(settings.collaborationMode))
   ) {
     throw new ProjectValidationError("Invalid collaborationMode");
   }

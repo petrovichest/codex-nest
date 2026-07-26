@@ -445,7 +445,7 @@ function HomeRoute({
 }) {
   const { t } = useI18n();
   const latest = [...threads]
-    .filter((thread) => !thread.archived)
+    .filter((thread) => !thread.archived && thread.relation.kind === "session")
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (latest) return <Navigate to={`/threads/${encodeURIComponent(latest.id)}`} replace />;
   return (
@@ -507,9 +507,13 @@ function Sidebar({
     null,
   );
   const snapshot = state.snapshot;
-  const activeThreads = snapshot?.threads.filter((thread) => !thread.archived) ?? [];
-  const archivedThreads = snapshot?.threads.filter((thread) => thread.archived) ?? [];
-  const groups = groupedThreads(snapshot?.projects ?? [], activeThreads);
+  const allThreads = snapshot?.threads ?? [];
+  const roots = topLevelThreads(allThreads);
+  const activeRoots = roots.filter((thread) => !thread.archived);
+  const archivedRoots = roots.filter((thread) => thread.archived);
+  const childrenByParent = childThreadsByParent(allThreads);
+  const selectedThreadId = selectedThreadFromPath(location.pathname);
+  const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const displayedProjectIds = orderedGroups.flatMap((group) =>
     group.project ? [group.project.id] : [],
@@ -866,14 +870,20 @@ function Sidebar({
     : null;
   const dropAfterProjectId =
     projectDrag && dropBeforeProjectId === null ? (projectDragTargets.at(-1) ?? null) : null;
-  const archive = archivedThreads.length > 0 && (
+  const archive = archivedRoots.length > 0 && (
     <details className="archive-group">
       <summary>
         {t("Архив")}
-        <span>{archivedThreads.length}</span>
+        <span>{archivedRoots.length}</span>
       </summary>
-      {archivedThreads.map((thread) => (
-        <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+      {archivedRoots.map((thread) => (
+        <ThreadBranch
+          thread={thread}
+          childrenByParent={childrenByParent}
+          selectedThreadId={selectedThreadId}
+          key={thread.id}
+          onNavigate={onClose}
+        />
       ))}
     </details>
   );
@@ -1093,7 +1103,13 @@ function Sidebar({
             const sessions = (
               <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                 {visible.map((thread) => (
-                  <ThreadLink thread={thread} key={thread.id} onNavigate={onClose} />
+                  <ThreadBranch
+                    thread={thread}
+                    childrenByParent={childrenByParent}
+                    selectedThreadId={selectedThreadId}
+                    key={thread.id}
+                    onNavigate={onClose}
+                  />
                 ))}
                 {group.threads.length > 5 && (
                   <button className="show-more" onClick={() => toggleShowAll(key)}>
@@ -1134,20 +1150,120 @@ function Sidebar({
   );
 }
 
+function ThreadBranch({
+  thread,
+  childrenByParent,
+  selectedThreadId,
+  onNavigate,
+}: {
+  thread: ThreadSummary;
+  childrenByParent: Map<string, ThreadSummary[]>;
+  selectedThreadId: string | null;
+  onNavigate(): void;
+}) {
+  const { t } = useI18n();
+  const children = childrenByParent.get(thread.id) ?? [];
+  const shouldAutoOpen = branchNeedsAttention(thread, childrenByParent, selectedThreadId);
+  const [open, setOpen] = useState(shouldAutoOpen);
+
+  useEffect(() => {
+    if (shouldAutoOpen) setOpen(true);
+  }, [selectedThreadId, shouldAutoOpen, thread.id]);
+
+  return (
+    <div className="thread-branch">
+      <div className="thread-branch-row">
+        {children.length ? (
+          <button
+            aria-label={open ? t("Свернуть субагентов") : t("Показать субагентов")}
+            aria-expanded={open}
+            className="thread-branch-toggle"
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? <ChevronDownIcon /> : <ChevronRightIcon />}
+          </button>
+        ) : (
+          <span className="thread-branch-spacer" />
+        )}
+        <ThreadLink thread={thread} onNavigate={onNavigate} />
+      </div>
+      {open && children.length > 0 && (
+        <div className="thread-branch-children">
+          {children.map((child) => (
+            <ThreadBranch
+              thread={child}
+              childrenByParent={childrenByParent}
+              selectedThreadId={selectedThreadId}
+              key={child.id}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
   const { language } = useI18n();
+  const title = localizeKnownServerText(language, thread.title) ?? thread.title;
+  const agentName =
+    thread.relation.kind === "subagent"
+      ? thread.relation.nickname?.trim() || thread.relation.role?.trim() || null
+      : null;
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
       to={`/threads/${encodeURIComponent(thread.id)}`}
       onClick={onNavigate}
     >
-      <span className="thread-link-title">
-        {localizeKnownServerText(language, thread.title) ?? thread.title}
-      </span>
+      <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );
+}
+
+function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  return threads.filter((thread) => thread.relation.kind === "session");
+}
+
+function childThreadsByParent(threads: ThreadSummary[]): Map<string, ThreadSummary[]> {
+  const result = new Map<string, ThreadSummary[]>();
+  for (const thread of threads) {
+    if (thread.relation.kind !== "subagent") continue;
+    const children = result.get(thread.relation.parentThreadId) ?? [];
+    children.push(thread);
+    result.set(thread.relation.parentThreadId, children);
+  }
+  return result;
+}
+
+function branchNeedsAttention(
+  thread: ThreadSummary,
+  childrenByParent: Map<string, ThreadSummary[]>,
+  selectedThreadId: string | null,
+): boolean {
+  if (
+    thread.id === selectedThreadId ||
+    thread.state === "running" ||
+    thread.state === "needsAttention"
+  ) {
+    return true;
+  }
+  return (childrenByParent.get(thread.id) ?? []).some((child) =>
+    branchNeedsAttention(child, childrenByParent, selectedThreadId),
+  );
+}
+
+function selectedThreadFromPath(pathname: string): string | null {
+  const match = /^\/threads\/([^/]+)/.exec(pathname);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 function rateLimitsLabel(

@@ -184,6 +184,7 @@ describe("browser notification permission", () => {
 function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary {
   return {
     id: "thread",
+    relation: { kind: "session", sessionId: "session" },
     projectId: "project",
     title: "Тестовая задача",
     preview: "",

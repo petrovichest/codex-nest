@@ -252,6 +252,7 @@ export class AppProjection extends EventEmitter {
         const summary = this.toSummary(cached);
         const unmaterialized = state.threadMeta[cached.thread.id]?.unmaterialized;
         return (
+          !isSpawnedSubagent(cached.thread) &&
           !cached.archived &&
           summary.projectId === projectId &&
           cached.currentTurnId === null &&
@@ -541,7 +542,9 @@ export class AppProjection extends EventEmitter {
         const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
         const [resumedThread, restoredGoalStatus] = await Promise.all([
           this.rejoinActiveThread(thread),
-          thread.status.type === "active" && cachedGoalStatus === undefined
+          thread.status.type === "active" &&
+          !isSpawnedSubagent(thread) &&
+          cachedGoalStatus === undefined
             ? this.readThreadGoalStatus(thread.id)
             : Promise.resolve(cachedGoalStatus),
         ]);
@@ -593,7 +596,13 @@ export class AppProjection extends EventEmitter {
   }
 
   private async rejoinActiveThread(thread: Thread): Promise<Thread> {
-    if (thread.status.type !== "active" || this.subscribedThreads.has(thread.id)) return thread;
+    if (
+      isSpawnedSubagent(thread) ||
+      thread.status.type !== "active" ||
+      this.subscribedThreads.has(thread.id)
+    ) {
+      return thread;
+    }
     try {
       const resumed = parseThreadResume(
         await this.bridge.request<unknown>("thread/resume", { threadId: thread.id }, 30_000),
@@ -644,11 +653,18 @@ export class AppProjection extends EventEmitter {
       const page = parseThreadList(
         await this.bridge.request<unknown>(
           "thread/list",
-          { cursor, limit: 100, sortKey: "updated_at", sortDirection: "desc", archived },
+          {
+            cursor,
+            limit: 100,
+            sortKey: "updated_at",
+            sortDirection: "desc",
+            archived,
+            sourceKinds: ["cli", "vscode", "appServer", "subAgentThreadSpawn"],
+          },
           30_000,
         ),
       );
-      threads.push(...page.data);
+      threads.push(...page.data.filter((thread) => !thread.ephemeral || isSpawnedSubagent(thread)));
       cursor = page.nextCursor;
     } while (cursor);
     return threads;
@@ -675,6 +691,7 @@ export class AppProjection extends EventEmitter {
     const state = this.store.snapshot();
     for (const cached of this.threads.values()) {
       if (cached.thread.status.type !== "idle") continue;
+      if (isSpawnedSubagent(cached.thread)) continue;
       const updatedAt = cached.thread.updatedAt * 1_000;
       const meta = state.threadMeta[cached.thread.id];
       if (meta?.outcomeUpdatedAt === updatedAt && meta.awaitingPlanResponse !== undefined) {
@@ -718,7 +735,11 @@ export class AppProjection extends EventEmitter {
   }
 
   private async onNotification(notification: ServerNotification): Promise<void> {
-    if (notification.method === "thread/started" && notification.params.thread.ephemeral) {
+    if (
+      notification.method === "thread/started" &&
+      notification.params.thread.ephemeral &&
+      !isSpawnedSubagent(notification.params.thread)
+    ) {
       this.hiddenThreads.add(notification.params.thread.id);
       return;
     }
@@ -805,7 +826,6 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "thread/deleted":
-      case "thread/closed":
         this.threads.delete(notification.params.threadId);
         this.subscribedThreads.delete(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
@@ -814,6 +834,23 @@ export class AppProjection extends EventEmitter {
         }
         this.publish({ type: "thread.removed", threadId: notification.params.threadId });
         break;
+      case "thread/closed": {
+        this.subscribedThreads.delete(notification.params.threadId);
+        const cached = this.threads.get(notification.params.threadId);
+        if (cached && isSpawnedSubagent(cached.thread)) {
+          cached.currentTurnId = null;
+          cached.thread.status = { type: "notLoaded" };
+          this.publishThread(notification.params.threadId);
+        } else {
+          this.threads.delete(notification.params.threadId);
+          this.unmaterializedThreads.delete(notification.params.threadId);
+          for (const key of this.progress.keys()) {
+            if (key.startsWith(`${notification.params.threadId}:`)) this.progress.delete(key);
+          }
+          this.publish({ type: "thread.removed", threadId: notification.params.threadId });
+        }
+        break;
+      }
       case "turn/started": {
         this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
@@ -1080,6 +1117,7 @@ export class AppProjection extends EventEmitter {
       currentTurnId: cached.currentTurnId,
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
       settings: sessionSettings(meta.settings),
+      relation: threadRelation(cached.thread),
     };
   }
 
@@ -1139,6 +1177,22 @@ function notificationThreadId(notification: ServerNotification): string | undefi
   if (!params || typeof params !== "object" || !("threadId" in params)) return undefined;
   const threadId = (params as { threadId?: unknown }).threadId;
   return typeof threadId === "string" ? threadId : undefined;
+}
+
+function isSpawnedSubagent(thread: Thread): boolean {
+  return thread.parentThreadId !== null;
+}
+
+function threadRelation(thread: Thread): ThreadSummary["relation"] {
+  return thread.parentThreadId === null
+    ? { kind: "session", sessionId: thread.sessionId }
+    : {
+        kind: "subagent",
+        sessionId: thread.sessionId,
+        parentThreadId: thread.parentThreadId,
+        nickname: thread.agentNickname,
+        role: thread.agentRole,
+      };
 }
 
 function sessionSettings(settings?: SessionSettings): SessionSettings {

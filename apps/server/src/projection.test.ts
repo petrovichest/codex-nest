@@ -153,6 +153,51 @@ describe("AppProjection", () => {
     expect(events).toEqual([]);
   });
 
+  it("projects native spawned subagents and keeps them after they close", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const child = {
+      ...thread("child", "/work", 2),
+      ephemeral: true,
+      parentThreadId: "one",
+      agentNickname: "tester",
+      agentRole: "worker",
+    };
+
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: child },
+    } satisfies ServerNotification);
+
+    expect(projection.summary("child")?.relation).toEqual({
+      kind: "subagent",
+      sessionId: "child",
+      parentThreadId: "one",
+      nickname: "tester",
+      role: "worker",
+    });
+
+    bridge.emit("notification", {
+      method: "thread/closed",
+      params: { threadId: "child" },
+    } satisfies ServerNotification);
+
+    expect(projection.summary("child")).toMatchObject({
+      id: "child",
+      state: "idle",
+      currentTurnId: null,
+    });
+  });
+
   it("sorts sessions only by most recent activity", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -339,6 +384,11 @@ describe("AppProjection", () => {
     );
     await projection.sync();
     expect(projection.threadCount).toBe(2);
+    expect(
+      bridge.request.mock.calls.find(([method]) => method === "thread/list")?.[1],
+    ).toMatchObject({
+      sourceKinds: ["cli", "vscode", "appServer", "subAgentThreadSpawn"],
+    });
     expect(projection.summary("two")?.projectId).toBe("nested");
     expect(projection.summary("one")?.settings).toEqual({
       collaborationMode: "default",

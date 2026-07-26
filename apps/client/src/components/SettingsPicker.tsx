@@ -7,7 +7,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useI18n, type Translate } from "../i18n";
-import { BrainIcon, ModelIcon, PlanIcon, TargetIcon } from "./Icons";
+import { ModelIcon, PlanIcon, TargetIcon, TeamIcon } from "./Icons";
 
 export function SettingsPicker({
   models,
@@ -35,42 +35,63 @@ export function SettingsPicker({
   const { language, t } = useI18n();
   const model = effectiveModel(models, value.model);
   const modelDisplayName = model ? compactModelName(model.displayName) : t("Модель");
+  const defaultEffort = model?.reasoningEfforts.find((option) => option.isDefault)?.value;
+  const effortDisplayName = value.reasoningEffort ?? defaultEffort ?? t("По умолчанию");
 
   return (
     <div className="settings-picker">
-      <SettingSelect
-        ariaLabel={t("Модель")}
-        disabled={disabled || models.length === 0}
-        displayValue={modelDisplayName}
-        icon={<ModelIcon />}
-        value={value.model ?? ""}
-        onChange={(selected) => changeModel(selected || null)}
-      >
-        <option value="">
-          {t("По умолчанию")} · {modelDisplayName}
-        </option>
-        {models.map((option) => (
-          <option value={option.id} key={option.id}>
-            {compactModelName(option.displayName)}
-          </option>
-        ))}
-      </SettingSelect>
-
-      <SettingSelect
-        ariaLabel={t("Уровень рассуждений")}
-        disabled={disabled || !model}
-        icon={<BrainIcon />}
-        iconOnly
-        value={value.reasoningEffort ?? ""}
-        onChange={(selected) => onChange({ reasoningEffort: selected || null })}
-      >
-        <option value="">Reasoning</option>
-        {model?.reasoningEfforts.map((option) => (
-          <option value={option.value} key={option.value}>
-            {option.value}
-          </option>
-        ))}
-      </SettingSelect>
+      <details className="model-picker" data-dismiss-on-outside-click>
+        <summary
+          aria-label={t("Модель и уровень рассуждений")}
+          className={`setting-control model-toggle${disabled || !models.length ? " disabled" : ""}`}
+          title={`${modelDisplayName} · ${effortDisplayName}`}
+          onClick={(event) => {
+            if (disabled || !models.length) event.preventDefault();
+          }}
+        >
+          <ModelIcon />
+          <span>{modelDisplayName}</span>
+        </summary>
+        <div className="model-popover">
+          <label>
+            <span>{t("Модель")}</span>
+            <select
+              aria-label={t("Модель")}
+              disabled={disabled || models.length === 0}
+              value={value.model ?? ""}
+              onChange={(event) => changeModel(event.target.value || null)}
+            >
+              <option value="">
+                {t("По умолчанию")} · {modelDisplayName}
+              </option>
+              {models.map((option) => (
+                <option value={option.id} key={option.id}>
+                  {option.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{t("Уровень рассуждений")}</span>
+            <select
+              aria-label={t("Уровень рассуждений")}
+              disabled={disabled || !model}
+              value={value.reasoningEffort ?? ""}
+              onChange={(event) => onChange({ reasoningEffort: event.target.value || null })}
+            >
+              <option value="">
+                {t("По умолчанию")}
+                {defaultEffort ? ` · ${defaultEffort}` : ""}
+              </option>
+              {model?.reasoningEfforts.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.value}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </details>
 
       <button
         aria-label={
@@ -90,6 +111,26 @@ export function SettingsPicker({
         }}
       >
         <PlanIcon />
+      </button>
+
+      <button
+        aria-label={
+          value.collaborationMode === "team"
+            ? t("Выключить командный режим")
+            : t("Включить командный режим")
+        }
+        aria-pressed={value.collaborationMode === "team"}
+        className={`setting-control team-toggle${value.collaborationMode === "team" ? " active" : ""}`}
+        disabled={disabled || !model || Boolean(goal)}
+        type="button"
+        onClick={() => {
+          onGoalModeChange?.(false);
+          onChange({
+            collaborationMode: value.collaborationMode === "team" ? "default" : "team",
+          });
+        }}
+      >
+        <TeamIcon />
       </button>
 
       {goal ? (
@@ -140,7 +181,7 @@ export function SettingsPicker({
           type="button"
           onClick={() => {
             const next = !goalMode;
-            if (next && value.collaborationMode === "plan") {
+            if (next && value.collaborationMode !== "default") {
               onChange({ collaborationMode: "default" });
             }
             onGoalModeChange?.(next);
@@ -206,39 +247,6 @@ function formatGoalUsage(goal: ThreadGoal, language: "en" | "ru", t: Translate):
             ? "{{count}} токена"
             : "{{count}} токенов";
   return `${t(tokenLabel, { count: goal.tokensUsed.toLocaleString(language) })} · ${time}`;
-}
-
-function SettingSelect({
-  ariaLabel,
-  displayValue,
-  icon,
-  iconOnly = false,
-  children,
-  ...props
-}: {
-  ariaLabel: string;
-  displayValue?: string;
-  icon: React.ReactNode;
-  iconOnly?: boolean;
-  children: React.ReactNode;
-  disabled: boolean;
-  value: string;
-  onChange(value: string): void;
-}) {
-  return (
-    <label className={`setting-control setting-select${iconOnly ? " icon-only" : ""}`}>
-      {icon}
-      {!iconOnly && <span className="setting-select-value">{displayValue}</span>}
-      <select
-        aria-label={ariaLabel}
-        disabled={props.disabled}
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-      >
-        {children}
-      </select>
-    </label>
-  );
 }
 
 function effectiveModel(models: ModelOption[], modelId?: string): ModelOption | undefined {
