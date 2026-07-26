@@ -12,10 +12,7 @@ import type {
 import type { MessageQueue } from "./message-queue";
 import type { AppProjection } from "./projection";
 import type { StateStore, VoiceTranscriptionState } from "./state/store";
-import {
-  appendTranscriptionTimingSample,
-  TranscriptionError,
-} from "./transcription";
+import { appendTranscriptionTimingSample, TranscriptionError } from "./transcription";
 
 export const MAX_VOICE_QUEUE_BYTES = 240 * 1024 * 1024;
 const VOICE_RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 900_000, 1_800_000] as const;
