@@ -1238,6 +1238,39 @@ describe("thread settings", () => {
         })
       ).json().draft,
     ).toEqual(savedDraft.json());
+    bridge.missingRolloutThreadIds.add("created");
+    const teamResumeStart = bridge.request.mock.calls.length;
+    const emptyTeam = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/created/settings",
+      headers,
+      payload: { collaborationMode: "team" },
+    });
+    expect(emptyTeam.statusCode).toBe(200);
+    expect(emptyTeam.json().settings).toEqual({ collaborationMode: "team" });
+    expect(
+      bridge.request.mock.calls
+        .slice(teamResumeStart)
+        .filter(([method]) => method === "thread/resume" || method === "thread/metadata/update"),
+    ).toEqual([
+      [
+        "thread/resume",
+        expect.objectContaining({
+          threadId: "created",
+          config: { agents: { enabled: false } },
+        }),
+        30_000,
+      ],
+      ["thread/metadata/update", { threadId: "created", gitInfo: { sha: null } }],
+      [
+        "thread/resume",
+        expect.objectContaining({
+          threadId: "created",
+          config: { agents: { enabled: false } },
+        }),
+        30_000,
+      ],
+    ]);
     const resumesBeforeFirstTurn = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/resume",
     ).length;
@@ -1251,6 +1284,16 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
       resumesBeforeFirstTurn,
     );
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({
+      additionalContext: {
+        "codexnest.team": {
+          kind: "application",
+          value: expect.stringContaining("codexnest managed-task tools"),
+        },
+      },
+    });
     expect(store.snapshot().threadMeta.created?.unmaterialized).toBe(false);
     expect(store.snapshot().threadMeta.created?.draft).toBeUndefined();
     await vi.waitFor(() =>
@@ -2292,6 +2335,7 @@ class SettingsBridge extends EventEmitter {
   } | null = null;
   failNextTurnStart = false;
   failNextGoalActivation = false;
+  missingRolloutThreadIds = new Set<string>();
   managedThreadSequence = 0;
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
@@ -2318,7 +2362,16 @@ class SettingsBridge extends EventEmitter {
       }
       return { thread: testThread("created") };
     }
-    if (method === "thread/resume") return {};
+    if (method === "thread/resume") {
+      const threadId = String(params.threadId);
+      if (this.missingRolloutThreadIds.delete(threadId)) {
+        throw new RpcError(-32_600, `no rollout found for thread id ${threadId}`);
+      }
+      return {};
+    }
+    if (method === "thread/metadata/update") {
+      return { thread: testThread(String(params.threadId)) };
+    }
     if (method === "thread/name/set") return {};
     if (method === "thread/delete") return {};
     if (method === "thread/turns/list") {

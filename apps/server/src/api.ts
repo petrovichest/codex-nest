@@ -1599,17 +1599,27 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         );
       }
       if (settings.collaborationMode === "team" && summary.settings.collaborationMode !== "team") {
-        await bridge.request<ThreadResumeResponse>(
-          "thread/resume",
-          {
+        const resumeParams = {
+          threadId: request.params.id,
+          cwd: summary.cwd,
+          excludeTurns: true,
+          ...threadSettings(settings),
+          config: teamRuntimeConfig(),
+        };
+        try {
+          await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
+        } catch (error) {
+          if (!projection.isUnmaterialized(request.params.id) || !isMissingRolloutError(error)) {
+            throw error;
+          }
+          // Codex does not persist an empty thread until its first durable metadata update.
+          // Materialize the rollout without starting a model turn or assigning a fake title.
+          await bridge.request("thread/metadata/update", {
             threadId: request.params.id,
-            cwd: summary.cwd,
-            excludeTurns: true,
-            ...threadSettings(settings),
-            config: teamRuntimeConfig(),
-          },
-          30_000,
-        );
+            gitInfo: { sha: null },
+          });
+          await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
+        }
       }
       const thread = await projection.setSettings(request.params.id, settings);
       if (patch.reasoningEffort !== undefined) {
@@ -3474,6 +3484,14 @@ function userConfigVersion(layers: unknown[]): string | null {
 
 function isConfigVersionConflict(error: unknown): boolean {
   return error instanceof RpcError && /version|stale|changed|conflict/i.test(error.message);
+}
+
+function isMissingRolloutError(error: unknown): boolean {
+  return (
+    error instanceof RpcError &&
+    error.code === -32_600 &&
+    /no rollout found for thread id/i.test(error.message)
+  );
 }
 
 function restoreDismissedProjectPath(state: CodexNestState, path: string): void {
