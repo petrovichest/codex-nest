@@ -204,9 +204,9 @@ jobs:
           node-version: 24
       - name: Validate release source
         run: |
-          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          test "$GITHUB_REF_TYPE" = tag
           git fetch --no-tags origin codex/mvp
-          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          git merge-base --is-ancestor "${GITHUB_SHA}^{commit}" FETCH_HEAD
       - name: Validate release version
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - name: Prepare installer asset
