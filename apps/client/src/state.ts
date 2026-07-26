@@ -44,7 +44,7 @@ export type ClientAction =
   | { type: "hydrate.detail"; detail: ThreadDetail }
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
-  | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" }
+  | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" | "reset" }
   | { type: "changes"; threadId: string; changes: ThreadChanges }
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
@@ -193,6 +193,11 @@ export function mergeThreadDetailChanges(
     const overlap = current.turns.findIndex((turn) => incomingIds.has(turn.id));
     turns =
       overlap < 0 ? changes.turns : mergeTurns(current.turns.slice(0, overlap), changes.turns);
+    const currentTurnId = changes.summary.currentTurnId;
+    if (currentTurnId && !turns.some((turn) => turn.id === currentTurnId)) {
+      const localCurrentTurn = current.turns.find((turn) => turn.id === currentTurnId);
+      if (localCurrentTurn) turns = [...turns, localCurrentTurn];
+    }
     if (overlap < 0) olderTurnsCursor = changes.olderTurnsCursor;
   } else {
     turns = mergeTurns(current.turns, changes.turns);
@@ -204,7 +209,9 @@ export function mergeThreadDetailChanges(
     queuedMessages: changes.queuedMessages,
     draft: changes.draft ?? null,
     olderTurnsCursor,
-    syncPoint: changes.syncPoint ?? current.syncPoint ?? null,
+    syncPoint: changes.resetLatest
+      ? changes.syncPoint
+      : (changes.syncPoint ?? current.syncPoint ?? null),
   };
 }
 

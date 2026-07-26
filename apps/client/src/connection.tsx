@@ -18,6 +18,7 @@ import {
   type AppSnapshot,
   type QueueMessageRequest,
   type ThreadDetail,
+  type ThreadSummary,
   type UpdateThreadDraftRequest,
   type VoiceTranscriptionMode,
 } from "@codexnest/protocol";
@@ -54,12 +55,24 @@ import type { ConnectionSettings } from "./storage";
 
 const HEARTBEAT_IDLE_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
+const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+
+type DetailReadOptions = {
+  authoritative?: boolean;
+  force?: boolean;
+};
+
+type DetailReader = (
+  threadId: string,
+  cursor?: string,
+  options?: DetailReadOptions,
+) => Promise<ThreadDetail>;
 
 interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
   dispatch: Dispatch<ClientAction>;
-  refreshDetail(threadId: string, options?: { force?: boolean }): Promise<ThreadDetail>;
+  refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
   loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
   sendReliable(
     threadId: string,
@@ -97,6 +110,9 @@ export function ConnectionProvider({
   const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
   const detailRequestVersions = useRef(new Map<string, number>());
+  const detailReader = useRef<DetailReader | null>(null);
+  const detailRetryAttempts = useRef(new Map<string, number>());
+  const detailRetryTimers = useRef(new Map<string, number>());
   const persistedDetails = useRef<Record<string, ThreadDetail>>({});
   const detailPersistTimers = useRef(new Map<string, number>());
   const persistenceConnectionKey = useRef(connectionCacheKey(settings));
@@ -214,60 +230,148 @@ export function ConnectionProvider({
     },
     [browserNotifications],
   );
+
+  const clearDetailRetry = useCallback((threadId: string) => {
+    const timer = detailRetryTimers.current.get(threadId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    detailRetryTimers.current.delete(threadId);
+    detailRetryAttempts.current.delete(threadId);
+  }, []);
+
+  const scheduleDetailRetry = useCallback(function schedule(threadId: string): void {
+    if (detailRetryTimers.current.has(threadId)) return;
+    const attempt = detailRetryAttempts.current.get(threadId) ?? 0;
+    const delay =
+      DETAIL_RETRY_DELAYS_MS[Math.min(attempt, DETAIL_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
+    detailRetryAttempts.current.set(threadId, attempt + 1);
+    const timer = window.setTimeout(() => {
+      if (detailRetryTimers.current.get(threadId) !== timer) return;
+      detailRetryTimers.current.delete(threadId);
+      const read = detailReader.current;
+      if (!read) return;
+      void read(threadId, undefined, { authoritative: true, force: true })
+        .then((detail) => {
+          const summary =
+            stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
+            detail.summary;
+          if (threadDetailNeedsRecovery(detail, summary)) schedule(threadId);
+          else {
+            detailRetryAttempts.current.delete(threadId);
+          }
+        })
+        .catch((error: unknown) => {
+          if (isRetryableApiError(error)) schedule(threadId);
+          else detailRetryAttempts.current.delete(threadId);
+        });
+    }, delay);
+    detailRetryTimers.current.set(threadId, timer);
+  }, []);
+
   const readDetail = useCallback(
-    (threadId: string, cursor?: string, force = false) => {
+    (threadId: string, cursor?: string, options: DetailReadOptions = {}) => {
       const key = JSON.stringify([threadId, cursor ?? null]);
       const current = detailRequests.current.get(key);
-      if (current && !force) return current;
+      if (current) return current;
       const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
       detailRequestVersions.current.set(key, version);
       const request = (async () => {
-        let baseline = stateRef.current.details[threadId];
-        if (!cursor && !baseline) {
-          const cached = await loadCachedThread(settings, threadId);
-          if (cached && detailRequestVersions.current.get(key) === version) {
-            baseline = cached;
-            dispatch({ type: "hydrate.detail", detail: cached });
+        const authoritativeLatest = async (): Promise<ThreadDetail> => {
+          const detail = await api.readThread(threadId, undefined, { fresh: true });
+          if (detailRequestVersions.current.get(key) === version) {
+            dispatch({ type: "detail", detail, page: "reset" });
           }
-        }
-        if (!cursor && baseline?.syncPoint) {
-          let merged = baseline;
-          let continuationCursor: string | undefined;
-          do {
-            const changes = await api.readThreadChanges(
-              threadId,
-              merged.syncPoint ?? baseline.syncPoint,
-              continuationCursor,
-            );
-            merged = mergeThreadDetailChanges(merged, changes);
-            if (detailRequestVersions.current.get(key) === version) {
-              dispatch({ type: "changes", threadId, changes });
+          return detail;
+        };
+        try {
+          let detail: ThreadDetail;
+          let baseline = stateRef.current.details[threadId];
+          if (!cursor && !baseline) {
+            const cached = await loadCachedThread(settings, threadId);
+            if (cached && detailRequestVersions.current.get(key) === version) {
+              baseline = cached;
+              dispatch({ type: "hydrate.detail", detail: cached });
             }
-            continuationCursor = changes.continuationCursor ?? undefined;
-          } while (continuationCursor);
-          return merged;
+          }
+          if (!cursor && baseline?.syncPoint && !options.authoritative) {
+            try {
+              let merged = baseline;
+              let continuationCursor: string | undefined;
+              do {
+                const changes = await api.readThreadChanges(
+                  threadId,
+                  merged.syncPoint ?? baseline.syncPoint,
+                  continuationCursor,
+                );
+                merged = mergeThreadDetailChanges(merged, changes);
+                if (detailRequestVersions.current.get(key) === version) {
+                  dispatch({ type: "changes", threadId, changes });
+                }
+                continuationCursor = changes.continuationCursor ?? undefined;
+              } while (continuationCursor);
+              const summary =
+                stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
+                merged.summary;
+              detail = threadDetailNeedsRecovery(merged, summary)
+                ? await authoritativeLatest()
+                : merged;
+            } catch {
+              detail = await authoritativeLatest();
+            }
+          } else if (!cursor && options.authoritative) {
+            detail = await authoritativeLatest();
+          } else {
+            detail = await api.readThread(threadId, cursor, { fresh: options.force });
+            if (detailRequestVersions.current.get(key) === version) {
+              dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
+            }
+          }
+          if (!cursor) {
+            const summary =
+              stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
+              detail.summary;
+            if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
+            else clearDetailRetry(threadId);
+          }
+          return detail;
+        } catch (error) {
+          if (!cursor && isRetryableApiError(error)) scheduleDetailRetry(threadId);
+          throw error;
         }
-        const detail = await api.readThread(threadId, cursor, { fresh: force });
-        if (detailRequestVersions.current.get(key) === version) {
-          dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
-        }
-        return detail;
       })().finally(() => {
         if (detailRequests.current.get(key) === request) detailRequests.current.delete(key);
       });
       detailRequests.current.set(key, request);
       return request;
     },
-    [api, settings],
+    [api, clearDetailRetry, scheduleDetailRetry, settings],
   );
+  detailReader.current = readDetail;
+
   const refreshDetail = useCallback(
-    (threadId: string, options?: { force?: boolean }) =>
-      readDetail(threadId, undefined, options?.force),
+    (threadId: string, options?: DetailReadOptions) => readDetail(threadId, undefined, options),
     [readDetail],
   );
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
     [readDetail],
+  );
+
+  useEffect(() => {
+    for (const [threadId, detail] of Object.entries(state.details)) {
+      const summary =
+        state.snapshot?.threads.find((thread) => thread.id === threadId) ?? detail.summary;
+      if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
+      else clearDetailRetry(threadId);
+    }
+  }, [clearDetailRetry, scheduleDetailRetry, state.details, state.snapshot?.threads]);
+
+  useEffect(
+    () => () => {
+      for (const timer of detailRetryTimers.current.values()) window.clearTimeout(timer);
+      detailRetryTimers.current.clear();
+      detailRetryAttempts.current.clear();
+    },
+    [settings],
   );
 
   const scheduleOutboxRetry = useCallback((attempt: number, drain: () => void) => {
@@ -652,4 +756,37 @@ export function useConnection(): ConnectionContextValue {
   const value = useContext(ConnectionContext);
   if (!value) throw new Error("useConnection must be used inside ConnectionProvider");
   return value;
+}
+
+function threadDetailNeedsRecovery(detail: ThreadDetail, summary: ThreadSummary): boolean {
+  const currentTurn = summary.currentTurnId
+    ? detail.turns.find((turn) => turn.id === summary.currentTurnId)
+    : null;
+  if (summary.currentTurnId && (!currentTurn || currentTurn.status !== "inProgress")) return true;
+  if (!summary.currentTurnId && detail.turns.some((turn) => turn.status === "inProgress")) {
+    return true;
+  }
+  if (
+    summary.relation.kind !== "session" ||
+    summary.state !== "completed" ||
+    !detail.turns.length
+  ) {
+    return false;
+  }
+  const latestTurn = detail.turns.at(-1)!;
+  const latestKnownAt = Math.max(
+    latestTurn.completedAt ?? latestTurn.startedAt ?? 0,
+    ...latestTurn.items.map((item) => ("timestamp" in item ? (item.timestamp ?? 0) : 0)),
+  );
+  if (latestKnownAt > 0 && summary.updatedAt - latestKnownAt > 5_000) return true;
+  const hasFinalAnswer = latestTurn.items.some(
+    (item) =>
+      item.type === "agentMessage" &&
+      item.phase === "final_answer" &&
+      Boolean(item.text.trim() || item.images.length),
+  );
+  const hasPlan = latestTurn.items.some(
+    (item) => item.type === "plan" && item.status === "completed",
+  );
+  return !hasFinalAnswer && !hasPlan;
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
 
-import { clientReducer, initialState, sortThreads } from "./state";
+import { clientReducer, initialState, mergeThreadDetailChanges, sortThreads } from "./state";
 
 const baseThread: ThreadSummary = {
   id: "one",
@@ -1036,6 +1036,85 @@ describe("clientReducer", () => {
     expect(state.details.one?.turns[1]?.durationMs).toBe(2);
     expect(state.details.one?.olderTurnsCursor).toBe("older");
     expect(state.details.one?.syncPoint?.cursor).toBe("next-delta");
+  });
+
+  it("preserves a matching live turn across a canonical reset and clears a poisoned cursor", () => {
+    const liveTurn = {
+      ...turn("live"),
+      status: "inProgress" as const,
+      completedAt: null,
+      durationMs: null,
+    };
+    const current = {
+      summary: { ...baseThread, currentTurnId: "live" },
+      turns: [turn("anchor"), liveTurn],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      syncPoint: {
+        cursor: "poisoned",
+        anchorTurnId: "anchor",
+        anchorRevision: "old",
+      },
+    };
+
+    const merged = mergeThreadDetailChanges(current, {
+      summary: { ...baseThread, currentTurnId: "live" },
+      turns: [turn("anchor")],
+      queuedMessages: [],
+      draft: null,
+      continuationCursor: null,
+      syncPoint: null,
+      resetLatest: true,
+      olderTurnsCursor: null,
+    });
+
+    expect(merged.turns.map((candidate) => candidate.id)).toEqual(["anchor", "live"]);
+    expect(merged.syncPoint).toBeNull();
+  });
+
+  it("replaces stale terminal message versions during an authoritative reset", () => {
+    const completed = {
+      ...baseThread,
+      state: "completed" as const,
+      currentTurnId: null,
+    };
+    const detail = (text: string) => ({
+      summary: completed,
+      turns: [
+        {
+          ...turn("turn"),
+          items: [
+            {
+              type: "agentMessage" as const,
+              id: "answer",
+              status: "completed" as const,
+              text,
+              images: [],
+              timestamp: 2,
+              phase: "final_answer" as const,
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    });
+    let state = clientReducer(initialState, {
+      type: "detail",
+      detail: detail("Старая длинная версия ответа"),
+      page: "latest",
+    });
+
+    state = clientReducer(state, {
+      type: "detail",
+      detail: detail("Канонический ответ"),
+      page: "reset",
+    });
+
+    expect(state.details.one?.turns[0]?.items[0]).toMatchObject({
+      text: "Канонический ответ",
+      status: "completed",
+    });
   });
 
   it("sorts sessions only by most recent activity", () => {
