@@ -2599,16 +2599,16 @@ pre {
   min-height: 40px;
   padding: 0;
   transform: translate(-50%, calc(-100% - 8px));
-  border: 0;
+  border: 1px solid var(--line-strong);
   border-radius: 50%;
-  color: var(--accent-text);
-  background: var(--accent);
+  color: var(--text-strong);
+  background: var(--surface-raised);
   box-shadow: var(--shadow);
 }
 
 .scroll-to-bottom:hover:not(:disabled) {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--accent) 88%, var(--bg));
+  border-color: var(--muted);
+  background: var(--surface-muted);
 }
 
 .scroll-to-bottom svg {
