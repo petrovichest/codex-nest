@@ -57,6 +57,33 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([{ ...message, status: "queued" }]);
   });
 
+  it("reconciles a delivery whose response was lost instead of sending it again", async () => {
+    const { queue, delivery, store } = await setup("active");
+    delivery.steer.mockRejectedValueOnce(new Error("response lost"));
+    delivery.deliveredTurnId.mockResolvedValueOnce("active");
+    const message = await queue.enqueue("thread", "Только один раз");
+
+    await expect(queue.sendNow("thread", message.id)).resolves.toBe("active");
+    expect(queue.list("thread")).toEqual([]);
+    expect(store.snapshot().messageReceipts?.[message.id]).toMatchObject({
+      threadId: "thread",
+      turnId: "active",
+    });
+    expect(delivery.steer).toHaveBeenCalledOnce();
+  });
+
+  it("parks an ambiguous delivery while reconciliation is unavailable", async () => {
+    const { queue, delivery } = await setup("active");
+    delivery.steer.mockRejectedValueOnce(new Error("response lost"));
+    delivery.deliveredTurnId.mockRejectedValueOnce(new Error("session unavailable"));
+    const message = await queue.enqueue("thread", "Не отправлять повторно вслепую");
+
+    await expect(queue.sendNow("thread", message.id)).rejects.toThrow("response lost");
+    expect(queue.list("thread")).toEqual([{ ...message, status: "dispatching" }]);
+    await queue.drain("thread");
+    expect(delivery.steer).toHaveBeenCalledOnce();
+  });
+
   it("persists image-only messages without changing queue delivery", async () => {
     const { queue, delivery } = await setup("active");
     const image = "data:image/png;base64,aW1hZ2U=";
@@ -190,13 +217,14 @@ describe("MessageQueue", () => {
     await store.update((state) => {
       state.messageQueues = { thread: [delivered, pending] };
     });
-    delivery.wasDelivered.mockImplementation(async (_threadId, messageId) => {
-      return messageId === delivered.id;
+    delivery.deliveredTurnId.mockImplementation(async (_threadId, messageId) => {
+      return messageId === delivered.id ? "delivered-turn" : null;
     });
 
     await queue.recover();
 
     expect(queue.list("thread")).toEqual([{ ...pending, status: "queued" }]);
+    expect(store.snapshot().messageReceipts?.[delivered.id]?.turnId).toBe("delivered-turn");
   });
 
   it("keeps messages queued while delivery is paused and resumes afterwards", async () => {
@@ -234,7 +262,7 @@ async function setup(initialTurn: string | null) {
       currentTurn = "steered";
       return "steered";
     }),
-    wasDelivered: vi.fn(async () => false),
+    deliveredTurnId: vi.fn(async () => null),
     publish: vi.fn(),
   };
   return {

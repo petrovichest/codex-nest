@@ -8,11 +8,22 @@ import { ConnectionProvider, useConnection } from "./connection";
 
 const capacitor = vi.hoisted(() => ({ native: false }));
 const addAppListener = vi.hoisted(() => vi.fn());
+const listPendingVoiceRecordings = vi.hoisted(() =>
+  vi.fn<() => Promise<Array<{ id: string }>>>(() => Promise.resolve([])),
+);
+const deletePendingVoiceRecording = vi.hoisted(() =>
+  vi.fn<(id: string) => Promise<void>>(() => Promise.resolve()),
+);
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
 }));
 vi.mock("@capacitor/app", () => ({ App: { addListener: addAppListener } }));
+vi.mock("./offline-store", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listPendingVoiceRecordings,
+  deletePendingVoiceRecording,
+}));
 
 const summary: ThreadSummary = {
   id: "thread",
@@ -37,10 +48,80 @@ describe("ConnectionProvider", () => {
   beforeEach(() => {
     capacitor.native = false;
     addAppListener.mockReset();
+    listPendingVoiceRecordings.mockReset();
+    listPendingVoiceRecordings.mockResolvedValue([]);
+    deletePendingVoiceRecording.mockReset();
+    deletePendingVoiceRecording.mockResolvedValue();
     FakeWebSocket.instances = [];
   });
 
   afterEach(() => vi.useRealTimers());
+
+  it("discards persisted voice recordings without uploading them in the background", async () => {
+    listPendingVoiceRecordings.mockResolvedValueOnce([{ id: "stale-recording" }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <span>ready</span>
+      </ConnectionProvider>,
+    );
+
+    await waitFor(() =>
+      expect(deletePendingVoiceRecording).toHaveBeenCalledWith("stale-recording"),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("does not retry a failed voice upload after reconnecting", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: { code: "transcription_unavailable", message: "offline" } }),
+          { status: 503 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let queueRecording: ReturnType<typeof useConnection>["queueVoiceRecording"] | undefined;
+
+    function Probe() {
+      queueRecording = useConnection().queueVoiceRecording;
+      return null;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+
+    await act(async () => {
+      await expect(
+        queueRecording!({
+          id: "recording",
+          threadId: "thread",
+          audio: new Blob(["audio"], { type: "audio/webm" }),
+          durationMs: 1_000,
+          mode: "draft",
+          selectionStart: 0,
+          selectionEnd: 0,
+          draftUpdatedAt: null,
+          draft: { input: "", images: [], goalMode: false, annotations: [] },
+        }),
+      ).rejects.toThrow("offline");
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(async () => Promise.resolve());
+    expect(fetchMock).toHaveBeenCalledOnce();
+    view.unmount();
+  });
 
   it("deduplicates concurrent reads of the same thread page", async () => {
     const detail: ThreadDetail = {

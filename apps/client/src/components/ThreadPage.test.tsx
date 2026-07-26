@@ -2622,7 +2622,7 @@ describe("Activity", () => {
     );
   });
 
-  it("restores a server voice job and blocks only its composer", async () => {
+  it("blocks for a remote voice job without presenting it as a local recording", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     context.state.snapshot.voiceTranscriptions = [
       {
@@ -2637,16 +2637,19 @@ describe("Activity", () => {
         error: null,
       },
     ];
-    render(voiceThreadRoute());
+    const view = render(voiceThreadRoute());
 
-    const microphone = await screen.findByRole("button", {
-      name: "Запись на сервере · можно закрыть",
-    });
+    const microphone = view.container.querySelector<HTMLButtonElement>("button.microphone");
+    expect(microphone).not.toBeNull();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
     );
-    expect(microphone).toBeDisabled();
-    expect(within(microphone).getByText("0:00")).toBeInTheDocument();
+    expect(microphone!).toBeDisabled();
+    expect(within(microphone!).queryByText("0:00")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отменить обработку записи" }));
+    await waitFor(() =>
+      expect(context.api.cancelVoiceTranscription).toHaveBeenCalledWith("thread"),
+    );
   });
 
   it.each(["send", "queue", "steer"] as const)(
@@ -2998,6 +3001,7 @@ function threadApi() {
       estimatedTotalSeconds: null,
       error: null,
     }),
+    cancelVoiceTranscription: vi.fn().mockResolvedValue(undefined),
   };
 }
 

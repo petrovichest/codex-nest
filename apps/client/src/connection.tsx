@@ -19,8 +19,6 @@ import {
   type QueueMessageRequest,
   type ThreadDetail,
   type ThreadSummary,
-  type UpdateThreadDraftRequest,
-  type VoiceTranscriptionMode,
 } from "@codexnest/protocol";
 
 import { ApiClient, isRetryableApiError } from "./api";
@@ -37,7 +35,6 @@ import {
   listOutboxMessages,
   listPendingVoiceRecordings,
   putOutboxMessage,
-  putPendingVoiceRecording,
   saveCachedMeta,
   saveCachedThread,
   saveLocalDraft,
@@ -68,6 +65,11 @@ type DetailReader = (
   options?: DetailReadOptions,
 ) => Promise<ThreadDetail>;
 
+type VoiceRecordingUpload = Omit<
+  PendingVoiceRecording,
+  "connectionKey" | "createdAt" | "attempts" | "lastError"
+>;
+
 interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
@@ -78,17 +80,7 @@ interface ConnectionContextValue {
     threadId: string,
     body: QueueMessageRequest & { clientMessageId: string },
   ): Promise<"delivered" | "pending">;
-  queueVoiceRecording(recording: {
-    id: string;
-    threadId: string;
-    audio: Blob;
-    durationMs: number;
-    mode: VoiceTranscriptionMode;
-    selectionStart: number;
-    selectionEnd: number;
-    draftUpdatedAt: number | null;
-    draft: UpdateThreadDraftRequest;
-  }): Promise<"accepted" | "pending">;
+  queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
   reconnect(): number;
 }
 
@@ -119,8 +111,6 @@ export function ConnectionProvider({
   const foregroundRefresh = useRef<Promise<void> | null>(null);
   const outboxDrain = useRef<Promise<void> | null>(null);
   const outboxRetryTimer = useRef<number | undefined>(undefined);
-  const voiceDrain = useRef<Promise<void> | null>(null);
-  const voiceRetryTimer = useRef<number | undefined>(undefined);
   const browserNotifications = useMemo(
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
     [],
@@ -458,7 +448,7 @@ export function ConnectionProvider({
   );
 
   const uploadVoiceRecording = useCallback(
-    async (recording: PendingVoiceRecording): Promise<void> => {
+    async (recording: VoiceRecordingUpload): Promise<void> => {
       const savedDraft = await api.updateThreadDraft(recording.threadId, recording.draft, {
         retry: false,
       });
@@ -476,92 +466,27 @@ export function ConnectionProvider({
         draftUpdatedAt: savedDraft?.updatedAt ?? null,
         clientUploadId: recording.id,
       });
-      await deletePendingVoiceRecording(recording.id);
       if (accepted) dispatch({ type: "voice.accepted", job: accepted });
     },
     [api, settings],
   );
 
-  const scheduleVoiceRetry = useCallback((attempt: number, drain: () => void) => {
-    if (voiceRetryTimer.current !== undefined) return;
-    const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
-    const base = delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)] ?? 30_000;
-    voiceRetryTimer.current = window.setTimeout(
-      () => {
-        voiceRetryTimer.current = undefined;
-        drain();
-      },
-      Math.round(base * (0.8 + Math.random() * 0.4)),
-    );
-  }, []);
-
-  const drainVoiceRecordings = useCallback((): Promise<void> => {
-    if (voiceDrain.current) return voiceDrain.current;
-    const request = (async () => {
-      const recordings = await listPendingVoiceRecordings(settings);
-      for (const recording of recordings) {
-        try {
-          await uploadVoiceRecording(recording);
-        } catch (error) {
-          const next: PendingVoiceRecording = {
-            ...recording,
-            attempts: recording.attempts + 1,
-            lastError: error instanceof Error ? error.message : "Voice upload failed",
-          };
-          await putPendingVoiceRecording(next);
-          if (isRetryableApiError(error)) {
-            scheduleVoiceRetry(next.attempts, () => void drainVoiceRecordings());
-            break;
-          }
-        }
-      }
-    })().finally(() => {
-      if (voiceDrain.current === request) voiceDrain.current = null;
-    });
-    voiceDrain.current = request;
-    return request;
-  }, [scheduleVoiceRetry, settings, uploadVoiceRecording]);
-
   const queueVoiceRecording = useCallback(
-    async (
-      input: Omit<
-        PendingVoiceRecording,
-        "connectionKey" | "createdAt" | "attempts" | "lastError" | "localDraftUpdatedAt"
-      >,
-    ): Promise<"accepted" | "pending"> => {
+    async (input: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void> => {
       const localDraftUpdatedAt = Date.now();
-      const recording: PendingVoiceRecording = {
+      const recording: VoiceRecordingUpload = {
         ...input,
-        connectionKey: connectionCacheKey(settings),
         localDraftUpdatedAt,
-        createdAt: Date.now(),
-        attempts: 0,
-        lastError: null,
       };
-      await putPendingVoiceRecording(recording);
       await saveLocalDraft(settings, recording.threadId, recording.draft, localDraftUpdatedAt);
-      try {
-        await uploadVoiceRecording(recording);
-        return "accepted";
-      } catch (error) {
-        if (!isRetryableApiError(error)) throw error;
-        const retryPersisted = await putPendingVoiceRecording({
-          ...recording,
-          attempts: 1,
-          lastError: error instanceof Error ? error.message : "Voice upload failed",
-        });
-        if (!retryPersisted) throw error;
-        scheduleVoiceRetry(1, () => void drainVoiceRecordings());
-        return "pending";
-      }
+      await uploadVoiceRecording(recording);
     },
-    [drainVoiceRecordings, scheduleVoiceRetry, settings, uploadVoiceRecording],
+    [settings, uploadVoiceRecording],
   );
 
   useEffect(() => {
     const wake = () => {
       void drainReliableOutbox();
-      void drainVoiceRecordings();
     };
     window.addEventListener("online", wake);
     wake();
@@ -571,12 +496,16 @@ export function ConnectionProvider({
         window.clearTimeout(outboxRetryTimer.current);
         outboxRetryTimer.current = undefined;
       }
-      if (voiceRetryTimer.current !== undefined) {
-        window.clearTimeout(voiceRetryTimer.current);
-        voiceRetryTimer.current = undefined;
-      }
     };
-  }, [drainReliableOutbox, drainVoiceRecordings]);
+  }, [drainReliableOutbox]);
+
+  useEffect(() => {
+    void listPendingVoiceRecordings(settings)
+      .then((recordings) =>
+        Promise.all(recordings.map((recording) => deletePendingVoiceRecording(recording.id))),
+      )
+      .catch(() => undefined);
+  }, [settings]);
 
   useEffect(() => {
     let stopped = false;
@@ -643,7 +572,6 @@ export function ConnectionProvider({
           browserNotifications?.acceptSnapshot(frame.snapshot);
           dispatch({ type: "snapshot", snapshot: frame.snapshot });
           void drainReliableOutbox();
-          void drainVoiceRecordings();
         } else if (frame.type === "event") {
           if (streamSequence.current === null || frame.sequence !== streamSequence.current + 1) {
             candidate.close();
@@ -693,21 +621,13 @@ export function ConnectionProvider({
       streamSequence.current = null;
       socket?.close();
     };
-  }, [
-    api,
-    browserNotifications,
-    drainReliableOutbox,
-    drainVoiceRecordings,
-    generation,
-    settings.token,
-  ]);
+  }, [api, browserNotifications, drainReliableOutbox, generation, settings.token]);
 
   useEffect(() => {
     const refresh = () => {
       if (foregroundRefresh.current) return;
       const targetGeneration = reconnect();
       void drainReliableOutbox();
-      void drainVoiceRecordings();
       const request = api
         .sync()
         .then((snapshot) => acceptSyncedSnapshot(snapshot, targetGeneration))
@@ -734,7 +654,7 @@ export function ConnectionProvider({
       document.removeEventListener("visibilitychange", foreground);
       void removeNativeListener?.();
     };
-  }, [acceptSyncedSnapshot, api, drainReliableOutbox, drainVoiceRecordings, reconnect]);
+  }, [acceptSyncedSnapshot, api, drainReliableOutbox, reconnect]);
 
   const value = useMemo(
     () => ({

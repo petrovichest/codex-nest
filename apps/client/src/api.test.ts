@@ -29,4 +29,17 @@ describe("ApiClient", () => {
       annotations: [],
     });
   });
+
+  it("cancels a voice transcription without deleting its thread", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await api.cancelVoiceTranscription("thread/id");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/voice-transcriptions"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
 });

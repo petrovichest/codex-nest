@@ -827,9 +827,10 @@ describe("audio transcriptions", () => {
       })),
       updateConfiguration: vi.fn(),
       transcribe: vi.fn(
-        () =>
-          new Promise<string>((resolve) => {
+        (_audio: Buffer, _contentType: string, signal?: AbortSignal) =>
+          new Promise<string>((resolve, reject) => {
             resolveTranscript = resolve;
+            signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
           }),
       ),
     };
@@ -900,6 +901,35 @@ describe("audio transcriptions", () => {
       expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
     });
     expect(store.snapshot().threadMeta.voice?.draft?.input).toBe("Начало голос конец");
+
+    const cancellationTarget = await app.inject({
+      method: "POST",
+      url:
+        "/api/v1/threads/voice/voice-transcriptions?" +
+        new URLSearchParams({
+          mode: "draft",
+          selectionStart: "0",
+          selectionEnd: "0",
+          draftUpdatedAt: String(store.snapshot().threadMeta.voice!.draft!.updatedAt),
+          clientUploadId: "cancel-voice",
+        }),
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "1000",
+      },
+      payload: Buffer.from("cancel-audio"),
+    });
+    expect(cancellationTarget.statusCode).toBe(202);
+    await vi.waitFor(() => expect(transcription.transcribe).toHaveBeenCalledTimes(2));
+
+    const cancelled = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/threads/voice/voice-transcriptions",
+      headers: authorization,
+    });
+    expect(cancelled.statusCode).toBe(204);
+    expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
 
     await app.close();
   });
@@ -2016,6 +2046,13 @@ describe("Team orchestration", () => {
         ],
       }),
     ]);
+    const deliveredChild = projection.summary(String(firstResult.threadId));
+    expect(deliveredChild).toMatchObject({
+      unread: false,
+    });
+    expect(store.snapshot().threadMeta[String(firstResult.threadId)]?.lastReadUpdatedAt).toBe(
+      deliveredChild?.updatedAt,
+    );
     expect(projection.summary("thread")?.currentTurnId).toBe("turn");
 
     bridge.emit("notification", {

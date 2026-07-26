@@ -85,6 +85,8 @@ export function Composer({
   onVoiceModeChange,
   voiceUploadPending = false,
   voiceInputLocked = false,
+  onCancelVoiceTranscription,
+  voiceCancellationPending = false,
   transcriptionStatus = null,
   transcriptionError = null,
   error,
@@ -122,6 +124,8 @@ export function Composer({
   onVoiceModeChange?(mode: VoiceInputMode): void;
   voiceUploadPending?: boolean;
   voiceInputLocked?: boolean;
+  onCancelVoiceTranscription?(): void;
+  voiceCancellationPending?: boolean;
   transcriptionStatus?: ComposerTranscriptionStatus | null;
   transcriptionError?: string | null;
   error: string | null;
@@ -801,6 +805,16 @@ export function Composer({
                 onClick={cancelRecording}
               >
                 <XIcon />
+              </button>
+            ) : onCancelVoiceTranscription ? (
+              <button
+                aria-label={t("Отменить обработку записи")}
+                className="composer-action stop"
+                disabled={voiceCancellationPending}
+                type="button"
+                onClick={onCancelVoiceTranscription}
+              >
+                {voiceCancellationPending ? <span className="spinner small" /> : <XIcon />}
               </button>
             ) : (
               <button

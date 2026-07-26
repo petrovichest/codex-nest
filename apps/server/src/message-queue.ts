@@ -9,7 +9,7 @@ export interface MessageQueueDelivery {
   currentTurnId(threadId: string): string | null;
   start(threadId: string, message: QueuedMessage): Promise<string>;
   steer(threadId: string, turnId: string, message: QueuedMessage): Promise<string>;
-  wasDelivered(threadId: string, messageId: string): Promise<boolean>;
+  deliveredTurnId(threadId: string, messageId: string): Promise<string | null>;
   publish(threadId: string, messages: QueuedMessage[]): void;
 }
 
@@ -166,20 +166,20 @@ export class MessageQueue {
     for (const [threadId, messages] of Object.entries(queues)) {
       await this.withLock(threadId, async () => {
         for (const message of messages.filter((candidate) => candidate.status === "dispatching")) {
-          const delivered = await this.delivery.wasDelivered(threadId, message.id);
+          const deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
           await this.store.update((state) => {
             const queue = state.messageQueues?.[threadId] ?? [];
-            state.messageQueues![threadId] = delivered
+            state.messageQueues![threadId] = deliveredTurnId
               ? queue.filter((candidate) => candidate.id !== message.id)
               : queue.map((candidate) =>
                   candidate.id === message.id ? { ...candidate, status: "queued" } : candidate,
                 );
             if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
-            if (delivered) {
+            if (deliveredTurnId) {
               state.messageReceipts ??= {};
               state.messageReceipts[message.id] = {
                 threadId,
-                turnId: null,
+                turnId: deliveredTurnId,
                 contentHash: messageContentHash(message.text, message.images ?? [], !!message.goal),
                 createdAt: Date.now(),
               };
@@ -219,6 +219,16 @@ export class MessageQueue {
         ? await this.delivery.steer(threadId, activeTurnId, message)
         : await this.delivery.start(threadId, message);
     } catch (error) {
+      try {
+        const deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
+        if (deliveredTurnId) {
+          await this.remove(threadId, message.id, deliveredTurnId, message);
+          return deliveredTurnId;
+        }
+      } catch {
+        // Keep an ambiguous delivery parked until a later recovery can reconcile it.
+        throw error;
+      }
       await this.setStatus(threadId, message.id, "queued").catch(() => undefined);
       throw error;
     }

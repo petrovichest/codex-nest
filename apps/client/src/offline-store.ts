@@ -206,10 +206,6 @@ export async function deleteOutboxMessage(id: string): Promise<void> {
   await deleteValue(OUTBOX_STORE, id);
 }
 
-export async function putPendingVoiceRecording(recording: PendingVoiceRecording): Promise<boolean> {
-  return writeValue(RECORDING_STORE, recording);
-}
-
 export async function listPendingVoiceRecordings(
   settings: ConnectionSettings,
 ): Promise<PendingVoiceRecording[]> {

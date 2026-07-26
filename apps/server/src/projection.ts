@@ -70,6 +70,7 @@ export class AppProjection extends EventEmitter {
   private readonly hiddenThreads = new Set<string>();
   private readonly pendingSubagentTitles = new Map<string, string>();
   private readonly subagentTitleUpdates = new Set<string>();
+  private readonly deliveredNativeWaits = new Set<string>();
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -622,17 +623,24 @@ export class AppProjection extends EventEmitter {
     afterItemId: string | null,
   ): Promise<void> {
     if (!agents.length) return;
-    await this.upsertTimelineArtifact(threadId, turnId, {
-      type: "orchestrationNotice",
-      id: `orchestration-${turnId}-${agents
-        .map((agent) => agent.threadId)
-        .sort()
-        .join("-")}`,
-      status: "completed",
-      agents,
-      timestamp: Date.now(),
-      afterItemId,
-    });
+    const timestamp = Date.now();
+    await this.upsertTimelineArtifact(
+      threadId,
+      turnId,
+      {
+        type: "orchestrationNotice",
+        id: `orchestration-${turnId}-${agents
+          .map((agent) => agent.threadId)
+          .sort()
+          .join("-")}`,
+        status: "completed",
+        agents,
+        timestamp,
+        afterItemId,
+      },
+      agents.filter((agent) => agent.outcome === "completed").map((agent) => agent.threadId),
+      timestamp,
+    );
   }
 
   publishThreadState(threadId: string): void {
@@ -666,7 +674,11 @@ export class AppProjection extends EventEmitter {
     threadId: string,
     turnId: string,
     item: TimelineArtifact,
+    deliveredThreadIds: readonly string[] = [],
+    deliveredAt = Number.POSITIVE_INFINITY,
   ): Promise<void> {
+    const readMarkers = this.readMarkers(deliveredThreadIds, deliveredAt);
+    const markedRead: string[] = [];
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.timelineArtifacts ??= {};
@@ -677,10 +689,12 @@ export class AppProjection extends EventEmitter {
           ? [...items, item]
           : items.map((candidate, itemIndex) => (itemIndex === index ? item : candidate));
       state.threadMeta[threadId] = meta;
+      if (index < 0) markedRead.push(...applyReadMarkers(state, readMarkers));
     });
     this.activity.set(activityKey(threadId, turnId, item.id), item);
     this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
+    for (const deliveredThreadId of markedRead) this.publishThread(deliveredThreadId);
   }
 
   private historyRevision(threadId: string): number {
@@ -1271,7 +1285,35 @@ export class AppProjection extends EventEmitter {
       }
       case "item/started":
       case "item/completed": {
-        this.captureSubagentTitles(notification.params.item);
+        const sourceItem = notification.params.item;
+        this.captureSubagentTitles(sourceItem);
+        if (
+          notification.method === "item/completed" &&
+          sourceItem.type === "collabAgentToolCall" &&
+          sourceItem.tool === "wait" &&
+          sourceItem.status === "completed"
+        ) {
+          const deliveryKey = activityKey(
+            notification.params.threadId,
+            notification.params.turnId,
+            sourceItem.id,
+          );
+          if (!this.deliveredNativeWaits.has(deliveryKey)) {
+            this.deliveredNativeWaits.add(deliveryKey);
+            try {
+              await this.markDeliveredThreadsRead(
+                sourceItem.receiverThreadIds.filter((threadId) => {
+                  const agent = sourceItem.agentsStates[threadId];
+                  return agent?.status === "completed" && Boolean(agent.message?.trim());
+                }),
+                notification.params.completedAtMs,
+              );
+            } catch (error) {
+              this.deliveredNativeWaits.delete(deliveryKey);
+              throw error;
+            }
+          }
+        }
         let key = activityKey(
           notification.params.threadId,
           notification.params.turnId,
@@ -1371,6 +1413,41 @@ export class AppProjection extends EventEmitter {
         this.pendingSubagentTitles.set(threadId, title);
       }
     }
+  }
+
+  private async markDeliveredThreadsRead(
+    threadIds: readonly string[],
+    deliveredAt: number,
+  ): Promise<void> {
+    const readMarkers = this.readMarkers(threadIds, deliveredAt);
+    const snapshot = this.store.snapshot();
+    if (
+      !readMarkers.some(
+        ([threadId, updatedAt]) =>
+          updatedAt > (snapshot.threadMeta[threadId]?.lastReadUpdatedAt ?? 0),
+      )
+    ) {
+      return;
+    }
+    const markedRead: string[] = [];
+    await this.store.update((state) => {
+      markedRead.push(...applyReadMarkers(state, readMarkers));
+    });
+    for (const threadId of markedRead) this.publishThread(threadId);
+  }
+
+  private readMarkers(
+    threadIds: readonly string[],
+    deliveredAt: number,
+  ): Array<readonly [string, number]> {
+    const markers: Array<readonly [string, number]> = [];
+    for (const threadId of new Set(threadIds)) {
+      const cached = this.threads.get(threadId);
+      if (cached) {
+        markers.push([threadId, Math.min(cached.thread.updatedAt * 1_000, deliveredAt)]);
+      }
+    }
+    return markers;
   }
 
   private setSubagentTitle(threadId: string, title: string): void {
@@ -1535,6 +1612,21 @@ export class AppProjection extends EventEmitter {
     this.sequence += 1;
     this.emit("event", this.sequence, event);
   }
+}
+
+function applyReadMarkers(
+  state: CodexNestState,
+  markers: Array<readonly [threadId: string, updatedAt: number]>,
+): string[] {
+  const markedRead: string[] = [];
+  for (const [threadId, updatedAt] of markers) {
+    const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+    if (updatedAt <= meta.lastReadUpdatedAt) continue;
+    meta.lastReadUpdatedAt = updatedAt;
+    state.threadMeta[threadId] = meta;
+    markedRead.push(threadId);
+  }
+  return markedRead;
 }
 
 function notificationThreadId(notification: ServerNotification): string | undefined {

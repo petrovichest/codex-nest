@@ -511,6 +511,8 @@ const ENGLISH: Record<string, string> = {
   "Остановить задачу": "Stop task",
   "Остановить запись": "Stop recording",
   "Отменить запись": "Discard recording",
+  "Отменить обработку записи": "Cancel recording processing",
+  "Не удалось отменить обработку записи": "Failed to cancel recording processing",
   "Отправить сейчас": "Send now",
   "Отправляем запись": "Uploading recording",
   "Отправляем запись — не закрывайте": "Uploading recording — do not close",

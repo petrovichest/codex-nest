@@ -134,6 +134,12 @@ export class ApiClient {
     );
   }
 
+  cancelVoiceTranscription(threadId: string): Promise<void> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions`, {
+      method: "DELETE",
+    });
+  }
+
   readCodexRateLimits(): Promise<CodexRateLimitsResponse> {
     return this.request("/api/v1/codex/rate-limits");
   }

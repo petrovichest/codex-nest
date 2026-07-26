@@ -15,7 +15,6 @@ import type { StateStore, VoiceTranscriptionState } from "./state/store";
 import {
   appendTranscriptionTimingSample,
   TranscriptionError,
-  type TranscriptionService,
 } from "./transcription";
 
 export const MAX_VOICE_QUEUE_BYTES = 240 * 1024 * 1024;
@@ -24,7 +23,9 @@ const VOICE_RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 900_000, 1_800_000] as 
 type VoiceTranscriptionManagerOptions = {
   store: StateStore;
   projection: Pick<AppProjection, "publishVoiceTranscription" | "removeVoiceTranscription">;
-  transcription: Pick<TranscriptionService, "transcribe">;
+  transcription: {
+    transcribe(audio: Buffer, contentType: string, signal?: AbortSignal): Promise<string>;
+  };
   queue: Pick<MessageQueue, "enqueue" | "sendNow">;
   onWarning?(error: unknown, message: string): void;
 };
@@ -53,6 +54,11 @@ export class VoiceTranscriptionManager {
   private startup: Promise<void> | null = null;
   private stopped = false;
   private retryTimer: NodeJS.Timeout | null = null;
+  private activeJob: {
+    jobId: string;
+    controller: AbortController;
+    settled: Promise<void>;
+  } | null = null;
 
   constructor(private readonly options: VoiceTranscriptionManagerOptions) {
     this.directory = join(
@@ -86,6 +92,7 @@ export class VoiceTranscriptionManager {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.activeJob?.controller.abort();
   }
 
   job(threadId: string): VoiceTranscriptionState | null {
@@ -123,12 +130,15 @@ export class VoiceTranscriptionManager {
   async cancelThread(threadId: string): Promise<void> {
     const current = this.job(threadId);
     if (!current) return;
+    const active = this.activeJob?.jobId === current.id ? this.activeJob : null;
     await this.options.store.update((state) => {
       if (state.voiceTranscriptions?.[threadId]?.id === current.id) {
         delete state.voiceTranscriptions[threadId];
       }
     });
+    active?.controller.abort();
     if (current.audioFile) await unlink(this.audioPath(current.audioFile)).catch(() => undefined);
+    await active?.settled;
     this.options.projection.removeVoiceTranscription(threadId, current.id, "cancelled");
   }
 
@@ -269,14 +279,23 @@ export class VoiceTranscriptionManager {
     while (!this.stopped) {
       const job = this.nextJob();
       if (!job) return;
+      const controller = new AbortController();
+      let settle!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      this.activeJob = { jobId: job.id, controller, settled };
       try {
-        if (job.status !== "applying") await this.transcribe(job);
+        if (job.status !== "applying") await this.transcribe(job, controller.signal);
         const current = this.job(job.threadId);
         if (current?.id === job.id && current.status === "applying") {
           await this.apply(current);
         }
       } catch (error) {
         await this.fail(job, error);
+      } finally {
+        if (this.activeJob?.jobId === job.id) this.activeJob = null;
+        settle();
       }
     }
   }
@@ -294,7 +313,7 @@ export class VoiceTranscriptionManager {
     );
   }
 
-  private async transcribe(job: VoiceTranscriptionState): Promise<void> {
+  private async transcribe(job: VoiceTranscriptionState, signal: AbortSignal): Promise<void> {
     if (!job.audioFile) throw new Error("Saved audio is missing");
     const startedAt = Date.now();
     let active: VoiceTranscriptionState | null = null;
@@ -311,7 +330,7 @@ export class VoiceTranscriptionManager {
     this.options.projection.publishVoiceTranscription(active);
 
     const audio = await readFile(this.audioPath(job.audioFile));
-    const transcript = await this.options.transcription.transcribe(audio, job.contentType);
+    const transcript = await this.options.transcription.transcribe(audio, job.contentType, signal);
     const processingMs = Math.max(1, Date.now() - startedAt);
     let applying: VoiceTranscriptionState | null = null;
     await this.options.store.update((state) => {

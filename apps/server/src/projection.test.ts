@@ -228,6 +228,256 @@ describe("AppProjection", () => {
     });
   });
 
+  it("deduplicates native wait delivery and bounds replay markers to the source event", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      for (const threadId of ["child-a", "child-b"]) {
+        state.threadMeta[threadId] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: 10_000,
+        };
+      }
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    for (const threadId of ["child-a", "child-b"]) {
+      projection.upsertThread({
+        ...thread(threadId, "/work", 10),
+        parentThreadId: "one",
+        ephemeral: true,
+      });
+    }
+    expect(projection.summary("child-a")?.unread).toBe(true);
+    expect(projection.summary("child-b")?.unread).toBe(true);
+
+    const updates = vi.spyOn(store, "update");
+    const published: string[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "thread.upserted") published.push(event.thread.id);
+    });
+    const firstWait = collabWaitNotification("wait-first", "completed", ["child-a", "child-b"], {
+      "child-a": { status: "completed", message: "Result A" },
+      "child-b": { status: "completed", message: "Result B" },
+    });
+    bridge.emit("notification", firstWait);
+    bridge.emit("notification", firstWait);
+
+    await vi.waitFor(() => {
+      expect(store.snapshot().threadMeta["child-a"]?.lastReadUpdatedAt).toBe(10_000);
+      expect(store.snapshot().threadMeta["child-b"]?.lastReadUpdatedAt).toBe(10_000);
+    });
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(projection.summary("child-a")?.unread).toBe(false);
+    expect(projection.summary("child-b")?.unread).toBe(false);
+    expect(published).toEqual(expect.arrayContaining(["child-a", "child-b"]));
+
+    bridge.emit("notification", firstWait);
+    await nextImmediate();
+    expect(updates).toHaveBeenCalledTimes(1);
+
+    projection.upsertThread({
+      ...thread("child-a", "/work", 11),
+      parentThreadId: "one",
+      ephemeral: true,
+    });
+    expect(projection.summary("child-a")?.unread).toBe(true);
+    bridge.emit("notification", firstWait);
+    await nextImmediate();
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(store.snapshot().threadMeta["child-a"]?.lastReadUpdatedAt).toBe(10_000);
+    expect(projection.summary("child-a")?.unread).toBe(true);
+
+    const replayBridge = new FakeBridge();
+    const replayProjection = new AppProjection(
+      replayBridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    replayProjection.upsertThread({
+      ...thread("child-a", "/work", 11),
+      parentThreadId: "one",
+      ephemeral: true,
+    });
+    replayBridge.emit("notification", firstWait);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta["child-a"]?.lastReadUpdatedAt).toBe(10_500),
+    );
+    expect(replayProjection.summary("child-a")?.unread).toBe(true);
+
+    replayBridge.emit(
+      "notification",
+      collabWaitNotification(
+        "wait-second",
+        "completed",
+        ["child-a"],
+        {
+          "child-a": { status: "completed", message: "A newer result" },
+        },
+        11_500,
+      ),
+    );
+
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta["child-a"]?.lastReadUpdatedAt).toBe(11_000),
+    );
+    expect(replayProjection.summary("child-a")?.unread).toBe(false);
+  });
+
+  it("does not clear native subagents for timeout, running, empty, or failed results", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.child = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 10_000,
+      };
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread({
+      ...thread("child", "/work", 10),
+      parentThreadId: "one",
+      ephemeral: true,
+    });
+    const updates = vi.spyOn(store, "update");
+
+    bridge.emit(
+      "notification",
+      collabWaitNotification("wait-timeout", "failed", ["child"], {
+        child: { status: "completed", message: "Late result" },
+      }),
+    );
+    bridge.emit(
+      "notification",
+      collabWaitNotification("wait-running", "completed", ["child"], {
+        child: { status: "running", message: "Still running" },
+      }),
+    );
+    bridge.emit(
+      "notification",
+      collabWaitNotification("wait-empty", "completed", ["child"], {
+        child: { status: "completed", message: "   " },
+      }),
+    );
+    bridge.emit(
+      "notification",
+      collabWaitNotification("wait-errored", "completed", ["child"], {
+        child: { status: "errored", message: "Failed" },
+      }),
+    );
+    bridge.emit(
+      "notification",
+      collabWaitNotification("wait-interrupted", "completed", ["child"], {
+        child: { status: "interrupted", message: "Interrupted" },
+      }),
+    );
+    await nextImmediate();
+
+    expect(updates).not.toHaveBeenCalled();
+    expect(store.snapshot().threadMeta.child?.lastReadUpdatedAt).toBe(0);
+    expect(projection.summary("child")?.unread).toBe(true);
+  });
+
+  it("applies managed result markers only with the first atomic artifact insert", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      for (const [threadId, outcome] of [
+        ["completed-child", "completed"],
+        ["failed-child", "failed"],
+        ["interrupted-child", "interrupted"],
+      ] as const) {
+        state.threadMeta[threadId] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastOutcome: outcome,
+          outcomeUpdatedAt: 10_000,
+        };
+      }
+    });
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("parent", "/work", 10));
+    for (const threadId of ["completed-child", "failed-child", "interrupted-child"]) {
+      projection.upsertThread({
+        ...thread(threadId, "/work", 10),
+        parentThreadId: "parent",
+        ephemeral: true,
+      });
+    }
+    const agents = [
+      {
+        threadId: "completed-child",
+        title: "Completed",
+        nickname: null,
+        outcome: "completed" as const,
+      },
+      {
+        threadId: "failed-child",
+        title: "Failed",
+        nickname: null,
+        outcome: "failed" as const,
+      },
+      {
+        threadId: "interrupted-child",
+        title: "Interrupted",
+        nickname: null,
+        outcome: "interrupted" as const,
+      },
+    ];
+
+    const first = projection.recordOrchestrationNotice("parent", "parent-turn", agents, null);
+    const duplicate = projection.recordOrchestrationNotice("parent", "parent-turn", agents, null);
+    projection.upsertThread({
+      ...thread("completed-child", "/work", 11),
+      parentThreadId: "parent",
+      ephemeral: true,
+    });
+    await Promise.all([first, duplicate]);
+
+    expect(store.snapshot().threadMeta.parent?.timelineArtifacts?.["parent-turn"]).toHaveLength(1);
+    expect(store.snapshot().threadMeta["completed-child"]?.lastReadUpdatedAt).toBe(10_000);
+    expect(store.snapshot().threadMeta["failed-child"]?.lastReadUpdatedAt).toBe(0);
+    expect(store.snapshot().threadMeta["interrupted-child"]?.lastReadUpdatedAt).toBe(0);
+    expect(projection.summary("completed-child")?.unread).toBe(true);
+    expect(projection.summary("failed-child")?.unread).toBe(true);
+    expect(projection.summary("interrupted-child")?.unread).toBe(true);
+
+    await projection.recordOrchestrationNotice("parent", "parent-turn", agents, null);
+    expect(store.snapshot().threadMeta["completed-child"]?.lastReadUpdatedAt).toBe(10_000);
+    expect(projection.summary("completed-child")?.unread).toBe(true);
+
+    await projection.recordOrchestrationNotice("parent", "next-parent-turn", [agents[0]!], null);
+    expect(store.snapshot().threadMeta["completed-child"]?.lastReadUpdatedAt).toBe(11_000);
+    expect(projection.summary("completed-child")?.unread).toBe(false);
+  });
+
   it("recovers loaded subagents omitted from thread/list once per connection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -2001,6 +2251,44 @@ function testTurn(id: string, status: "inProgress" | "completed"): Thread["turns
     completedAt: status === "completed" ? 2 : null,
     durationMs: status === "completed" ? 1_000 : null,
   };
+}
+
+type CollabToolCall = Extract<
+  Thread["turns"][number]["items"][number],
+  { type: "collabAgentToolCall" }
+>;
+
+function collabWaitNotification(
+  id: string,
+  status: CollabToolCall["status"],
+  receiverThreadIds: string[],
+  agentsStates: CollabToolCall["agentsStates"],
+  completedAtMs = 10_500,
+): ServerNotification {
+  return {
+    method: "item/completed",
+    params: {
+      threadId: "one",
+      turnId: "parent-turn",
+      item: {
+        type: "collabAgentToolCall",
+        id,
+        tool: "wait",
+        status,
+        senderThreadId: "one",
+        receiverThreadIds,
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates,
+      },
+      completedAtMs,
+    },
+  } satisfies ServerNotification;
+}
+
+function nextImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function goalNotification(

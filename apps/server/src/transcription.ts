@@ -123,7 +123,7 @@ export class TranscriptionService {
     return this.configuration();
   }
 
-  async transcribe(audio: Buffer, contentType: string): Promise<string> {
+  async transcribe(audio: Buffer, contentType: string, signal?: AbortSignal): Promise<string> {
     const mediaType = normalizeAudioType(contentType);
     const extension = AUDIO_TYPES.get(mediaType);
     if (!extension) throw new TranscriptionError("failed", "Unsupported audio format");
@@ -139,7 +139,7 @@ export class TranscriptionService {
       throw new TranscriptionError("unavailable", "OpenAI transcription is not configured");
     }
 
-    const text = await this.requestTranscription(provider, audio, mediaType, extension);
+    const text = await this.requestTranscription(provider, audio, mediaType, extension, signal);
     if (provider !== "local" || !this.settings.refineLocal || !this.options.refiner) return text;
 
     try {
@@ -158,6 +158,7 @@ export class TranscriptionService {
     audio: Buffer,
     mediaType: string,
     extension: string,
+    signal?: AbortSignal,
   ): Promise<string> {
     const bytes = new Uint8Array(audio.byteLength);
     bytes.set(audio);
@@ -190,7 +191,9 @@ export class TranscriptionService {
               ? { Authorization: `Bearer ${this.settings.openAiApiKey!}` }
               : undefined,
           body: form,
-          signal: AbortSignal.timeout(this.options.timeoutMs),
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(this.options.timeoutMs)])
+            : AbortSignal.timeout(this.options.timeoutMs),
           ...(dispatcher ? { dispatcher } : {}),
         },
       );

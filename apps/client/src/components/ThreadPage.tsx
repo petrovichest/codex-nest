@@ -179,6 +179,8 @@ export function ThreadPage({
   const currentTurnIdRef = useRef(summary?.currentTurnId ?? null);
   currentTurnIdRef.current = summary?.currentTurnId ?? null;
   const [voiceUploads, setVoiceUploads] = useState<Record<string, VoiceUploadState>>({});
+  const localVoiceJobIdsRef = useRef(new Set<string>());
+  const [voiceCancellationPending, setVoiceCancellationPending] = useState(false);
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
   const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
@@ -247,6 +249,8 @@ export function ThreadPage({
     state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
   const voiceRemoval = state.voiceRemovals?.[threadId];
   const activeVoiceJob = voiceJob?.status === "failed" ? null : voiceJob;
+  const localActiveVoiceJob =
+    activeVoiceJob && localVoiceJobIdsRef.current.has(activeVoiceJob.id) ? activeVoiceJob : null;
   const voiceUpload = voiceUploads[threadId] ?? null;
   const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
   const optimisticTurnMessages = optimisticMessages.filter(
@@ -269,11 +273,11 @@ export function ThreadPage({
     ? hasMaterializedVoiceMessage(detail, optimisticMessages, activeVoiceJob.id)
     : false;
   const draftVoiceProgress: VoiceProgress | null =
-    activeVoiceJob?.mode === "draft"
+    localActiveVoiceJob?.mode === "draft"
       ? {
-          status: activeVoiceJob.status as Exclude<VoiceTranscriptionStatus, "failed">,
+          status: localActiveVoiceJob.status as Exclude<VoiceTranscriptionStatus, "failed">,
           elapsedSeconds: transcriptionElapsedSeconds,
-          estimatedTotalSeconds: activeVoiceJob.estimatedTotalSeconds,
+          estimatedTotalSeconds: localActiveVoiceJob.estimatedTotalSeconds,
         }
       : voiceUpload?.mode === "draft"
         ? {
@@ -431,13 +435,15 @@ export function ThreadPage({
       ...current,
       [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
     }));
+    const uploadId = createClientMessageId();
+    localVoiceJobIdsRef.current.add(uploadId);
     try {
       const draft = structuredClone(currentComposerDraft());
       const expectedDraftUpdatedAt = savedDraftUpdatedAtRef.current.has(targetThreadId)
         ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
         : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
       await queueVoiceRecording({
-        id: createClientMessageId(),
+        id: uploadId,
         threadId: targetThreadId,
         audio: recording.audio,
         durationMs: recording.durationMs,
@@ -447,12 +453,32 @@ export function ThreadPage({
         draftUpdatedAt: expectedDraftUpdatedAt,
         draft,
       });
+    } catch (error) {
+      localVoiceJobIdsRef.current.delete(uploadId);
+      throw error;
     } finally {
       setVoiceUploads((current) => {
         const next = { ...current };
         delete next[targetThreadId];
         return next;
       });
+    }
+  }
+
+  async function cancelVoiceTranscription(): Promise<void> {
+    if (!activeVoiceJob || voiceCancellationPending) return;
+    setVoiceCancellationPending(true);
+    setError(null);
+    try {
+      await api.cancelVoiceTranscription(threadId);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отменить обработку записи"),
+      );
+    } finally {
+      setVoiceCancellationPending(false);
     }
   }
 
@@ -482,6 +508,7 @@ export function ThreadPage({
       return;
     }
     handledVoiceRemovalsRef.current.add(voiceRemoval.jobId);
+    localVoiceJobIdsRef.current.delete(voiceRemoval.jobId);
     if (voiceRemoval.outcome === "cancelled") return;
     if (voiceRemoval.outcome === "send") {
       pendingDraftsRef.current.delete(threadId);
@@ -1356,6 +1383,10 @@ export function ThreadPage({
             onVoiceModeChange={setVoiceMode}
             voiceUploadPending={Boolean(voiceUpload)}
             voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
+            onCancelVoiceTranscription={
+              activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
+            }
+            voiceCancellationPending={voiceCancellationPending}
             onRecordingReady={(recording) => beginTranscription(threadId, recording)}
             transcriptionStatus={draftVoiceProgress}
             transcriptionError={

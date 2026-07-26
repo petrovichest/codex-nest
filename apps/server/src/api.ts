@@ -544,12 +544,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
-    wasDelivered: async (threadId, messageId) => {
+    deliveredTurnId: async (threadId, messageId) => {
       const result = parseThreadRead(
         await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
       );
-      return result.thread.turns.some((turn) =>
-        turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
+      return (
+        result.thread.turns.find((turn) =>
+          turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
+        )?.id ?? null
       );
     },
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
@@ -946,6 +948,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         timingProfile: transcriptionTimingProfile(config),
       });
       return accepted ? reply.code(202).send(accepted) : reply.code(204).send();
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/threads/:id/voice-transcriptions",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) {
+        return apiError(reply, 404, "not_found", "Thread not found");
+      }
+      assertWritableThread(summary);
+      await voiceTranscriptions?.cancelThread(request.params.id);
+      return reply.code(204).send();
     },
   );
 
