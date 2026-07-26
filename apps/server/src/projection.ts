@@ -197,7 +197,8 @@ export class AppProjection extends EventEmitter {
 
   async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
-    const subagent = local ? isSpawnedSubagent(local.thread) : false;
+    const meta = this.store.snapshot().threadMeta[id];
+    const subagent = local ? hasSubagentTranscript(local.thread, meta) : false;
     if (local && this.isUnmaterialized(id)) {
       const state = this.store.snapshot();
       return {
@@ -213,7 +214,7 @@ export class AppProjection extends EventEmitter {
     const page = await this.readTurnsPage(id, subagent ? null : cursor, "desc", !subagent);
     const state = this.store.snapshot();
     const visibleTurns = subagent
-      ? subagentTranscriptTurnViews(cached.thread, page.turns)
+      ? subagentTranscriptTurnViews(cached.thread, page.turns, meta)
       : page.turns;
     const syncPoint =
       !subagent && cursor === null
@@ -236,7 +237,9 @@ export class AppProjection extends EventEmitter {
   ): Promise<ThreadChanges> {
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
-    if (isSpawnedSubagent(cached.thread)) return this.resetThreadChanges(id);
+    if (hasSubagentTranscript(cached.thread, this.store.snapshot().threadMeta[id])) {
+      return this.resetThreadChanges(id);
+    }
 
     let page: CachedTurnsPage;
     try {
@@ -1545,8 +1548,32 @@ function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
 }
 
-function subagentTranscriptTurnViews(thread: Thread, turns: TurnView[]): TurnView[] {
+function hasSubagentTranscript(
+  thread: Thread,
+  meta?: CodexNestState["threadMeta"][string],
+): boolean {
+  return isSpawnedSubagent(thread) || meta?.managedParent !== undefined;
+}
+
+function subagentTranscriptTurnViews(
+  thread: Thread,
+  turns: TurnView[],
+  meta?: CodexNestState["threadMeta"][string],
+): TurnView[] {
   if (!turns.length) return [];
+  if (!isSpawnedSubagent(thread) && meta?.managedParent) {
+    let keptInput = false;
+    return turns.map((turn) => ({
+      ...turn,
+      items: turn.items.filter((item) => {
+        if (item.type !== "userMessage") return true;
+        if (keptInput) return false;
+        keptInput = true;
+        return true;
+      }),
+    }));
+  }
+
   const expectedTitle = thread.name?.trim() || null;
   let boundary: { turnIndex: number; itemIndex: number } | null = null;
 

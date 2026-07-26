@@ -559,6 +559,127 @@ describe("AppProjection", () => {
     expect((await projection.readThread("child")).turns).toEqual([]);
   });
 
+  it("filters managed root-child history and resets incremental reads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      state.threadMeta.child = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "parent", taskId: "task" },
+      };
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      expect(params).toMatchObject({
+        threadId: "child",
+        cursor: null,
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "full",
+      });
+      return {
+        data: [
+          {
+            id: "child-task",
+            items: [
+              {
+                type: "userMessage",
+                id: "child-input-one",
+                clientId: null,
+                content: [
+                  {
+                    type: "text",
+                    text: "Проверить managed transcript с длинным coordinator prompt",
+                    text_elements: [],
+                  },
+                ],
+              },
+              {
+                type: "userMessage",
+                id: "child-input-two",
+                clientId: null,
+                content: [
+                  {
+                    type: "text",
+                    text: "Проверить managed transcript с длинным coordinator prompt",
+                    text_elements: [],
+                  },
+                ],
+              },
+              {
+                type: "agentMessage",
+                id: "child-final",
+                text: "Managed transcript исправлен",
+                phase: "final_answer",
+                memoryCitation: null,
+              },
+            ],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 2,
+            completedAt: 3,
+            durationMs: 1_000,
+          },
+        ],
+        nextCursor: "parent-history",
+        backwardsCursor: "parent-sync",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread({
+      ...thread("child", "/work", 4, { type: "notLoaded" }),
+      parentThreadId: null,
+      name: "Короткий заголовок",
+    });
+
+    const detail = await projection.readThread("child", "parent-cursor");
+
+    expect(detail.turns.map((turn) => turn.id)).toEqual(["child-task"]);
+    expect(detail.turns.flatMap((turn) => turn.items.map((item) => item.id))).toEqual([
+      "child-input-one",
+      "child-final",
+    ]);
+    expect(
+      detail.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage"),
+    ).toHaveLength(1);
+    expect(detail.olderTurnsCursor).toBeNull();
+    expect(detail).not.toHaveProperty("syncPoint");
+
+    bridge.request.mockClear();
+    const changes = await projection.readThreadChanges("child", {
+      cursor: "parent-sync",
+      anchorTurnId: "stale-parent-turn",
+      anchorRevision: "parent-revision",
+    });
+
+    expect(changes.resetLatest).toBe(true);
+    expect(changes.turns.flatMap((turn) => turn.items.map((item) => item.id))).toEqual([
+      "child-input-one",
+      "child-final",
+    ]);
+    expect(
+      changes.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage"),
+    ).toHaveLength(1);
+    expect(changes.continuationCursor).toBeNull();
+    expect(changes.olderTurnsCursor).toBeNull();
+    expect(changes.syncPoint).toBeNull();
+    expect(bridge.request).toHaveBeenCalledTimes(1);
+  });
+
   it("sorts sessions only by most recent activity", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
