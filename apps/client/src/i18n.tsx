@@ -368,6 +368,7 @@ const ENGLISH: Record<string, string> = {
   "{{count}} токена": "{{count}} tokens",
   "{{count}} токенов": "{{count}} tokens",
   "Требуется внимание": "Attention required",
+  "Прокрутить к последнему сообщению": "Scroll to latest message",
   "Запрос уже закрыт": "The request is already closed",
   "Разрешить команду?": "Allow this command?",
   "Команда не указана": "No command provided",

@@ -1937,6 +1937,32 @@ describe("Activity", () => {
     await waitFor(() => expect(scroll.scrollTop).toBe(350));
   });
 
+  it("shows a button away from the latest message and smoothly scrolls back", () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary);
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+
+    scroll.scrollTop = 250;
+    fireEvent.scroll(scroll);
+
+    const button = screen.getByRole("button", {
+      name: "Прокрутить к последнему сообщению",
+    });
+    fireEvent.click(button);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "smooth" });
+
+    scroll.scrollTop = 400;
+    fireEvent.scroll(scroll);
+    expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
+  });
+
   it("reloads the open chat for a reconnect snapshot epoch", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary);

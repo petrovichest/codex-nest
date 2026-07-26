@@ -2588,24 +2588,32 @@ pre {
   font-size: 11px;
 }
 
-.attention-jump {
+.scroll-to-bottom {
   position: absolute;
-  right: 24px;
-  bottom: 152px;
+  top: 0;
+  left: 50%;
   z-index: 30;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--warning-text);
-  border-color: color-mix(in srgb, #d99b28 35%, var(--line));
-  background: var(--surface-raised);
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  transform: translate(-50%, calc(-100% - 8px));
+  border: 0;
+  border-radius: 50%;
+  color: var(--accent-text);
+  background: var(--accent);
   box-shadow: var(--shadow);
-  font-size: 12px;
 }
 
-.attention-jump svg {
-  width: 14px;
-  height: 14px;
+.scroll-to-bottom:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 88%, var(--bg));
+}
+
+.scroll-to-bottom svg {
+  width: 18px;
+  height: 18px;
 }
 
 .composer-empty-projects {
@@ -3420,11 +3428,6 @@ pre {
   .attention-stack {
     width: 100%;
     margin: 0;
-  }
-
-  .attention-jump {
-    right: 12px;
-    bottom: calc(136px + env(safe-area-inset-bottom));
   }
 
   .session-inspector {

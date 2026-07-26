@@ -50,8 +50,8 @@ import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
 import {
   ArchiveIcon,
+  ArrowDownIcon,
   CheckIcon,
-  ChevronDownIcon,
   CopyIcon,
   FileIcon,
   MoreIcon,
@@ -99,6 +99,7 @@ function emptyComposerDraft(): UpdateThreadDraftRequest {
 
 const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
 const COMPLETED_CHAT_RETRY_MS = 500;
+const TAIL_FOLLOW_THRESHOLD_PX = 120;
 
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
@@ -155,11 +156,10 @@ export function ThreadPage({
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
   const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
-  const [attentionJump, setAttentionJump] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
-  const previousAttentionIds = useRef<string | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
   const detailReconcileKey = useRef<string | null>(null);
   const completedChatRetry = useRef<{
@@ -626,9 +626,11 @@ export function ThreadPage({
   }, [api, detail, summary, threadId]);
 
   useLayoutEffect(() => {
-    if (!detail || initialScrollThread.current === threadId) return;
-    initialScrollThread.current = threadId;
+    if (initialScrollThread.current === threadId) return;
     followsTail.current = true;
+    setShowScrollToBottom(false);
+    if (!detail) return;
+    initialScrollThread.current = threadId;
     scrollToEnd(scrollRef.current);
   }, [detail, threadId]);
 
@@ -654,7 +656,7 @@ export function ThreadPage({
     );
     if (!target) return;
     followsTail.current = true;
-    setAttentionJump(false);
+    setShowScrollToBottom(false);
     if (typeof target.scrollIntoView === "function") {
       target.scrollIntoView({ behavior: "smooth", block: "nearest" });
     } else {
@@ -662,19 +664,6 @@ export function ThreadPage({
     }
     scrollTargetMessageId.current = null;
   }, [detail, optimisticMessages, threadId]);
-
-  useEffect(() => {
-    const ids = attention.map((request) => request.id).join(":");
-    if (
-      previousAttentionIds.current !== null &&
-      ids !== previousAttentionIds.current &&
-      attention.length > 0 &&
-      !followsTail.current
-    ) {
-      setAttentionJump(true);
-    }
-    previousAttentionIds.current = ids;
-  }, [attention]);
 
   const loadOlder = useCallback(async () => {
     const cursor = detail?.olderTurnsCursor;
@@ -1059,8 +1048,9 @@ export function ThreadPage({
           ref={scrollRef}
           onScroll={(event) => {
             const node = event.currentTarget;
-            followsTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120;
-            if (followsTail.current) setAttentionJump(false);
+            followsTail.current =
+              node.scrollHeight - node.scrollTop - node.clientHeight < TAIL_FOLLOW_THRESHOLD_PX;
+            setShowScrollToBottom(!followsTail.current);
             if (node.scrollTop < 160) void loadOlder();
           }}
         >
@@ -1172,18 +1162,6 @@ export function ThreadPage({
               )}
           </section>
         </div>
-        {attentionJump && (
-          <button
-            className="attention-jump"
-            onClick={() => {
-              followsTail.current = true;
-              setAttentionJump(false);
-              scrollToEnd(scrollRef.current, "smooth");
-            }}
-          >
-            {t("Требуется внимание")} <ChevronDownIcon />
-          </button>
-        )}
         <Composer
           key={threadId}
           autoFocus={(location.state as { focusComposer?: unknown } | null)?.focusComposer === true}
@@ -1231,6 +1209,19 @@ export function ThreadPage({
           error={error}
           hasSupplementalContent={annotations.length > 0}
         >
+          {showScrollToBottom && (
+            <button
+              type="button"
+              className="scroll-to-bottom"
+              aria-label={t("Прокрутить к последнему сообщению")}
+              onClick={() => {
+                followsTail.current = true;
+                scrollToEnd(scrollRef.current, "smooth");
+              }}
+            >
+              <ArrowDownIcon />
+            </button>
+          )}
           <QueuedMessages
             messages={mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)}
             action={queueAction}
