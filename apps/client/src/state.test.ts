@@ -995,6 +995,49 @@ describe("clientReducer", () => {
     ).toMatchObject({ steps: [{ status: "completed" }] });
   });
 
+  it("merges an incremental history response without replacing older local turns", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [turn("old"), turn("anchor")],
+        queuedMessages: [],
+        olderTurnsCursor: "older",
+        syncPoint: {
+          cursor: "delta",
+          anchorTurnId: "anchor",
+          anchorRevision: "revision-1",
+        },
+      },
+      page: "latest",
+    });
+
+    state = clientReducer(state, {
+      type: "changes",
+      threadId: "one",
+      changes: {
+        summary: { ...baseThread, updatedAt: 3 },
+        turns: [{ ...turn("anchor"), durationMs: 2 }, turn("new")],
+        queuedMessages: [],
+        draft: null,
+        continuationCursor: null,
+        syncPoint: {
+          cursor: "next-delta",
+          anchorTurnId: "new",
+          anchorRevision: "revision-2",
+        },
+        resetLatest: false,
+        olderTurnsCursor: null,
+      },
+    });
+
+    expect(state.details.one?.turns.map((item) => item.id)).toEqual(["old", "anchor", "new"]);
+    expect(state.details.one?.turns[1]?.durationMs).toBe(2);
+    expect(state.details.one?.olderTurnsCursor).toBe("older");
+    expect(state.details.one?.syncPoint?.cursor).toBe("next-delta");
+  });
+
   it("sorts sessions only by most recent activity", () => {
     const threads = [
       {

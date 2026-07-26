@@ -217,7 +217,7 @@ describe("ConnectionProvider", () => {
     act(() => vi.advanceTimersByTime(10_000));
     expect(first.readyState).toBe(FakeWebSocket.CLOSED);
 
-    act(() => vi.advanceTimersByTime(1_000));
+    act(() => vi.advanceTimersByTime(1_300));
     const second = FakeWebSocket.instances[1]!;
     act(() => {
       second.open();

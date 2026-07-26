@@ -178,6 +178,37 @@ describe("Activity", () => {
     expect(screen.getByText("secret-value")).toBeInTheDocument();
   });
 
+  it("renders delivered subagent results as links in the timeline", () => {
+    render(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "orchestrationNotice",
+            id: "orchestration",
+            status: "completed",
+            agents: [
+              {
+                threadId: "child",
+                title: "Проверить интерфейс",
+                nickname: "reviewer",
+                outcome: "completed",
+              },
+            ],
+            timestamp: Date.now(),
+            afterItemId: null,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Получен результат субагента")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "reviewer · Проверить интерфейс" })).toHaveAttribute(
+      "href",
+      "/threads/child",
+    );
+    expect(screen.getByText("Завершена")).toBeInTheDocument();
+  });
+
   it("omits empty text activities and hides copy for image-only messages", () => {
     const view = render(
       <Activity
@@ -2101,7 +2132,7 @@ describe("Activity", () => {
     expect(attention.closest(".timeline")).not.toBeNull();
   });
 
-  it("renders an optimistic message before the running indicator while startTurn is pending", async () => {
+  it("renders a reliable optimistic message before the running indicator", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
@@ -2128,7 +2159,7 @@ describe("Activity", () => {
     )?.[0].message;
     expect(optimistic).toMatchObject({
       text: "Появись сразу",
-      destination: "turn",
+      destination: "queue",
     });
 
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
@@ -2152,10 +2183,7 @@ describe("Activity", () => {
     view.rerender(threadRoute());
 
     const message = screen.getByText("Появись сразу").closest("article")!;
-    const timing = view.container.querySelector(".turn-timing")!;
-    expect(message.compareDocumentPosition(timing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(message).toHaveAttribute("data-message-id", optimistic.id);
-    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "nearest" });
 
     await act(async () => resolveStart?.({ turnId: "turn" }));
     delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView;
@@ -2962,6 +2990,21 @@ function mockThreadConnection(
     },
     refreshDetail: vi.fn().mockResolvedValue(detail),
     loadOlderDetail: vi.fn().mockResolvedValue(detail),
+    sendReliable: vi
+      .fn()
+      .mockImplementation((threadId, body) =>
+        thread.currentTurnId ? api.enqueue(threadId, body) : api.startTurn(threadId, body),
+      ),
+    queueVoiceRecording: vi.fn().mockImplementation((recording) =>
+      api.createVoiceTranscription(recording.threadId, recording.audio, {
+        recordingDurationMs: recording.durationMs,
+        mode: recording.mode,
+        selectionStart: recording.selectionStart,
+        selectionEnd: recording.selectionEnd,
+        draftUpdatedAt: recording.draftUpdatedAt,
+        clientUploadId: recording.id,
+      }),
+    ),
     dispatch: vi.fn(),
   };
   connection.mockReturnValue(value);

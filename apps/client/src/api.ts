@@ -23,9 +23,11 @@ import type {
   SteerTurnRequest,
   SummaryResponse,
   ThreadDetail,
+  ThreadChanges,
   ThreadDraft,
   ThreadGoal,
   ThreadSummary,
+  ThreadSyncPoint,
   TranscriptionConfigResponse,
   TranscriptionResponse,
   UpdateTranscriptionSettingsRequest,
@@ -106,13 +108,15 @@ export class ApiClient {
       selectionStart: number;
       selectionEnd: number;
       draftUpdatedAt: number | null;
+      clientUploadId: string;
     },
-  ): Promise<VoiceTranscriptionJob> {
+  ): Promise<VoiceTranscriptionJob | null> {
     const query = new URLSearchParams({
       mode: options.mode,
       selectionStart: String(options.selectionStart),
       selectionEnd: String(options.selectionEnd),
       draftUpdatedAt: options.draftUpdatedAt === null ? "none" : String(options.draftUpdatedAt),
+      clientUploadId: options.clientUploadId,
     });
     return this.request(
       `/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions?${query}`,
@@ -125,7 +129,7 @@ export class ApiClient {
             Math.max(1, Math.round(options.recordingDurationMs)),
           ),
         },
-        timeoutMs: null,
+        timeoutMs: 60_000,
       },
     );
   }
@@ -218,18 +222,38 @@ export class ApiClient {
     const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`, {
       cache: options?.fresh ? "no-store" : undefined,
+      retry: true,
+    });
+  }
+
+  readThreadChanges(
+    id: string,
+    syncPoint: ThreadSyncPoint,
+    continuationCursor?: string,
+  ): Promise<ThreadChanges> {
+    const query = new URLSearchParams({
+      cursor: syncPoint.cursor,
+      anchorTurnId: syncPoint.anchorTurnId,
+      anchorRevision: syncPoint.anchorRevision,
+    });
+    if (continuationCursor) query.set("continuationCursor", continuationCursor);
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/changes?${query}`, {
+      cache: "no-store",
+      retry: true,
     });
   }
 
   updateThreadDraft(
     id: string,
     body: UpdateThreadDraftRequest,
-    options?: { keepalive?: boolean },
+    options?: { keepalive?: boolean; retry?: boolean },
   ): Promise<ThreadDraft | null> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/draft`, {
       method: "PUT",
       body,
       keepalive: options?.keepalive,
+      timeoutMs: 15_000,
+      retry: options?.retry ?? false,
     });
   }
 
@@ -245,7 +269,12 @@ export class ApiClient {
   }
 
   createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary } & TurnStartResult> {
-    return this.request("/api/v1/threads", { method: "POST", body, timeoutMs: null });
+    return this.request("/api/v1/threads", {
+      method: "POST",
+      body,
+      timeoutMs: null,
+      retry: Boolean(body.clientMessageId),
+    });
   }
 
   updateThread(id: string, body: UpdateThreadRequest): Promise<ThreadSummary> {
@@ -268,6 +297,7 @@ export class ApiClient {
       method: "POST",
       body,
       timeoutMs: null,
+      retry: Boolean(body.clientMessageId),
     });
   }
 
@@ -275,7 +305,7 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
       method: "POST",
       body,
-      timeoutMs: null,
+      timeoutMs: 15_000,
     });
   }
 
@@ -361,7 +391,7 @@ export class ApiClient {
   }
 
   sync(): Promise<AppSnapshot> {
-    return this.request("/api/v1/sync", { method: "POST" });
+    return this.request("/api/v1/sync", { method: "POST", retry: true });
   }
 
   webSocketUrl(): string {
@@ -382,7 +412,35 @@ export class ApiClient {
       keepalive?: boolean;
       headers?: Record<string, string>;
       cache?: RequestCache;
+      retry?: boolean;
     } = {},
+  ): Promise<T> {
+    const retryDelays = [1_000, 2_000, 4_000];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.requestOnce<T>(path, options);
+      } catch (error) {
+        if (!options.retry || attempt >= retryDelays.length || !isRetryableApiError(error)) {
+          throw error;
+        }
+        await delay(retryDelays[attempt]!);
+      }
+    }
+  }
+
+  private async requestOnce<T>(
+    path: string,
+    options: {
+      method?: string;
+      body?: unknown;
+      rawBody?: BodyInit;
+      contentType?: string;
+      authenticated?: boolean;
+      timeoutMs?: number | null;
+      keepalive?: boolean;
+      headers?: Record<string, string>;
+      cache?: RequestCache;
+    },
   ): Promise<T> {
     const headers = new Headers({ Accept: "application/json" });
     for (const [name, value] of Object.entries(options.headers ?? {})) headers.set(name, value);
@@ -445,4 +503,19 @@ export class ApiClientError extends Error {
     super(message);
     this.name = "ApiClientError";
   }
+}
+
+export function isRetryableApiError(error: unknown): boolean {
+  if (!(error instanceof ApiClientError)) return false;
+  return (
+    error.code === "connection_failed" ||
+    error.status === 408 ||
+    error.status === 425 ||
+    error.status === 429 ||
+    (typeof error.status === "number" && error.status >= 500)
+  );
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }

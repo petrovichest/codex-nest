@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseAccountRateLimits,
   parseThreadList,
+  parseThreadLoadedList,
   parseThreadRead,
   parseThreadResume,
   ProtocolShapeError,
@@ -48,6 +49,16 @@ describe("app-server response guards", () => {
   it("rejects malformed pagination envelopes", () => {
     expect(() => parseThreadList({ data: [thread], nextCursor: 42 })).toThrow(
       "Invalid app-server response shape for thread/list",
+    );
+  });
+
+  it("accepts only thread ids from the loaded-thread listing", () => {
+    expect(parseThreadLoadedList({ data: ["parent", "child"], nextCursor: null }).data).toEqual([
+      "parent",
+      "child",
+    ]);
+    expect(() => parseThreadLoadedList({ data: [thread], nextCursor: null })).toThrow(
+      "Invalid app-server response shape for thread/loaded/list data",
     );
   });
 

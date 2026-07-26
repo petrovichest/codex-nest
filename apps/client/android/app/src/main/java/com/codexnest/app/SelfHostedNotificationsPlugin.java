@@ -87,6 +87,17 @@ public class SelfHostedNotificationsPlugin extends Plugin {
         call.resolve();
     }
 
+    @PluginMethod
+    public void acknowledgeThread(PluginCall call) {
+        String threadId = call.getString("threadId");
+        if (threadId == null || threadId.isBlank()) {
+            call.reject("Thread id is required");
+            return;
+        }
+        MainActivity.acknowledgePendingThread(getContext(), threadId);
+        call.resolve();
+    }
+
     @Override
     protected void handleOnNewIntent(Intent intent) {
         String threadId = intent.getStringExtra(MainActivity.EXTRA_THREAD_ID);
@@ -94,7 +105,6 @@ public class SelfHostedNotificationsPlugin extends Plugin {
         JSObject event = new JSObject();
         event.put("threadId", threadId);
         notifyListeners("notificationActionPerformed", event, true);
-        MainActivity.clearPendingThread(getContext());
     }
 
     private void resolveGranted(PluginCall call) {

@@ -29,6 +29,9 @@ import type {
   SteerTurnRequest,
   TaskDefaults,
   ThreadGoal,
+  ThreadChanges,
+  ThreadOutcome,
+  ThreadSyncPoint,
   ThreadSummary,
   TranscriptionConfigResponse,
   TranscriptionResponse,
@@ -53,11 +56,13 @@ import { AttentionValidationError, type AttentionManager } from "./attention";
 import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
-import type { ThreadResumeResponse } from "./codex/generated/v2/index";
+import type { ServerNotification } from "./codex/generated/index";
+import type { CollabAgentStatus, ThreadResumeResponse, Turn } from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
   parseThreadRead,
   parseThreadStart,
+  parseTurnsList,
   parseTurnStart,
   parseTurnSteer,
 } from "./codex/guards";
@@ -86,6 +91,7 @@ import {
   MessageQueueNotFoundError,
   MessageQueuePausedError,
   MessageQueueValidationError,
+  messageContentHash,
 } from "./message-queue";
 import type { CodexNestState, StateStore } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
@@ -118,6 +124,10 @@ const TEAM_MODE_CONTEXT = [
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
   "Do not execute any plan step in the parent session.",
   "After spawning a subagent, do not steer it, send follow-up input, or resume or reuse that session for another step; only wait for its result.",
+  "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
+  "Never finish a turn merely by saying that you are waiting: either call the native wait tool in the active turn or let CodexNest deliver the result in a later continuation.",
+  "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
+  "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
   "Never run parallel subagents that may write to overlapping files.",
   "When the required results are ready, return one consolidated result to the user.",
@@ -129,6 +139,15 @@ interface DownloadTicket {
   path: string;
   fileName: string;
   expiresAt: number;
+}
+
+interface TeamResultClaim {
+  claimId: string;
+  results: Array<{
+    childThreadId: string;
+    terminalTurnId: string;
+    outcome: ThreadOutcome;
+  }>;
 }
 
 export interface ApiServices {
@@ -151,6 +170,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const { bridge, store, projection, attention, codexManager, appManager, threadTitles } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
+  const turnStartLocks = new Map<string, Promise<unknown>>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
@@ -178,6 +198,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     goal = false,
   ): Promise<TurnStartResult> => {
+    if (clientMessageId) {
+      const receipt = store.snapshot().messageReceipts?.[clientMessageId];
+      if (receipt) {
+        if (
+          receipt.threadId !== threadId ||
+          receipt.contentHash !== messageContentHash(input, images, goal)
+        ) {
+          throw new MessageQueueConflictError("Message id has already been used");
+        }
+        return { turnId: receipt.turnId ?? clientMessageId };
+      }
+    }
     let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
     assertWritableThread(summary);
@@ -195,6 +227,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       await setThreadGoal(bridge, threadId, { objective: input.trim(), status: "paused" });
     }
+    const teamClaim =
+      summary.settings.collaborationMode === "team"
+        ? await claimTeamResults(store, threadId)
+        : null;
     let turn;
     try {
       if (!projection.isUnmaterialized(threadId)) {
@@ -214,17 +250,51 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId,
           clientUserMessageId: clientMessageId,
           input: messageInput(input, images),
-          ...turnSettings(summary.settings, projection.availableModels),
+          ...turnSettings(
+            summary.settings,
+            projection.availableModels,
+            teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
+          ),
         }),
       );
     } catch (error) {
+      if (teamClaim) await releaseTeamClaim(store, threadId, teamClaim.claimId);
       if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
       throw error;
     }
     await projection.markMaterialized(threadId);
     await projection.setCurrentTurn(threadId, turn.turn.id);
     if (clientMessageId) {
+      await store.update((state) => {
+        state.messageReceipts ??= {};
+        state.messageReceipts[clientMessageId] = {
+          threadId,
+          turnId: turn.turn.id,
+          contentHash: messageContentHash(input, images, goal),
+          createdAt: Date.now(),
+        };
+      });
+    }
+    if (clientMessageId) {
       projection.recordUserMessage(threadId, turn.turn.id, clientMessageId, input, images);
+    }
+    if (teamClaim) {
+      await deliverTeamClaim(store, threadId, teamClaim.claimId, turn.turn.id);
+      await projection.recordOrchestrationNotice(
+        threadId,
+        turn.turn.id,
+        teamClaim.results.map((result) => {
+          const child = projection.summary(result.childThreadId);
+          return {
+            threadId: result.childThreadId,
+            title: child?.title ?? "Субагент",
+            nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
+            outcome: result.outcome,
+          };
+        }),
+        clientMessageId,
+      );
+      projection.publishThreadState(threadId);
     }
     if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
     if (!goal) return { turnId: turn.turn.id };
@@ -245,10 +315,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     goal = false,
   ): Promise<TurnStartResult> => {
-    const release = codexManager?.beginTurn();
-    return startTurnUnlocked(threadId, input, images, clientMessageId, goal).finally(() =>
-      release?.(),
-    );
+    return withKeyLock(turnStartLocks, threadId, async () => {
+      const release = codexManager?.beginTurn();
+      return startTurnUnlocked(threadId, input, images, clientMessageId, goal).finally(() =>
+        release?.(),
+      );
+    });
   };
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
@@ -300,17 +372,48 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
-    const result = parseTurnSteer(
-      await bridge.request<unknown>("turn/steer", {
-        threadId,
-        expectedTurnId: turnId,
-        clientUserMessageId: clientMessageId,
-        input: messageInput(input, images),
-      }),
-    );
+    const teamClaim =
+      projection.summary(threadId)?.settings.collaborationMode === "team"
+        ? await claimTeamResults(store, threadId)
+        : null;
+    let result;
+    try {
+      result = parseTurnSteer(
+        await bridge.request<unknown>("turn/steer", {
+          threadId,
+          expectedTurnId: turnId,
+          clientUserMessageId: clientMessageId,
+          input: messageInput(input, images),
+          ...(teamClaim
+            ? {
+                additionalContext: {
+                  "codexnest.team.results": {
+                    kind: "application",
+                    value: teamContinuationContext(store, threadId, teamClaim),
+                  },
+                },
+              }
+            : {}),
+        }),
+      );
+    } catch (error) {
+      if (teamClaim) await releaseTeamClaim(store, threadId, teamClaim.claimId);
+      throw error;
+    }
     if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, result.turnId);
     if (clientMessageId) {
       projection.recordUserMessage(threadId, result.turnId, clientMessageId, input, images);
+    }
+    if (teamClaim) {
+      await deliverTeamClaim(store, threadId, teamClaim.claimId, result.turnId);
+      await recordTeamNotice(
+        projection,
+        threadId,
+        result.turnId,
+        teamClaim.results,
+        clientMessageId,
+      );
+      projection.publishThreadState(threadId);
     }
     return result.turnId;
   };
@@ -337,6 +440,65 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
   });
+  const scheduledTeamContinuations = new Set<string>();
+  let teamNotificationQueue = Promise.resolve();
+  let teamContinuationsClosed = false;
+  const scheduleTeamContinuation = (threadId: string): void => {
+    if (teamContinuationsClosed || scheduledTeamContinuations.has(threadId)) return;
+    scheduledTeamContinuations.add(threadId);
+    setImmediate(() => {
+      void (async () => {
+        try {
+          if (teamContinuationsClosed) return;
+          const summary = projection.summary(threadId);
+          if (
+            !summary ||
+            summary.relation.kind !== "session" ||
+            summary.currentTurnId ||
+            !hasPendingTeamResults(store, threadId)
+          ) {
+            return;
+          }
+          if (queue.count(threadId)) {
+            await queue.drain(threadId);
+            return;
+          }
+          await startTurn(threadId, "", [], null);
+        } catch (error) {
+          app.log.warn(
+            { err: safeError(error), threadId },
+            "Failed to continue Team orchestration",
+          );
+        } finally {
+          scheduledTeamContinuations.delete(threadId);
+        }
+      })();
+    });
+  };
+  const resumeTeamContinuations = (): void => {
+    for (const threadId of pendingTeamParents(store)) scheduleTeamContinuation(threadId);
+  };
+  const teamNotificationHandler = (notification: Parameters<typeof handleTeamNotification>[0]) => {
+    if (!isTeamOrchestrationNotification(notification, projection)) return;
+    teamNotificationQueue = teamNotificationQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const affected = await handleTeamNotification(notification, store, projection);
+        for (const threadId of affected) {
+          projection.publishThreadState(threadId);
+          scheduleTeamContinuation(threadId);
+        }
+      })
+      .catch((error: unknown) => {
+        app.log.warn({ err: safeError(error) }, "Failed to process Team orchestration event");
+      });
+  };
+  bridge.on("notification", teamNotificationHandler);
+  app.addHook("onClose", async () => {
+    teamContinuationsClosed = true;
+    bridge.off("notification", teamNotificationHandler);
+    await teamNotificationQueue;
+  });
   const voiceTranscriptions = services.transcription
     ? new VoiceTranscriptionManager({
         store,
@@ -356,8 +518,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   projection.on("event", (_sequence, event) => {
     if (event.type === "resync.required") {
       void queue.recover().catch(() => undefined);
+      void reconcileTeamOrchestration(bridge, store, projection)
+        .then((threadIds) => {
+          for (const threadId of threadIds) {
+            projection.publishThreadState(threadId);
+            scheduleTeamContinuation(threadId);
+          }
+        })
+        .catch((error: unknown) => {
+          app.log.warn({ err: safeError(error) }, "Failed to reconcile Team orchestration");
+        });
     } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
       void queue.drain(event.thread.id).catch(() => undefined);
+      if (event.thread.relation.kind === "session") scheduleTeamContinuation(event.thread.id);
     } else if (event.type === "thread.removed") {
       void queue.removeThread(event.threadId).catch(() => undefined);
     }
@@ -499,12 +672,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       selectionStart?: string;
       selectionEnd?: string;
       draftUpdatedAt?: string;
+      clientUploadId?: string;
     };
     Body: Buffer;
   }>(
     "/api/v1/threads/:id/voice-transcriptions",
     { bodyLimit: MAX_TRANSCRIPTION_BYTES },
-    async (request, reply): Promise<VoiceTranscriptionJob | undefined> => {
+    async (request, reply): Promise<VoiceTranscriptionJob | null | undefined> => {
       const summary = projection.summary(request.params.id);
       if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
@@ -522,6 +696,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       if (!["draft", "send", "queue", "steer"].includes(request.query.mode ?? "")) {
         return apiError(reply, 400, "validation_failed", "Voice input mode is invalid");
+      }
+      const clientUploadId =
+        request.query.clientUploadId === undefined
+          ? undefined
+          : optionalVoiceUploadId(request.query.clientUploadId);
+      if (request.query.clientUploadId !== undefined && clientUploadId === null) {
+        return apiError(reply, 400, "validation_failed", "Voice upload id is invalid");
       }
       const selectionStart = parseNonNegativeInteger(request.query.selectionStart);
       const selectionEnd = parseNonNegativeInteger(request.query.selectionEnd);
@@ -555,20 +736,20 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!config.provider || !config.providers.includes(config.provider)) {
         return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
       }
-      return reply.code(202).send(
-        await voiceTranscriptions.accept({
-          threadId: request.params.id,
-          mode: request.query.mode as VoiceTranscriptionMode,
-          audio: request.body,
-          contentType: normalizedType,
-          audioDurationMs,
-          estimatedTotalSeconds: estimatedTranscriptionSeconds(config, audioDurationMs),
-          selectionStart,
-          selectionEnd,
-          expectedDraftUpdatedAt,
-          timingProfile: transcriptionTimingProfile(config),
-        }),
-      );
+      const accepted = await voiceTranscriptions.accept({
+        ...(clientUploadId ? { clientUploadId } : {}),
+        threadId: request.params.id,
+        mode: request.query.mode as VoiceTranscriptionMode,
+        audio: request.body,
+        contentType: normalizedType,
+        audioDurationMs,
+        estimatedTotalSeconds: estimatedTranscriptionSeconds(config, audioDurationMs),
+        selectionStart,
+        selectionEnd,
+        expectedDraftUpdatedAt,
+        timingProfile: transcriptionTimingProfile(config),
+      });
+      return accepted ? reply.code(202).send(accepted) : reply.code(204).send();
     },
   );
 
@@ -679,6 +860,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         return await requireCodexManager(codexManager).applyProxy(body.proxy);
       } finally {
         await queue.resume();
+        resumeTeamContinuations();
       }
     },
   );
@@ -688,6 +870,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return await requireCodexManager(codexManager).update();
     } finally {
       await queue.resume();
+      resumeTeamContinuations();
     }
   });
 
@@ -696,6 +879,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return await requireCodexManager(codexManager).restart();
     } finally {
       await queue.resume();
+      resumeTeamContinuations();
     }
   });
 
@@ -880,7 +1064,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(
     "/api/v1/threads/:id",
     async (request, reply) => {
-      const observed = projection.summary(request.params.id);
+      let observed = projection.summary(request.params.id);
+      if (!observed) {
+        await projection.sync();
+        observed = projection.summary(request.params.id);
+      }
       if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
       const cursor =
         typeof request.query.cursor === "string" && request.query.cursor.length
@@ -897,6 +1085,50 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return detail;
     },
   );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: {
+      cursor?: string;
+      anchorTurnId?: string;
+      anchorRevision?: string;
+      continuationCursor?: string;
+    };
+  }>("/api/v1/threads/:id/changes", async (request, reply): Promise<ThreadChanges | undefined> => {
+    let observed = projection.summary(request.params.id);
+    if (!observed) {
+      await projection.sync();
+      observed = projection.summary(request.params.id);
+    }
+    if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+    const { cursor, anchorTurnId, anchorRevision, continuationCursor } = request.query;
+    if (
+      typeof cursor !== "string" ||
+      !cursor ||
+      typeof anchorTurnId !== "string" ||
+      !anchorTurnId ||
+      typeof anchorRevision !== "string" ||
+      !anchorRevision ||
+      (continuationCursor !== undefined &&
+        (typeof continuationCursor !== "string" || !continuationCursor))
+    ) {
+      return apiError(reply, 400, "validation_failed", "A valid thread sync point is required");
+    }
+    const syncPoint: ThreadSyncPoint = { cursor, anchorTurnId, anchorRevision };
+    const changes = await projection.readThreadChanges(
+      request.params.id,
+      syncPoint,
+      continuationCursor ?? null,
+    );
+    if (observed.unseen) {
+      await projection.markViewed(request.params.id, observed.updatedAt);
+      return {
+        ...changes,
+        summary: projection.summary(request.params.id) ?? changes.summary,
+      };
+    }
+    return changes;
+  });
 
   app.put<{ Params: { id: string }; Body: UpdateThreadDraftRequest }>(
     "/api/v1/threads/:id/draft",
@@ -1020,6 +1252,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       codexManager?.assertTurnsAllowed();
       const body = validateThreadBody(request.body, reply);
       if (!body) return;
+      if (body.clientMessageId) {
+        const receipt = store.snapshot().messageReceipts?.[body.clientMessageId];
+        if (receipt) {
+          if (
+            receipt.contentHash !==
+            messageContentHash(body.input, body.images ?? [], body.goal ?? false)
+          ) {
+            throw new MessageQueueConflictError("Message id has already been used");
+          }
+          let existing = projection.summary(receipt.threadId);
+          if (!existing) {
+            await projection.sync();
+            existing = projection.summary(receipt.threadId);
+          }
+          if (!existing) {
+            throw new MessageQueueConflictError("The original thread is temporarily unavailable");
+          }
+          return reply.code(200).send({
+            thread: existing,
+            turnId: receipt.turnId ?? body.clientMessageId,
+          });
+        }
+      }
       const project = store
         .snapshot()
         .projects.find((candidate) => candidate.id === body.projectId);
@@ -1091,6 +1346,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     await bridge.request("thread/delete", { threadId: request.params.id });
     await voiceTranscriptions?.cancelThread(request.params.id);
     await queue.removeThread(request.params.id);
+    await projection.invalidateHistory(request.params.id).catch(() => undefined);
     await store.update((state) => {
       delete state.threadMeta[request.params.id];
     });
@@ -1179,6 +1435,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
         return apiError(reply, 400, "validation_failed", "input or images are required");
       }
+      if (body.goal !== undefined && typeof body.goal !== "boolean") {
+        return apiError(reply, 400, "validation_failed", "goal must be boolean");
+      }
+      if (body.goal && (!body.input.trim() || body.input.trim().length > 4_000)) {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "goal objective must be 1-4000 characters",
+        );
+      }
       if (body.clientMessageId !== undefined && clientMessageId === null) {
         return apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
       }
@@ -1192,6 +1459,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.input,
         images,
         clientMessageId ?? undefined,
+        { goal: body.goal },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
@@ -1417,6 +1685,471 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 }
 
+async function handleTeamNotification(
+  notification: ServerNotification,
+  store: StateStore,
+  projection: AppProjection,
+): Promise<Set<string>> {
+  const affected = new Set<string>();
+  if (notification.method === "thread/started") {
+    const parentThreadId = notification.params.thread.parentThreadId;
+    if (
+      parentThreadId &&
+      projection.summary(parentThreadId)?.settings.collaborationMode === "team" &&
+      (await registerTeamChildren(store, parentThreadId, [notification.params.thread.id]))
+    ) {
+      affected.add(parentThreadId);
+    }
+    return affected;
+  }
+  if (notification.method === "item/completed") {
+    const item = notification.params.item;
+    if (
+      item.type === "collabAgentToolCall" &&
+      item.tool === "spawnAgent" &&
+      projection.summary(notification.params.threadId)?.settings.collaborationMode === "team" &&
+      (await registerTeamChildren(store, notification.params.threadId, item.receiverThreadIds))
+    ) {
+      affected.add(notification.params.threadId);
+    }
+    return affected;
+  }
+  if (notification.method === "turn/completed") {
+    for (const item of notification.params.turn.items) {
+      if (
+        item.type === "collabAgentToolCall" &&
+        item.tool === "spawnAgent" &&
+        projection.summary(notification.params.threadId)?.settings.collaborationMode === "team" &&
+        (await registerTeamChildren(store, notification.params.threadId, item.receiverThreadIds))
+      ) {
+        affected.add(notification.params.threadId);
+      }
+    }
+    const waited = await deliverWaitedTeamResults(
+      store,
+      notification.params.threadId,
+      notification.params.turn,
+    );
+    if (waited.length) {
+      affected.add(notification.params.threadId);
+      await recordTeamNotice(
+        projection,
+        notification.params.threadId,
+        notification.params.turn.id,
+        waited,
+        firstUserMessageId(notification.params.turn),
+      );
+    }
+    const childParent = await recordTeamTerminal(
+      store,
+      notification.params.threadId,
+      notification.params.turn.id,
+      turnOutcome(notification.params.turn),
+    );
+    if (childParent) affected.add(childParent);
+    return affected;
+  }
+  if (
+    notification.method === "thread/status/changed" &&
+    notification.params.status.type === "systemError"
+  ) {
+    const parent = await recordTeamTerminal(
+      store,
+      notification.params.threadId,
+      `system-error:${Date.now()}`,
+      "failed",
+    );
+    if (parent) affected.add(parent);
+    return affected;
+  }
+  if (notification.method === "thread/closed" || notification.method === "thread/deleted") {
+    const parent = await recordTeamTerminal(
+      store,
+      notification.params.threadId,
+      `${notification.method}:${Date.now()}`,
+      notification.method === "thread/deleted" ? "failed" : "interrupted",
+    );
+    if (parent) affected.add(parent);
+  }
+  return affected;
+}
+
+async function registerTeamChildren(
+  store: StateStore,
+  parentThreadId: string,
+  childThreadIds: string[],
+): Promise<boolean> {
+  const existing = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.children;
+  if (!childThreadIds.some((childThreadId) => !existing?.[childThreadId])) return false;
+  let changed = false;
+  await store.update((state) => {
+    const meta = state.threadMeta[parentThreadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+    meta.teamOrchestration ??= { children: {} };
+    for (const childThreadId of childThreadIds) {
+      if (meta.teamOrchestration.children[childThreadId]) continue;
+      meta.teamOrchestration.children[childThreadId] = { status: "running" };
+      changed = true;
+    }
+    state.threadMeta[parentThreadId] = meta;
+  });
+  return changed;
+}
+
+async function recordTeamTerminal(
+  store: StateStore,
+  childThreadId: string,
+  terminalTurnId: string,
+  outcome: ThreadOutcome,
+): Promise<string | null> {
+  const candidateParentId =
+    Object.entries(store.snapshot().threadMeta).find(
+      ([, meta]) => meta.teamOrchestration?.children[childThreadId]?.status === "running",
+    )?.[0] ?? null;
+  if (!candidateParentId) return null;
+  let recorded = false;
+  await store.update((state) => {
+    const child = state.threadMeta[candidateParentId]?.teamOrchestration?.children[childThreadId];
+    if (!child || child.status !== "running") return;
+    child.status = outcome;
+    child.terminalTurnId = terminalTurnId;
+    delete child.delivery;
+    recorded = true;
+  });
+  return recorded ? candidateParentId : null;
+}
+
+async function deliverWaitedTeamResults(
+  store: StateStore,
+  parentThreadId: string,
+  turn: Turn,
+): Promise<TeamResultClaim["results"]> {
+  const terminalAgents = new Map<string, ThreadOutcome>();
+  for (const item of turn.items) {
+    if (item.type !== "collabAgentToolCall" || item.tool !== "wait") continue;
+    for (const [childThreadId, state] of Object.entries(item.agentsStates)) {
+      if (!state) continue;
+      const outcome = collabAgentOutcome(state.status);
+      if (outcome) terminalAgents.set(childThreadId, outcome);
+    }
+  }
+  if (!terminalAgents.size) return [];
+  const delivered: TeamResultClaim["results"] = [];
+  await store.update((state) => {
+    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    for (const [childThreadId, outcome] of terminalAgents) {
+      const child = orchestration.children[childThreadId];
+      if (!child || child.delivery?.status === "delivered") continue;
+      child.status = outcome;
+      child.terminalTurnId ??= `wait:${turn.id}`;
+      child.delivery = {
+        status: "delivered",
+        claimId: `wait:${turn.id}`,
+        parentTurnId: turn.id,
+      };
+      delivered.push({
+        childThreadId,
+        terminalTurnId: child.terminalTurnId,
+        outcome,
+      });
+    }
+    cleanupTeamOrchestration(state, parentThreadId);
+  });
+  return delivered;
+}
+
+async function claimTeamResults(
+  store: StateStore,
+  parentThreadId: string,
+): Promise<TeamResultClaim | null> {
+  if (!hasPendingTeamResults(store, parentThreadId)) return null;
+  const claimId = randomBytes(16).toString("hex");
+  const results: TeamResultClaim["results"] = [];
+  await store.update((state) => {
+    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    for (const [childThreadId, child] of Object.entries(orchestration.children)) {
+      if (child.status === "running" || !child.terminalTurnId || child.delivery !== undefined) {
+        continue;
+      }
+      child.delivery = { status: "claimed", claimId };
+      results.push({
+        childThreadId,
+        terminalTurnId: child.terminalTurnId,
+        outcome: child.status,
+      });
+    }
+  });
+  return results.length ? { claimId, results } : null;
+}
+
+async function deliverTeamClaim(
+  store: StateStore,
+  parentThreadId: string,
+  claimId: string,
+  parentTurnId: string,
+): Promise<void> {
+  await store.update((state) => {
+    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    for (const child of Object.values(orchestration.children)) {
+      if (child.delivery?.status !== "claimed" || child.delivery.claimId !== claimId) continue;
+      child.delivery = { status: "delivered", claimId, parentTurnId };
+    }
+    cleanupTeamOrchestration(state, parentThreadId);
+  });
+}
+
+async function releaseTeamClaim(
+  store: StateStore,
+  parentThreadId: string,
+  claimId: string,
+): Promise<void> {
+  await store.update((state) => {
+    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    for (const child of Object.values(orchestration.children)) {
+      if (child.delivery?.status === "claimed" && child.delivery.claimId === claimId) {
+        delete child.delivery;
+      }
+    }
+  });
+}
+
+function cleanupTeamOrchestration(state: CodexNestState, parentThreadId: string): void {
+  const meta = state.threadMeta[parentThreadId];
+  const orchestration = meta?.teamOrchestration;
+  if (
+    orchestration &&
+    Object.values(orchestration.children).every(
+      (child) => child.status !== "running" && child.delivery?.status === "delivered",
+    )
+  ) {
+    delete meta!.teamOrchestration;
+  }
+}
+
+function hasPendingTeamResults(store: StateStore, parentThreadId: string): boolean {
+  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  return Boolean(
+    orchestration &&
+    Object.values(orchestration.children).some(
+      (child) =>
+        child.status !== "running" && Boolean(child.terminalTurnId) && child.delivery === undefined,
+    ),
+  );
+}
+
+function pendingTeamParents(store: StateStore): string[] {
+  const state = store.snapshot();
+  return Object.keys(state.threadMeta).filter((threadId) => hasPendingTeamResults(store, threadId));
+}
+
+function teamContinuationContext(
+  store: StateStore,
+  parentThreadId: string,
+  claim: TeamResultClaim,
+): string {
+  const state = store.snapshot();
+  const active = Object.entries(state.threadMeta[parentThreadId]?.teamOrchestration?.children ?? {})
+    .filter(([, child]) => child.status === "running")
+    .map(([threadId]) => threadId);
+  const completed = claim.results
+    .map((result) => `${result.childThreadId} (${result.outcome})`)
+    .join(", ");
+  return [
+    "CodexNest orchestration continuation.",
+    `New terminal subagent results: ${completed}.`,
+    active.length
+      ? `Subagents still running: ${active.join(", ")}.`
+      : "No tracked subagents remain running.",
+    "The native FINAL_ANSWER or agent-mail messages from these subagents are already present in the parent history.",
+    "If this turn also contains an explicit user message, answer the user first.",
+    "Then incorporate every named result into the original task, decide the next concrete action, and continue working.",
+    "Do not merely acknowledge the result or say that you are waiting.",
+  ].join(" ");
+}
+
+async function reconcileTeamOrchestration(
+  bridge: CodexBridge,
+  store: StateStore,
+  projection: AppProjection,
+): Promise<Set<string>> {
+  const affected = new Set<string>();
+  for (const child of projection.snapshot().threads) {
+    if (
+      child.relation.kind !== "subagent" ||
+      child.state !== "running" ||
+      projection.summary(child.relation.parentThreadId)?.settings.collaborationMode !== "team"
+    ) {
+      continue;
+    }
+    if (await registerTeamChildren(store, child.relation.parentThreadId, [child.id])) {
+      affected.add(child.relation.parentThreadId);
+    }
+  }
+
+  const state = store.snapshot();
+  for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+    const orchestration = meta.teamOrchestration;
+    if (!orchestration) continue;
+    const parent = projection.summary(parentThreadId);
+    const claimedById = new Map<string, TeamResultClaim["results"]>();
+    for (const [childThreadId, child] of Object.entries(orchestration.children)) {
+      if (child.delivery?.status === "claimed") {
+        const items = claimedById.get(child.delivery.claimId) ?? [];
+        if (child.status !== "running" && child.terminalTurnId) {
+          items.push({
+            childThreadId,
+            terminalTurnId: child.terminalTurnId,
+            outcome: child.status,
+          });
+        }
+        claimedById.set(child.delivery.claimId, items);
+      }
+      if (child.status !== "running") continue;
+      const summary = projection.summary(childThreadId);
+      if (summary?.state === "running") continue;
+      try {
+        const page = parseTurnsList(
+          await bridge.request<unknown>(
+            "thread/turns/list",
+            {
+              threadId: childThreadId,
+              limit: 1,
+              sortDirection: "desc",
+              itemsView: "full",
+            },
+            30_000,
+          ),
+        );
+        const latest = page.data[0];
+        if (latest && latest.status !== "inProgress") {
+          const recordedParent = await recordTeamTerminal(
+            store,
+            childThreadId,
+            latest.id,
+            turnOutcome(latest),
+          );
+          if (recordedParent) affected.add(recordedParent);
+        }
+      } catch (error) {
+        projection.emit(
+          "projectionError",
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    for (const [claimId, results] of claimedById) {
+      if (parent?.currentTurnId) {
+        await deliverTeamClaim(store, parentThreadId, claimId, parent.currentTurnId);
+        await recordTeamNotice(projection, parentThreadId, parent.currentTurnId, results, null);
+      } else {
+        await releaseTeamClaim(store, parentThreadId, claimId);
+      }
+      affected.add(parentThreadId);
+    }
+    if (hasPendingTeamResults(store, parentThreadId)) affected.add(parentThreadId);
+  }
+  return affected;
+}
+
+async function recordTeamNotice(
+  projection: AppProjection,
+  parentThreadId: string,
+  parentTurnId: string,
+  results: TeamResultClaim["results"],
+  afterItemId: string | null,
+): Promise<void> {
+  if (!results.length) return;
+  await projection.recordOrchestrationNotice(
+    parentThreadId,
+    parentTurnId,
+    results.map((result) => {
+      const child = projection.summary(result.childThreadId);
+      return {
+        threadId: result.childThreadId,
+        title: child?.title ?? "Субагент",
+        nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
+        outcome: result.outcome,
+      };
+    }),
+    afterItemId,
+  );
+}
+
+function firstUserMessageId(turn: Turn): string | null {
+  const item = turn.items.find((candidate) => candidate.type === "userMessage");
+  return item?.type === "userMessage" ? (item.clientId ?? item.id) : null;
+}
+
+function turnOutcome(turn: Turn): ThreadOutcome {
+  if (turn.status === "failed") return "failed";
+  if (turn.status === "interrupted") return "interrupted";
+  return "completed";
+}
+
+function collabAgentOutcome(status: CollabAgentStatus): ThreadOutcome | null {
+  if (status === "completed") return "completed";
+  if (status === "interrupted" || status === "shutdown") return "interrupted";
+  if (status === "errored" || status === "notFound") return "failed";
+  return null;
+}
+
+function isTeamOrchestrationNotification(
+  notification: ServerNotification,
+  projection: AppProjection,
+): boolean {
+  if (notification.method === "thread/started") {
+    const parentThreadId = notification.params.thread.parentThreadId;
+    return Boolean(
+      parentThreadId && projection.summary(parentThreadId)?.settings.collaborationMode === "team",
+    );
+  }
+  if (notification.method === "item/completed") {
+    return (
+      notification.params.item.type === "collabAgentToolCall" &&
+      notification.params.item.tool === "spawnAgent" &&
+      projection.summary(notification.params.threadId)?.settings.collaborationMode === "team"
+    );
+  }
+  if (notification.method === "turn/completed") {
+    const summary = projection.summary(notification.params.threadId);
+    return (
+      summary?.settings.collaborationMode === "team" ||
+      (summary?.relation.kind === "subagent" &&
+        projection.summary(summary.relation.parentThreadId)?.settings.collaborationMode ===
+          "team") ||
+      notification.params.turn.items.some(
+        (item) =>
+          item.type === "collabAgentToolCall" &&
+          (item.tool === "spawnAgent" || item.tool === "wait"),
+      )
+    );
+  }
+  return (
+    (notification.method === "thread/status/changed" &&
+      notification.params.status.type === "systemError") ||
+    notification.method === "thread/closed" ||
+    notification.method === "thread/deleted"
+  );
+}
+
+function withKeyLock<T>(
+  locks: Map<string, Promise<unknown>>,
+  key: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  locks.set(key, next);
+  const cleanup = () => {
+    if (locks.get(key) === next) locks.delete(key);
+  };
+  void next.then(cleanup, cleanup);
+  return next;
+}
+
 function withTranscriptionTiming(
   config: TranscriptionConfigResponse,
   store: StateStore,
@@ -1488,7 +2221,11 @@ function threadSettings(settings?: SessionSettings): Record<string, unknown> {
   });
 }
 
-function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<string, unknown> {
+function turnSettings(
+  settings: SessionSettings,
+  models: ModelOption[],
+  continuationContext?: string,
+): Record<string, unknown> {
   const model = effectiveModel(settings, models);
   if (!model) throw new ProjectValidationError("No model is available for collaboration mode");
   const reasoningEffort =
@@ -1509,12 +2246,24 @@ function turnSettings(settings: SessionSettings, models: ModelOption[]): Record<
       },
     },
     additionalContext:
-      settings.collaborationMode === "team"
+      settings.collaborationMode === "team" || continuationContext
         ? {
-            "codexnest.team": {
-              kind: "application",
-              value: TEAM_MODE_CONTEXT,
-            },
+            ...(settings.collaborationMode === "team"
+              ? {
+                  "codexnest.team": {
+                    kind: "application",
+                    value: TEAM_MODE_CONTEXT,
+                  },
+                }
+              : {}),
+            ...(continuationContext
+              ? {
+                  "codexnest.team.results": {
+                    kind: "application",
+                    value: continuationContext,
+                  },
+                }
+              : {}),
           }
         : undefined,
   });
@@ -1610,6 +2359,12 @@ function optionalClientMessageId(value: unknown): string | null {
     value.length > 0 &&
     value.length <= 200 &&
     value.trim() === value
+    ? value
+    : null;
+}
+
+function optionalVoiceUploadId(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value)
     ? value
     : null;
 }

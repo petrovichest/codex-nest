@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
@@ -13,6 +13,7 @@ import type {
   SessionSettings,
   ServerEvent,
   TaskDefaults,
+  ThreadChanges,
   ThreadDetail,
   ThreadDraft,
   UpdateThreadDraftRequest,
@@ -20,6 +21,7 @@ import type {
   ThreadOutcome,
   ThreadState,
   ThreadSummary,
+  ThreadSyncPoint,
   TurnProgress,
   TurnView,
   UiLanguage,
@@ -30,7 +32,16 @@ import type { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
-import { parseModelList, parseThreadList, parseThreadResume, parseTurnsList } from "./codex/guards";
+import {
+  parseModelList,
+  parseThreadList,
+  parseThreadLoadedList,
+  parseThreadRead,
+  parseThreadResume,
+  parseTurnsList,
+} from "./codex/guards";
+import { RpcError } from "./codex/transport";
+import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
 import type {
   CodexNestState,
@@ -54,6 +65,7 @@ export class AppProjection extends EventEmitter {
   private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
+  private readonly historyRevisions = new Map<string, number>();
   private readonly subscribedThreads = new Set<string>();
   private readonly hiddenThreads = new Set<string>();
   private readonly pendingSubagentTitles = new Map<string, string>();
@@ -62,6 +74,8 @@ export class AppProjection extends EventEmitter {
   private sequence = 0;
   private syncedAt: string | null = null;
   private syncPromise?: Promise<void>;
+  private recoverLoadedThreads = true;
+  private readonly historyCache: HistoryCache;
 
   constructor(
     private readonly bridge: CodexBridge,
@@ -70,6 +84,7 @@ export class AppProjection extends EventEmitter {
     private readonly pushConfigured: boolean,
   ) {
     super();
+    this.historyCache = new HistoryCache(store.path);
     bridge.on("state", (state) => {
       if (state !== "ready") {
         this.subscribedThreads.clear();
@@ -77,6 +92,8 @@ export class AppProjection extends EventEmitter {
         this.pendingSubagentTitles.clear();
         this.subagentTitleUpdates.clear();
         for (const cached of this.threads.values()) cached.goalStatus = undefined;
+      } else {
+        this.recoverLoadedThreads = true;
       }
       this.publish({ type: "connection.changed", connection: this.connection });
     });
@@ -191,30 +208,151 @@ export class AppProjection extends EventEmitter {
         draft: state.threadMeta[id]?.draft ?? null,
       };
     }
-    const page = parseTurnsList(
+    const cached = this.threads.get(id);
+    if (!cached) throw new Error("Thread not found");
+    const page = await this.readTurnsPage(id, subagent ? null : cursor, "desc", !subagent);
+    const state = this.store.snapshot();
+    const visibleTurns = subagent
+      ? subagentTranscriptTurnViews(cached.thread, page.turns)
+      : page.turns;
+    const syncPoint =
+      !subagent && cursor === null
+        ? syncPointForPage(page.backwardsCursor, visibleTurns)
+        : undefined;
+    return {
+      summary: this.toSummary(cached),
+      turns: visibleTurns,
+      queuedMessages: state.messageQueues?.[id] ?? [],
+      olderTurnsCursor: subagent ? null : page.nextCursor,
+      draft: state.threadMeta[id]?.draft ?? null,
+      ...(syncPoint === undefined ? {} : { syncPoint }),
+    };
+  }
+
+  async readThreadChanges(
+    id: string,
+    syncPoint: ThreadSyncPoint,
+    continuationCursor: string | null = null,
+  ): Promise<ThreadChanges> {
+    const cached = this.threads.get(id);
+    if (!cached) throw new Error("Thread not found");
+    if (isSpawnedSubagent(cached.thread)) return this.resetThreadChanges(id);
+
+    let page: CachedTurnsPage;
+    try {
+      page = await this.readTurnsPage(id, continuationCursor ?? syncPoint.cursor, "asc", false);
+    } catch (error) {
+      if (!isInvalidCursorError(error)) throw error;
+      return this.resetThreadChanges(id);
+    }
+
+    let turns = page.turns;
+    if (continuationCursor === null) {
+      const anchorIndex = turns.findIndex((turn) => turn.id === syncPoint.anchorTurnId);
+      if (anchorIndex < 0) return this.resetThreadChanges(id);
+      turns = turns.slice(anchorIndex);
+      const boundary = turns[0];
+      if (boundary && turnRevision(boundary) === syncPoint.anchorRevision) {
+        turns = turns.slice(1);
+      }
+    }
+
+    const state = this.store.snapshot();
+    let nextSyncPoint: ThreadSyncPoint | null = null;
+    if (page.nextCursor === null) {
+      const latest = page.turns.at(-1);
+      if (!latest || latest.id === syncPoint.anchorTurnId) {
+        const boundary = page.turns.find((turn) => turn.id === syncPoint.anchorTurnId);
+        nextSyncPoint = {
+          ...syncPoint,
+          anchorRevision: boundary ? turnRevision(boundary) : syncPoint.anchorRevision,
+        };
+      } else {
+        const head = await this.readTurnsPage(id, null, "desc", false, 1);
+        nextSyncPoint = syncPointForPage(head.backwardsCursor, head.turns);
+      }
+    }
+    return {
+      summary: this.toSummary(cached),
+      turns,
+      queuedMessages: state.messageQueues?.[id] ?? [],
+      draft: state.threadMeta[id]?.draft ?? null,
+      continuationCursor: page.nextCursor,
+      syncPoint: nextSyncPoint,
+      resetLatest: false,
+      olderTurnsCursor: null,
+    };
+  }
+
+  invalidateHistory(threadId: string): Promise<void> {
+    return this.historyCache.invalidateThread(threadId);
+  }
+
+  private async resetThreadChanges(id: string): Promise<ThreadChanges> {
+    await this.historyCache.invalidateThread(id).catch(() => undefined);
+    const detail = await this.readThread(id);
+    return {
+      summary: detail.summary,
+      turns: detail.turns,
+      queuedMessages: detail.queuedMessages,
+      draft: detail.draft ?? null,
+      continuationCursor: null,
+      syncPoint: detail.syncPoint ?? null,
+      resetLatest: true,
+      olderTurnsCursor: detail.olderTurnsCursor,
+    };
+  }
+
+  private async readTurnsPage(
+    id: string,
+    cursor: string | null,
+    direction: "asc" | "desc",
+    allowCache: boolean,
+    limit = THREAD_TURN_PAGE_SIZE,
+  ): Promise<CachedTurnsPage> {
+    const local = this.threads.get(id);
+    if (!local) throw new Error("Thread not found");
+    const threadUpdatedAt = local.thread.updatedAt * 1_000;
+    const canReadCache =
+      allowCache &&
+      direction === "desc" &&
+      limit === THREAD_TURN_PAGE_SIZE &&
+      (cursor !== null || local.currentTurnId === null);
+    if (canReadCache) {
+      const cached = await this.historyCache.get(id, cursor, direction);
+      if (
+        cached &&
+        (cursor !== null ||
+          (cached.threadUpdatedAt === threadUpdatedAt &&
+            cached.historyRevision === this.historyRevision(id)))
+      ) {
+        return cached;
+      }
+    }
+
+    const response = parseTurnsList(
       await this.bridge.request<unknown>(
         "thread/turns/list",
         {
           threadId: id,
-          cursor: subagent ? null : cursor,
-          limit: THREAD_TURN_PAGE_SIZE,
-          sortDirection: "desc",
+          cursor,
+          limit,
+          sortDirection: direction,
           itemsView: "full",
         },
         30_000,
       ),
     );
-    const cached = this.threads.get(id);
-    if (!cached) throw new Error("Thread not found");
     const state = this.store.snapshot();
     const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
-    const chronologicalTurns = page.data.slice().reverse();
-    const visibleTurns = subagent
-      ? subagentTranscriptTurns(cached.thread, chronologicalTurns)
-      : chronologicalTurns;
-    return {
-      summary: this.toSummary(cached),
-      turns: visibleTurns.map((turn) =>
+    const ordered = direction === "desc" ? response.data.slice().reverse() : response.data;
+    const page: CachedTurnsPage = {
+      threadId: id,
+      cursor,
+      direction,
+      threadUpdatedAt,
+      historyRevision: this.historyRevision(id),
+      turns: ordered.map((turn) =>
         normalizeTurn(
           turn,
           this.progress.get(turnKey(id, turn.id)),
@@ -222,10 +360,15 @@ export class AppProjection extends EventEmitter {
           artifacts[turn.id] ?? [],
         ),
       ),
-      queuedMessages: state.messageQueues?.[id] ?? [],
-      olderTurnsCursor: subagent ? null : page.nextCursor,
-      draft: state.threadMeta[id]?.draft ?? null,
+      nextCursor: response.nextCursor,
+      backwardsCursor: response.backwardsCursor ?? null,
     };
+    if (canReadCache) {
+      await this.historyCache.set(page).catch((error: unknown) => {
+        this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+      });
+    }
+    return page;
   }
 
   async setDraft(threadId: string, value: UpdateThreadDraftRequest): Promise<ThreadDraft | null> {
@@ -469,6 +612,30 @@ export class AppProjection extends EventEmitter {
     await this.upsertTimelineArtifact(request.threadId, request.turnId, item);
   }
 
+  async recordOrchestrationNotice(
+    threadId: string,
+    turnId: string,
+    agents: Extract<ActivityItem, { type: "orchestrationNotice" }>["agents"],
+    afterItemId: string | null,
+  ): Promise<void> {
+    if (!agents.length) return;
+    await this.upsertTimelineArtifact(threadId, turnId, {
+      type: "orchestrationNotice",
+      id: `orchestration-${turnId}-${agents
+        .map((agent) => agent.threadId)
+        .sort()
+        .join("-")}`,
+      status: "completed",
+      agents,
+      timestamp: Date.now(),
+      afterItemId,
+    });
+  }
+
+  publishThreadState(threadId: string): void {
+    this.publishThread(threadId);
+  }
+
   recordUserMessage(
     threadId: string,
     turnId: string,
@@ -488,6 +655,7 @@ export class AppProjection extends EventEmitter {
       phase: null,
     };
     this.activity.set(key, item);
+    this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
   }
 
@@ -508,7 +676,16 @@ export class AppProjection extends EventEmitter {
       state.threadMeta[threadId] = meta;
     });
     this.activity.set(activityKey(threadId, turnId, item.id), item);
+    this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
+  }
+
+  private historyRevision(threadId: string): number {
+    return this.historyRevisions.get(threadId) ?? 0;
+  }
+
+  private bumpHistoryRevision(threadId: string): void {
+    this.historyRevisions.set(threadId, this.historyRevision(threadId) + 1);
   }
 
   private latestActivityId(threadId: string, turnId: string): string | null {
@@ -538,13 +715,25 @@ export class AppProjection extends EventEmitter {
   }
 
   private async performSync(): Promise<void> {
-    const [listedActive, archived, models] = await Promise.all([
+    const shouldRecoverLoaded = this.recoverLoadedThreads;
+    const [listedActive, archived, models, loadedThreadIds] = await Promise.all([
       this.listAllThreads(false),
       this.listAllThreads(true),
       this.listAllModels(),
+      shouldRecoverLoaded
+        ? this.listAllLoadedThreadIds().catch((error: unknown) => {
+            this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+            return [];
+          })
+        : Promise.resolve([]),
     ]);
+    const listedIds = new Set([...listedActive, ...archived].map((thread) => thread.id));
+    const recoveredSubagents = shouldRecoverLoaded
+      ? await this.readLoadedSubagentsOmittedFromList(loadedThreadIds, listedIds)
+      : [];
+    const activeCandidates = [...listedActive, ...recoveredSubagents];
     const active = await Promise.all(
-      listedActive.map(async (thread) => {
+      activeCandidates.map(async (thread) => {
         const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
         const [resumedThread, restoredGoalStatus] = await Promise.all([
           this.rejoinActiveThread(thread),
@@ -583,7 +772,16 @@ export class AppProjection extends EventEmitter {
       });
     }
     for (const id of this.threads.keys()) {
-      if (!incoming.has(id) && !this.unmaterializedThreads.has(id)) this.threads.delete(id);
+      const cached = this.threads.get(id);
+      if (
+        !incoming.has(id) &&
+        !this.unmaterializedThreads.has(id) &&
+        (!cached ||
+          !isSpawnedSubagent(cached.thread) ||
+          !incoming.has(cached.thread.parentThreadId!))
+      ) {
+        this.threads.delete(id);
+      }
     }
 
     await this.store.update((state) => {
@@ -597,6 +795,7 @@ export class AppProjection extends EventEmitter {
     await this.reconcileOutcomes();
     this.models = models;
     this.syncedAt = new Date().toISOString();
+    if (shouldRecoverLoaded) this.recoverLoadedThreads = false;
     this.publish({ type: "models.changed", models });
     this.publish({ type: "resync.required" });
     this.backfillSubagentTitles();
@@ -728,6 +927,48 @@ export class AppProjection extends EventEmitter {
     return threads;
   }
 
+  private async listAllLoadedThreadIds(): Promise<string[]> {
+    const threadIds: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = parseThreadLoadedList(
+        await this.bridge.request<unknown>("thread/loaded/list", { cursor, limit: 100 }, 30_000),
+      );
+      threadIds.push(...page.data);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return threadIds;
+  }
+
+  private async readLoadedSubagentsOmittedFromList(
+    loadedThreadIds: string[],
+    listedIds: Set<string>,
+  ): Promise<Thread[]> {
+    const candidates = loadedThreadIds.filter((threadId) => {
+      if (listedIds.has(threadId)) return false;
+      const cached = this.threads.get(threadId);
+      return !cached || isSpawnedSubagent(cached.thread);
+    });
+    const recovered = await Promise.all(
+      candidates.map(async (threadId): Promise<Thread | null> => {
+        try {
+          const response = parseThreadRead(
+            await this.bridge.request<unknown>(
+              "thread/read",
+              { threadId, includeTurns: false },
+              30_000,
+            ),
+          );
+          return isSpawnedSubagent(response.thread) ? response.thread : null;
+        } catch (error) {
+          this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+          return null;
+        }
+      }),
+    );
+    return recovered.filter((thread): thread is Thread => thread !== null);
+  }
+
   private async listAllModels(): Promise<ModelOption[]> {
     const models: Model[] = [];
     let cursor: string | null = null;
@@ -808,6 +1049,7 @@ export class AppProjection extends EventEmitter {
       }
       return;
     }
+    if (threadId) this.bumpHistoryRevision(threadId);
     switch (notification.method) {
       case "error": {
         const item: ActivityItem = {
@@ -1232,8 +1474,12 @@ export class AppProjection extends EventEmitter {
     }
     if (cached.thread.status.type === "systemError") return "failed";
     if (cached.currentTurnId) return "running";
+    if (isSpawnedSubagent(cached.thread) && cached.thread.status.type === "active")
+      return "running";
     if (cached.goalStatus === "active") return "running";
-    if (this.store.snapshot().threadMeta[cached.thread.id]?.awaitingPlanResponse) {
+    const meta = this.store.snapshot().threadMeta[cached.thread.id];
+    if (teamOrchestrationIsActive(meta?.teamOrchestration)) return "running";
+    if (meta?.awaitingPlanResponse) {
       return "needsAttention";
     }
     return cached.liveOutcome ?? stored ?? "idle";
@@ -1284,7 +1530,7 @@ function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
 }
 
-function subagentTranscriptTurns(thread: Thread, turns: Turn[]): Turn[] {
+function subagentTranscriptTurnViews(thread: Thread, turns: TurnView[]): TurnView[] {
   if (!turns.length) return [];
   const expectedTitle = thread.name?.trim() || null;
   let boundary: { turnIndex: number; itemIndex: number } | null = null;
@@ -1294,7 +1540,7 @@ function subagentTranscriptTurns(thread: Thread, turns: Turn[]): Turn[] {
     for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
       const item = turn.items[itemIndex]!;
       if (item.type !== "userMessage") continue;
-      if (expectedTitle && subagentTaskTitle(userMessageText(item)) !== expectedTitle) continue;
+      if (expectedTitle && subagentTaskTitle(item.text) !== expectedTitle) continue;
       boundary = { turnIndex, itemIndex };
       break;
     }
@@ -1312,6 +1558,24 @@ function subagentTranscriptTurns(thread: Thread, turns: Turn[]): Turn[] {
       return true;
     }),
   }));
+}
+
+function syncPointForPage(cursor: string | null, turns: TurnView[]): ThreadSyncPoint | null {
+  const anchor = turns.at(-1);
+  if (!cursor || !anchor) return null;
+  return {
+    cursor,
+    anchorTurnId: anchor.id,
+    anchorRevision: turnRevision(anchor),
+  };
+}
+
+function turnRevision(turn: TurnView): string {
+  return createHash("sha256").update(JSON.stringify(turn)).digest("base64url");
+}
+
+function isInvalidCursorError(error: unknown): boolean {
+  return error instanceof RpcError && error.code === -32_602 && /cursor/iu.test(error.message);
 }
 
 function subagentTitleFromTurns(turns: Turn[]): string | null {
@@ -1676,11 +1940,17 @@ function fallbackArtifactPosition(items: ActivityItem[], artifact: TimelineArtif
   }
   let insertion = 0;
   while (items[insertion]?.type === "userMessage") insertion += 1;
-  return artifact.type === "planChecklist" ? insertion : items.length;
+  return artifact.type === "planChecklist" || artifact.type === "orchestrationNotice"
+    ? insertion
+    : items.length;
 }
 
 function isTimelineArtifact(item: ActivityItem): item is TimelineArtifact {
-  return item.type === "userInputResponse" || item.type === "planChecklist";
+  return (
+    item.type === "userInputResponse" ||
+    item.type === "planChecklist" ||
+    item.type === "orchestrationNotice"
+  );
 }
 
 function turnContainsPlan(turn: Turn): boolean {
@@ -1808,4 +2078,13 @@ function publicVoiceTranscription(job: VoiceTranscriptionState): VoiceTranscript
 
 function isTerminal(state: ThreadState): state is ThreadOutcome {
   return state === "completed" || state === "failed" || state === "interrupted";
+}
+
+function teamOrchestrationIsActive(
+  orchestration: CodexNestState["threadMeta"][string]["teamOrchestration"],
+): boolean {
+  if (!orchestration) return false;
+  return Object.values(orchestration.children).some(
+    (child) => child.status === "running" || child.delivery?.status !== "delivered",
+  );
 }

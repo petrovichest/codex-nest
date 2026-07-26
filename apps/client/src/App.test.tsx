@@ -18,6 +18,7 @@ const capacitor = vi.hoisted(() => ({
 
 vi.mock("./connection", () => ({ useConnection: connection }));
 vi.mock("./push", () => ({
+  acknowledgePendingThread: vi.fn().mockResolvedValue(undefined),
   stopPushNotifications: vi.fn().mockResolvedValue(undefined),
   usePushNotifications: vi.fn(),
 }));

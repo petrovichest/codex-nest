@@ -4,6 +4,7 @@ import type {
   ModelListResponse,
   Thread,
   ThreadListResponse,
+  ThreadLoadedListResponse,
   ThreadReadResponse,
   ThreadResumeResponse,
   ThreadTurnsListResponse,
@@ -32,6 +33,14 @@ export function parseThreadList(value: unknown): ThreadListResponse {
   const page = pageShape(value, "thread/list");
   if (!page.data.every(isThread)) throw new ProtocolShapeError("thread/list data");
   return page as unknown as ThreadListResponse;
+}
+
+export function parseThreadLoadedList(value: unknown): ThreadLoadedListResponse {
+  const page = pageShape(value, "thread/loaded/list");
+  if (!page.data.every((threadId) => typeof threadId === "string")) {
+    throw new ProtocolShapeError("thread/loaded/list data");
+  }
+  return page as unknown as ThreadLoadedListResponse;
 }
 
 export function parseModelList(value: unknown): ModelListResponse {

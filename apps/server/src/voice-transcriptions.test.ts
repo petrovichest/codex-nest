@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QueuedMessage } from "@codexnest/protocol";
 
 import { StateStore } from "./state/store";
+import { TranscriptionError } from "./transcription";
 import { insertTranscript, VoiceTranscriptionManager } from "./voice-transcriptions";
 
 const directories: string[] = [];
@@ -66,6 +67,89 @@ describe("VoiceTranscriptionManager", () => {
       stat(join(directory, "state.json.voice-transcriptions", `${job.id}.webm`)),
     ).rejects.toMatchObject({ code: "ENOENT" });
     expect(projection.removeVoiceTranscription).toHaveBeenCalledWith("thread", job.id, "draft");
+  });
+
+  it("deduplicates a repeated upload id before and after transcription", async () => {
+    const { store } = await createStore("");
+    let resolveTranscript: ((value: string) => void) | undefined;
+    const transcribe = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveTranscript = resolve;
+        }),
+    );
+    const manager = new VoiceTranscriptionManager({
+      store,
+      projection: projectionMock(),
+      transcription: { transcribe },
+      queue: queueMock(store),
+    });
+    await manager.start();
+    const input = {
+      clientUploadId: "voice-upload",
+      threadId: "thread",
+      mode: "draft" as const,
+      audio: Buffer.from("audio"),
+      contentType: "audio/webm" as const,
+      audioDurationMs: 1_000,
+      estimatedTotalSeconds: null,
+      selectionStart: 0,
+      selectionEnd: 0,
+      expectedDraftUpdatedAt: null,
+      timingProfile: null,
+    };
+
+    const first = await manager.accept(input);
+    const duplicate = await manager.accept(input);
+    expect(duplicate).toEqual(first);
+    await vi.waitFor(() => expect(transcribe).toHaveBeenCalledOnce());
+
+    resolveTranscript?.("готово");
+    await vi.waitFor(() => expect(store.snapshot().voiceReceipts?.["voice-upload"]).toBeDefined());
+    await expect(manager.accept(input)).resolves.toBeNull();
+    expect(transcribe).toHaveBeenCalledOnce();
+  });
+
+  it("keeps audio queued and schedules another attempt after a transient provider error", async () => {
+    const { store, directory } = await createStore("");
+    const manager = new VoiceTranscriptionManager({
+      store,
+      projection: projectionMock(),
+      transcription: {
+        transcribe: vi.fn(async () => {
+          throw new TranscriptionError("unavailable", "provider offline");
+        }),
+      },
+      queue: queueMock(store),
+    });
+    await manager.start();
+    const job = await manager.accept({
+      clientUploadId: "retry-voice",
+      threadId: "thread",
+      mode: "draft",
+      audio: Buffer.from("audio"),
+      contentType: "audio/webm",
+      audioDurationMs: 1_000,
+      estimatedTotalSeconds: null,
+      selectionStart: 0,
+      selectionEnd: 0,
+      expectedDraftUpdatedAt: null,
+      timingProfile: null,
+    });
+
+    await vi.waitFor(() =>
+      expect(store.snapshot().voiceTranscriptions?.thread).toMatchObject({
+        status: "queued",
+        attempts: 1,
+        error: "provider offline",
+        nextAttemptAt: expect.any(Number),
+      }),
+    );
+    expect(manager.active("thread")).toBe(true);
+    await expect(
+      stat(join(directory, "state.json.voice-transcriptions", `${job.id}.webm`)),
+    ).resolves.toMatchObject({ size: 5 });
+    manager.stop();
   });
 
   it("recovers an interrupted transcription from disk after restart", async () => {
@@ -270,7 +354,7 @@ describe("VoiceTranscriptionManager", () => {
     );
   });
 
-  it("keeps a failed job visible but unlocks the thread", async () => {
+  it("keeps a failed job and its audio visible but unlocks the thread", async () => {
     const { store, directory } = await createStore("");
     const projection = projectionMock();
     const manager = new VoiceTranscriptionManager({
@@ -300,7 +384,7 @@ describe("VoiceTranscriptionManager", () => {
     expect(store.snapshot().voiceTranscriptions?.thread?.error).toBe("STT failed");
     await expect(
       stat(join(directory, "state.json.voice-transcriptions", `${job.id}.webm`)),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    ).resolves.toMatchObject({ size: 5 });
   });
 });
 

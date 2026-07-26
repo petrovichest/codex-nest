@@ -45,11 +45,13 @@ public class MainActivity extends BridgeActivity {
         preferences.edit().putString(PENDING_THREAD_KEY, threadId).apply();
     }
 
-    static void clearPendingThread(Context context) {
-        context
-            .getSharedPreferences(CAPACITOR_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .remove(PENDING_THREAD_KEY)
-            .apply();
+    static void acknowledgePendingThread(Context context, String threadId) {
+        SharedPreferences preferences = context.getSharedPreferences(
+            CAPACITOR_PREFERENCES,
+            Context.MODE_PRIVATE
+        );
+        String pending = preferences.getString(PENDING_THREAD_KEY, null);
+        if (pending == null || !pending.equals(threadId)) return;
+        preferences.edit().remove(PENDING_THREAD_KEY).apply();
     }
 }

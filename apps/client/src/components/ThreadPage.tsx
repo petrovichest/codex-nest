@@ -43,8 +43,16 @@ import {
 } from "../annotations";
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
+import { ApiClientError } from "../api";
 import { openDownloadUrl } from "../downloads";
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
+import {
+  confirmLocalDraft,
+  deleteLocalDraft,
+  loadLocalDraft,
+  saveLocalDraft,
+} from "../offline-store";
+import { acknowledgePendingThread } from "../push";
 import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
@@ -128,8 +136,18 @@ export function ThreadPage({
   const { language, t } = useI18n();
   const languageRef = useRef(language);
   languageRef.current = language;
-  const { api, state, dispatch, refreshDetail, loadOlderDetail } = useConnection();
-  const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
+  const {
+    api,
+    state,
+    dispatch,
+    refreshDetail,
+    loadOlderDetail,
+    sendReliable,
+    queueVoiceRecording,
+  } = useConnection();
+  const detail = state.details[threadId];
+  const summary =
+    state.snapshot?.threads.find((thread) => thread.id === threadId) ?? detail?.summary;
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
   const isSubagent = parentThreadId !== null;
@@ -138,7 +156,6 @@ export function ThreadPage({
     : undefined;
   const project =
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
-  const detail = state.details[threadId];
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
     value: emptyComposerDraft(),
@@ -153,6 +170,7 @@ export function ThreadPage({
   const [deleting, setDeleting] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [threadMissing, setThreadMissing] = useState(false);
   const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
   const voiceModeRef = useRef(voiceMode);
   voiceModeRef.current = voiceMode;
@@ -189,7 +207,10 @@ export function ThreadPage({
   const composerDraftRef = useRef<ComposerDraftState>(composerDraftState);
   const draftTimerRef = useRef<{ threadId: string; timer: number } | null>(null);
   const pendingDraftsRef = useRef(
-    new Map<string, { revision: number; value: UpdateThreadDraftRequest }>(),
+    new Map<
+      string,
+      { revision: number; value: UpdateThreadDraftRequest; localUpdatedAt: number }
+    >(),
   );
   const savedDraftUpdatedAtRef = useRef(new Map<string, number | null>());
   const draftRevisionRef = useRef(0);
@@ -313,6 +334,7 @@ export function ThreadPage({
           const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
           if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
           pendingDraftsRef.current.delete(targetThreadId);
+          await confirmLocalDraft(api.settings, targetThreadId, saved, pending.localUpdatedAt);
           savedDraftUpdatedAtRef.current.set(targetThreadId, saved?.updatedAt ?? null);
           dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
           if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
@@ -322,13 +344,13 @@ export function ThreadPage({
               // The server copy is authoritative once it has been accepted.
             }
           }
-        } catch (caught) {
-          if (composerDraftRef.current.threadId === targetThreadId) {
-            setError(
-              caught instanceof Error
-                ? localizeKnownServerText(language, caught.message)
-                : t("Не удалось сохранить черновик"),
-            );
+        } catch {
+          if (pendingDraftsRef.current.has(targetThreadId) && !draftTimerRef.current) {
+            const timer = window.setTimeout(() => {
+              if (draftTimerRef.current?.timer === timer) draftTimerRef.current = null;
+              void persistPendingDraft(targetThreadId);
+            }, 5_000);
+            draftTimerRef.current = { threadId: targetThreadId, timer };
           }
         }
       });
@@ -342,7 +364,9 @@ export function ThreadPage({
     immediate: boolean,
   ): void {
     const revision = ++draftRevisionRef.current;
-    pendingDraftsRef.current.set(targetThreadId, { revision, value });
+    const localUpdatedAt = Date.now();
+    pendingDraftsRef.current.set(targetThreadId, { revision, value, localUpdatedAt });
+    void saveLocalDraft(api.settings, targetThreadId, value, localUpdatedAt);
     if (draftTimerRef.current) {
       window.clearTimeout(draftTimerRef.current.timer);
       draftTimerRef.current = null;
@@ -406,21 +430,21 @@ export function ThreadPage({
       [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
     }));
     try {
-      await flushDraft(targetThreadId);
-      if (pendingDraftsRef.current.has(targetThreadId)) {
-        throw new Error(t("Не удалось сохранить черновик"));
-      }
+      const draft = structuredClone(currentComposerDraft());
       const expectedDraftUpdatedAt = savedDraftUpdatedAtRef.current.has(targetThreadId)
         ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
         : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
-      const accepted = await api.createVoiceTranscription(targetThreadId, recording.audio, {
-        recordingDurationMs: recording.durationMs,
+      await queueVoiceRecording({
+        id: createClientMessageId(),
+        threadId: targetThreadId,
+        audio: recording.audio,
+        durationMs: recording.durationMs,
         mode: uploadMode,
         selectionStart: recording.selection.start,
         selectionEnd: recording.selection.end,
         draftUpdatedAt: expectedDraftUpdatedAt,
+        draft,
       });
-      dispatch({ type: "voice.accepted", job: accepted });
     } finally {
       setVoiceUploads((current) => {
         const next = { ...current };
@@ -465,17 +489,17 @@ export function ThreadPage({
       replaceComposerDraft(emptyComposerDraft(), false);
       dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
-      void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
-        setError(localizeKnownServerText(languageRef.current, caught.message));
-      });
+      void refreshDetail(threadId, { force: true }).catch(() => undefined);
       return;
     }
     draftTouchedThreadsRef.current.delete(threadId);
     hydratedDraftSourcesRef.current.delete(threadId);
-    void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
-      setError(localizeKnownServerText(languageRef.current, caught.message));
-    });
+    void refreshDetail(threadId, { force: true }).catch(() => undefined);
   }, [refreshDetail, threadId, voiceRemoval]);
+
+  useEffect(() => {
+    if (detail) void acknowledgePendingThread(threadId);
+  }, [detail, threadId]);
 
   useEffect(() => {
     if (goal) setGoalMode(false);
@@ -494,10 +518,8 @@ export function ThreadPage({
     if (!detail) return;
     if (draftTouchedThreadsRef.current.has(threadId)) return;
     const detailDraft = detail.draft ?? null;
-    savedDraftUpdatedAtRef.current.set(threadId, detailDraft?.updatedAt ?? null);
-    if (hydratedDraftSourcesRef.current.get(threadId) === detailDraft) return;
     const localAnnotations = loadPendingAnnotations(threadId);
-    const serverDraft = detailDraft
+    const serverSource = detailDraft
       ? {
           input: detailDraft.input,
           images: detailDraft.images,
@@ -505,16 +527,35 @@ export function ThreadPage({
           annotations: detailDraft.annotations,
         }
       : emptyComposerDraft();
-    const knownIds = new Set(serverDraft.annotations.map((annotation) => annotation.id));
-    const mergedAnnotations = [
-      ...serverDraft.annotations,
-      ...localAnnotations.filter((annotation) => !knownIds.has(annotation.id)),
-    ].sort((a, b) => a.createdAt - b.createdAt);
-    const next = { ...serverDraft, annotations: mergedAnnotations };
-    hydratedDraftSourcesRef.current.set(threadId, detailDraft);
-    replaceComposerDraft(next, localAnnotations.length ? "immediate" : false);
-    if (localAnnotations.length) legacyAnnotationThreadsRef.current.add(threadId);
-  }, [detail, isSubagent, threadId]);
+    const mergeLegacyAnnotations = (source: UpdateThreadDraftRequest) => {
+      const knownIds = new Set(source.annotations.map((annotation) => annotation.id));
+      return {
+        ...source,
+        annotations: [
+          ...source.annotations,
+          ...localAnnotations.filter((annotation) => !knownIds.has(annotation.id)),
+        ].sort((a, b) => a.createdAt - b.createdAt),
+      };
+    };
+    savedDraftUpdatedAtRef.current.set(threadId, detailDraft?.updatedAt ?? null);
+    if (hydratedDraftSourcesRef.current.get(threadId) !== detailDraft) {
+      hydratedDraftSourcesRef.current.set(threadId, detailDraft);
+      replaceComposerDraft(
+        mergeLegacyAnnotations(serverSource),
+        localAnnotations.length ? "immediate" : false,
+      );
+      if (localAnnotations.length) legacyAnnotationThreadsRef.current.add(threadId);
+    }
+    let active = true;
+    void loadLocalDraft(api.settings, threadId).then((localDraft) => {
+      if (!active || draftTouchedThreadsRef.current.has(threadId)) return;
+      if (!localDraft || localDraft.updatedAt <= (detailDraft?.updatedAt ?? 0)) return;
+      replaceComposerDraft(mergeLegacyAnnotations(localDraft.value), "immediate");
+    });
+    return () => {
+      active = false;
+    };
+  }, [api.settings, detail, isSubagent, threadId]);
 
   useEffect(() => {
     const flushBeforePageExit = () => {
@@ -530,9 +571,7 @@ export function ThreadPage({
     if (!request) return;
     void request
       .then((value) => dispatch({ type: "goal", threadId, goal: value }))
-      .catch((caught: Error) =>
-        setError(localizeKnownServerText(languageRef.current, caught.message)),
-      );
+      .catch(() => undefined);
   }, [api, dispatch, isSubagent, threadId]);
 
   useEffect(() => {
@@ -564,10 +603,15 @@ export function ThreadPage({
   }, [gitChangesRefreshKey, inspectorOpen, loadGitChanges, threadId]);
 
   useEffect(() => {
+    setThreadMissing(false);
     if (threadId) {
-      void refreshDetail(threadId, { force: true }).catch((caught: Error) =>
-        setError(localizeKnownServerText(languageRef.current, caught.message)),
-      );
+      void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
+        if (caught instanceof ApiClientError && caught.status === 404) {
+          dispatch({ type: "thread.remove", threadId });
+          setThreadMissing(true);
+          void acknowledgePendingThread(threadId);
+        }
+      });
     }
   }, [threadId, refreshDetail, state.snapshotEpoch]);
 
@@ -600,10 +644,7 @@ export function ThreadPage({
     const timer = window.setTimeout(() => {
       if (completedChatRetry.current?.timer !== timer) return;
       completedChatRetry.current = { key, timer: null };
-      void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
-        if (completedChatRetry.current?.key !== key) return;
-        setError(localizeKnownServerText(languageRef.current, caught.message));
-      });
+      void refreshDetail(threadId, { force: true }).catch(() => undefined);
     }, COMPLETED_CHAT_RETRY_MS);
     completedChatRetry.current = { key, timer };
   }, [detail, refreshDetail, summary, threadId]);
@@ -625,9 +666,8 @@ export function ThreadPage({
     const key = `${threadId}:${currentTurnId ?? "idle"}:${staleTurn ? "stale" : "missing"}`;
     if (detailReconcileKey.current === key) return;
     detailReconcileKey.current = key;
-    void refreshDetail(threadId, { force: true }).catch((caught: Error) => {
+    void refreshDetail(threadId, { force: true }).catch(() => {
       detailReconcileKey.current = null;
-      setError(localizeKnownServerText(languageRef.current, caught.message));
     });
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
@@ -757,7 +797,7 @@ export function ThreadPage({
       text: submittedInput.trim(),
       images: submittedImages.map((image) => image.url),
       createdAt: Date.now(),
-      destination: summary!.currentTurnId ? "queue" : "turn",
+      destination: "queue",
       turnId: null,
     };
     setBusy(true);
@@ -767,28 +807,14 @@ export function ThreadPage({
     replaceComposerDraft(emptyComposerDraft(), false);
     await flushDraft();
     try {
-      if (summary!.currentTurnId) {
-        await api.enqueue(threadId, {
-          input: submittedInput,
-          ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
-          clientMessageId,
-        });
-      } else {
-        const result = await api.startTurn(threadId, {
-          input: submittedInput,
-          ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
-          ...(submittedGoalMode ? { goal: true } : {}),
-          clientMessageId,
-        });
-        dispatch({
-          type: "optimistic.accept",
-          threadId,
-          messageId: clientMessageId,
-          turnId: result.turnId,
-        });
-        if (result.goalWarning) setError(localizeKnownServerText(language, result.goalWarning));
-      }
+      await sendReliable(threadId, {
+        input: submittedInput,
+        ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
+        ...(submittedGoalMode ? { goal: true } : {}),
+        clientMessageId,
+      });
       pendingDraftsRef.current.delete(threadId);
+      await deleteLocalDraft(api.settings, threadId);
       savedDraftUpdatedAtRef.current.set(threadId, null);
       dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
@@ -1014,7 +1040,14 @@ export function ThreadPage({
   if (!summary)
     return (
       <div className="center-state">
-        <h2>{t("Задача не найдена")}</h2>
+        {threadMissing ? (
+          <h2>{t("Задача не найдена")}</h2>
+        ) : (
+          <>
+            <div className="spinner" />
+            <p>{t("Получаем состояние Codex…")}</p>
+          </>
+        )}
       </div>
     );
 
@@ -1747,6 +1780,27 @@ export function Activity({
             );
           })}
         </ol>
+      </article>
+    );
+  }
+  if (item.type === "orchestrationNotice") {
+    return (
+      <article className="message orchestration-notice">
+        <div className="activity-label">
+          {item.agents.length === 1
+            ? t("Получен результат субагента")
+            : t("Получены результаты субагентов")}
+        </div>
+        <ul>
+          {item.agents.map((agent) => (
+            <li key={agent.threadId}>
+              <Link to={`/threads/${encodeURIComponent(agent.threadId)}`}>
+                {agent.nickname ? `${agent.nickname} · ${agent.title}` : agent.title}
+              </Link>
+              <span>{orchestrationOutcomeLabel(agent.outcome, t)}</span>
+            </li>
+          ))}
+        </ul>
       </article>
     );
   }
@@ -2554,6 +2608,15 @@ function completedChatLooksIncomplete(
 function hasVisibleActivity(item: ActivityItem): boolean {
   if ("text" in item) return Boolean(item.text.trim() || item.images.length);
   return true;
+}
+
+function orchestrationOutcomeLabel(
+  outcome: "completed" | "failed" | "interrupted",
+  t: Translate,
+): string {
+  if (outcome === "failed") return t("Ошибка");
+  if (outcome === "interrupted") return t("Прервана");
+  return t("Завершена");
 }
 
 function findLatestCompletedPlan(detail?: ThreadDetail): string | null {

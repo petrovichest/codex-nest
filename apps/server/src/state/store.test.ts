@@ -128,6 +128,66 @@ describe("StateStore", () => {
     });
   });
 
+  it("persists pending Team results and their timeline notices", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamOrchestration: {
+          children: {
+            child: {
+              status: "completed",
+              terminalTurnId: "child-turn",
+            },
+          },
+        },
+        timelineArtifacts: {
+          "parent-turn": [
+            {
+              type: "orchestrationNotice",
+              id: "notice",
+              status: "completed",
+              agents: [
+                {
+                  threadId: "child",
+                  title: "Проверить интерфейс",
+                  nickname: "reviewer",
+                  outcome: "completed",
+                },
+              ],
+              timestamp: 1,
+              afterItemId: null,
+            },
+          ],
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.parent).toMatchObject({
+      teamOrchestration: {
+        children: {
+          child: {
+            status: "completed",
+            terminalTurnId: "child-turn",
+          },
+        },
+      },
+      timelineArtifacts: {
+        "parent-turn": [
+          {
+            type: "orchestrationNotice",
+            agents: [{ threadId: "child", outcome: "completed" }],
+          },
+        ],
+      },
+    });
+  });
+
   it("reloads unmaterialized sessions and complete server drafts", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

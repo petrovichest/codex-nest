@@ -12,9 +12,14 @@ import type {
 import type { MessageQueue } from "./message-queue";
 import type { AppProjection } from "./projection";
 import type { StateStore, VoiceTranscriptionState } from "./state/store";
-import { appendTranscriptionTimingSample, type TranscriptionService } from "./transcription";
+import {
+  appendTranscriptionTimingSample,
+  TranscriptionError,
+  type TranscriptionService,
+} from "./transcription";
 
 export const MAX_VOICE_QUEUE_BYTES = 240 * 1024 * 1024;
+const VOICE_RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 900_000, 1_800_000] as const;
 
 type VoiceTranscriptionManagerOptions = {
   store: StateStore;
@@ -25,6 +30,7 @@ type VoiceTranscriptionManagerOptions = {
 };
 
 type AcceptVoiceTranscription = {
+  clientUploadId?: string;
   threadId: string;
   mode: VoiceTranscriptionMode;
   audio: Buffer;
@@ -46,6 +52,7 @@ export class VoiceTranscriptionManager {
   private worker: Promise<void> | null = null;
   private startup: Promise<void> | null = null;
   private stopped = false;
+  private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: VoiceTranscriptionManagerOptions) {
     this.directory = join(
@@ -67,6 +74,7 @@ export class VoiceTranscriptionManager {
           job.status = "queued";
           job.startedAt = null;
           job.error = null;
+          job.nextAttemptAt = Date.now();
         }
       }
     });
@@ -76,6 +84,8 @@ export class VoiceTranscriptionManager {
 
   stop(): void {
     this.stopped = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
   }
 
   job(threadId: string): VoiceTranscriptionState | null {
@@ -87,8 +97,8 @@ export class VoiceTranscriptionManager {
     return status === "queued" || status === "transcribing" || status === "applying";
   }
 
-  accept(input: AcceptVoiceTranscription): Promise<VoiceTranscriptionJob> {
-    let accepted!: VoiceTranscriptionJob;
+  accept(input: AcceptVoiceTranscription): Promise<VoiceTranscriptionJob | null> {
+    let accepted!: VoiceTranscriptionJob | null;
     const task = this.acceptChain
       .catch(() => undefined)
       .then(async () => {
@@ -106,6 +116,7 @@ export class VoiceTranscriptionManager {
       if (state.voiceTranscriptions?.[threadId]?.id !== current.id) return;
       delete state.voiceTranscriptions[threadId];
     });
+    if (current.audioFile) await unlink(this.audioPath(current.audioFile)).catch(() => undefined);
     this.options.projection.removeVoiceTranscription(threadId, current.id, "cancelled");
   }
 
@@ -121,8 +132,19 @@ export class VoiceTranscriptionManager {
     this.options.projection.removeVoiceTranscription(threadId, current.id, "cancelled");
   }
 
-  private async acceptUnlocked(input: AcceptVoiceTranscription): Promise<VoiceTranscriptionJob> {
+  private async acceptUnlocked(
+    input: AcceptVoiceTranscription,
+  ): Promise<VoiceTranscriptionJob | null> {
+    const requestedId = input.clientUploadId;
+    if (
+      requestedId &&
+      (this.options.store.snapshot().voiceReceipts?.[requestedId] ||
+        this.options.store.snapshot().messageReceipts?.[requestedId])
+    ) {
+      return null;
+    }
     const existing = this.job(input.threadId);
+    if (requestedId && existing?.id === requestedId) return publicJob(existing);
     if (existing && existing.status !== "failed") {
       throw new VoiceTranscriptionConflictError(
         "A voice transcription is already active in this thread",
@@ -130,12 +152,12 @@ export class VoiceTranscriptionManager {
     }
     const activeBytes = Object.values(
       this.options.store.snapshot().voiceTranscriptions ?? {},
-    ).reduce((total, job) => total + (job.status === "failed" ? 0 : job.audioBytes), 0);
+    ).reduce((total, job) => total + job.audioBytes, 0);
     if (activeBytes + input.audio.length > MAX_VOICE_QUEUE_BYTES) {
       throw new VoiceTranscriptionQueueFullError("Voice transcription queue is full");
     }
 
-    const id = randomUUID();
+    const id = requestedId ?? randomUUID();
     const extension = input.contentType === "audio/mp4" ? "mp4" : "webm";
     const audioFile = `${id}.${extension}`;
     const temporary = `${audioFile}.${process.pid}.tmp`;
@@ -155,6 +177,8 @@ export class VoiceTranscriptionManager {
       audioBytes: input.audio.length,
       selectionStart: input.selectionStart,
       selectionEnd: input.selectionEnd,
+      attempts: 0,
+      nextAttemptAt: Date.now(),
       ...(input.timingProfile ? { timingProfile: input.timingProfile } : {}),
     };
     try {
@@ -167,7 +191,7 @@ export class VoiceTranscriptionManager {
           );
         }
         const queuedBytes = Object.values(draft.voiceTranscriptions).reduce(
-          (total, job) => total + (job.status === "failed" ? 0 : job.audioBytes),
+          (total, job) => total + job.audioBytes,
           0,
         );
         if (queuedBytes + input.audio.length > MAX_VOICE_QUEUE_BYTES) {
@@ -225,13 +249,19 @@ export class VoiceTranscriptionManager {
 
   private kick(): void {
     if (this.stopped || this.worker) return;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     this.worker = this.run()
       .catch((error: unknown) => {
         this.options.onWarning?.(error, "Voice transcription worker failed");
       })
       .finally(() => {
         this.worker = null;
-        if (!this.stopped && this.nextJob()) this.kick();
+        if (this.stopped) return;
+        if (this.nextJob()) this.kick();
+        else this.scheduleNextRetry();
       });
   }
 
@@ -252,9 +282,14 @@ export class VoiceTranscriptionManager {
   }
 
   private nextJob(): VoiceTranscriptionState | null {
+    const now = Date.now();
     return (
       Object.values(this.options.store.snapshot().voiceTranscriptions ?? {})
-        .filter((job) => ["queued", "transcribing", "applying"].includes(job.status))
+        .filter(
+          (job) =>
+            ["queued", "transcribing", "applying"].includes(job.status) &&
+            (job.nextAttemptAt ?? 0) <= now,
+        )
         .sort((left, right) => left.createdAt - right.createdAt)[0] ?? null
     );
   }
@@ -269,6 +304,7 @@ export class VoiceTranscriptionManager {
       current.status = "transcribing";
       current.startedAt = startedAt;
       current.error = null;
+      delete current.nextAttemptAt;
       active = structuredClone(current);
     });
     if (!active) return;
@@ -284,6 +320,8 @@ export class VoiceTranscriptionManager {
       current.status = "applying";
       current.transcript = transcript.trim();
       current.error = null;
+      current.attempts = 0;
+      delete current.nextAttemptAt;
       if (current.timingProfile) {
         state.transcriptionTimings ??= {};
         state.transcriptionTimings[current.timingProfile] = appendTranscriptionTimingSample(
@@ -321,6 +359,8 @@ export class VoiceTranscriptionManager {
         updatedAt: Date.now(),
       };
       state.threadMeta[job.threadId] = meta;
+      state.voiceReceipts ??= {};
+      state.voiceReceipts[job.id] = { threadId: job.threadId, createdAt: Date.now() };
       delete state.voiceTranscriptions![job.threadId];
     });
     this.options.projection.removeVoiceTranscription(job.threadId, job.id, "draft");
@@ -341,6 +381,10 @@ export class VoiceTranscriptionManager {
         completeVoiceTranscriptionId: job.id,
       },
     );
+    await this.options.store.update((state) => {
+      state.voiceReceipts ??= {};
+      state.voiceReceipts[job.id] = { threadId: job.threadId, createdAt: Date.now() };
+    });
     if (job.mode === "steer") {
       try {
         await this.options.queue.sendNow(job.threadId, job.id);
@@ -352,26 +396,66 @@ export class VoiceTranscriptionManager {
   }
 
   private async fail(job: VoiceTranscriptionState, error: unknown): Promise<void> {
-    let failed: VoiceTranscriptionState | null = null;
-    let audioFile: string | undefined;
+    if (!(error instanceof TranscriptionError) || error.kind === "validation") {
+      await this.failPermanently(job, error);
+      return;
+    }
+    let retrying: VoiceTranscriptionState | null = null;
     await this.options.store.update((state) => {
       const current = state.voiceTranscriptions?.[job.threadId];
       if (!current || current.id !== job.id) return;
-      audioFile = current.audioFile;
+      const attempts = (current.attempts ?? 0) + 1;
+      const base =
+        VOICE_RETRY_DELAYS_MS[Math.min(attempts - 1, VOICE_RETRY_DELAYS_MS.length - 1)] ??
+        1_800_000;
+      current.status = "queued";
+      current.startedAt = null;
+      current.attempts = attempts;
+      current.nextAttemptAt = Date.now() + Math.round(base * (0.8 + Math.random() * 0.4));
+      current.error = error.message;
+      retrying = structuredClone(current);
+    });
+    if (retrying) this.options.projection.publishVoiceTranscription(retrying);
+  }
+
+  private async failPermanently(job: VoiceTranscriptionState, error: unknown): Promise<void> {
+    let failed: VoiceTranscriptionState | null = null;
+    await this.options.store.update((state) => {
+      const current = state.voiceTranscriptions?.[job.threadId];
+      if (!current || current.id !== job.id) return;
       current.status = "failed";
       current.error = error instanceof Error ? error.message : "Voice transcription failed";
-      delete current.audioFile;
+      delete current.nextAttemptAt;
       delete current.transcript;
       failed = structuredClone(current);
     });
-    if (audioFile) await unlink(this.audioPath(audioFile)).catch(() => undefined);
     if (failed) this.options.projection.publishVoiceTranscription(failed);
+  }
+
+  private scheduleNextRetry(): void {
+    if (this.stopped || this.retryTimer) return;
+    const nextAttemptAt = Object.values(this.options.store.snapshot().voiceTranscriptions ?? {})
+      .filter((job) => job.status === "queued" && job.nextAttemptAt)
+      .reduce<number | null>(
+        (earliest, job) =>
+          earliest === null ? job.nextAttemptAt! : Math.min(earliest, job.nextAttemptAt!),
+        null,
+      );
+    if (nextAttemptAt === null) return;
+    this.retryTimer = setTimeout(
+      () => {
+        this.retryTimer = null;
+        this.kick();
+      },
+      Math.max(0, nextAttemptAt - Date.now()),
+    );
+    this.retryTimer.unref();
   }
 
   private async removeOrphanedAudio(): Promise<void> {
     const referenced = new Set(
       Object.values(this.options.store.snapshot().voiceTranscriptions ?? {}).flatMap((job) =>
-        job.status !== "failed" && job.audioFile ? [job.audioFile] : [],
+        job.audioFile ? [job.audioFile] : [],
       ),
     );
     const files = await readdir(this.directory).catch(() => []);

@@ -1871,6 +1871,171 @@ describe("thread settings", () => {
   });
 });
 
+describe("Team orchestration", () => {
+  it("starts a background parent continuation when the first subagent finishes", async () => {
+    const { app, bridge, projection, store } = await createTeamHarness();
+    const child = teamChild("child", "Проверить интерфейс");
+    bridge.emit("notification", spawnCompleted("thread", "child"));
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: child },
+    } satisfies ServerNotification);
+    bridge.emit("notification", spawnCompleted("thread", "child-two"));
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: teamChild("child-two", "Проверить сервер") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.thread?.teamOrchestration?.children).toMatchObject({
+        child: { status: "running" },
+        "child-two": { status: "running" },
+      }),
+    );
+    const startsBefore = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/start",
+    ).length;
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "child",
+        turn: {
+          ...testTurn("child-result", "completed"),
+          items: [
+            {
+              type: "agentMessage",
+              id: "child-final",
+              text: "Интерфейс проверен",
+              phase: "final_answer",
+              memoryCitation: null,
+            },
+          ],
+          itemsView: "full",
+        },
+      },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        startsBefore + 1,
+      ),
+    );
+    const continuation = bridge.request.mock.calls
+      .filter(([method]) => method === "turn/start")
+      .at(-1)?.[1] as Record<string, unknown>;
+    expect(continuation).toMatchObject({
+      threadId: "thread",
+      clientUserMessageId: null,
+      input: [],
+      additionalContext: {
+        "codexnest.team.results": {
+          kind: "application",
+          value: expect.stringMatching(/child \(completed\).*Subagents still running: child-two/i),
+        },
+      },
+    });
+    expect(store.snapshot().threadMeta.thread?.teamOrchestration?.children).toMatchObject({
+      child: {
+        status: "completed",
+        delivery: { status: "delivered", parentTurnId: "turn" },
+      },
+      "child-two": { status: "running" },
+    });
+    expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toEqual([
+      expect.objectContaining({
+        type: "orchestrationNotice",
+        agents: [
+          expect.objectContaining({
+            threadId: "child",
+            title: "Проверить интерфейс",
+            outcome: "completed",
+          }),
+        ],
+      }),
+    ]);
+    expect(projection.summary("thread")?.currentTurnId).toBe("turn");
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "child", turn: testTurn("child-result", "completed") },
+    } satisfies ServerNotification);
+    await nextImmediate();
+    await nextImmediate();
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+      startsBefore + 1,
+    );
+
+    await app.close();
+    await store.flushed();
+  });
+
+  it("delivers a queued user message before continuing with a completed subagent", async () => {
+    const { app, bridge, headers, projection, store } = await createTeamHarness();
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "thread", turn: testTurn("parent-running", "inProgress") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", spawnCompleted("thread", "child"));
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: teamChild("child", "Собрать данные") },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "child", turn: testTurn("child-result", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => {
+      const tracked = store.snapshot().threadMeta.thread?.teamOrchestration?.children.child;
+      expect(tracked?.status).toBe("completed");
+      expect(tracked?.delivery).toBeUndefined();
+    });
+
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Сначала ответь на это", clientMessageId: "user-priority" },
+    });
+    expect(queued.statusCode).toBe(202);
+    const startsBefore = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/start",
+    ).length;
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "thread", turn: testTurn("parent-running", "completed") },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        startsBefore + 1,
+      ),
+    );
+    const continuation = bridge.request.mock.calls
+      .filter(([method]) => method === "turn/start")
+      .at(-1)?.[1] as Record<string, unknown>;
+    expect(continuation).toMatchObject({
+      clientUserMessageId: "user-priority",
+      input: [{ type: "text", text: "Сначала ответь на это", text_elements: [] }],
+      additionalContext: {
+        "codexnest.team.results": {
+          kind: "application",
+          value: expect.stringContaining("If this turn also contains an explicit user message"),
+        },
+      },
+    });
+    await vi.waitFor(() => expect(store.snapshot().messageQueues?.thread).toBeUndefined());
+    expect(projection.summary("thread")?.currentTurnId).toBe("turn");
+
+    await nextImmediate();
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+      startsBefore + 1,
+    );
+    await app.close();
+    await store.flushed();
+  });
+});
+
 function createCodexManagerMock() {
   const codexStatus = {
     supported: true,
@@ -1964,6 +2129,9 @@ class SettingsBridge extends EventEmitter {
       return params.archived
         ? { data: [], nextCursor: null, backwardsCursor: null }
         : { data: [testThread()], nextCursor: null, backwardsCursor: null };
+    }
+    if (method === "thread/loaded/list") {
+      return { data: ["thread"], nextCursor: null };
     }
     if (method === "model/list") {
       return {
@@ -2076,6 +2244,92 @@ class SettingsBridge extends EventEmitter {
     }
     throw new Error(`Unexpected ${method}`);
   });
+}
+
+async function createTeamHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-team-api-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  await store.update((state) => {
+    state.auth.tokenSha256 = hashToken("correct");
+    state.projects.push({
+      id: "project",
+      displayName: "Project",
+      path: "/work",
+      createdAt: "2026-01-01",
+      updatedAt: "2026-01-01",
+    });
+  });
+  const bridge = new SettingsBridge();
+  const attention = new AttentionManager();
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  await projection.sync();
+  await projection.setSettings("thread", {
+    collaborationMode: "team",
+    model: "gpt-a",
+    reasoningEffort: "high",
+  });
+  const config = loadConfig({
+    statePath: store.path,
+    clientDist: join(directory, "missing"),
+    allowedOrigins: new Set(["http://localhost"]),
+    websocketAuthTimeoutMs: 25,
+  });
+  const app = await buildApp(config, {
+    bridge: bridge as unknown as CodexBridge,
+    store,
+    projection,
+    attention,
+    push: new PushNotifier(store),
+    projectRoot: directory,
+  });
+  return {
+    app,
+    bridge,
+    headers: { authorization: "Bearer correct" },
+    projection,
+    store,
+  };
+}
+
+function teamChild(id: string, name: string): Thread {
+  return {
+    ...testThread(id),
+    parentThreadId: "thread",
+    ephemeral: true,
+    status: { type: "active", activeFlags: [] },
+    agentNickname: "reviewer",
+    agentRole: "worker",
+    name,
+  };
+}
+
+function spawnCompleted(parentThreadId: string, childThreadId: string): ServerNotification {
+  return {
+    method: "item/completed",
+    params: {
+      threadId: parentThreadId,
+      turnId: "parent-spawn",
+      item: {
+        type: "collabAgentToolCall",
+        id: `spawn-${childThreadId}`,
+        tool: "spawnAgent",
+        status: "completed",
+        senderThreadId: parentThreadId,
+        receiverThreadIds: [childThreadId],
+        prompt: "Task: Проверить интерфейс\n\nВернуть результат.",
+        model: null,
+        reasoningEffort: null,
+        agentsStates: {},
+      },
+      completedAtMs: 1_000,
+    },
+  };
+}
+
+function nextImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function testModel(

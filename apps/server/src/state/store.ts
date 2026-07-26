@@ -18,8 +18,22 @@ import type {
 
 export type TimelineArtifact = Extract<
   ActivityItem,
-  { type: "userInputResponse" | "planChecklist" }
+  { type: "userInputResponse" | "planChecklist" | "orchestrationNotice" }
 >;
+
+export interface TeamOrchestrationChildState {
+  status: "running" | ThreadOutcome;
+  terminalTurnId?: string;
+  delivery?: {
+    status: "claimed" | "delivered";
+    claimId: string;
+    parentTurnId?: string;
+  };
+}
+
+export interface TeamOrchestrationState {
+  children: Record<string, TeamOrchestrationChildState>;
+}
 
 export interface ThreadMetaState {
   pinned: boolean;
@@ -31,6 +45,7 @@ export interface ThreadMetaState {
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
+  teamOrchestration?: TeamOrchestrationState;
   unmaterialized?: boolean;
   draft?: ThreadDraft;
 }
@@ -62,6 +77,20 @@ export interface VoiceTranscriptionState {
   selectionEnd: number;
   timingProfile?: string;
   transcript?: string;
+  attempts?: number;
+  nextAttemptAt?: number;
+}
+
+export interface VoiceReceiptState {
+  threadId: string;
+  createdAt: number;
+}
+
+export interface MessageReceiptState {
+  threadId: string;
+  turnId: string | null;
+  contentHash: string;
+  createdAt: number;
 }
 
 export interface CodexNestState {
@@ -76,7 +105,9 @@ export interface CodexNestState {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
+  messageReceipts?: Record<string, MessageReceiptState>;
   voiceTranscriptions?: Record<string, VoiceTranscriptionState>;
+  voiceReceipts?: Record<string, VoiceReceiptState>;
 }
 
 export function emptyState(): CodexNestState {
@@ -88,7 +119,9 @@ export function emptyState(): CodexNestState {
     devices: {},
     uiLanguage: "en",
     messageQueues: {},
+    messageReceipts: {},
     voiceTranscriptions: {},
+    voiceReceipts: {},
   };
 }
 
@@ -213,8 +246,14 @@ function validateState(value: unknown): CodexNestState {
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {
     throw new Error("Corrupt message queues in CodexNest state");
   }
+  if (value.messageReceipts !== undefined && !isRecord(value.messageReceipts)) {
+    throw new Error("Corrupt message receipts in CodexNest state");
+  }
   if (value.voiceTranscriptions !== undefined && !isRecord(value.voiceTranscriptions)) {
     throw new Error("Corrupt voice transcriptions in CodexNest state");
+  }
+  if (value.voiceReceipts !== undefined && !isRecord(value.voiceReceipts)) {
+    throw new Error("Corrupt voice receipts in CodexNest state");
   }
   if (
     value.defaultReasoningEffort !== undefined &&
@@ -247,6 +286,7 @@ function validateState(value: unknown): CodexNestState {
       (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
+      (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft))
     ) {
@@ -270,9 +310,30 @@ function validateState(value: unknown): CodexNestState {
       throw new Error("Corrupt queued message in CodexNest state");
     }
   }
+  for (const receipt of Object.values(value.messageReceipts ?? {})) {
+    if (
+      !isRecord(receipt) ||
+      typeof receipt.threadId !== "string" ||
+      (receipt.turnId !== null && typeof receipt.turnId !== "string") ||
+      typeof receipt.contentHash !== "string" ||
+      !/^[a-f\d]{64}$/iu.test(receipt.contentHash) ||
+      typeof receipt.createdAt !== "number"
+    ) {
+      throw new Error("Corrupt message receipt");
+    }
+  }
   for (const [threadId, job] of Object.entries(value.voiceTranscriptions ?? {})) {
     if (!isVoiceTranscription(job, threadId)) {
       throw new Error("Corrupt voice transcription in CodexNest state");
+    }
+  }
+  for (const receipt of Object.values(value.voiceReceipts ?? {})) {
+    if (
+      !isRecord(receipt) ||
+      typeof receipt.threadId !== "string" ||
+      typeof receipt.createdAt !== "number"
+    ) {
+      throw new Error("Corrupt voice receipt");
     }
   }
   const verifier = value.auth.tokenSha256;
@@ -368,7 +429,43 @@ function isTimelineArtifact(value: unknown): value is TimelineArtifact {
       )
     );
   }
+  if (value.type === "orchestrationNotice") {
+    return (
+      value.status === "completed" &&
+      Array.isArray(value.agents) &&
+      value.agents.length > 0 &&
+      value.agents.every(
+        (agent) =>
+          isRecord(agent) &&
+          typeof agent.threadId === "string" &&
+          typeof agent.title === "string" &&
+          (agent.nickname === null || typeof agent.nickname === "string") &&
+          ["completed", "failed", "interrupted"].includes(String(agent.outcome)),
+      )
+    );
+  }
   return false;
+}
+
+function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationState {
+  if (!isRecord(value) || !isRecord(value.children)) return false;
+  return Object.values(value.children).every((child) => {
+    if (
+      !isRecord(child) ||
+      !["running", "completed", "failed", "interrupted"].includes(String(child.status)) ||
+      ((child.terminalTurnId !== undefined || child.status !== "running") &&
+        typeof child.terminalTurnId !== "string")
+    ) {
+      return false;
+    }
+    if (child.delivery === undefined) return true;
+    return (
+      isRecord(child.delivery) &&
+      ["claimed", "delivered"].includes(String(child.delivery.status)) &&
+      typeof child.delivery.claimId === "string" &&
+      (child.delivery.parentTurnId === undefined || typeof child.delivery.parentTurnId === "string")
+    );
+  });
 }
 
 function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessage {
@@ -419,7 +516,13 @@ function isVoiceTranscription(value: unknown, threadId: string): value is VoiceT
     (value.timingProfile !== undefined &&
       (typeof value.timingProfile !== "string" || !value.timingProfile.trim())) ||
     (value.transcript !== undefined &&
-      (typeof value.transcript !== "string" || !value.transcript.trim()))
+      (typeof value.transcript !== "string" || !value.transcript.trim())) ||
+    (value.attempts !== undefined &&
+      (typeof value.attempts !== "number" ||
+        !Number.isSafeInteger(value.attempts) ||
+        value.attempts < 0)) ||
+    (value.nextAttemptAt !== undefined &&
+      (typeof value.nextAttemptAt !== "number" || !Number.isFinite(value.nextAttemptAt)))
   ) {
     return false;
   }

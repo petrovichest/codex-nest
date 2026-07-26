@@ -304,6 +304,19 @@ export type ActivityItem =
       afterItemId: string | null;
     }
   | {
+      type: "orchestrationNotice";
+      id: string;
+      status: "completed";
+      agents: Array<{
+        threadId: string;
+        title: string;
+        nickname: string | null;
+        outcome: ThreadOutcome;
+      }>;
+      timestamp: number;
+      afterItemId: string | null;
+    }
+  | {
       type: "error" | "unsupported";
       id: string;
       status: "failed";
@@ -348,12 +361,30 @@ export type ThreadDraft = UpdateThreadDraftRequest & {
   updatedAt: number;
 };
 
+export type ThreadSyncPoint = {
+  cursor: string;
+  anchorTurnId: string;
+  anchorRevision: string;
+};
+
 export type ThreadDetail = {
   summary: ThreadSummary;
   turns: TurnView[];
   queuedMessages: QueuedMessage[];
   olderTurnsCursor: string | null;
   draft?: ThreadDraft | null;
+  syncPoint?: ThreadSyncPoint | null;
+};
+
+export type ThreadChanges = {
+  summary: ThreadSummary;
+  turns: TurnView[];
+  queuedMessages: QueuedMessage[];
+  draft?: ThreadDraft | null;
+  continuationCursor: string | null;
+  syncPoint: ThreadSyncPoint | null;
+  resetLatest: boolean;
+  olderTurnsCursor: string | null;
 };
 
 export type ModelOption = {
@@ -664,6 +695,7 @@ export type StartTurnRequest = {
 export type QueueMessageRequest = {
   input: string;
   images?: string[];
+  goal?: boolean;
   clientMessageId?: string;
 };
 

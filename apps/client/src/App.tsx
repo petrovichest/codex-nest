@@ -264,6 +264,8 @@ export function App({
   }, []);
 
   const snapshot = state.snapshot;
+  const openingThreadWithoutSnapshot =
+    !snapshot && /^\/threads\/[^/]+\/?$/u.test(location.pathname);
   const attention = snapshot?.attention ?? [];
   const updateAvailable =
     appUpdateStatus?.updateAvailable === true ||
@@ -308,7 +310,7 @@ export function App({
             <button onClick={reconnect}>{t("Повторить")}</button>
           </div>
         )}
-        {!snapshot ? (
+        {!snapshot && !openingThreadWithoutSnapshot ? (
           <div className="center-state">
             <div className="spinner" />
             <p>{t("Получаем состояние Codex…")}</p>
@@ -318,7 +320,10 @@ export function App({
             <Route
               path="/"
               element={
-                <HomeRoute threads={snapshot.threads} onOpenNavigation={() => setDrawer(true)} />
+                <HomeRoute
+                  threads={snapshot?.threads ?? []}
+                  onOpenNavigation={() => setDrawer(true)}
+                />
               }
             />
             <Route path="/new" element={<Navigate to="/" replace />} />

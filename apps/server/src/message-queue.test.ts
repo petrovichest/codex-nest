@@ -77,6 +77,23 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([first]);
   });
 
+  it("deduplicates a retry after the original message was delivered", async () => {
+    const { queue, delivery, store } = await setup(null);
+
+    await queue.enqueue("thread", "Один раз", [], "client-message");
+    await vi.waitFor(() =>
+      expect(store.snapshot().messageReceipts?.["client-message"]).toBeDefined(),
+    );
+    const retry = await queue.enqueue("thread", "Один раз", [], "client-message");
+
+    expect(retry).toMatchObject({ id: "client-message", status: "dispatching" });
+    expect(delivery.start).toHaveBeenCalledOnce();
+    expect(queue.list("thread")).toEqual([]);
+    await expect(queue.enqueue("thread", "Другой текст", [], "client-message")).rejects.toThrow(
+      "Message id has already been used",
+    );
+  });
+
   it("atomically converts a completed voice job into a goal message", async () => {
     const { queue, store } = await setup("active");
     await store.update((state) => {

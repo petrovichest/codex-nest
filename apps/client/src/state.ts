@@ -4,6 +4,7 @@ import type {
   Project,
   QueuedMessage,
   ServerEvent,
+  ThreadChanges,
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
@@ -35,9 +36,16 @@ export type OptimisticMessage = {
 
 export type ClientAction =
   | { type: "network"; network: ClientState["network"]; error?: string | null }
+  | {
+      type: "hydrate";
+      snapshot: AppSnapshot | null;
+      goals: Record<string, ThreadGoal | null>;
+    }
+  | { type: "hydrate.detail"; detail: ThreadDetail }
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
   | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" }
+  | { type: "changes"; threadId: string; changes: ThreadChanges }
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
@@ -67,6 +75,14 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return initialState;
     case "network":
       return { ...state, network: action.network, error: action.error ?? null };
+    case "hydrate":
+      return {
+        ...state,
+        snapshot: action.snapshot,
+        goals: action.goals,
+      };
+    case "hydrate.detail":
+      return applyDetail(state, action.detail, "latest");
     case "snapshot":
       return {
         ...state,
@@ -77,6 +93,8 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       };
     case "detail":
       return applyDetail(state, action.detail, action.page);
+    case "changes":
+      return applyChanges(state, action.threadId, action.changes);
     case "draft": {
       const detail = state.details[action.threadId];
       if (!detail) return state;
@@ -142,6 +160,52 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       if (!state.snapshot) return state;
       return applyEvent(state, action.sequence, action.event);
   }
+}
+
+function applyChanges(state: ClientState, threadId: string, changes: ThreadChanges): ClientState {
+  const current = state.details[threadId];
+  if (!current) {
+    return applyDetail(
+      state,
+      {
+        summary: changes.summary,
+        turns: changes.turns,
+        queuedMessages: changes.queuedMessages,
+        olderTurnsCursor: changes.olderTurnsCursor,
+        draft: changes.draft ?? null,
+        syncPoint: changes.syncPoint,
+      },
+      "latest",
+    );
+  }
+  const merged = mergeThreadDetailChanges(current, changes);
+  return applyDetail(state, merged, changes.resetLatest ? "reset" : "latest");
+}
+
+export function mergeThreadDetailChanges(
+  current: ThreadDetail,
+  changes: ThreadChanges,
+): ThreadDetail {
+  let turns: ThreadDetail["turns"];
+  let olderTurnsCursor = current.olderTurnsCursor;
+  if (changes.resetLatest) {
+    const incomingIds = new Set(changes.turns.map((turn) => turn.id));
+    const overlap = current.turns.findIndex((turn) => incomingIds.has(turn.id));
+    turns =
+      overlap < 0 ? changes.turns : mergeTurns(current.turns.slice(0, overlap), changes.turns);
+    if (overlap < 0) olderTurnsCursor = changes.olderTurnsCursor;
+  } else {
+    turns = mergeTurns(current.turns, changes.turns);
+  }
+  return {
+    ...current,
+    summary: changes.summary,
+    turns,
+    queuedMessages: changes.queuedMessages,
+    draft: changes.draft ?? null,
+    olderTurnsCursor,
+    syncPoint: changes.syncPoint ?? current.syncPoint ?? null,
+  };
 }
 
 function applyEvent(state: ClientState, sequence: number, event: ServerEvent): ClientState {
@@ -252,28 +316,30 @@ function removeThreadState(state: ClientState, threadId: string): ClientState {
 function applyDetail(
   state: ClientState,
   detail: ThreadDetail,
-  page: "latest" | "older",
+  page: "latest" | "older" | "reset",
 ): ClientState {
   const threadId = detail.summary.id;
   const current = state.details[threadId];
   const expanded = state.expandedHistory[threadId] ?? false;
   const subagent = detail.summary.relation.kind === "subagent";
   const merged = current
-    ? {
-        ...detail,
-        turns: subagent
-          ? page === "older"
-            ? current.turns
-            : detail.turns
-          : page === "older"
-            ? mergeTurns(detail.turns, current.turns)
-            : mergeTurns(current.turns, detail.turns),
-        olderTurnsCursor: subagent
-          ? null
-          : page === "latest" && expanded
-            ? current.olderTurnsCursor
-            : detail.olderTurnsCursor,
-      }
+    ? page === "reset"
+      ? detail
+      : {
+          ...detail,
+          turns: subagent
+            ? page === "older"
+              ? current.turns
+              : detail.turns
+            : page === "older"
+              ? mergeTurns(detail.turns, current.turns)
+              : mergeTurns(current.turns, detail.turns),
+          olderTurnsCursor: subagent
+            ? null
+            : page === "latest" && expanded
+              ? current.olderTurnsCursor
+              : detail.olderTurnsCursor,
+        }
     : subagent
       ? { ...detail, olderTurnsCursor: null }
       : detail;
@@ -293,7 +359,9 @@ function applyDetail(
       ? { ...state.expandedHistory, [threadId]: false }
       : page === "older"
         ? { ...state.expandedHistory, [threadId]: true }
-        : state.expandedHistory,
+        : page === "reset"
+          ? { ...state.expandedHistory, [threadId]: false }
+          : state.expandedHistory,
     optimisticMessages: setOptimisticMessages(
       state.optimisticMessages,
       threadId,

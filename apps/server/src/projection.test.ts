@@ -228,6 +228,89 @@ describe("AppProjection", () => {
     });
   });
 
+  it("recovers loaded subagents omitted from thread/list once per connection", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const parent = thread("parent", "/work", 2, { type: "notLoaded" });
+    const child = {
+      ...thread("child", "/work", 3, { type: "active", activeFlags: [] }),
+      parentThreadId: "parent",
+      ephemeral: true,
+      agentNickname: "reviewer",
+      agentRole: "worker",
+      name: "Проверить восстановление",
+    };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [parent],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") {
+        return { data: ["parent", "child"], nextCursor: null };
+      }
+      if (method === "thread/read" && params.threadId === "child") {
+        return { thread: child };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("child")).toMatchObject({
+      state: "running",
+      relation: {
+        kind: "subagent",
+        parentThreadId: "parent",
+        nickname: "reviewer",
+      },
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/loaded/list"),
+    ).toHaveLength(1);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(1);
+
+    await projection.sync();
+
+    expect(projection.summary("child")?.state).toBe("running");
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/loaded/list"),
+    ).toHaveLength(1);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(1);
+
+    bridge.emit("state", "ready");
+    await projection.sync();
+
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/loaded/list"),
+    ).toHaveLength(2);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("backfills an unnamed subagent from its own first input", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -1354,6 +1437,71 @@ describe("AppProjection", () => {
     );
     expect(value.currentTurnId).toBeNull();
     expect(value.state).not.toBe("running");
+  });
+
+  it("reads only turns after the cached history anchor", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const first = testTurn("first", "completed");
+    const second = testTurn("second", "completed");
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      if (params.sortDirection === "asc") {
+        return {
+          data: [first, second],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      return {
+        data: params.limit === 1 ? [second] : [first],
+        nextCursor: null,
+        backwardsCursor: params.limit === 1 ? "next-delta" : "delta-cursor",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    const initial = await projection.readThread("one");
+    expect(initial.turns.map((turn) => turn.id)).toEqual(["first"]);
+    expect(initial.syncPoint).toMatchObject({
+      cursor: "delta-cursor",
+      anchorTurnId: "first",
+    });
+    bridge.request.mockClear();
+
+    const changes = await projection.readThreadChanges("one", initial.syncPoint!);
+
+    expect(changes.resetLatest).toBe(false);
+    expect(changes.turns.map((turn) => turn.id)).toEqual(["second"]);
+    expect(changes.syncPoint).toMatchObject({
+      cursor: "next-delta",
+      anchorTurnId: "second",
+    });
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      1,
+      "thread/turns/list",
+      expect.objectContaining({
+        threadId: "one",
+        cursor: "delta-cursor",
+        sortDirection: "asc",
+      }),
+      30_000,
+    );
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      2,
+      "thread/turns/list",
+      expect.objectContaining({ threadId: "one", limit: 1, sortDirection: "desc" }),
+      30_000,
+    );
   });
 
   it("overlays accepted user messages onto a lagging turn read", async () => {

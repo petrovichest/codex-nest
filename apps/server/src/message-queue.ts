@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { QueuedMessage } from "@codexnest/protocol";
 
@@ -50,8 +50,30 @@ export class MessageQueue {
       createdAt: Date.now(),
       status: "queued",
     };
+    const contentHash = messageContentHash(message.text, message.images ?? [], !!message.goal);
     let stored = message;
     await this.store.update((state) => {
+      const receipt = state.messageReceipts?.[messageId];
+      if (receipt) {
+        if (receipt.threadId !== threadId || receipt.contentHash !== contentHash) {
+          throw new MessageQueueConflictError("Message id has already been used");
+        }
+        stored = { ...message, status: "dispatching" };
+        const queue = state.messageQueues?.[threadId];
+        if (queue?.some((candidate) => candidate.id === messageId)) {
+          state.messageQueues![threadId] = queue.filter((candidate) => candidate.id !== messageId);
+          if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
+        }
+        const meta = state.threadMeta[threadId];
+        if (meta) delete meta.draft;
+        if (
+          options.completeVoiceTranscriptionId &&
+          state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
+        ) {
+          delete state.voiceTranscriptions[threadId];
+        }
+        return;
+      }
       state.messageQueues ??= {};
       const queue = (state.messageQueues[threadId] ??= []);
       const existing = queue.find((candidate) => candidate.id === messageId);
@@ -153,6 +175,15 @@ export class MessageQueue {
                   candidate.id === message.id ? { ...candidate, status: "queued" } : candidate,
                 );
             if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
+            if (delivered) {
+              state.messageReceipts ??= {};
+              state.messageReceipts[message.id] = {
+                threadId,
+                turnId: null,
+                contentHash: messageContentHash(message.text, message.images ?? [], !!message.goal),
+                createdAt: Date.now(),
+              };
+            }
           });
         }
         this.publish(threadId);
@@ -182,16 +213,17 @@ export class MessageQueue {
     const activeTurnId = this.delivery.currentTurnId(threadId);
     if (activeTurnId && !allowSteer) return activeTurnId;
     await this.setStatus(threadId, message.id, "dispatching");
+    let turnId: string;
     try {
-      const turnId = activeTurnId
+      turnId = activeTurnId
         ? await this.delivery.steer(threadId, activeTurnId, message)
         : await this.delivery.start(threadId, message);
-      await this.remove(threadId, message.id);
-      return turnId;
     } catch (error) {
       await this.setStatus(threadId, message.id, "queued").catch(() => undefined);
       throw error;
     }
+    await this.remove(threadId, message.id, turnId, message);
+    return turnId;
   }
 
   private async setStatus(
@@ -211,11 +243,29 @@ export class MessageQueue {
     this.publish(threadId);
   }
 
-  private async remove(threadId: string, messageId: string): Promise<void> {
+  private async remove(
+    threadId: string,
+    messageId: string,
+    deliveredTurnId?: string,
+    deliveredMessage?: QueuedMessage,
+  ): Promise<void> {
     await this.store.update((state) => {
       const queue = state.messageQueues?.[threadId] ?? [];
       state.messageQueues![threadId] = queue.filter((message) => message.id !== messageId);
       if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
+      if (deliveredTurnId && deliveredMessage) {
+        state.messageReceipts ??= {};
+        state.messageReceipts[messageId] = {
+          threadId,
+          turnId: deliveredTurnId,
+          contentHash: messageContentHash(
+            deliveredMessage.text,
+            deliveredMessage.images ?? [],
+            !!deliveredMessage.goal,
+          ),
+          createdAt: Date.now(),
+        };
+      }
     });
     this.publish(threadId);
   }
@@ -234,4 +284,10 @@ export class MessageQueue {
     void next.then(cleanup, cleanup);
     return next;
   }
+}
+
+export function messageContentHash(text: string, images: string[], goal: boolean): string {
+  return createHash("sha256")
+    .update(JSON.stringify([text.trim(), images, goal]))
+    .digest("hex");
 }
