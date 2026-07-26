@@ -86,13 +86,6 @@ projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
 
-bridge.on("request", (request, transport) => {
-  try {
-    attention.receive(request, transport);
-  } catch {
-    transport.respondError(request.id, -32_602, "Invalid request parameters");
-  }
-});
 bridge.on("state", (state) => {
   if (state === "ready") {
     void projection.sync().catch((error: Error) => {

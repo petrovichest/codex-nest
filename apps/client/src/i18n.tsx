@@ -48,6 +48,7 @@ const ENGLISH: Record<string, string> = {
   "Не удалось изменить порядок проектов": "Failed to reorder projects",
   "Не удалось удалить проект": "Failed to remove project",
   "Не удалось создать сессию": "Failed to create session",
+  "Не удалось создать Team-сессию": "Failed to create Team session",
   "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди":
     "A project cannot be removed while its sessions are running, awaiting a decision, or have queued messages",
   Архив: "Archive",
@@ -66,6 +67,9 @@ const ENGLISH: Record<string, string> = {
   "Удалить проект «{{project}}» из Codex Nest? Проект и его сессии исчезнут из приложения, но папка и история сохранятся.":
     "Remove “{{project}}” from Codex Nest? The project and its sessions will disappear from the app, but the folder and history will be preserved.",
   "Создать новую сессию в проекте {{project}}": "Create a new session in {{project}}",
+  "Создать новую Team-сессию": "Create a new Team session",
+  "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.":
+    "This session predates managed Team tools. Create a new Team session.",
   "Показать меньше": "Show less",
   "Показать ещё {{count}}": "Show {{count}} more",
   "Пока нет задач": "No tasks yet",

@@ -632,6 +632,11 @@ pre {
   box-shadow: 0 0 0 3px color-mix(in srgb, #4b9ce8 16%, transparent);
 }
 
+.status-queued {
+  background: #8d929b;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #8d929b 15%, transparent);
+}
+
 .status-needsAttention {
   background: #e5a62b;
   box-shadow: 0 0 0 3px color-mix(in srgb, #e5a62b 18%, transparent);
@@ -2653,6 +2658,12 @@ pre {
   margin: 8px auto 0;
   color: var(--danger);
   font-size: 12px;
+}
+
+.team-session-upgrade {
+  margin: 0 4px 8px;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
 }
 
 .queued-messages {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app";
+import { triggerTeamWatchdogs } from "./api";
 import type { AppManager } from "./app-management";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
@@ -1184,7 +1185,7 @@ describe("thread settings", () => {
     expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "default" });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
-    ).toEqual({ cwd: "/work" });
+    ).toMatchObject({ cwd: "/work", dynamicTools: expect.any(Array) });
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
       turnsBeforeEmptyThread,
     );
@@ -1412,6 +1413,12 @@ describe("thread settings", () => {
       reasoningEffort: "high",
     });
     expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
+    ).toMatchObject({
+      config: { agents: { enabled: false } },
+      dynamicTools: expect.any(Array),
+    });
+    expect(
       bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
     ).toMatchObject({
       effort: "high",
@@ -1423,7 +1430,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /parent session may only schedule its executable steps, wait, and report results.*every executable plan step.*fresh native subagent session.*exactly one self-contained task prompt.*fork_turns="none".*Task: <concise task-specific title>.*only the minimum context.*never copy or summarize the conversation, the full plan.*do not execute any plan step in the parent session.*do not steer it, send follow-up input.*sequential or parallel delegation/i,
+            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*only the minimum context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*finish the turn.*inspect_task.*steer_task.*cancel_task/is,
           ),
         },
       },
@@ -1872,25 +1879,35 @@ describe("thread settings", () => {
 });
 
 describe("Team orchestration", () => {
-  it("starts a background parent continuation when the first subagent finishes", async () => {
+  it("spawns managed threads and continues the parent after a submitted result becomes terminal", async () => {
     const { app, bridge, projection, store } = await createTeamHarness();
-    const child = teamChild("child", "Проверить интерфейс");
-    bridge.emit("notification", spawnCompleted("thread", "child"));
-    bridge.emit("notification", {
-      method: "thread/started",
-      params: { thread: child },
-    } satisfies ServerNotification);
-    bridge.emit("notification", spawnCompleted("thread", "child-two"));
-    bridge.emit("notification", {
-      method: "thread/started",
-      params: { thread: teamChild("child-two", "Проверить сервер") },
-    } satisfies ServerNotification);
-    await vi.waitFor(() =>
-      expect(store.snapshot().threadMeta.thread?.teamOrchestration?.children).toMatchObject({
-        child: { status: "running" },
-        "child-two": { status: "running" },
-      }),
-    );
+    const first = await callTeamTool(bridge, "thread", "spawn_task", {
+      title: "Проверить интерфейс",
+      prompt: "Проверь интерфейс и верни результат.",
+    });
+    const second = await callTeamTool(bridge, "thread", "spawn_task", {
+      title: "Проверить сервер",
+      prompt: "Проверь сервер и верни результат.",
+    });
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    const firstResult = dynamicToolJson(first);
+    const secondResult = dynamicToolJson(second);
+    await vi.waitFor(() => {
+      const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks;
+      expect(tasks?.[String(firstResult.taskId)]?.status).toBe("running");
+      expect(tasks?.[String(secondResult.taskId)]?.status).toBe("running");
+    });
+    expect(projection.summary(String(firstResult.threadId))?.relation).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "thread",
+    });
+
+    const submitted = await callTeamTool(bridge, String(firstResult.threadId), "submit_result", {
+      summary: "Интерфейс проверен",
+      details: "Ошибок не обнаружено.",
+    });
+    expect(submitted.success).toBe(true);
     const startsBefore = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/start",
     ).length;
@@ -1898,7 +1915,7 @@ describe("Team orchestration", () => {
     bridge.emit("notification", {
       method: "turn/completed",
       params: {
-        threadId: "child",
+        threadId: String(firstResult.threadId),
         turn: {
           ...testTurn("child-result", "completed"),
           items: [
@@ -1930,23 +1947,26 @@ describe("Team orchestration", () => {
       additionalContext: {
         "codexnest.team.results": {
           kind: "application",
-          value: expect.stringMatching(/child \(completed\).*Subagents still running: child-two/i),
+          value: expect.stringMatching(
+            /Проверить интерфейс.*Summary: Интерфейс проверен.*Проверить сервер/is,
+          ),
         },
       },
     });
-    expect(store.snapshot().threadMeta.thread?.teamOrchestration?.children).toMatchObject({
-      child: {
-        status: "completed",
-        delivery: { status: "delivered", parentTurnId: "turn" },
-      },
-      "child-two": { status: "running" },
-    });
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(firstResult.taskId)],
+      ).toBeUndefined(),
+    );
+    expect(
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(secondResult.taskId)],
+    ).toMatchObject({ status: "running" });
     expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toEqual([
       expect.objectContaining({
         type: "orchestrationNotice",
         agents: [
           expect.objectContaining({
-            threadId: "child",
+            threadId: firstResult.threadId,
             title: "Проверить интерфейс",
             outcome: "completed",
           }),
@@ -1957,7 +1977,10 @@ describe("Team orchestration", () => {
 
     bridge.emit("notification", {
       method: "turn/completed",
-      params: { threadId: "child", turn: testTurn("child-result", "completed") },
+      params: {
+        threadId: String(firstResult.threadId),
+        turn: testTurn("child-result", "completed"),
+      },
     } satisfies ServerNotification);
     await nextImmediate();
     await nextImmediate();
@@ -1969,24 +1992,51 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("delivers a queued user message before continuing with a completed subagent", async () => {
+  it("extracts a final answer and delivers a queued user message before the continuation", async () => {
     const { app, bridge, headers, projection, store } = await createTeamHarness();
     bridge.emit("notification", {
       method: "turn/started",
       params: { threadId: "thread", turn: testTurn("parent-running", "inProgress") },
     } satisfies ServerNotification);
-    bridge.emit("notification", spawnCompleted("thread", "child"));
-    bridge.emit("notification", {
-      method: "thread/started",
-      params: { thread: teamChild("child", "Собрать данные") },
-    } satisfies ServerNotification);
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Собрать данные",
+        prompt: "Собери данные и верни результат.",
+      }),
+    );
+    await vi.waitFor(() => {
+      const task =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      expect(task?.status).toBe("running");
+    });
     bridge.emit("notification", {
       method: "turn/completed",
-      params: { threadId: "child", turn: testTurn("child-result", "completed") },
+      params: {
+        threadId: String(spawned.threadId),
+        turn: {
+          ...testTurn("child-result", "completed"),
+          itemsView: "full",
+          items: [
+            {
+              type: "agentMessage",
+              id: "final",
+              text: "Данные собраны\n\nПолный отчёт",
+              phase: "final_answer",
+              memoryCitation: null,
+            },
+          ],
+        },
+      },
     } satisfies ServerNotification);
     await vi.waitFor(() => {
-      const tracked = store.snapshot().threadMeta.thread?.teamOrchestration?.children.child;
+      const tracked =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
       expect(tracked?.status).toBe("completed");
+      expect(tracked?.result).toMatchObject({
+        summary: "Данные собраны",
+        details: "Данные собраны\n\nПолный отчёт",
+        source: "final_answer",
+      });
       expect(tracked?.delivery).toBeUndefined();
     });
 
@@ -2031,6 +2081,124 @@ describe("Team orchestration", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
       startsBefore + 1,
     );
+    await app.close();
+    await store.flushed();
+  });
+
+  it("runs four managed tasks and starts the fifth from the FIFO queue", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const spawned = [];
+    for (let index = 1; index <= 5; index += 1) {
+      spawned.push(
+        dynamicToolJson(
+          await callTeamTool(bridge, "thread", "spawn_task", {
+            title: `Задача ${index}`,
+            prompt: `Выполни задачу ${index}.`,
+          }),
+        ),
+      );
+    }
+    await vi.waitFor(() => {
+      const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
+      expect(Object.values(tasks).filter((task) => task.status === "running")).toHaveLength(4);
+      expect(tasks[String(spawned[4]!.taskId)]?.status).toBe("queued");
+    });
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: String(spawned[0]!.threadId),
+        turn: {
+          ...testTurn("first-terminal", "completed"),
+          itemsView: "full",
+          items: [
+            {
+              type: "agentMessage",
+              id: "first-final",
+              text: "Первая задача готова",
+              phase: "final_answer",
+              memoryCitation: null,
+            },
+          ],
+        },
+      },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() => {
+      const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
+      expect(tasks[String(spawned[4]!.taskId)]?.status).toBe("running");
+    });
+    const childStarts = bridge.request.mock.calls.filter(
+      ([method, params]) =>
+        method === "turn/start" &&
+        String((params as Record<string, unknown>).threadId) !== "thread",
+    );
+    expect(childStarts).toHaveLength(5);
+
+    await app.close();
+    await store.flushed();
+  });
+
+  it("arms the inactivity watchdog and lets the parent inspect, steer, and cancel", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Долгая задача",
+        prompt: "Выполни долгую задачу.",
+      }),
+    );
+    await vi.waitFor(() => {
+      const task =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      expect(task?.status).toBe("running");
+    });
+    const now = Date.now();
+    await store.update((state) => {
+      const task = state.threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      if (task) task.lastActivityAt = now - 11 * 60_000;
+    });
+    await expect(triggerTeamWatchdogs(store, new Map(), now)).resolves.toEqual(new Set(["thread"]));
+    expect(
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+        ?.watchdog,
+    ).toMatchObject({ status: "pending" });
+
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "inspect_task", {
+          taskId: spawned.taskId,
+        })
+      ).success,
+    ).toBe(true);
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "steer_task", {
+          taskId: spawned.taskId,
+          message: "Проверь, не заблокирован ли процесс.",
+        })
+      ).success,
+    ).toBe(true);
+    expect(
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+        ?.watchdog,
+    ).toBeUndefined();
+
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "cancel_task", {
+          taskId: spawned.taskId,
+          reason: "Больше не требуется",
+        })
+      ).success,
+    ).toBe(true);
+    expect(
+      bridge.request.mock.calls.some(
+        ([method, params]) =>
+          method === "turn/interrupt" &&
+          (params as Record<string, unknown>).threadId === spawned.threadId,
+      ),
+    ).toBe(true);
+
     await app.close();
     await store.flushed();
   });
@@ -2124,6 +2292,7 @@ class SettingsBridge extends EventEmitter {
   } | null = null;
   failNextTurnStart = false;
   failNextGoalActivation = false;
+  managedThreadSequence = 0;
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
@@ -2142,7 +2311,13 @@ class SettingsBridge extends EventEmitter {
         nextCursor: null,
       };
     }
-    if (method === "thread/start") return { thread: testThread("created") };
+    if (method === "thread/start") {
+      if (params.threadSource === "codexnest-managed-subagent") {
+        this.managedThreadSequence += 1;
+        return { thread: testThread(`managed-${this.managedThreadSequence}`) };
+      }
+      return { thread: testThread("created") };
+    }
     if (method === "thread/resume") return {};
     if (method === "thread/name/set") return {};
     if (method === "thread/delete") return {};
@@ -2154,9 +2329,13 @@ class SettingsBridge extends EventEmitter {
         this.failNextTurnStart = false;
         throw new Error("turn failed");
       }
-      return { turn: testTurn("turn", "inProgress") };
+      const threadId = String(params.threadId ?? "thread");
+      return {
+        turn: testTurn(threadId === "thread" ? "turn" : `turn-${threadId}`, "inProgress"),
+      };
     }
     if (method === "turn/steer") return { turnId: "steered" };
+    if (method === "turn/interrupt") return {};
     if (method === "thread/goal/get") return { goal: this.goal };
     if (method === "thread/goal/clear") {
       this.goal = null;
@@ -2270,6 +2449,11 @@ async function createTeamHarness() {
     model: "gpt-a",
     reasoningEffort: "high",
   });
+  await store.update((state) => {
+    const meta = state.threadMeta.thread ?? { pinned: false, lastReadUpdatedAt: 0 };
+    meta.teamToolsVersion = 1;
+    state.threadMeta.thread = meta;
+  });
   const config = loadConfig({
     statePath: store.path,
     clientDist: join(directory, "missing"),
@@ -2293,39 +2477,53 @@ async function createTeamHarness() {
   };
 }
 
-function teamChild(id: string, name: string): Thread {
-  return {
-    ...testThread(id),
-    parentThreadId: "thread",
-    ephemeral: true,
-    status: { type: "active", activeFlags: [] },
-    agentNickname: "reviewer",
-    agentRole: "worker",
-    name,
-  };
+type TestDynamicToolResponse = {
+  contentItems: Array<{ type: "inputText"; text: string }>;
+  success: boolean;
+};
+
+async function callTeamTool(
+  bridge: SettingsBridge,
+  threadId: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<TestDynamicToolResponse> {
+  return new Promise((resolve, reject) => {
+    const requestId = `tool-${Math.random()}`;
+    bridge.emit(
+      "request",
+      {
+        method: "item/tool/call",
+        id: requestId,
+        params: {
+          threadId,
+          turnId: `turn-${threadId}`,
+          callId: requestId,
+          namespace: "codexnest",
+          tool,
+          arguments: args,
+        },
+      },
+      {
+        respond(id: string, result: TestDynamicToolResponse) {
+          if (id !== requestId) {
+            reject(new Error("Unexpected dynamic tool response id"));
+            return;
+          }
+          resolve(result);
+        },
+        respondError(_id: string, _code: number, message: string) {
+          reject(new Error(message));
+        },
+      },
+    );
+  });
 }
 
-function spawnCompleted(parentThreadId: string, childThreadId: string): ServerNotification {
-  return {
-    method: "item/completed",
-    params: {
-      threadId: parentThreadId,
-      turnId: "parent-spawn",
-      item: {
-        type: "collabAgentToolCall",
-        id: `spawn-${childThreadId}`,
-        tool: "spawnAgent",
-        status: "completed",
-        senderThreadId: parentThreadId,
-        receiverThreadIds: [childThreadId],
-        prompt: "Task: Проверить интерфейс\n\nВернуть результат.",
-        model: null,
-        reasoningEffort: null,
-        agentsStates: {},
-      },
-      completedAtMs: 1_000,
-    },
-  };
+function dynamicToolJson(response: TestDynamicToolResponse): Record<string, unknown> {
+  const text = response.contentItems.find((item) => item.type === "inputText")?.text;
+  if (!text) throw new Error("Dynamic tool response has no text");
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 function nextImmediate(): Promise<void> {

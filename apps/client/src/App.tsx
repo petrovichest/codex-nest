@@ -646,6 +646,7 @@ function Sidebar({
       projectThreads.some(
         (thread) =>
           thread.state === "running" ||
+          thread.state === "queued" ||
           thread.state === "needsAttention" ||
           thread.queuedMessageCount > 0,
       )
@@ -1251,6 +1252,7 @@ function branchNeedsAttention(
 ): boolean {
   if (
     thread.id === selectedThreadId ||
+    thread.state === "queued" ||
     thread.state === "running" ||
     thread.state === "needsAttention"
   ) {

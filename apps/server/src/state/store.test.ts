@@ -137,10 +137,20 @@ describe("StateStore", () => {
         pinned: false,
         lastReadUpdatedAt: 0,
         teamOrchestration: {
-          children: {
-            child: {
+          tasks: {
+            task: {
+              id: "task",
+              childThreadId: "child",
+              title: "Проверить интерфейс",
+              prompt: "Проверить интерфейс и вернуть результат.",
               status: "completed",
+              createdAt: 1,
+              lastActivityAt: 2,
               terminalTurnId: "child-turn",
+              result: {
+                summary: "Интерфейс проверен",
+                source: "submitted",
+              },
             },
           },
         },
@@ -170,10 +180,15 @@ describe("StateStore", () => {
     await reloaded.load();
     expect(reloaded.snapshot().threadMeta.parent).toMatchObject({
       teamOrchestration: {
-        children: {
-          child: {
+        tasks: {
+          task: {
+            childThreadId: "child",
             status: "completed",
             terminalTurnId: "child-turn",
+            result: {
+              summary: "Интерфейс проверен",
+              source: "submitted",
+            },
           },
         },
       },

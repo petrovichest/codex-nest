@@ -170,6 +170,7 @@ export function ThreadPage({
   const [deleting, setDeleting] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
   const [threadMissing, setThreadMissing] = useState(false);
   const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
   const voiceModeRef = useRef(voiceMode);
@@ -978,6 +979,7 @@ export function ThreadPage({
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
     setSettingsBusy(true);
     setError(null);
+    setTeamUpgradeRequired(false);
     try {
       const thread = await api.updateThreadSettings(threadId, patch);
       dispatch({ type: "thread", thread });
@@ -985,10 +987,40 @@ export function ThreadPage({
         setGoalMode(false);
       }
     } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "";
+      if (patch.collaborationMode === "team" && message.includes("managed Team tools")) {
+        setTeamUpgradeRequired(true);
+      }
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
           : t("Не удалось изменить настройки"),
+      );
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function createManagedTeamSession() {
+    if (!project) return;
+    setSettingsBusy(true);
+    setError(null);
+    try {
+      const created = await api.createProjectThread(project.id);
+      dispatch({ type: "thread", thread: created.thread });
+      const configured = await api.updateThreadSettings(created.thread.id, {
+        collaborationMode: "team",
+      });
+      dispatch({ type: "thread", thread: configured });
+      setTeamUpgradeRequired(false);
+      navigate(`/threads/${encodeURIComponent(configured.id)}`, {
+        state: { focusComposer: true },
+      });
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось создать Team-сессию"),
       );
     } finally {
       setSettingsBusy(false);
@@ -1304,6 +1336,16 @@ export function ThreadPage({
             error={error}
             hasSupplementalContent={annotations.length > 0}
           >
+            {teamUpgradeRequired && project && (
+              <button
+                className="team-session-upgrade"
+                type="button"
+                disabled={settingsBusy}
+                onClick={() => void createManagedTeamSession()}
+              >
+                {t("Создать новую Team-сессию")}
+              </button>
+            )}
             {showScrollToBottom && (
               <button
                 type="button"

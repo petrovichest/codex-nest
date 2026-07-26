@@ -21,9 +21,38 @@ export type TimelineArtifact = Extract<
   { type: "userInputResponse" | "planChecklist" | "orchestrationNotice" }
 >;
 
-export interface TeamOrchestrationChildState {
-  status: "running" | ThreadOutcome;
+export type ManagedTeamTaskStatus = "queued" | "starting" | "running" | ThreadOutcome;
+
+export interface ManagedTeamTaskResult {
+  summary: string;
+  details?: string;
+  source: "submitted" | "final_answer" | "agent_message" | "status";
+}
+
+export interface ManagedTeamTaskState {
+  id: string;
+  childThreadId: string;
+  childTurnId?: string;
+  title: string;
+  prompt: string;
+  status: ManagedTeamTaskStatus;
+  createdAt: number;
+  startedAt?: number;
+  lastActivityAt: number;
+  lastWatchdogAt?: number;
+  watchdog?: {
+    status: "pending" | "claimed";
+    triggeredAt: number;
+    claimId?: string;
+  };
   terminalTurnId?: string;
+  resultCandidate?: {
+    summary: string;
+    details?: string;
+    submittedAt: number;
+    callId: string;
+  };
+  result?: ManagedTeamTaskResult;
   delivery?: {
     status: "claimed" | "delivered";
     claimId: string;
@@ -32,7 +61,7 @@ export interface TeamOrchestrationChildState {
 }
 
 export interface TeamOrchestrationState {
-  children: Record<string, TeamOrchestrationChildState>;
+  tasks: Record<string, ManagedTeamTaskState>;
 }
 
 export interface ThreadMetaState {
@@ -46,6 +75,11 @@ export interface ThreadMetaState {
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
   teamOrchestration?: TeamOrchestrationState;
+  teamToolsVersion?: 1;
+  managedParent?: {
+    parentThreadId: string;
+    taskId: string;
+  };
   unmaterialized?: boolean;
   draft?: ThreadDraft;
 }
@@ -274,6 +308,9 @@ function validateState(value: unknown): CodexNestState {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");
   }
   for (const meta of Object.values(value.threadMeta)) {
+    if (isRecord(meta) && isLegacyTeamOrchestrationState(meta.teamOrchestration)) {
+      delete meta.teamOrchestration;
+    }
     if (
       !isRecord(meta) ||
       typeof meta.pinned !== "boolean" ||
@@ -287,6 +324,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
       (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
+      (meta.teamToolsVersion !== undefined && meta.teamToolsVersion !== 1) ||
+      (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft))
     ) {
@@ -448,24 +487,80 @@ function isTimelineArtifact(value: unknown): value is TimelineArtifact {
 }
 
 function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationState {
-  if (!isRecord(value) || !isRecord(value.children)) return false;
-  return Object.values(value.children).every((child) => {
+  if (!isRecord(value) || !isRecord(value.tasks)) return false;
+  return Object.entries(value.tasks).every(([taskId, task]) => {
     if (
-      !isRecord(child) ||
-      !["running", "completed", "failed", "interrupted"].includes(String(child.status)) ||
-      ((child.terminalTurnId !== undefined || child.status !== "running") &&
-        typeof child.terminalTurnId !== "string")
+      !isRecord(task) ||
+      task.id !== taskId ||
+      typeof task.childThreadId !== "string" ||
+      typeof task.title !== "string" ||
+      !task.title.trim() ||
+      typeof task.prompt !== "string" ||
+      !task.prompt.trim() ||
+      !["queued", "starting", "running", "completed", "failed", "interrupted"].includes(
+        String(task.status),
+      ) ||
+      typeof task.createdAt !== "number" ||
+      typeof task.lastActivityAt !== "number" ||
+      (task.startedAt !== undefined && typeof task.startedAt !== "number") ||
+      (task.lastWatchdogAt !== undefined && typeof task.lastWatchdogAt !== "number") ||
+      (task.watchdog !== undefined && !isManagedWatchdog(task.watchdog)) ||
+      (task.childTurnId !== undefined && typeof task.childTurnId !== "string") ||
+      (task.terminalTurnId !== undefined && typeof task.terminalTurnId !== "string") ||
+      (task.resultCandidate !== undefined && !isManagedResultCandidate(task.resultCandidate)) ||
+      (task.result !== undefined && !isManagedResult(task.result))
     ) {
       return false;
     }
-    if (child.delivery === undefined) return true;
+    if (task.delivery === undefined) return true;
     return (
-      isRecord(child.delivery) &&
-      ["claimed", "delivered"].includes(String(child.delivery.status)) &&
-      typeof child.delivery.claimId === "string" &&
-      (child.delivery.parentTurnId === undefined || typeof child.delivery.parentTurnId === "string")
+      isRecord(task.delivery) &&
+      ["claimed", "delivered"].includes(String(task.delivery.status)) &&
+      typeof task.delivery.claimId === "string" &&
+      (task.delivery.parentTurnId === undefined || typeof task.delivery.parentTurnId === "string")
     );
   });
+}
+
+function isLegacyTeamOrchestrationState(value: unknown): boolean {
+  return isRecord(value) && isRecord(value.children) && value.tasks === undefined;
+}
+
+function isManagedParent(value: unknown): boolean {
+  return (
+    isRecord(value) && typeof value.parentThreadId === "string" && typeof value.taskId === "string"
+  );
+}
+
+function isManagedResultCandidate(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.summary === "string" &&
+    Boolean(value.summary.trim()) &&
+    (value.details === undefined || typeof value.details === "string") &&
+    typeof value.submittedAt === "number" &&
+    typeof value.callId === "string"
+  );
+}
+
+function isManagedWatchdog(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    ["pending", "claimed"].includes(String(value.status)) &&
+    typeof value.triggeredAt === "number" &&
+    (value.claimId === undefined || typeof value.claimId === "string") &&
+    (value.status !== "claimed" || typeof value.claimId === "string")
+  );
+}
+
+function isManagedResult(value: unknown): value is ManagedTeamTaskResult {
+  return (
+    isRecord(value) &&
+    typeof value.summary === "string" &&
+    Boolean(value.summary.trim()) &&
+    (value.details === undefined || typeof value.details === "string") &&
+    ["submitted", "final_answer", "agent_message", "status"].includes(String(value.source))
+  );
 }
 
 function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessage {

@@ -190,7 +190,8 @@ export type DirectoryListing = {
 
 export type ThreadOutcome = "completed" | "failed" | "interrupted";
 
-export type ThreadState = "needsAttention" | "running" | ThreadOutcome | "idle" | "unavailable";
+export type ThreadState =
+  "needsAttention" | "queued" | "running" | ThreadOutcome | "idle" | "unavailable";
 
 export type ThreadRelation =
   | {

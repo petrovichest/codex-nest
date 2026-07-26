@@ -1442,7 +1442,7 @@ export class AppProjection extends EventEmitter {
     const state = this.store.snapshot();
     const meta = state.threadMeta[cached.thread.id] ?? { pinned: false, lastReadUpdatedAt: 0 };
     const updatedAt = cached.thread.updatedAt * 1_000;
-    const threadState = this.threadState(cached, meta.lastOutcome);
+    const threadState = this.threadState(cached, meta.lastOutcome, state);
     const unread = updatedAt > meta.lastReadUpdatedAt && isTerminal(threadState);
     return {
       id: cached.thread.id,
@@ -1460,11 +1460,15 @@ export class AppProjection extends EventEmitter {
       currentTurnId: cached.currentTurnId,
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
       settings: sessionSettings(meta.settings),
-      relation: threadRelation(cached.thread),
+      relation: threadRelation(cached.thread, meta),
     };
   }
 
-  private threadState(cached: CachedThread, stored?: ThreadOutcome): ThreadState {
+  private threadState(
+    cached: CachedThread,
+    stored: ThreadOutcome | undefined,
+    state: CodexNestState,
+  ): ThreadState {
     if (
       this.attention
         .list()
@@ -1472,12 +1476,23 @@ export class AppProjection extends EventEmitter {
     ) {
       return "needsAttention";
     }
+    const meta = state.threadMeta[cached.thread.id];
+    if (meta?.managedParent) {
+      const managedTask =
+        state.threadMeta[meta.managedParent.parentThreadId]?.teamOrchestration?.tasks[
+          meta.managedParent.taskId
+        ];
+      if (managedTask?.status === "queued") return "queued";
+      if (managedTask?.status === "starting" || managedTask?.status === "running") return "running";
+      if (managedTask && ["completed", "failed", "interrupted"].includes(managedTask.status)) {
+        return managedTask.status as ThreadOutcome;
+      }
+    }
     if (cached.thread.status.type === "systemError") return "failed";
     if (cached.currentTurnId) return "running";
     if (isSpawnedSubagent(cached.thread) && cached.thread.status.type === "active")
       return "running";
     if (cached.goalStatus === "active") return "running";
-    const meta = this.store.snapshot().threadMeta[cached.thread.id];
     if (teamOrchestrationIsActive(meta?.teamOrchestration)) return "running";
     if (meta?.awaitingPlanResponse) {
       return "needsAttention";
@@ -1621,7 +1636,19 @@ function subagentTaskTitle(prompt: string): string | null {
   return title ? `${title}…` : null;
 }
 
-function threadRelation(thread: Thread): ThreadSummary["relation"] {
+function threadRelation(
+  thread: Thread,
+  meta?: CodexNestState["threadMeta"][string],
+): ThreadSummary["relation"] {
+  if (meta?.managedParent) {
+    return {
+      kind: "subagent",
+      sessionId: thread.sessionId,
+      parentThreadId: meta.managedParent.parentThreadId,
+      nickname: null,
+      role: null,
+    };
+  }
   return thread.parentThreadId === null
     ? { kind: "session", sessionId: thread.sessionId }
     : {
@@ -2084,7 +2111,11 @@ function teamOrchestrationIsActive(
   orchestration: CodexNestState["threadMeta"][string]["teamOrchestration"],
 ): boolean {
   if (!orchestration) return false;
-  return Object.values(orchestration.children).some(
-    (child) => child.status === "running" || child.delivery?.status !== "delivered",
+  return Object.values(orchestration.tasks).some(
+    (task) =>
+      task.status === "queued" ||
+      task.status === "starting" ||
+      task.status === "running" ||
+      task.delivery?.status !== "delivered",
   );
 }

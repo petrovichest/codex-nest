@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
@@ -56,8 +56,13 @@ import { AttentionValidationError, type AttentionManager } from "./attention";
 import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
-import type { ServerNotification } from "./codex/generated/index";
-import type { CollabAgentStatus, ThreadResumeResponse, Turn } from "./codex/generated/v2/index";
+import type { ServerNotification, ServerRequest } from "./codex/generated/index";
+import type {
+  DynamicToolCallResponse,
+  ThreadItem,
+  ThreadResumeResponse,
+  Turn,
+} from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
   parseThreadRead,
@@ -66,7 +71,7 @@ import {
   parseTurnStart,
   parseTurnSteer,
 } from "./codex/guards";
-import { RpcError } from "./codex/transport";
+import { RpcError, type JsonlTransport } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
@@ -93,7 +98,12 @@ import {
   MessageQueueValidationError,
   messageContentHash,
 } from "./message-queue";
-import type { CodexNestState, StateStore } from "./state/store";
+import type {
+  CodexNestState,
+  ManagedTeamTaskResult,
+  ManagedTeamTaskState,
+  StateStore,
+} from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
 import {
   appendTranscriptionTimingSample,
@@ -114,24 +124,34 @@ import {
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
+const TEAM_TOOLS_VERSION = 1;
+const TEAM_MAX_ACTIVE_TASKS = 4;
+const TEAM_WATCHDOG_MS = 10 * 60_000;
+const TEAM_ACTIVITY_PERSIST_MS = 60_000;
+const TEAM_SESSION_UPGRADE_MESSAGE =
+  "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.";
 const TEAM_MODE_CONTEXT = [
   "This session is in CodexNest Team mode. Act only as the root coordinator.",
-  "Once a plan exists, the parent session may only schedule its executable steps, wait, and report results.",
-  "For every executable plan step, create a fresh native subagent session and send exactly one self-contained task prompt.",
-  'Always spawn it with fork_turns="none" so the child receives no parent conversation history.',
-  "Start the prompt with one line in the exact form `Task: <concise task-specific title>`; put the execution details after it.",
+  "Use only the codexnest managed-task tools for delegation. Never use native subagent tools.",
+  "For every independent executable step, call codexnest.spawn_task with a concise title and one self-contained prompt.",
   "Include only the minimum context needed to complete that step: its objective, relevant constraints, affected scope, and expected result.",
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
-  "Do not execute any plan step in the parent session.",
-  "After spawning a subagent, do not steer it, send follow-up input, or resume or reuse that session for another step; only wait for its result.",
+  "Do not execute a delegated plan step in the parent session.",
   "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
-  "Never finish a turn merely by saying that you are waiting: either call the native wait tool in the active turn or let CodexNest deliver the result in a later continuation.",
+  "After scheduling tasks, you may finish the turn; CodexNest will resume this session when results arrive.",
   "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
   "Never run parallel subagents that may write to overlapping files.",
+  "Use codexnest.inspect_task, codexnest.steer_task, or codexnest.cancel_task when a watchdog reports that a task is silent.",
   "When the required results are ready, return one consolidated result to the user.",
   "The user should not need to coordinate subagents directly.",
+].join(" ");
+const TEAM_CHILD_INSTRUCTIONS = [
+  "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
+  "Do not create or delegate to subagents.",
+  "Before finishing, call codexnest.submit_result with a concise summary and optional Markdown details.",
+  "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
 ].join(" ");
 
 interface DownloadTicket {
@@ -144,11 +164,88 @@ interface DownloadTicket {
 interface TeamResultClaim {
   claimId: string;
   results: Array<{
+    taskId: string;
     childThreadId: string;
     terminalTurnId: string;
     outcome: ThreadOutcome;
+    title: string;
+    result: ManagedTeamTaskResult;
+  }>;
+  watchdogs: Array<{
+    taskId: string;
+    childThreadId: string;
+    title: string;
+    status: ManagedTeamTaskState["status"];
+    lastActivityAt: number;
   }>;
 }
+
+const TEAM_ROOT_DYNAMIC_TOOLS = [
+  {
+    type: "namespace",
+    name: "codexnest",
+    description: "Create and manage CodexNest child tasks for Team mode.",
+    tools: [
+      dynamicTool("spawn_task", "Create one managed child task.", {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Concise task-specific title." },
+          prompt: { type: "string", description: "Self-contained task instructions." },
+        },
+        required: ["title", "prompt"],
+        additionalProperties: false,
+      }),
+      dynamicTool("list_tasks", "List this parent's managed tasks.", {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      }),
+      dynamicTool("inspect_task", "Inspect the current progress of one managed task.", {
+        type: "object",
+        properties: { taskId: { type: "string" } },
+        required: ["taskId"],
+        additionalProperties: false,
+      }),
+      dynamicTool("steer_task", "Send corrective guidance to a running managed task.", {
+        type: "object",
+        properties: {
+          taskId: { type: "string" },
+          message: { type: "string" },
+        },
+        required: ["taskId", "message"],
+        additionalProperties: false,
+      }),
+      dynamicTool("cancel_task", "Cancel a queued or running managed task.", {
+        type: "object",
+        properties: {
+          taskId: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["taskId"],
+        additionalProperties: false,
+      }),
+    ],
+  },
+] as const;
+
+const TEAM_CHILD_DYNAMIC_TOOLS = [
+  {
+    type: "namespace",
+    name: "codexnest",
+    description: "Return the result of the current CodexNest managed task.",
+    tools: [
+      dynamicTool("submit_result", "Submit the result candidate for this managed task.", {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "Concise non-empty result summary." },
+          details: { type: "string", description: "Optional Markdown details." },
+        },
+        required: ["summary"],
+        additionalProperties: false,
+      }),
+    ],
+  },
+] as const;
 
 export interface ApiServices {
   bridge: CodexBridge;
@@ -215,6 +312,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     assertWritableThread(summary);
     const shouldGenerateTitle =
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
+    if (
+      summary.settings.collaborationMode === "team" &&
+      store.snapshot().threadMeta[threadId]?.teamToolsVersion !== TEAM_TOOLS_VERSION
+    ) {
+      throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
+    }
     if (goal) {
       if (summary.settings.collaborationMode === "team") {
         throw new ProjectConflictError("Team mode cannot be combined with a goal");
@@ -241,6 +344,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             cwd: summary.cwd,
             excludeTurns: true,
             ...threadSettings(summary.settings),
+            ...(summary.settings.collaborationMode === "team"
+              ? { config: teamRuntimeConfig() }
+              : {}),
           },
           30_000,
         );
@@ -287,7 +393,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           const child = projection.summary(result.childThreadId);
           return {
             threadId: result.childThreadId,
-            title: child?.title ?? "Субагент",
+            title: result.title,
             nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
             outcome: result.outcome,
           };
@@ -325,6 +431,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
     for (const candidate of projection.emptyThreadCandidates(projectId)) {
+      if (
+        store.snapshot().threadMeta[candidate.thread.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION
+      ) {
+        continue;
+      }
       if (candidate.knownUnmaterialized) return candidate.thread;
       const detail = await projection.readThread(candidate.thread.id);
       if (detail.turns.length === 0 && detail.queuedMessages.length === 0) {
@@ -350,10 +461,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await bridge.request<unknown>("thread/start", {
           cwd: project.path,
           ...threadSettings(settings),
+          dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
+          ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
         }),
       );
       projection.upsertThread(started.thread);
       await projection.markUnmaterialized(started.thread.id);
+      await markTeamToolsAvailable(store, started.thread.id);
       return projection.setSettings(started.thread.id, settings);
     })().finally(() => {
       if (projectThreadCreations.get(projectId) === request) {
@@ -441,6 +555,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
   });
   const scheduledTeamContinuations = new Set<string>();
+  const scheduledTeamTaskStarts = new Set<string>();
+  const teamTaskStartLocks = new Map<string, Promise<unknown>>();
+  const managedActivity = new Map<string, number>();
   let teamNotificationQueue = Promise.resolve();
   let teamContinuationsClosed = false;
   const scheduleTeamContinuation = (threadId: string): void => {
@@ -455,7 +572,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             !summary ||
             summary.relation.kind !== "session" ||
             summary.currentTurnId ||
-            !hasPendingTeamResults(store, threadId)
+            !hasPendingTeamContinuation(store, threadId)
           ) {
             return;
           }
@@ -475,17 +592,51 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       })();
     });
   };
-  const resumeTeamContinuations = (): void => {
-    for (const threadId of pendingTeamParents(store)) scheduleTeamContinuation(threadId);
+  const scheduleTeamTasks = (parentThreadId: string): void => {
+    if (teamContinuationsClosed || scheduledTeamTaskStarts.has(parentThreadId)) return;
+    scheduledTeamTaskStarts.add(parentThreadId);
+    setImmediate(() => {
+      void withKeyLock(teamTaskStartLocks, parentThreadId, async () => {
+        try {
+          await startQueuedTeamTasks(bridge, store, projection, parentThreadId);
+          projection.publishThreadState(parentThreadId);
+          scheduleTeamContinuation(parentThreadId);
+        } catch (error) {
+          app.log.warn(
+            { err: safeError(error), parentThreadId },
+            "Failed to start managed Team task",
+          );
+        } finally {
+          scheduledTeamTaskStarts.delete(parentThreadId);
+        }
+      });
+    });
   };
-  const teamNotificationHandler = (notification: Parameters<typeof handleTeamNotification>[0]) => {
-    if (!isTeamOrchestrationNotification(notification, projection)) return;
+  const resumeTeamContinuations = (): void => {
+    for (const threadId of pendingTeamParents(store)) {
+      scheduleTeamTasks(threadId);
+      scheduleTeamContinuation(threadId);
+    }
+  };
+  const teamNotificationHandler = (notification: ServerNotification) => {
+    const childThreadId = notificationThreadId(notification);
+    if (childThreadId && managedTaskForChild(store.snapshot(), childThreadId)) {
+      managedActivity.set(childThreadId, Date.now());
+    }
+    if (!isManagedTeamNotification(notification, store)) return;
     teamNotificationQueue = teamNotificationQueue
       .catch(() => undefined)
       .then(async () => {
-        const affected = await handleTeamNotification(notification, store, projection);
+        const affected = await handleManagedTeamNotification(
+          notification,
+          bridge,
+          store,
+          projection,
+          managedActivity,
+        );
         for (const threadId of affected) {
           projection.publishThreadState(threadId);
+          scheduleTeamTasks(threadId);
           scheduleTeamContinuation(threadId);
         }
       })
@@ -493,10 +644,54 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         app.log.warn({ err: safeError(error) }, "Failed to process Team orchestration event");
       });
   };
+  const teamRequestHandler = (request: ServerRequest, transport: JsonlTransport) => {
+    if (request.method === "item/tool/call" && request.params.namespace === "codexnest") {
+      void handleManagedTeamToolCall(request, bridge, store, projection)
+        .then(async (response) => {
+          transport.respond(request.id, response);
+          const caller = request.params.threadId;
+          const parent =
+            projection.summary(caller)?.relation.kind === "session"
+              ? caller
+              : managedTaskForChild(store.snapshot(), caller)?.parentThreadId;
+          if (parent) {
+            scheduleTeamTasks(parent);
+            projection.publishThreadState(parent);
+          }
+        })
+        .catch((error: unknown) => {
+          transport.respond(request.id, dynamicToolError(safeError(error).message));
+        });
+      return;
+    }
+    try {
+      attention.receive(request, transport);
+    } catch {
+      transport.respondError(request.id, -32_602, "Invalid request parameters");
+    }
+  };
   bridge.on("notification", teamNotificationHandler);
+  bridge.on("request", teamRequestHandler);
+  const teamWatchdogTimer = setInterval(() => {
+    teamNotificationQueue = teamNotificationQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const affected = await triggerTeamWatchdogs(store, managedActivity, Date.now());
+        for (const parentThreadId of affected) {
+          projection.publishThreadState(parentThreadId);
+          scheduleTeamContinuation(parentThreadId);
+        }
+      })
+      .catch((error: unknown) => {
+        app.log.warn({ err: safeError(error) }, "Failed to run Team watchdog");
+      });
+  }, 30_000);
+  teamWatchdogTimer.unref();
   app.addHook("onClose", async () => {
     teamContinuationsClosed = true;
+    clearInterval(teamWatchdogTimer);
     bridge.off("notification", teamNotificationHandler);
+    bridge.off("request", teamRequestHandler);
     await teamNotificationQueue;
   });
   const voiceTranscriptions = services.transcription
@@ -522,6 +717,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         .then((threadIds) => {
           for (const threadId of threadIds) {
             projection.publishThreadState(threadId);
+            scheduleTeamTasks(threadId);
             scheduleTeamContinuation(threadId);
           }
         })
@@ -1291,10 +1487,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await bridge.request<unknown>("thread/start", {
           cwd: project.path,
           ...threadSettings(settings),
+          dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
+          ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
         }),
       );
       projection.upsertThread(started.thread);
       await projection.markUnmaterialized(started.thread.id);
+      await markTeamToolsAvailable(store, started.thread.id);
       await projection.setSettings(started.thread.id, settings);
       const result = await startTurn(
         started.thread.id,
@@ -1343,6 +1542,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", "Thread not found");
     }
     assertWritableThread(summary);
+    if (teamOrchestrationHasWork(store, request.params.id)) {
+      throw new ProjectConflictError(
+        "Managed Team tasks must finish or be cancelled before deleting the parent session",
+      );
+    }
     await bridge.request("thread/delete", { threadId: request.params.id });
     await voiceTranscriptions?.cancelThread(request.params.id);
     await queue.removeThread(request.params.id);
@@ -1374,10 +1578,38 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const settings = mergeSettings(summary.settings, patch, projection.availableModels);
       if (
         settings.collaborationMode === "team" &&
+        store.snapshot().threadMeta[request.params.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION
+      ) {
+        throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
+      }
+      if (
+        settings.collaborationMode === "team" &&
         summary.settings.collaborationMode !== "team" &&
         (await readThreadGoal(bridge, request.params.id))
       ) {
         throw new ProjectConflictError("Team mode cannot be combined with a goal");
+      }
+      if (
+        settings.collaborationMode !== "team" &&
+        summary.settings.collaborationMode === "team" &&
+        teamOrchestrationHasWork(store, request.params.id)
+      ) {
+        throw new ProjectConflictError(
+          "Team mode cannot be disabled while managed tasks are active or undelivered",
+        );
+      }
+      if (settings.collaborationMode === "team" && summary.settings.collaborationMode !== "team") {
+        await bridge.request<ThreadResumeResponse>(
+          "thread/resume",
+          {
+            threadId: request.params.id,
+            cwd: summary.cwd,
+            excludeTurns: true,
+            ...threadSettings(settings),
+            config: teamRuntimeConfig(),
+          },
+          30_000,
+        );
       }
       const thread = await projection.setSettings(request.params.id, settings);
       if (patch.reasoningEffort !== undefined) {
@@ -1685,202 +1917,431 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 }
 
-async function handleTeamNotification(
-  notification: ServerNotification,
+async function handleManagedTeamToolCall(
+  request: Extract<ServerRequest, { method: "item/tool/call" }>,
+  bridge: CodexBridge,
   store: StateStore,
   projection: AppProjection,
-): Promise<Set<string>> {
-  const affected = new Set<string>();
-  if (notification.method === "thread/started") {
-    const parentThreadId = notification.params.thread.parentThreadId;
-    if (
-      parentThreadId &&
-      projection.summary(parentThreadId)?.settings.collaborationMode === "team" &&
-      (await registerTeamChildren(store, parentThreadId, [notification.params.thread.id]))
-    ) {
-      affected.add(parentThreadId);
-    }
-    return affected;
-  }
-  if (notification.method === "item/completed") {
-    const item = notification.params.item;
-    if (
-      item.type === "collabAgentToolCall" &&
-      item.tool === "spawnAgent" &&
-      projection.summary(notification.params.threadId)?.settings.collaborationMode === "team" &&
-      (await registerTeamChildren(store, notification.params.threadId, item.receiverThreadIds))
-    ) {
-      affected.add(notification.params.threadId);
-    }
-    return affected;
-  }
-  if (notification.method === "turn/completed") {
-    for (const item of notification.params.turn.items) {
-      if (
-        item.type === "collabAgentToolCall" &&
-        item.tool === "spawnAgent" &&
-        projection.summary(notification.params.threadId)?.settings.collaborationMode === "team" &&
-        (await registerTeamChildren(store, notification.params.threadId, item.receiverThreadIds))
-      ) {
-        affected.add(notification.params.threadId);
+): Promise<DynamicToolCallResponse> {
+  const { threadId, callId, tool } = request.params;
+  const args = dynamicToolArguments(request.params.arguments);
+  if (tool === "submit_result") {
+    const managed = managedTaskForChild(store.snapshot(), threadId);
+    if (!managed) return dynamicToolError("This thread is not a managed Team task");
+    const summary = requiredToolString(args, "summary");
+    const details = optionalToolString(args, "details");
+    let accepted = false;
+    await store.update((state) => {
+      const task =
+        state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+      if (!task) return;
+      if (task.resultCandidate?.callId === callId) {
+        accepted = true;
+        return;
       }
+      if (isTerminalTask(task)) return;
+      task.resultCandidate = {
+        summary,
+        ...(details ? { details } : {}),
+        submittedAt: Date.now(),
+        callId,
+      };
+      task.lastActivityAt = Date.now();
+      delete task.watchdog;
+      accepted = true;
+    });
+    return accepted
+      ? dynamicToolSuccess({ accepted: true })
+      : dynamicToolError("The managed task is already terminal");
+  }
+
+  const parent = projection.summary(threadId);
+  if (
+    !parent ||
+    parent.relation.kind !== "session" ||
+    parent.settings.collaborationMode !== "team"
+  ) {
+    return dynamicToolError("Managed task tools are only available to a Team parent session");
+  }
+
+  if (tool === "spawn_task") {
+    const title = requiredToolString(args, "title");
+    const prompt = requiredToolString(args, "prompt");
+    const task = await createManagedTeamTask(bridge, store, projection, parent, title, prompt);
+    return dynamicToolSuccess({
+      taskId: task.id,
+      threadId: task.childThreadId,
+      status: task.status,
+    });
+  }
+
+  if (tool === "list_tasks") {
+    const tasks = Object.values(
+      store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
+    )
+      .sort((left, right) => left.createdAt - right.createdAt)
+      .map(publicManagedTask);
+    return dynamicToolSuccess({ tasks });
+  }
+
+  const taskId = requiredToolString(args, "taskId");
+  const task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+  if (!task) return dynamicToolError("Managed task not found");
+
+  if (tool === "inspect_task") {
+    let recentMessages: string[] = [];
+    try {
+      const page = parseTurnsList(
+        await bridge.request<unknown>(
+          "thread/turns/list",
+          {
+            threadId: task.childThreadId,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+          30_000,
+        ),
+      );
+      recentMessages = (page.data[0]?.items ?? [])
+        .filter(
+          (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+            item.type === "agentMessage",
+        )
+        .map((item) => item.text.trim())
+        .filter(Boolean)
+        .slice(-3);
+    } catch {
+      // The persisted coordinator state is still useful when detailed history is unavailable.
     }
-    const waited = await deliverWaitedTeamResults(
-      store,
-      notification.params.threadId,
-      notification.params.turn,
+    return dynamicToolSuccess({ ...publicManagedTask(task), recentMessages });
+  }
+
+  if (tool === "steer_task") {
+    if (task.status !== "running" || !task.childTurnId) {
+      return dynamicToolError("Only a running managed task can be steered");
+    }
+    const message = requiredToolString(args, "message");
+    const result = parseTurnSteer(
+      await bridge.request<unknown>("turn/steer", {
+        threadId: task.childThreadId,
+        expectedTurnId: task.childTurnId,
+        input: messageInput(message, []),
+      }),
     );
-    if (waited.length) {
-      affected.add(notification.params.threadId);
-      await recordTeamNotice(
-        projection,
-        notification.params.threadId,
-        notification.params.turn.id,
-        waited,
-        firstUserMessageId(notification.params.turn),
+    await store.update((state) => {
+      const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+      if (!current || isTerminalTask(current)) return;
+      current.childTurnId = result.turnId;
+      current.lastActivityAt = Date.now();
+      delete current.watchdog;
+    });
+    return dynamicToolSuccess({ accepted: true, turnId: result.turnId });
+  }
+
+  if (tool === "cancel_task") {
+    if (isTerminalTask(task)) return dynamicToolSuccess({ accepted: true, status: task.status });
+    if (task.childTurnId) {
+      await bridge
+        .request("turn/interrupt", {
+          threadId: task.childThreadId,
+          turnId: task.childTurnId,
+        })
+        .catch(() => undefined);
+    }
+    const reason = optionalToolString(args, "reason");
+    await finalizeManagedTask(store, task.childThreadId, `cancelled:${Date.now()}`, "interrupted", {
+      summary: reason ? `Task cancelled: ${reason}` : "Task cancelled by the parent agent.",
+      source: "status",
+    });
+    return dynamicToolSuccess({ accepted: true, status: "interrupted" });
+  }
+
+  return dynamicToolError(`Unknown CodexNest tool: ${tool}`);
+}
+
+async function createManagedTeamTask(
+  bridge: CodexBridge,
+  store: StateStore,
+  projection: AppProjection,
+  parent: ThreadSummary,
+  title: string,
+  prompt: string,
+): Promise<ManagedTeamTaskState> {
+  if (store.snapshot().threadMeta[parent.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION) {
+    throw new ProjectConflictError("This Team session does not have managed tools");
+  }
+  const started = parseThreadStart(
+    await bridge.request<unknown>("thread/start", {
+      cwd: parent.cwd,
+      ...threadSettings(parent.settings),
+      config: teamRuntimeConfig(),
+      developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+      dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
+      threadSource: "codexnest-managed-subagent",
+    }),
+  );
+  projection.upsertThread(started.thread);
+  await projection.markUnmaterialized(started.thread.id);
+  await bridge
+    .request("thread/name/set", { threadId: started.thread.id, name: title })
+    .catch(() => undefined);
+  const now = Date.now();
+  const task: ManagedTeamTaskState = {
+    id: randomUUID(),
+    childThreadId: started.thread.id,
+    title,
+    prompt,
+    status: "queued",
+    createdAt: now,
+    lastActivityAt: now,
+  };
+  await store.update((state) => {
+    const parentMeta = state.threadMeta[parent.id] ?? {
+      pinned: false,
+      lastReadUpdatedAt: 0,
+    };
+    parentMeta.teamOrchestration ??= { tasks: {} };
+    parentMeta.teamOrchestration.tasks[task.id] = task;
+    state.threadMeta[parent.id] = parentMeta;
+    const childMeta = state.threadMeta[task.childThreadId] ?? {
+      pinned: false,
+      lastReadUpdatedAt: 0,
+    };
+    childMeta.managedParent = { parentThreadId: parent.id, taskId: task.id };
+    state.threadMeta[task.childThreadId] = childMeta;
+  });
+  projection.publishThreadState(task.childThreadId);
+  return task;
+}
+
+async function startQueuedTeamTasks(
+  bridge: CodexBridge,
+  store: StateStore,
+  projection: AppProjection,
+  parentThreadId: string,
+): Promise<void> {
+  while (true) {
+    const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    const active = Object.values(orchestration.tasks).filter(
+      (task) => task.status === "starting" || task.status === "running",
+    ).length;
+    if (active >= TEAM_MAX_ACTIVE_TASKS) return;
+    const queued = Object.values(orchestration.tasks)
+      .filter((task) => task.status === "queued")
+      .sort((left, right) => left.createdAt - right.createdAt)[0];
+    if (!queued) return;
+
+    await store.update((state) => {
+      const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
+      if (task?.status === "queued") {
+        task.status = "starting";
+        task.lastActivityAt = Date.now();
+      }
+    });
+    projection.publishThreadState(queued.childThreadId);
+
+    try {
+      const parent = projection.summary(parentThreadId);
+      if (!parent) throw new Error("Managed task parent is unavailable");
+      await bridge.request<ThreadResumeResponse>(
+        "thread/resume",
+        {
+          threadId: queued.childThreadId,
+          cwd: parent.cwd,
+          excludeTurns: true,
+          ...threadSettings(parent.settings),
+          config: teamRuntimeConfig(),
+          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+        },
+        30_000,
+      );
+      const turn = parseTurnStart(
+        await bridge.request<unknown>("turn/start", {
+          threadId: queued.childThreadId,
+          input: messageInput(queued.prompt, []),
+          ...managedChildTurnSettings(parent.settings, projection.availableModels),
+        }),
+      );
+      await projection.markMaterialized(queued.childThreadId);
+      await projection.setCurrentTurn(queued.childThreadId, turn.turn.id);
+      await store.update((state) => {
+        const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
+        if (!task || task.status !== "starting") return;
+        const now = Date.now();
+        task.status = "running";
+        task.childTurnId = turn.turn.id;
+        task.startedAt = now;
+        task.lastActivityAt = now;
+      });
+    } catch (error) {
+      await finalizeManagedTask(
+        store,
+        queued.childThreadId,
+        `start-error:${Date.now()}`,
+        "failed",
+        {
+          summary: `Managed task failed to start: ${safeError(error).message}`,
+          source: "status",
+        },
       );
     }
-    const childParent = await recordTeamTerminal(
-      store,
-      notification.params.threadId,
-      notification.params.turn.id,
-      turnOutcome(notification.params.turn),
-    );
-    if (childParent) affected.add(childParent);
+    projection.publishThreadState(queued.childThreadId);
+  }
+}
+
+async function handleManagedTeamNotification(
+  notification: ServerNotification,
+  bridge: CodexBridge,
+  store: StateStore,
+  projection: AppProjection,
+  activity: Map<string, number>,
+): Promise<Set<string>> {
+  const affected = new Set<string>();
+  const childThreadId = notificationThreadId(notification);
+  if (!childThreadId) return affected;
+  const managed = managedTaskForChild(store.snapshot(), childThreadId);
+  if (!managed) return affected;
+  const now = activity.get(childThreadId) ?? Date.now();
+  if (now - managed.task.lastActivityAt >= TEAM_ACTIVITY_PERSIST_MS) {
+    await store.update((state) => {
+      const task =
+        state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+      if (!task || isTerminalTask(task)) return;
+      task.lastActivityAt = now;
+      delete task.watchdog;
+    });
+  }
+
+  if (notification.method === "turn/completed") {
+    let turn = notification.params.turn;
+    if (!managed.task.resultCandidate && turn.itemsView !== "full") {
+      const page = parseTurnsList(
+        await bridge.request<unknown>(
+          "thread/turns/list",
+          {
+            threadId: childThreadId,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+          30_000,
+        ),
+      );
+      turn = page.data[0] ?? turn;
+    }
+    const result =
+      managed.task.resultCandidate !== undefined
+        ? submittedManagedResult(managed.task)
+        : managedResultFromTurn(turn, turnOutcome(turn));
+    if (await finalizeManagedTask(store, childThreadId, turn.id, turnOutcome(turn), result)) {
+      affected.add(managed.parentThreadId);
+    }
     return affected;
   }
+
   if (
     notification.method === "thread/status/changed" &&
     notification.params.status.type === "systemError"
   ) {
-    const parent = await recordTeamTerminal(
-      store,
-      notification.params.threadId,
-      `system-error:${Date.now()}`,
-      "failed",
-    );
-    if (parent) affected.add(parent);
-    return affected;
-  }
-  if (notification.method === "thread/closed" || notification.method === "thread/deleted") {
-    const parent = await recordTeamTerminal(
-      store,
-      notification.params.threadId,
-      `${notification.method}:${Date.now()}`,
-      notification.method === "thread/deleted" ? "failed" : "interrupted",
-    );
-    if (parent) affected.add(parent);
+    if (
+      await finalizeManagedTask(store, childThreadId, `system-error:${Date.now()}`, "failed", {
+        summary: "Managed task stopped because the Codex thread entered a system error state.",
+        source: "status",
+      })
+    ) {
+      affected.add(managed.parentThreadId);
+    }
+  } else if (notification.method === "thread/closed" || notification.method === "thread/deleted") {
+    const outcome = notification.method === "thread/deleted" ? "failed" : "interrupted";
+    if (
+      await finalizeManagedTask(
+        store,
+        childThreadId,
+        `${notification.method}:${Date.now()}`,
+        outcome,
+        {
+          summary:
+            notification.method === "thread/deleted"
+              ? "Managed task thread was deleted."
+              : "Managed task thread was closed.",
+          source: "status",
+        },
+      )
+    ) {
+      affected.add(managed.parentThreadId);
+    }
   }
   return affected;
 }
 
-async function registerTeamChildren(
-  store: StateStore,
-  parentThreadId: string,
-  childThreadIds: string[],
-): Promise<boolean> {
-  const existing = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.children;
-  if (!childThreadIds.some((childThreadId) => !existing?.[childThreadId])) return false;
-  let changed = false;
-  await store.update((state) => {
-    const meta = state.threadMeta[parentThreadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-    meta.teamOrchestration ??= { children: {} };
-    for (const childThreadId of childThreadIds) {
-      if (meta.teamOrchestration.children[childThreadId]) continue;
-      meta.teamOrchestration.children[childThreadId] = { status: "running" };
-      changed = true;
-    }
-    state.threadMeta[parentThreadId] = meta;
-  });
-  return changed;
-}
-
-async function recordTeamTerminal(
+async function finalizeManagedTask(
   store: StateStore,
   childThreadId: string,
   terminalTurnId: string,
   outcome: ThreadOutcome,
-): Promise<string | null> {
-  const candidateParentId =
-    Object.entries(store.snapshot().threadMeta).find(
-      ([, meta]) => meta.teamOrchestration?.children[childThreadId]?.status === "running",
-    )?.[0] ?? null;
-  if (!candidateParentId) return null;
+  result: ManagedTeamTaskResult,
+): Promise<boolean> {
+  const managed = managedTaskForChild(store.snapshot(), childThreadId);
+  if (!managed || isTerminalTask(managed.task)) return false;
   let recorded = false;
   await store.update((state) => {
-    const child = state.threadMeta[candidateParentId]?.teamOrchestration?.children[childThreadId];
-    if (!child || child.status !== "running") return;
-    child.status = outcome;
-    child.terminalTurnId = terminalTurnId;
-    delete child.delivery;
+    const task =
+      state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+    if (!task || isTerminalTask(task)) return;
+    task.status = outcome;
+    task.terminalTurnId = terminalTurnId;
+    task.result = result;
+    task.lastActivityAt = Date.now();
+    delete task.watchdog;
+    delete task.delivery;
+    const childMeta = state.threadMeta[childThreadId];
+    if (childMeta) {
+      childMeta.lastOutcome = outcome;
+      childMeta.outcomeUpdatedAt = Date.now();
+    }
     recorded = true;
   });
-  return recorded ? candidateParentId : null;
-}
-
-async function deliverWaitedTeamResults(
-  store: StateStore,
-  parentThreadId: string,
-  turn: Turn,
-): Promise<TeamResultClaim["results"]> {
-  const terminalAgents = new Map<string, ThreadOutcome>();
-  for (const item of turn.items) {
-    if (item.type !== "collabAgentToolCall" || item.tool !== "wait") continue;
-    for (const [childThreadId, state] of Object.entries(item.agentsStates)) {
-      if (!state) continue;
-      const outcome = collabAgentOutcome(state.status);
-      if (outcome) terminalAgents.set(childThreadId, outcome);
-    }
-  }
-  if (!terminalAgents.size) return [];
-  const delivered: TeamResultClaim["results"] = [];
-  await store.update((state) => {
-    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
-    if (!orchestration) return;
-    for (const [childThreadId, outcome] of terminalAgents) {
-      const child = orchestration.children[childThreadId];
-      if (!child || child.delivery?.status === "delivered") continue;
-      child.status = outcome;
-      child.terminalTurnId ??= `wait:${turn.id}`;
-      child.delivery = {
-        status: "delivered",
-        claimId: `wait:${turn.id}`,
-        parentTurnId: turn.id,
-      };
-      delivered.push({
-        childThreadId,
-        terminalTurnId: child.terminalTurnId,
-        outcome,
-      });
-    }
-    cleanupTeamOrchestration(state, parentThreadId);
-  });
-  return delivered;
+  return recorded;
 }
 
 async function claimTeamResults(
   store: StateStore,
   parentThreadId: string,
 ): Promise<TeamResultClaim | null> {
-  if (!hasPendingTeamResults(store, parentThreadId)) return null;
+  if (!hasPendingTeamContinuation(store, parentThreadId)) return null;
   const claimId = randomBytes(16).toString("hex");
   const results: TeamResultClaim["results"] = [];
+  const watchdogs: TeamResultClaim["watchdogs"] = [];
   await store.update((state) => {
     const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
     if (!orchestration) return;
-    for (const [childThreadId, child] of Object.entries(orchestration.children)) {
-      if (child.status === "running" || !child.terminalTurnId || child.delivery !== undefined) {
-        continue;
+    for (const task of Object.values(orchestration.tasks)) {
+      if (isTerminalTask(task) && task.terminalTurnId && task.result && !task.delivery) {
+        task.delivery = { status: "claimed", claimId };
+        results.push({
+          taskId: task.id,
+          childThreadId: task.childThreadId,
+          terminalTurnId: task.terminalTurnId,
+          outcome: task.status,
+          title: task.title,
+          result: task.result,
+        });
       }
-      child.delivery = { status: "claimed", claimId };
-      results.push({
-        childThreadId,
-        terminalTurnId: child.terminalTurnId,
-        outcome: child.status,
-      });
+      if (task.watchdog?.status === "pending") {
+        task.watchdog = { ...task.watchdog, status: "claimed", claimId };
+        watchdogs.push({
+          taskId: task.id,
+          childThreadId: task.childThreadId,
+          title: task.title,
+          status: task.status,
+          lastActivityAt: task.lastActivityAt,
+        });
+      }
     }
   });
-  return results.length ? { claimId, results } : null;
+  return results.length || watchdogs.length ? { claimId, results, watchdogs } : null;
 }
 
 async function deliverTeamClaim(
@@ -1892,9 +2353,13 @@ async function deliverTeamClaim(
   await store.update((state) => {
     const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
     if (!orchestration) return;
-    for (const child of Object.values(orchestration.children)) {
-      if (child.delivery?.status !== "claimed" || child.delivery.claimId !== claimId) continue;
-      child.delivery = { status: "delivered", claimId, parentTurnId };
+    for (const task of Object.values(orchestration.tasks)) {
+      if (task.delivery?.status === "claimed" && task.delivery.claimId === claimId) {
+        task.delivery = { status: "delivered", claimId, parentTurnId };
+      }
+      if (task.watchdog?.status === "claimed" && task.watchdog.claimId === claimId) {
+        delete task.watchdog;
+      }
     }
     cleanupTeamOrchestration(state, parentThreadId);
   });
@@ -1908,9 +2373,12 @@ async function releaseTeamClaim(
   await store.update((state) => {
     const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
     if (!orchestration) return;
-    for (const child of Object.values(orchestration.children)) {
-      if (child.delivery?.status === "claimed" && child.delivery.claimId === claimId) {
-        delete child.delivery;
+    for (const task of Object.values(orchestration.tasks)) {
+      if (task.delivery?.status === "claimed" && task.delivery.claimId === claimId) {
+        delete task.delivery;
+      }
+      if (task.watchdog?.status === "claimed" && task.watchdog.claimId === claimId) {
+        task.watchdog = { status: "pending", triggeredAt: task.watchdog.triggeredAt };
       }
     }
   });
@@ -1919,30 +2387,35 @@ async function releaseTeamClaim(
 function cleanupTeamOrchestration(state: CodexNestState, parentThreadId: string): void {
   const meta = state.threadMeta[parentThreadId];
   const orchestration = meta?.teamOrchestration;
-  if (
-    orchestration &&
-    Object.values(orchestration.children).every(
-      (child) => child.status !== "running" && child.delivery?.status === "delivered",
-    )
-  ) {
-    delete meta!.teamOrchestration;
+  if (!orchestration) return;
+  for (const [taskId, task] of Object.entries(orchestration.tasks)) {
+    if (isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog) {
+      delete orchestration.tasks[taskId];
+    }
   }
+  if (!Object.keys(orchestration.tasks).length) delete meta!.teamOrchestration;
 }
 
-function hasPendingTeamResults(store: StateStore, parentThreadId: string): boolean {
+function hasPendingTeamContinuation(store: StateStore, parentThreadId: string): boolean {
   const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
   return Boolean(
     orchestration &&
-    Object.values(orchestration.children).some(
-      (child) =>
-        child.status !== "running" && Boolean(child.terminalTurnId) && child.delivery === undefined,
+    Object.values(orchestration.tasks).some(
+      (task) =>
+        (isTerminalTask(task) &&
+          Boolean(task.terminalTurnId) &&
+          Boolean(task.result) &&
+          task.delivery === undefined) ||
+        task.watchdog?.status === "pending",
     ),
   );
 }
 
 function pendingTeamParents(store: StateStore): string[] {
   const state = store.snapshot();
-  return Object.keys(state.threadMeta).filter((threadId) => hasPendingTeamResults(store, threadId));
+  return Object.entries(state.threadMeta)
+    .filter(([, meta]) => Boolean(meta.teamOrchestration))
+    .map(([threadId]) => threadId);
 }
 
 function teamContinuationContext(
@@ -1951,19 +2424,33 @@ function teamContinuationContext(
   claim: TeamResultClaim,
 ): string {
   const state = store.snapshot();
-  const active = Object.entries(state.threadMeta[parentThreadId]?.teamOrchestration?.children ?? {})
-    .filter(([, child]) => child.status === "running")
-    .map(([threadId]) => threadId);
-  const completed = claim.results
-    .map((result) => `${result.childThreadId} (${result.outcome})`)
-    .join(", ");
+  const active = Object.values(state.threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {})
+    .filter((task) => task.status === "starting" || task.status === "running")
+    .map((task) => `${task.title} [${task.id}]`);
+  const queued = Object.values(state.threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {})
+    .filter((task) => task.status === "queued")
+    .map((task) => `${task.title} [${task.id}]`);
+  const resultSections = claim.results.map((item) =>
+    [
+      `Task: ${item.title} [${item.taskId}]`,
+      `Outcome: ${item.outcome}`,
+      `Source: ${item.result.source}`,
+      `Summary: ${item.result.summary}`,
+      ...(item.result.details ? [`Details:\n${item.result.details}`] : []),
+    ].join("\n"),
+  );
+  const watchdogSections = claim.watchdogs.map(
+    (item) =>
+      `Silent task: ${item.title} [${item.taskId}], status=${item.status}, last activity=${new Date(item.lastActivityAt).toISOString()}. Inspect it, steer it, cancel it, or explicitly continue waiting.`,
+  );
   return [
     "CodexNest orchestration continuation.",
-    `New terminal subagent results: ${completed}.`,
+    ...(resultSections.length ? ["New terminal managed-task results:", ...resultSections] : []),
+    ...(watchdogSections.length ? ["Managed-task watchdog:", ...watchdogSections] : []),
     active.length
-      ? `Subagents still running: ${active.join(", ")}.`
-      : "No tracked subagents remain running.",
-    "The native FINAL_ANSWER or agent-mail messages from these subagents are already present in the parent history.",
+      ? `Managed tasks still running: ${active.join(", ")}.`
+      : "No managed tasks are currently running.",
+    ...(queued.length ? [`Managed tasks queued: ${queued.join(", ")}.`] : []),
     "If this turn also contains an explicit user message, answer the user first.",
     "Then incorporate every named result into the original task, decide the next concrete action, and continue working.",
     "Do not merely acknowledge the result or say that you are waiting.",
@@ -1976,46 +2463,36 @@ async function reconcileTeamOrchestration(
   projection: AppProjection,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
-  for (const child of projection.snapshot().threads) {
-    if (
-      child.relation.kind !== "subagent" ||
-      child.state !== "running" ||
-      projection.summary(child.relation.parentThreadId)?.settings.collaborationMode !== "team"
-    ) {
-      continue;
-    }
-    if (await registerTeamChildren(store, child.relation.parentThreadId, [child.id])) {
-      affected.add(child.relation.parentThreadId);
-    }
-  }
-
   const state = store.snapshot();
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     const orchestration = meta.teamOrchestration;
     if (!orchestration) continue;
     const parent = projection.summary(parentThreadId);
     const claimedById = new Map<string, TeamResultClaim["results"]>();
-    for (const [childThreadId, child] of Object.entries(orchestration.children)) {
-      if (child.delivery?.status === "claimed") {
-        const items = claimedById.get(child.delivery.claimId) ?? [];
-        if (child.status !== "running" && child.terminalTurnId) {
+    for (const task of Object.values(orchestration.tasks)) {
+      if (task.delivery?.status === "claimed") {
+        const items = claimedById.get(task.delivery.claimId) ?? [];
+        if (isTerminalTask(task) && task.terminalTurnId && task.result) {
           items.push({
-            childThreadId,
-            terminalTurnId: child.terminalTurnId,
-            outcome: child.status,
+            taskId: task.id,
+            childThreadId: task.childThreadId,
+            terminalTurnId: task.terminalTurnId,
+            outcome: task.status,
+            title: task.title,
+            result: task.result,
           });
         }
-        claimedById.set(child.delivery.claimId, items);
+        claimedById.set(task.delivery.claimId, items);
       }
-      if (child.status !== "running") continue;
-      const summary = projection.summary(childThreadId);
-      if (summary?.state === "running") continue;
+      if (task.status !== "running" && task.status !== "starting") continue;
+      const summary = projection.summary(task.childThreadId);
+      if (summary?.currentTurnId) continue;
       try {
         const page = parseTurnsList(
           await bridge.request<unknown>(
             "thread/turns/list",
             {
-              threadId: childThreadId,
+              threadId: task.childThreadId,
               limit: 1,
               sortDirection: "desc",
               itemsView: "full",
@@ -2025,13 +2502,49 @@ async function reconcileTeamOrchestration(
         );
         const latest = page.data[0];
         if (latest && latest.status !== "inProgress") {
-          const recordedParent = await recordTeamTerminal(
-            store,
-            childThreadId,
-            latest.id,
-            turnOutcome(latest),
-          );
-          if (recordedParent) affected.add(recordedParent);
+          const result = task.resultCandidate
+            ? submittedManagedResult(task)
+            : managedResultFromTurn(latest, turnOutcome(latest));
+          if (
+            await finalizeManagedTask(
+              store,
+              task.childThreadId,
+              latest.id,
+              turnOutcome(latest),
+              result,
+            )
+          ) {
+            affected.add(parentThreadId);
+          }
+        } else if (latest?.status === "inProgress") {
+          await projection.setCurrentTurn(task.childThreadId, latest.id);
+          await store.update((draft) => {
+            const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+            if (!current || isTerminalTask(current)) return;
+            current.status = "running";
+            current.childTurnId = latest.id;
+            current.lastActivityAt = Date.now();
+          });
+        } else if (!latest && task.status === "starting") {
+          await store.update((draft) => {
+            const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+            if (current?.status === "starting") current.status = "queued";
+          });
+        } else if (!latest && task.status === "running") {
+          if (
+            await finalizeManagedTask(
+              store,
+              task.childThreadId,
+              `reconcile-missing:${Date.now()}`,
+              "interrupted",
+              {
+                summary: "Managed task had no recoverable turn after CodexNest restarted.",
+                source: "status",
+              },
+            )
+          ) {
+            affected.add(parentThreadId);
+          }
         }
       } catch (error) {
         projection.emit(
@@ -2049,7 +2562,16 @@ async function reconcileTeamOrchestration(
       }
       affected.add(parentThreadId);
     }
-    if (hasPendingTeamResults(store, parentThreadId)) affected.add(parentThreadId);
+    for (const task of Object.values(orchestration.tasks)) {
+      if (task.watchdog?.status !== "claimed" || !task.watchdog.claimId) continue;
+      if (parent?.currentTurnId) {
+        await deliverTeamClaim(store, parentThreadId, task.watchdog.claimId, parent.currentTurnId);
+      } else {
+        await releaseTeamClaim(store, parentThreadId, task.watchdog.claimId);
+      }
+      affected.add(parentThreadId);
+    }
+    affected.add(parentThreadId);
   }
   return affected;
 }
@@ -2069,7 +2591,7 @@ async function recordTeamNotice(
       const child = projection.summary(result.childThreadId);
       return {
         threadId: result.childThreadId,
-        title: child?.title ?? "Субагент",
+        title: result.title,
         nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
         outcome: result.outcome,
       };
@@ -2078,61 +2600,246 @@ async function recordTeamNotice(
   );
 }
 
-function firstUserMessageId(turn: Turn): string | null {
-  const item = turn.items.find((candidate) => candidate.type === "userMessage");
-  return item?.type === "userMessage" ? (item.clientId ?? item.id) : null;
-}
-
 function turnOutcome(turn: Turn): ThreadOutcome {
   if (turn.status === "failed") return "failed";
   if (turn.status === "interrupted") return "interrupted";
   return "completed";
 }
 
-function collabAgentOutcome(status: CollabAgentStatus): ThreadOutcome | null {
-  if (status === "completed") return "completed";
-  if (status === "interrupted" || status === "shutdown") return "interrupted";
-  if (status === "errored" || status === "notFound") return "failed";
+function isManagedTeamNotification(notification: ServerNotification, store: StateStore): boolean {
+  const threadId = notificationThreadId(notification);
+  return Boolean(threadId && managedTaskForChild(store.snapshot(), threadId));
+}
+
+export async function triggerTeamWatchdogs(
+  store: StateStore,
+  activity: Map<string, number>,
+  now: number,
+): Promise<Set<string>> {
+  const affected = new Set<string>();
+  const state = store.snapshot();
+  const due: Array<{ parentThreadId: string; taskId: string; lastActivityAt: number }> = [];
+  for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+    for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
+      if (task.status !== "running" || task.watchdog) continue;
+      const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
+      if (
+        now - lastActivityAt >= TEAM_WATCHDOG_MS &&
+        now - (task.lastWatchdogAt ?? 0) >= TEAM_WATCHDOG_MS
+      ) {
+        due.push({ parentThreadId, taskId: task.id, lastActivityAt });
+      }
+    }
+  }
+  if (!due.length) return affected;
+  await store.update((draft) => {
+    for (const item of due) {
+      const task = draft.threadMeta[item.parentThreadId]?.teamOrchestration?.tasks[item.taskId];
+      if (!task || task.status !== "running" || task.watchdog) continue;
+      const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
+      if (now - lastActivityAt < TEAM_WATCHDOG_MS) continue;
+      task.lastActivityAt = lastActivityAt;
+      task.lastWatchdogAt = now;
+      task.watchdog = { status: "pending", triggeredAt: now };
+      affected.add(item.parentThreadId);
+    }
+  });
+  return affected;
+}
+
+function managedTaskForChild(
+  state: CodexNestState,
+  childThreadId: string,
+): { parentThreadId: string; task: ManagedTeamTaskState } | null {
+  const relation = state.threadMeta[childThreadId]?.managedParent;
+  if (relation) {
+    const task =
+      state.threadMeta[relation.parentThreadId]?.teamOrchestration?.tasks[relation.taskId];
+    if (task?.childThreadId === childThreadId) {
+      return { parentThreadId: relation.parentThreadId, task };
+    }
+  }
+  for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+    const task = Object.values(meta.teamOrchestration?.tasks ?? {}).find(
+      (candidate) => candidate.childThreadId === childThreadId,
+    );
+    if (task) return { parentThreadId, task };
+  }
   return null;
 }
 
-function isTeamOrchestrationNotification(
-  notification: ServerNotification,
-  projection: AppProjection,
-): boolean {
-  if (notification.method === "thread/started") {
-    const parentThreadId = notification.params.thread.parentThreadId;
-    return Boolean(
-      parentThreadId && projection.summary(parentThreadId)?.settings.collaborationMode === "team",
-    );
+function notificationThreadId(notification: ServerNotification): string | null {
+  if (notification.method === "thread/started") return notification.params.thread.id;
+  const params = notification.params as unknown;
+  if (!isObjectRecord(params)) return null;
+  return typeof params.threadId === "string" ? params.threadId : null;
+}
+
+function submittedManagedResult(task: ManagedTeamTaskState): ManagedTeamTaskResult {
+  const candidate = task.resultCandidate;
+  if (!candidate) {
+    return { summary: "Managed task completed without a submitted result.", source: "status" };
   }
-  if (notification.method === "item/completed") {
-    return (
-      notification.params.item.type === "collabAgentToolCall" &&
-      notification.params.item.tool === "spawnAgent" &&
-      projection.summary(notification.params.threadId)?.settings.collaborationMode === "team"
-    );
-  }
-  if (notification.method === "turn/completed") {
-    const summary = projection.summary(notification.params.threadId);
-    return (
-      summary?.settings.collaborationMode === "team" ||
-      (summary?.relation.kind === "subagent" &&
-        projection.summary(summary.relation.parentThreadId)?.settings.collaborationMode ===
-          "team") ||
-      notification.params.turn.items.some(
-        (item) =>
-          item.type === "collabAgentToolCall" &&
-          (item.tool === "spawnAgent" || item.tool === "wait"),
-      )
-    );
-  }
-  return (
-    (notification.method === "thread/status/changed" &&
-      notification.params.status.type === "systemError") ||
-    notification.method === "thread/closed" ||
-    notification.method === "thread/deleted"
+  return {
+    summary: candidate.summary,
+    ...(candidate.details ? { details: candidate.details } : {}),
+    source: "submitted",
+  };
+}
+
+function managedResultFromTurn(turn: Turn, outcome: ThreadOutcome): ManagedTeamTaskResult {
+  const messages = turn.items.filter(
+    (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+      item.type === "agentMessage" && Boolean(item.text.trim()),
   );
+  const final = [...messages].reverse().find((item) => item.phase === "final_answer");
+  const selected = final ?? messages.at(-1);
+  if (selected) {
+    const text = selected.text.trim();
+    const summary = firstResultParagraph(text);
+    return {
+      summary,
+      ...(text !== summary ? { details: text } : {}),
+      source: final ? "final_answer" : "agent_message",
+    };
+  }
+  return {
+    summary:
+      outcome === "completed"
+        ? "Managed task completed without an agent message."
+        : outcome === "failed"
+          ? "Managed task failed without an agent message."
+          : "Managed task was interrupted without an agent message.",
+    source: "status",
+  };
+}
+
+function firstResultParagraph(text: string): string {
+  const paragraph =
+    text
+      .split(/\n\s*\n/u)
+      .find((part) => part.trim())
+      ?.trim() ?? text.trim();
+  return paragraph.length <= 500 ? paragraph : `${paragraph.slice(0, 499).trimEnd()}…`;
+}
+
+function isTerminalTask(
+  task: ManagedTeamTaskState,
+): task is ManagedTeamTaskState & { status: ThreadOutcome } {
+  return task.status === "completed" || task.status === "failed" || task.status === "interrupted";
+}
+
+function publicManagedTask(task: ManagedTeamTaskState): Record<string, unknown> {
+  return {
+    taskId: task.id,
+    threadId: task.childThreadId,
+    title: task.title,
+    status: task.status,
+    createdAt: task.createdAt,
+    startedAt: task.startedAt ?? null,
+    lastActivityAt: task.lastActivityAt,
+    result: task.result ?? null,
+  };
+}
+
+function dynamicToolArguments(value: unknown): Record<string, unknown> {
+  if (!isObjectRecord(value)) throw new ProjectValidationError("Tool arguments must be an object");
+  return value;
+}
+
+function requiredToolString(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ProjectValidationError(`${key} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function optionalToolString(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new ProjectValidationError(`${key} must be a string`);
+  return value.trim() || undefined;
+}
+
+function dynamicToolSuccess(value: unknown): DynamicToolCallResponse {
+  return {
+    contentItems: [{ type: "inputText", text: JSON.stringify(value) }],
+    success: true,
+  };
+}
+
+function dynamicToolError(message: string): DynamicToolCallResponse {
+  return {
+    contentItems: [{ type: "inputText", text: JSON.stringify({ error: message }) }],
+    success: false,
+  };
+}
+
+function dynamicTool(
+  name: string,
+  description: string,
+  inputSchema: Record<string, unknown>,
+): {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  deferLoading: true;
+} {
+  return { type: "function", name, description, inputSchema, deferLoading: true };
+}
+
+function teamRuntimeConfig(): Record<string, unknown> {
+  return { agents: { enabled: false } };
+}
+
+function managedChildTurnSettings(
+  settings: SessionSettings,
+  models: ModelOption[],
+): Record<string, unknown> {
+  const model = effectiveModel(settings, models);
+  if (!model) throw new ProjectValidationError("No model is available for managed task");
+  const effort =
+    settings.reasoningEffort ??
+    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
+    null;
+  return compact({
+    model: model.id,
+    serviceTier: settings.serviceTier,
+    effort,
+    personality: settings.personality,
+    collaborationMode: {
+      mode: "default",
+      settings: {
+        model: model.id,
+        reasoning_effort: effort,
+        developer_instructions: null,
+      },
+    },
+  });
+}
+
+async function markTeamToolsAvailable(store: StateStore, threadId: string): Promise<void> {
+  await store.update((state) => {
+    const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+    meta.teamToolsVersion = TEAM_TOOLS_VERSION;
+    state.threadMeta[threadId] = meta;
+  });
+}
+
+function teamOrchestrationHasWork(store: StateStore, parentThreadId: string): boolean {
+  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  return Boolean(
+    orchestration &&
+    Object.values(orchestration.tasks).some(
+      (task) => !isTerminalTask(task) || task.delivery?.status !== "delivered" || task.watchdog,
+    ),
+  );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function withKeyLock<T>(
