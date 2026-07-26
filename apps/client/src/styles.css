@@ -1984,12 +1984,24 @@ pre {
   font-size: 12px;
 }
 
+.implement-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 12px 0 0 auto;
+}
+
 .implement-plan {
   width: fit-content;
-  margin: 12px 0 0 auto;
   border-color: transparent;
   background: var(--surface-muted);
   color: var(--text);
+}
+
+.implement-plan.orchestrator {
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
 }
 
 .finish-thread-action {

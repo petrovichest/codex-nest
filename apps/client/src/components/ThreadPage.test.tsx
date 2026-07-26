@@ -1733,32 +1733,13 @@ describe("Activity", () => {
       ...summary,
       settings: { collaborationMode: "plan" as const },
     };
-    mockThreadConnection(api, planThread, {
-      turns: [
-        {
-          id: "plan-turn",
-          status: "completed",
-          startedAt: 1,
-          completedAt: 2,
-          durationMs: 1,
-          progress: progress(),
-          items: [
-            {
-              type: "plan",
-              id: "plan",
-              status: "completed",
-              text: "# План\n\nСделать",
-              images: [],
-              timestamp: 2,
-              phase: null,
-            },
-          ],
-        },
-      ],
-    });
+    mockThreadConnection(api, planThread, completedPlanDetail());
     renderThread();
 
     expect(screen.queryByRole("button", { name: /Отклонить/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Запустить в режиме оркестратора" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Да, реализуй этот план" }));
 
     await waitFor(() =>
@@ -1775,6 +1756,77 @@ describe("Activity", () => {
     );
   });
 
+  it("starts a completed plan in orchestrator mode", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
+        collaborationMode: "team",
+      }),
+    );
+    expect(api.startTurn).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({
+        input: "Да, реализуй этот план в режиме оркестратора",
+        clientMessageId: expect.any(String),
+      }),
+    );
+  });
+
+  it("returns to Plan mode when orchestrator implementation fails to start", async () => {
+    const api = threadApi();
+    api.startTurn.mockRejectedValueOnce(new Error("Codex недоступен"));
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenNthCalledWith(2, "thread", {
+        collaborationMode: "plan",
+      }),
+    );
+    expect(screen.getByText("Codex недоступен")).toBeInTheDocument();
+  });
+
+  it("does not migrate an incompatible Plan session when starting the orchestrator", async () => {
+    const api = threadApi();
+    api.updateThreadSettings.mockRejectedValueOnce(
+      new Error("Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию."),
+    );
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
+
+    expect(
+      await screen.findByText(
+        "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.",
+      ),
+    ).toBeInTheDocument();
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(api.updateThreadSettings).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "Создать новую Team-сессию" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("sends plan annotations as revision feedback and blocks plan acceptance", async () => {
     const api = threadApi();
     const planThread = {
@@ -1789,32 +1841,11 @@ describe("Activity", () => {
       endOffset: 14,
     });
     localStorage.setItem(annotationStorageKey("thread"), JSON.stringify([annotation]));
-    mockThreadConnection(api, planThread, {
-      turns: [
-        {
-          id: "plan-turn",
-          status: "completed",
-          startedAt: 1,
-          completedAt: 2,
-          durationMs: 1,
-          progress: progress(),
-          items: [
-            {
-              type: "plan",
-              id: "plan",
-              status: "completed",
-              text: "# План\n\nСделать",
-              images: [],
-              timestamp: 2,
-              phase: null,
-            },
-          ],
-        },
-      ],
-    });
+    mockThreadConnection(api, planThread, completedPlanDetail());
     renderThread();
 
     expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Запустить в режиме оркестратора" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
     await waitFor(() =>
@@ -2853,6 +2884,32 @@ function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
     configurable: true,
     value: { getUserMedia: vi.fn(getUserMedia) },
   });
+}
+
+function completedPlanDetail(): NonNullable<Parameters<typeof mockThreadConnection>[2]> {
+  return {
+    turns: [
+      {
+        id: "plan-turn",
+        status: "completed",
+        startedAt: 1,
+        completedAt: 2,
+        durationMs: 1,
+        progress: progress(),
+        items: [
+          {
+            type: "plan",
+            id: "plan",
+            status: "completed",
+            text: "# План\n\nСделать",
+            images: [],
+            timestamp: 2,
+            phase: null,
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function threadApi() {

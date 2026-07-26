@@ -67,6 +67,7 @@ import {
   PencilIcon,
   PinIcon,
   SendIcon,
+  TeamIcon,
   TerminalIcon,
   ToolIcon,
   TrashIcon,
@@ -832,13 +833,20 @@ export function ThreadPage({
     }
   }
 
-  async function implementPlan() {
+  async function implementPlan(targetMode: "default" | "team") {
+    const implementationMessage =
+      targetMode === "team"
+        ? t("Да, реализуй этот план в режиме оркестратора")
+        : t("Да, реализуй этот план");
     setBusy(true);
     setError(null);
+    setTeamUpgradeRequired(false);
     let changedMode = false;
     let clientMessageId: string | null = null;
     try {
-      const thread = await api.updateThreadSettings(threadId, { collaborationMode: "default" });
+      const thread = await api.updateThreadSettings(threadId, {
+        collaborationMode: targetMode,
+      });
       changedMode = true;
       dispatch({ type: "thread", thread });
       clientMessageId = createClientMessageId();
@@ -848,7 +856,7 @@ export function ThreadPage({
         message: {
           id: clientMessageId,
           threadId,
-          text: t("Да, реализуй этот план"),
+          text: implementationMessage,
           images: [],
           createdAt: Date.now(),
           destination: "turn",
@@ -856,7 +864,7 @@ export function ThreadPage({
         },
       });
       const result = await api.startTurn(threadId, {
-        input: t("Да, реализуй этот план"),
+        input: implementationMessage,
         clientMessageId,
       });
       dispatch({
@@ -878,7 +886,9 @@ export function ThreadPage({
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
-          : t("Не удалось начать реализацию плана"),
+          : targetMode === "team"
+            ? t("Не удалось начать реализацию плана в режиме оркестратора")
+            : t("Не удалось начать реализацию плана"),
       );
     } finally {
       setBusy(false);
@@ -1205,18 +1215,35 @@ export function ThreadPage({
                           onDeleteAnnotation={deleteAnnotationEvent}
                         />
                         {!isSubagent && entry.id === latestPlanId && (
-                          <button
-                            className="implement-plan"
-                            disabled={busy || latestPlanHasAnnotations}
-                            title={
-                              latestPlanHasAnnotations
-                                ? t("Сначала отправьте или удалите аннотации к плану")
-                                : undefined
-                            }
-                            onClick={() => void implementPlan()}
-                          >
-                            {t("Да, реализуй этот план")}
-                          </button>
+                          <div className="implement-plan-actions">
+                            <button
+                              className="implement-plan"
+                              disabled={busy || latestPlanHasAnnotations}
+                              title={
+                                latestPlanHasAnnotations
+                                  ? t("Сначала отправьте или удалите аннотации к плану")
+                                  : undefined
+                              }
+                              type="button"
+                              onClick={() => void implementPlan("default")}
+                            >
+                              {t("Да, реализуй этот план")}
+                            </button>
+                            <button
+                              className="implement-plan orchestrator"
+                              disabled={busy || latestPlanHasAnnotations}
+                              title={
+                                latestPlanHasAnnotations
+                                  ? t("Сначала отправьте или удалите аннотации к плану")
+                                  : undefined
+                              }
+                              type="button"
+                              onClick={() => void implementPlan("team")}
+                            >
+                              <TeamIcon />
+                              {t("Запустить в режиме оркестратора")}
+                            </button>
+                          </div>
                         )}
                       </div>
                     ),

@@ -441,6 +441,7 @@ const ENGLISH: Record<string, string> = {
   "Выполнены действия": "Actions completed",
   "Выполнены команды": "Commands executed",
   "Да, реализуй этот план": "Yes, implement this plan",
+  "Да, реализуй этот план в режиме оркестратора": "Yes, implement this plan in orchestrator mode",
   "Действия с задачей": "Task actions",
   "Для доступа к микрофону откройте CodexNest по HTTPS":
     "Open CodexNest over HTTPS to access the microphone",
@@ -462,6 +463,7 @@ const ENGLISH: Record<string, string> = {
   "На сервере · ожидание": "On the server · waiting",
   "Запрашиваем доступ к микрофону": "Requesting microphone access",
   "Запустить цель": "Start goal",
+  "Запустить в режиме оркестратора": "Run in orchestrator mode",
   "Изменены файлы": "Files changed",
   "Изменён {{path}}": "Changed {{path}}",
   "Изображение {{number}}": "Image {{number}}",
@@ -489,6 +491,8 @@ const ENGLISH: Record<string, string> = {
   "Не удалось изменить цель": "Failed to change the goal",
   "Не удалось начать запись с микрофона": "Failed to start microphone recording",
   "Не удалось начать реализацию плана": "Failed to start implementing the plan",
+  "Не удалось начать реализацию плана в режиме оркестратора":
+    "Failed to start implementing the plan in orchestrator mode",
   "Не удалось отправить сообщение": "Failed to send the message",
   "Не удалось отправить запись на сервер": "Failed to upload the recording",
   "Не удалось очистить цель": "Failed to clear the goal",
