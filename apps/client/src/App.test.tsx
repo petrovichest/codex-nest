@@ -609,6 +609,187 @@ describe("App routing and navigation", () => {
     expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(1);
   });
 
+  it("limits each expanded subagent branch independently", () => {
+    const children = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `child-${index + 1}`,
+      title: `Субагент ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: {
+        kind: "subagent",
+        sessionId: `child-session-${index + 1}`,
+        parentThreadId: baseThread.id,
+        nickname: `agent-${index + 1}`,
+        role: "worker",
+      },
+    }));
+    const grandchildren = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `grandchild-${index + 1}`,
+      title: `Вложенный ${index + 1}`,
+      updatedAt: 80 - index,
+      relation: {
+        kind: "subagent",
+        sessionId: `grandchild-session-${index + 1}`,
+        parentThreadId: children[0]!.id,
+        nickname: `nested-${index + 1}`,
+        role: "worker",
+      },
+    }));
+    mockConnection(snapshot([...children, ...grandchildren, baseThread]));
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
+
+    const rootChildren = view.container.querySelector(
+      ".project-sessions > .thread-branch > .thread-branch-children",
+    ) as HTMLElement;
+    const directBranches = () =>
+      Array.from(rootChildren.children).filter((element) =>
+        element.classList.contains("thread-branch"),
+      );
+    expect(directBranches()).toHaveLength(5);
+    expect(
+      within(rootChildren).getByRole("button", { name: "Показать ещё 1" }),
+    ).toBeInTheDocument();
+
+    const firstChildLink = within(rootChildren).getByRole("link", {
+      name: /agent-1 · Субагент 1/,
+    });
+    const firstChildBranch = firstChildLink.closest(".thread-branch") as HTMLElement;
+    fireEvent.click(within(firstChildBranch).getByRole("button", { name: "Показать субагентов" }));
+
+    const nestedChildren = firstChildBranch.querySelector(
+      ":scope > .thread-branch-children",
+    ) as HTMLElement;
+    const nestedBranches = () =>
+      Array.from(nestedChildren.children).filter((element) =>
+        element.classList.contains("thread-branch"),
+      );
+    expect(nestedBranches()).toHaveLength(5);
+
+    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(directBranches()).toHaveLength(6);
+    expect(nestedBranches()).toHaveLength(5);
+
+    fireEvent.click(nestedChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(nestedBranches()).toHaveLength(6);
+    expect(nestedChildren.lastElementChild).toHaveTextContent("Показать меньше");
+
+    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(directBranches()).toHaveLength(5);
+    expect(nestedBranches()).toHaveLength(6);
+  });
+
+  it("restores the complete sidebar tree state from local storage", () => {
+    const rootSiblings = Array.from({ length: 5 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `root-${index + 1}`,
+      title: `Корневая ${index + 1}`,
+      updatedAt: 19 - index,
+      relation: { kind: "session", sessionId: `root-session-${index + 1}` },
+    }));
+    const children = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `persisted-child-${index + 1}`,
+      title: `Сохранённый субагент ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: {
+        kind: "subagent",
+        sessionId: `persisted-child-session-${index + 1}`,
+        parentThreadId: baseThread.id,
+        nickname: `saved-${index + 1}`,
+        role: "worker",
+      },
+    }));
+    mockConnection(snapshot([baseThread, ...rootSiblings, ...children]));
+
+    const firstView = renderApp("/threads/newer");
+    const firstProjectSessions = firstView.container.querySelector(
+      ".project-sessions",
+    ) as HTMLElement;
+    fireEvent.click(within(firstProjectSessions).getByRole("button", { name: "Показать ещё 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
+    const firstRootBranch = screen
+      .getByRole("link", { name: "Новая задача в истории" })
+      .closest(".thread-branch") as HTMLElement;
+    const firstChildren = firstRootBranch.querySelector(
+      ":scope > .thread-branch-children",
+    ) as HTMLElement;
+    fireEvent.click(within(firstChildren).getByRole("button", { name: "Показать ещё 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Проект" }));
+    firstView.unmount();
+
+    const secondView = renderApp("/threads/newer");
+    const projectToggle = screen.getByRole("button", { name: "Проект" });
+    expect(projectToggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(projectToggle);
+    const restoredProjectSessions = secondView.container.querySelector(
+      ".project-sessions",
+    ) as HTMLElement;
+    expect(restoredProjectSessions.querySelectorAll(":scope > .thread-branch")).toHaveLength(6);
+    const restoredRootBranch = screen
+      .getByRole("link", { name: "Новая задача в истории" })
+      .closest(".thread-branch") as HTMLElement;
+    expect(
+      within(restoredRootBranch).getByRole("button", { name: "Свернуть субагентов" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      restoredRootBranch.querySelectorAll(":scope > .thread-branch-children > .thread-branch"),
+    ).toHaveLength(6);
+  });
+
+  it("keeps sidebar tree state isolated by server", () => {
+    mockConnection(snapshot([baseThread]));
+
+    const firstView = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Проект" }));
+    firstView.unmount();
+
+    const otherServerView = renderApp("/threads/newer", () => undefined, "https://other.local");
+    expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute("aria-expanded", "true");
+    otherServerView.unmount();
+
+    renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("discards invalid and stale sidebar tree state", async () => {
+    const storageKey = "codexnest.sidebarTree.v1:https%3A%2F%2Fpi.local";
+    localStorage.setItem(storageKey, "{invalid");
+    mockConnection(snapshot([baseThread]));
+
+    const invalidView = renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute("aria-expanded", "true");
+    invalidView.unmount();
+
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        version: 1,
+        collapsedProjectIds: ["missing-project"],
+        expandedProjectListIds: ["missing-project"],
+        openBranchIds: ["missing-thread"],
+        expandedBranchListIds: ["missing-thread"],
+      }),
+    );
+    renderApp("/threads/newer");
+
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
+        version: 1,
+        collapsedProjectIds: [],
+        expandedProjectListIds: [],
+        openBranchIds: [],
+        expandedBranchListIds: [],
+      }),
+    );
+  });
+
   it("does not auto-expand a selected child that needs attention", () => {
     const child: ThreadSummary = {
       ...baseThread,
@@ -1215,13 +1396,10 @@ describe("App routing and navigation", () => {
   });
 });
 
-function renderApp(path: string, onDisconnected = () => undefined) {
+function renderApp(path: string, onDisconnected = () => undefined, baseUrl = "https://pi.local") {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <App
-        settings={{ baseUrl: "https://pi.local", token: "secret" }}
-        onDisconnected={onDisconnected}
-      />
+      <App settings={{ baseUrl, token: "secret" }} onDisconnected={onDisconnected} />
     </MemoryRouter>,
   );
 }

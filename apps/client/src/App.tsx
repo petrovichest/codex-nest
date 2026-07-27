@@ -68,6 +68,15 @@ const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed
 const PROJECT_DRAG_START_DISTANCE = 6;
 const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
+const THREAD_PREVIEW_LIMIT = 5;
+const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
+
+type SidebarTreeState = {
+  collapsedProjectIds: Set<string>;
+  expandedProjectListIds: Set<string>;
+  openBranchIds: Set<string>;
+  expandedBranchListIds: Set<string>;
+};
 
 type ProjectDragGesture = {
   active: boolean;
@@ -286,11 +295,13 @@ export function App({
         </div>
       )}
       <Sidebar
+        key={settings.baseUrl}
         containerRef={sidebarRef}
         drawer={drawer}
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
         projectListDirection={projectListDirection}
+        serverBaseUrl={settings.baseUrl}
         updateAvailable={updateAvailable}
       />
       {(drawer || drawerDragging) && (
@@ -442,6 +453,116 @@ function readLayoutPreferences(): {
   };
 }
 
+function emptySidebarTreeState(): SidebarTreeState {
+  return {
+    collapsedProjectIds: new Set(),
+    expandedProjectListIds: new Set(),
+    openBranchIds: new Set(),
+    expandedBranchListIds: new Set(),
+  };
+}
+
+function sidebarTreeStateStorageKey(serverBaseUrl: string): string {
+  const normalizedBaseUrl = serverBaseUrl.replace(/\/+$/u, "");
+  return `${SIDEBAR_TREE_STATE_KEY_PREFIX}${encodeURIComponent(normalizedBaseUrl)}`;
+}
+
+function readSidebarTreeState(serverBaseUrl: string): SidebarTreeState {
+  try {
+    const serialized = localStorage.getItem(sidebarTreeStateStorageKey(serverBaseUrl));
+    if (!serialized) return emptySidebarTreeState();
+    const parsed: unknown = JSON.parse(serialized);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return emptySidebarTreeState();
+    }
+    const record = parsed as Record<string, unknown>;
+    if (record.version !== 1) return emptySidebarTreeState();
+    const collapsedProjectIds = readStringSet(record.collapsedProjectIds);
+    const expandedProjectListIds = readStringSet(record.expandedProjectListIds);
+    const openBranchIds = readStringSet(record.openBranchIds);
+    const expandedBranchListIds = readStringSet(record.expandedBranchListIds);
+    if (
+      !collapsedProjectIds ||
+      !expandedProjectListIds ||
+      !openBranchIds ||
+      !expandedBranchListIds
+    ) {
+      return emptySidebarTreeState();
+    }
+    return {
+      collapsedProjectIds,
+      expandedProjectListIds,
+      openBranchIds,
+      expandedBranchListIds,
+    };
+  } catch {
+    return emptySidebarTreeState();
+  }
+}
+
+function readStringSet(value: unknown): Set<string> | null {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return null;
+  return new Set(value);
+}
+
+function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): void {
+  try {
+    localStorage.setItem(
+      sidebarTreeStateStorageKey(serverBaseUrl),
+      JSON.stringify({
+        version: 1,
+        collapsedProjectIds: [...state.collapsedProjectIds].sort(),
+        expandedProjectListIds: [...state.expandedProjectListIds].sort(),
+        openBranchIds: [...state.openBranchIds].sort(),
+        expandedBranchListIds: [...state.expandedBranchListIds].sort(),
+      }),
+    );
+  } catch {
+    return;
+  }
+}
+
+function toggleSidebarTreeEntry(
+  state: SidebarTreeState,
+  field: keyof SidebarTreeState,
+  id: string,
+): SidebarTreeState {
+  const values = new Set(state[field]);
+  if (values.has(id)) values.delete(id);
+  else values.add(id);
+  return { ...state, [field]: values };
+}
+
+function pruneSidebarTreeState(
+  state: SidebarTreeState,
+  projectIds: Set<string>,
+  threadIds: Set<string>,
+): SidebarTreeState {
+  projectIds.add("ungrouped");
+  const collapsedProjectIds = retainSidebarTreeEntries(state.collapsedProjectIds, projectIds);
+  const expandedProjectListIds = retainSidebarTreeEntries(state.expandedProjectListIds, projectIds);
+  const openBranchIds = retainSidebarTreeEntries(state.openBranchIds, threadIds);
+  const expandedBranchListIds = retainSidebarTreeEntries(state.expandedBranchListIds, threadIds);
+  if (
+    collapsedProjectIds.size === state.collapsedProjectIds.size &&
+    expandedProjectListIds.size === state.expandedProjectListIds.size &&
+    openBranchIds.size === state.openBranchIds.size &&
+    expandedBranchListIds.size === state.expandedBranchListIds.size
+  ) {
+    return state;
+  }
+  return {
+    collapsedProjectIds,
+    expandedProjectListIds,
+    openBranchIds,
+    expandedBranchListIds,
+  };
+}
+
+function retainSidebarTreeEntries(values: Set<string>, validIds: Set<string>): Set<string> {
+  return new Set([...values].filter((id) => validIds.has(id)));
+}
+
 function HomeRoute({
   threads,
   onOpenNavigation,
@@ -479,6 +600,7 @@ function Sidebar({
   onClose,
   onNewProject,
   projectListDirection,
+  serverBaseUrl,
   updateAvailable,
 }: {
   containerRef: RefObject<HTMLElement | null>;
@@ -486,14 +608,16 @@ function Sidebar({
   onClose(): void;
   onNewProject(): void;
   projectListDirection: ProjectListDirection;
+  serverBaseUrl: string;
   updateAvailable: boolean;
 }) {
   const { api, state, dispatch } = useConnection();
   const { language, t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
+  const [sidebarTree, setSidebarTree] = useState<SidebarTreeState>(() =>
+    readSidebarTreeState(serverBaseUrl),
+  );
   const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
@@ -524,6 +648,21 @@ function Sidebar({
     group.project ? [group.project.id] : [],
   );
   const projectOrderKey = snapshot?.projects.map((project) => project.id).join(":") ?? "";
+
+  useEffect(() => {
+    writeSidebarTreeState(serverBaseUrl, sidebarTree);
+  }, [serverBaseUrl, sidebarTree]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    setSidebarTree((current) =>
+      pruneSidebarTreeState(
+        current,
+        new Set(snapshot.projects.map((project) => project.id)),
+        new Set(snapshot.threads.map((thread) => thread.id)),
+      ),
+    );
+  }, [snapshot]);
 
   useEffect(() => {
     const navigation = threadNavRef.current;
@@ -572,21 +711,19 @@ function Sidebar({
   }, [projectOrderKey]);
 
   function toggleCollapsed(key: string) {
-    setCollapsed((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setSidebarTree((current) => toggleSidebarTreeEntry(current, "collapsedProjectIds", key));
   }
 
   function toggleShowAll(key: string) {
-    setShowAll((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setSidebarTree((current) => toggleSidebarTreeEntry(current, "expandedProjectListIds", key));
+  }
+
+  function toggleBranchOpen(threadId: string) {
+    setSidebarTree((current) => toggleSidebarTreeEntry(current, "openBranchIds", threadId));
+  }
+
+  function toggleBranchShowAll(threadId: string) {
+    setSidebarTree((current) => toggleSidebarTreeEntry(current, "expandedBranchListIds", threadId));
   }
 
   function showProjectNotice(
@@ -884,10 +1021,14 @@ function Sidebar({
       </summary>
       {archivedRoots.map((thread) => (
         <ThreadBranch
+          expandedBranchListIds={sidebarTree.expandedBranchListIds}
           thread={thread}
           childrenByParent={childrenByParent}
           key={thread.id}
           onNavigate={onClose}
+          onToggleOpen={toggleBranchOpen}
+          onToggleShowAll={toggleBranchShowAll}
+          openBranchIds={sidebarTree.openBranchIds}
         />
       ))}
     </details>
@@ -947,10 +1088,12 @@ function Sidebar({
           {projectListDirection === "bottom-up" && archive}
           {orderedGroups.map((group) => {
             const key = group.project?.id ?? "ungrouped";
-            const groupCollapsed = collapsed.has(key);
-            const groupShowsAll = showAll.has(key);
+            const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
+            const groupShowsAll = sidebarTree.expandedProjectListIds.has(key);
             const isBottomUp = projectListDirection === "bottom-up";
-            const visible = groupShowsAll ? group.threads : group.threads.slice(0, 5);
+            const visible = groupShowsAll
+              ? group.threads
+              : group.threads.slice(0, THREAD_PREVIEW_LIMIT);
             const projectThreads = group.project
               ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ?? [])
               : [];
@@ -1109,17 +1252,23 @@ function Sidebar({
               <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                 {visible.map((thread) => (
                   <ThreadBranch
+                    expandedBranchListIds={sidebarTree.expandedBranchListIds}
                     thread={thread}
                     childrenByParent={childrenByParent}
                     key={thread.id}
                     onNavigate={onClose}
+                    onToggleOpen={toggleBranchOpen}
+                    onToggleShowAll={toggleBranchShowAll}
+                    openBranchIds={sidebarTree.openBranchIds}
                   />
                 ))}
-                {group.threads.length > 5 && (
+                {group.threads.length > THREAD_PREVIEW_LIMIT && (
                   <button className="show-more" onClick={() => toggleShowAll(key)}>
                     {groupShowsAll
                       ? t("Показать меньше")
-                      : t("Показать ещё {{count}}", { count: group.threads.length - 5 })}
+                      : t("Показать ещё {{count}}", {
+                          count: group.threads.length - THREAD_PREVIEW_LIMIT,
+                        })}
                   </button>
                 )}
                 {!group.threads.length && (
@@ -1157,15 +1306,25 @@ function Sidebar({
 function ThreadBranch({
   thread,
   childrenByParent,
+  expandedBranchListIds,
   onNavigate,
+  onToggleOpen,
+  onToggleShowAll,
+  openBranchIds,
 }: {
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
+  expandedBranchListIds: ReadonlySet<string>;
   onNavigate(): void;
+  onToggleOpen(threadId: string): void;
+  onToggleShowAll(threadId: string): void;
+  openBranchIds: ReadonlySet<string>;
 }) {
   const { t } = useI18n();
   const children = childrenByParent.get(thread.id) ?? [];
-  const [open, setOpen] = useState(false);
+  const open = openBranchIds.has(thread.id);
+  const showAllChildren = expandedBranchListIds.has(thread.id);
+  const visibleChildren = showAllChildren ? children : children.slice(0, THREAD_PREVIEW_LIMIT);
 
   return (
     <div className="thread-branch">
@@ -1176,7 +1335,7 @@ function ThreadBranch({
             aria-expanded={open}
             className="thread-branch-toggle"
             type="button"
-            onClick={() => setOpen((value) => !value)}
+            onClick={() => onToggleOpen(thread.id)}
           >
             {open ? <ChevronDownIcon /> : <ChevronRightIcon />}
           </button>
@@ -1187,14 +1346,27 @@ function ThreadBranch({
       </div>
       {open && children.length > 0 && (
         <div className="thread-branch-children">
-          {children.map((child) => (
+          {visibleChildren.map((child) => (
             <ThreadBranch
+              expandedBranchListIds={expandedBranchListIds}
               thread={child}
               childrenByParent={childrenByParent}
               key={child.id}
               onNavigate={onNavigate}
+              onToggleOpen={onToggleOpen}
+              onToggleShowAll={onToggleShowAll}
+              openBranchIds={openBranchIds}
             />
           ))}
+          {children.length > THREAD_PREVIEW_LIMIT && (
+            <button className="show-more" type="button" onClick={() => onToggleShowAll(thread.id)}>
+              {showAllChildren
+                ? t("Показать меньше")
+                : t("Показать ещё {{count}}", {
+                    count: children.length - THREAD_PREVIEW_LIMIT,
+                  })}
+            </button>
+          )}
         </div>
       )}
     </div>
