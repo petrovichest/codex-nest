@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router";
 import type { AppSnapshot, AppUpdateStatus, Project, ThreadSummary } from "@codexnest/protocol";
 
 import { App } from "./App";
+import { I18nProvider } from "./i18n";
 
 const connection = vi.hoisted(() => vi.fn());
 const capacitor = vi.hoisted(() => ({
@@ -275,21 +276,37 @@ describe("App routing and navigation", () => {
 
   it("loads and refreshes both Codex limits only when clicked", async () => {
     const api = mockConnection(snapshot([baseThread]));
+    const primaryReset = Date.UTC(2026, 6, 28, 12, 30);
+    const secondaryReset = Date.UTC(2026, 7, 3, 8);
     api.readCodexRateLimits
       .mockResolvedValueOnce({
-        primary: { usedPercent: 20.4, windowDurationMins: 300 },
-        secondary: { usedPercent: 38.2, windowDurationMins: 10_080 },
+        primary: { usedPercent: 20.4, windowDurationMins: 300, resetsAt: primaryReset },
+        secondary: {
+          usedPercent: 38.2,
+          windowDurationMins: 10_080,
+          resetsAt: secondaryReset,
+        },
       })
       .mockResolvedValueOnce({
-        primary: { usedPercent: 100.5, windowDurationMins: 300 },
+        primary: { usedPercent: 100.5, windowDurationMins: 300, resetsAt: null },
         secondary: null,
       });
+    const formatter = new Intl.DateTimeFormat("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
     renderApp("/threads/newer");
     expect(api.readCodexRateLimits).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Показать лимиты Codex" }));
-    expect(await screen.findByText("5 ч 80% · 7 д 62%")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        `${formatter.format(primaryReset)} 80% · ${formatter.format(secondaryReset)} 62%`,
+      ),
+    ).toBeInTheDocument();
     expect(api.readCodexRateLimits).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: /Обновить лимиты Codex/ }));
@@ -318,6 +335,37 @@ describe("App routing and navigation", () => {
     expect(
       await screen.findByRole("button", { name: "Повторить обновление лимитов Codex" }),
     ).toHaveTextContent("Повторить лимиты");
+  });
+
+  it("formats the Codex limit reset in English when English is selected", async () => {
+    localStorage.setItem("codexnest.uiLanguage", "en");
+    const englishSnapshot = { ...snapshot([baseThread]), uiLanguage: "en" as const };
+    const api = mockConnection(englishSnapshot);
+    const reset = Date.UTC(2026, 6, 28, 12, 30);
+    api.readCodexRateLimits.mockResolvedValue({
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: reset },
+      secondary: null,
+    });
+
+    render(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/threads/newer"]}>
+          <App
+            settings={{ baseUrl: "https://pi.local", token: "secret" }}
+            onDisconnected={() => undefined}
+          />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show Codex limits" }));
+    const formatted = new Intl.DateTimeFormat("en-US", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(reset);
+    expect(await screen.findByText(`${formatted} 75%`)).toBeInTheDocument();
   });
 
   it("pulses unseen outcomes and dims acknowledged sessions", () => {
@@ -537,7 +585,7 @@ describe("App routing and navigation", () => {
     expect(sessions.lastElementChild).toHaveTextContent("Показать меньше");
   });
 
-  it("nests native subagents under their parent session", () => {
+  it("keeps child sessions collapsed until the user expands them", () => {
     const child: ThreadSummary = {
       ...baseThread,
       id: "child",
@@ -556,11 +604,39 @@ describe("App routing and navigation", () => {
 
     const view = renderApp("/threads/newer");
 
+    expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
     const childLink = screen.getByRole("link", { name: /tester · Проверить тесты/ });
     expect(childLink.closest(".thread-branch-children")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Свернуть субагентов" }));
     expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
     expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(1);
+  });
+
+  it("does not auto-expand a selected child that needs attention", () => {
+    const child: ThreadSummary = {
+      ...baseThread,
+      id: "child",
+      title: "Нужно решение",
+      state: "needsAttention",
+      updatedAt: 30,
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: baseThread.id,
+        nickname: "reviewer",
+        role: "worker",
+      },
+    };
+    mockConnection(snapshot([child, baseThread]));
+
+    renderApp("/threads/child");
+
+    expect(screen.getByRole("button", { name: "Показать субагентов" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByRole("link", { name: /reviewer · Нужно решение/ })).toBeNull();
   });
 
   it("collapses project sessions without toggling from project actions", () => {

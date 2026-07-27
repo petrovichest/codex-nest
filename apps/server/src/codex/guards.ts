@@ -15,6 +15,7 @@ import type {
 type RateLimitWindowView = {
   usedPercent: number;
   windowDurationMins: number | null;
+  resetsAt: number | null;
 };
 
 export type AccountRateLimitsView = {
@@ -190,7 +191,10 @@ function isRateLimitWindow(value: unknown): value is RateLimitWindowView {
     isRecord(value) &&
     typeof value.usedPercent === "number" &&
     Number.isFinite(value.usedPercent) &&
-    (value.windowDurationMins === null || typeof value.windowDurationMins === "number")
+    (value.windowDurationMins === null || typeof value.windowDurationMins === "number") &&
+    (value.resetsAt === undefined ||
+      value.resetsAt === null ||
+      (typeof value.resetsAt === "number" && Number.isFinite(value.resetsAt)))
   );
 }
 
@@ -199,6 +203,7 @@ function rateLimitWindow(value: unknown): RateLimitWindowView | null {
   return {
     usedPercent: value.usedPercent,
     windowDurationMins: value.windowDurationMins,
+    resetsAt: typeof value.resetsAt === "number" ? value.resetsAt * 1_000 : null,
   };
 }
 

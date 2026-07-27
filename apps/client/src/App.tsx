@@ -18,6 +18,7 @@ import type {
   Project,
   ThreadSummary,
   TranscriptionConfigResponse,
+  UiLanguage,
 } from "@codexnest/protocol";
 
 import {
@@ -517,7 +518,6 @@ function Sidebar({
   const activeRoots = roots.filter((thread) => !thread.archived);
   const archivedRoots = roots.filter((thread) => thread.archived);
   const childrenByParent = childThreadsByParent(allThreads);
-  const selectedThreadId = selectedThreadFromPath(location.pathname);
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const displayedProjectIds = orderedGroups.flatMap((group) =>
@@ -867,7 +867,7 @@ function Sidebar({
     }
   }
 
-  const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError, t);
+  const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError, language, t);
   const projectDragTargets = projectDrag
     ? displayedProjectIds.filter((projectId) => projectId !== projectDrag.projectId)
     : [];
@@ -886,7 +886,6 @@ function Sidebar({
         <ThreadBranch
           thread={thread}
           childrenByParent={childrenByParent}
-          selectedThreadId={selectedThreadId}
           key={thread.id}
           onNavigate={onClose}
         />
@@ -1112,7 +1111,6 @@ function Sidebar({
                   <ThreadBranch
                     thread={thread}
                     childrenByParent={childrenByParent}
-                    selectedThreadId={selectedThreadId}
                     key={thread.id}
                     onNavigate={onClose}
                   />
@@ -1159,22 +1157,15 @@ function Sidebar({
 function ThreadBranch({
   thread,
   childrenByParent,
-  selectedThreadId,
   onNavigate,
 }: {
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
-  selectedThreadId: string | null;
   onNavigate(): void;
 }) {
   const { t } = useI18n();
   const children = childrenByParent.get(thread.id) ?? [];
-  const shouldAutoOpen = branchNeedsAttention(thread, childrenByParent, selectedThreadId);
-  const [open, setOpen] = useState(shouldAutoOpen);
-
-  useEffect(() => {
-    if (shouldAutoOpen) setOpen(true);
-  }, [selectedThreadId, shouldAutoOpen, thread.id]);
+  const [open, setOpen] = useState(false);
 
   return (
     <div className="thread-branch">
@@ -1200,7 +1191,6 @@ function ThreadBranch({
             <ThreadBranch
               thread={child}
               childrenByParent={childrenByParent}
-              selectedThreadId={selectedThreadId}
               key={child.id}
               onNavigate={onNavigate}
             />
@@ -1245,50 +1235,36 @@ function childThreadsByParent(threads: ThreadSummary[]): Map<string, ThreadSumma
   return result;
 }
 
-function branchNeedsAttention(
-  thread: ThreadSummary,
-  childrenByParent: Map<string, ThreadSummary[]>,
-  selectedThreadId: string | null,
-): boolean {
-  if (
-    thread.id === selectedThreadId ||
-    thread.state === "queued" ||
-    thread.state === "running" ||
-    thread.state === "needsAttention"
-  ) {
-    return true;
-  }
-  return (childrenByParent.get(thread.id) ?? []).some((child) =>
-    branchNeedsAttention(child, childrenByParent, selectedThreadId),
-  );
-}
-
-function selectedThreadFromPath(pathname: string): string | null {
-  const match = /^\/threads\/([^/]+)/.exec(pathname);
-  if (!match?.[1]) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
-  }
-}
-
 function rateLimitsLabel(
   limits: CodexRateLimitsResponse | null,
   error: boolean,
+  language: UiLanguage,
   t: Translate,
 ): string {
   if (error) return t("Повторить лимиты");
   if (!limits) return t("Лимиты Codex");
   const windows = [limits.primary, limits.secondary]
     .filter((window): window is CodexRateLimitWindow => window !== null)
-    .map((window) => formatRateLimitWindow(window, t));
+    .map((window) => formatRateLimitWindow(window, language, t));
   return windows.length ? windows.join(" · ") : t("Лимиты недоступны");
 }
 
-function formatRateLimitWindow(window: CodexRateLimitWindow, t: Translate): string {
+function formatRateLimitWindow(
+  window: CodexRateLimitWindow,
+  language: UiLanguage,
+  t: Translate,
+): string {
   const remaining = Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)));
-  return `${rateLimitDuration(window.windowDurationMins, t)} ${remaining}%`;
+  const reset =
+    window.resetsAt === null
+      ? rateLimitDuration(window.windowDurationMins, t)
+      : new Intl.DateTimeFormat(language === "ru" ? "ru-RU" : "en-US", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }).format(new Date(window.resetsAt));
+  return `${reset} ${remaining}%`;
 }
 
 function rateLimitDuration(minutes: number | null, t: Translate): string {

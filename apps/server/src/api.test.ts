@@ -1846,8 +1846,12 @@ describe("thread settings", () => {
     const rateLimits = await app.inject({ url: "/api/v1/codex/rate-limits", headers });
     expect(rateLimits.statusCode).toBe(200);
     expect(rateLimits.json()).toEqual({
-      primary: { usedPercent: 25, windowDurationMins: 300 },
-      secondary: { usedPercent: 40, windowDurationMins: 10_080 },
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_785_258_183_000 },
+      secondary: {
+        usedPercent: 40,
+        windowDurationMins: 10_080,
+        resetsAt: 1_785_344_583_000,
+      },
     });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
@@ -2468,8 +2472,12 @@ class SettingsBridge extends EventEmitter {
           codex: {
             ...common,
             limitId: "codex",
-            primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
-            secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: null },
+            primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_785_258_183 },
+            secondary: {
+              usedPercent: 40,
+              windowDurationMins: 10_080,
+              resetsAt: 1_785_344_583,
+            },
           },
         },
         rateLimitResetCredits: null,

@@ -77,8 +77,13 @@ describe("app-server response guards", () => {
     const codex = {
       ...fallback,
       limitId: "codex",
-      primary: { ...window, usedPercent: 35 },
-      secondary: { ...window, usedPercent: 45, windowDurationMins: 10_080 },
+      primary: { ...window, usedPercent: 35, resetsAt: 1_785_258_183 },
+      secondary: {
+        ...window,
+        usedPercent: 45,
+        windowDurationMins: 10_080,
+        resetsAt: 1_785_344_583,
+      },
     };
 
     expect(
@@ -88,8 +93,12 @@ describe("app-server response guards", () => {
         rateLimitResetCredits: null,
       }),
     ).toEqual({
-      primary: { usedPercent: 35, windowDurationMins: 300 },
-      secondary: { usedPercent: 45, windowDurationMins: 10_080 },
+      primary: { usedPercent: 35, windowDurationMins: 300, resetsAt: 1_785_258_183_000 },
+      secondary: {
+        usedPercent: 45,
+        windowDurationMins: 10_080,
+        resetsAt: 1_785_344_583_000,
+      },
     });
     expect(
       parseAccountRateLimits({
@@ -97,13 +106,21 @@ describe("app-server response guards", () => {
         rateLimitsByLimitId: null,
         rateLimitResetCredits: null,
       }).primary,
-    ).toEqual({ usedPercent: 20, windowDurationMins: 300 });
+    ).toEqual({ usedPercent: 20, windowDurationMins: 300, resetsAt: null });
   });
 
   it("rejects malformed rate-limit windows", () => {
     expect(() =>
       parseAccountRateLimits({
         rateLimits: { primary: { usedPercent: "20", windowDurationMins: 300 }, secondary: null },
+      }),
+    ).toThrow("Invalid app-server response shape for account/rateLimits/read");
+    expect(() =>
+      parseAccountRateLimits({
+        rateLimits: {
+          primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: "tomorrow" },
+          secondary: null,
+        },
       }),
     ).toThrow("Invalid app-server response shape for account/rateLimits/read");
   });

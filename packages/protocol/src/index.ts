@@ -93,6 +93,7 @@ export type GitChangesSummary = {
 export type CodexRateLimitWindow = {
   usedPercent: number;
   windowDurationMins: number | null;
+  resetsAt: number | null;
 };
 
 export type CodexRateLimitsResponse = {
