@@ -81,6 +81,26 @@ describe("AppManager", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  it("allows the managed updater to coordinate active daemon turns at cutover", async () => {
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    const manager = new AppManager({
+      currentVersion: "0.1.0",
+      managedInstall: true,
+      statusPath: "/missing/update.json",
+      managementCli: "/home/user/.local/bin/codexnest",
+      transport: "daemon",
+      activeTurnCount: () => 3,
+      runCommand,
+    });
+
+    await expect(manager.update()).resolves.toMatchObject({ operation: "preparing" });
+    expect(runCommand).toHaveBeenCalledWith(
+      "systemctl",
+      ["--user", "start", "--no-block", "codexnest-update.service"],
+      { timeout: 10_000 },
+    );
+  });
+
   it("recovers a stale in-progress status after a reboot", async () => {
     const statusDirectory = await mkdtemp(join(tmpdir(), "codexnest-interrupted-update-"));
     const statusPath = join(statusDirectory, "update.json");

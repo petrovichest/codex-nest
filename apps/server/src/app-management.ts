@@ -18,6 +18,7 @@ export type AppManagerOptions = {
   statusPath: string;
   managementCli: string;
   activeTurnCount(): number;
+  transport?: "stdio" | "daemon";
   systemctlBin?: string;
   runCommand?: RunCommand;
 };
@@ -87,7 +88,7 @@ export class AppManager {
 
   async update(): Promise<AppUpdateStatus> {
     this.assertSupported();
-    if (this.options.activeTurnCount() > 0) {
+    if (this.options.activeTurnCount() > 0 && this.options.transport !== "daemon") {
       throw new AppManagementError(
         "active_turns",
         "Дождитесь завершения активных ответов перед обновлением CodexNest.",

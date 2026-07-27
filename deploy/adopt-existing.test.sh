@@ -23,6 +23,7 @@ prepare_case() {
   printf '%s\n' '{' '  "name": "fixture",' '  "version": "0.1.0"' '}' \
     > "$case_repo/package.json"
   cp "$test_script_dir/codexnest" "$case_repo/deploy/codexnest"
+  cp "$test_script_dir/restart-protocol.json" "$case_repo/deploy/restart-protocol.json"
   cp "$test_script_dir/systemd/codexnest-managed.service" \
     "$case_repo/deploy/systemd/codexnest-managed.service"
   cp "$test_script_dir/systemd/codexnest-update.service" \
@@ -51,6 +52,8 @@ prepare_case() {
     > "$case_home/.config/systemd/user/codexnest.service.d/preserved.conf"
   printf '{"auth":{"tokenSha256":"%064d"}}\n' 0 \
     > "$case_home/.local/state/codexnest/state.json"
+  printf '%s\n' 'test-restart-token' \
+    > "$case_home/.local/state/codexnest/restart-token"
 
   case_real_node="$(command -v node)"
   cat > "$case_node/bin/node" <<EOF
@@ -98,12 +101,18 @@ if [[ "$*" == *api.github.com* ]]; then
   printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "$tag"
   exit 0
 fi
+if [[ "$*" == *'/api/v1/internal/restart/prepare'* ]]; then
+  printf '%s\n' \
+    '{"restartProtocolVersion":1,"transport":"daemon","appServerReady":true,"hasManagedWork":false,"quiescent":true}'
+  exit 0
+fi
+if [[ "$*" == *'/api/v1/internal/restart/resume'* ]]; then exit 0; fi
 if [[ -f "$HOME/fail-health" ]]; then exit 22; fi
 current="$(readlink -f "$HOME/.local/share/codexnest/current" 2>/dev/null || true)"
 version="${current##*/v}"
 if [[ -f "$HOME/fail-rolling-health" && "$version" =~ -[0-9a-f]{7}$ ]]; then exit 22; fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7})?$ ]] || version=0.1.0
-printf '{"status":"ok","serverVersion":"%s"}\n' "$version"
+printf '{"status":"ok","serverVersion":"%s","recoveryState":"ready"}\n' "$version"
 EOF
   chmod 0755 "$case_fake_bin/systemctl" "$case_fake_bin/curl"
 }
@@ -127,6 +136,8 @@ run_cli() {
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
   CODEXNEST_REPOSITORY_URL="$case_repo" \
   CODEXNEST_UPDATE_CHANNEL="${CODEXNEST_UPDATE_CHANNEL:-}" \
+  CODEXNEST_HEALTH_ATTEMPTS=1 \
+  CODEXNEST_HEALTH_DELAY_SECONDS=0 \
   PATH="$case_fake_bin:/usr/bin:/bin" \
     "$case_home/.local/bin/codexnest" "$@"
 }

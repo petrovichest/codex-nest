@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
@@ -60,12 +60,14 @@ import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import type {
   DynamicToolCallResponse,
+  Thread,
   ThreadItem,
   ThreadResumeResponse,
   Turn,
 } from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
+  parseThreadList,
   parseThreadRead,
   parseThreadStart,
   parseTurnsList,
@@ -92,6 +94,11 @@ import {
 import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
 import {
+  RESTART_RECOVERY_PROTOCOL_VERSION,
+  RestartTokenError,
+  type RuntimeLifecycle,
+} from "./runtime-lifecycle";
+import {
   MessageQueue,
   MessageQueueConflictError,
   MessageQueueNotFoundError,
@@ -104,6 +111,7 @@ import type {
   ManagedTeamTaskResult,
   ManagedTeamTaskState,
   StateStore,
+  TeamToolOperationState,
 } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
 import {
@@ -129,6 +137,8 @@ const TEAM_TOOLS_VERSION = 1;
 const TEAM_MAX_ACTIVE_TASKS = 4;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
 const TEAM_ACTIVITY_PERSIST_MS = 60_000;
+const TEAM_CONTINUATION_MARKER_TEXT =
+  "Continue CodexNest Team orchestration using the attached managed-task results.";
 const TEAM_SESSION_UPGRADE_MESSAGE =
   "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.";
 const TEAM_MODE_CONTEXT = [
@@ -259,6 +269,7 @@ export interface ApiServices {
   push: PushNotifier;
   codexManager?: CodexManager;
   appManager?: AppManager;
+  lifecycle?: RuntimeLifecycle;
   threadTitles?: Pick<ThreadTitleGenerator, "generate">;
   transcription?: Pick<
     TranscriptionService,
@@ -268,17 +279,28 @@ export interface ApiServices {
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
-  const { bridge, store, projection, attention, codexManager, appManager, threadTitles } = services;
+  const {
+    bridge,
+    store,
+    projection,
+    attention,
+    codexManager,
+    appManager,
+    lifecycle,
+    threadTitles,
+  } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
   const turnStartLocks = new Map<string, Promise<unknown>>();
+  const teamParentLocks = new Map<string, Promise<unknown>>();
+  const teamToolOperationLocks = new Map<string, Promise<unknown>>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
   const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
     if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
     const model = effectiveModel(summary.settings, projection.availableModels);
-    void threadTitles
+    const pending = threadTitles
       .generate(input, {
         cwd: summary.cwd,
         model: model?.id,
@@ -291,6 +313,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .catch((error: unknown) => {
         app.log.warn({ err: safeError(error), threadId }, "Failed to generate thread title");
       });
+    void (lifecycle?.track(pending) ?? pending);
   };
   const startTurnUnlocked = async (
     threadId: string,
@@ -338,7 +361,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       summary.settings.collaborationMode === "team"
         ? await claimTeamResults(store, threadId)
         : null;
-    let turn;
+    const teamMarkerId = teamClaim
+      ? (clientMessageId ?? teamContinuationMarkerId(teamClaim.claimId))
+      : null;
+    const effectiveInput =
+      teamClaim && !input.trim() && !images.length ? TEAM_CONTINUATION_MARKER_TEXT : input;
+    if (teamClaim && teamMarkerId) {
+      await markTeamClaimDispatch(
+        store,
+        threadId,
+        teamClaim.claimId,
+        teamMarkerId,
+        teamContinuationContext(store, threadId, teamClaim),
+      );
+    }
+    let turnId: string;
     try {
       if (!projection.isUnmaterialized(threadId)) {
         await bridge.request<ThreadResumeResponse>(
@@ -355,11 +392,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           30_000,
         );
       }
-      turn = parseTurnStart(
+      const turn = parseTurnStart(
         await bridge.request<unknown>("turn/start", {
           threadId,
-          clientUserMessageId: clientMessageId,
-          input: messageInput(input, images),
+          clientUserMessageId: teamMarkerId ?? clientMessageId,
+          input: messageInput(effectiveInput, images),
           ...turnSettings(
             summary.settings,
             projection.availableModels,
@@ -367,32 +404,49 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           ),
         }),
       );
+      turnId = turn.turn.id;
     } catch (error) {
-      if (teamClaim) await releaseTeamClaim(store, threadId, teamClaim.claimId);
-      if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
-      throw error;
+      if (teamClaim && teamMarkerId) {
+        let recoveredTurnId: string | null;
+        try {
+          recoveredTurnId = await deliveredClientMessageTurnId(bridge, threadId, teamMarkerId);
+        } catch {
+          // Keep the durable claim parked until bridge recovery can reconcile it.
+          throw error;
+        }
+        if (recoveredTurnId) {
+          turnId = recoveredTurnId;
+        } else {
+          await releaseTeamClaim(store, threadId, teamClaim.claimId);
+          if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
+          throw error;
+        }
+      } else {
+        if (goal) await clearThreadGoal(bridge, threadId).catch(() => undefined);
+        throw error;
+      }
     }
     await projection.markMaterialized(threadId);
-    await projection.setCurrentTurn(threadId, turn.turn.id);
+    await projection.setCurrentTurn(threadId, turnId);
     if (clientMessageId) {
       await store.update((state) => {
         state.messageReceipts ??= {};
         state.messageReceipts[clientMessageId] = {
           threadId,
-          turnId: turn.turn.id,
+          turnId,
           contentHash: messageContentHash(input, images, goal),
           createdAt: Date.now(),
         };
       });
     }
     if (clientMessageId) {
-      projection.recordUserMessage(threadId, turn.turn.id, clientMessageId, input, images);
+      projection.recordUserMessage(threadId, turnId, clientMessageId, input, images);
     }
     if (teamClaim) {
-      await deliverTeamClaim(store, threadId, teamClaim.claimId, turn.turn.id);
+      await deliverTeamClaim(store, threadId, teamClaim.claimId, turnId);
       await projection.recordOrchestrationNotice(
         threadId,
-        turn.turn.id,
+        turnId,
         teamClaim.results.map((result) => {
           const child = projection.summary(result.childThreadId);
           return {
@@ -407,13 +461,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.publishThreadState(threadId);
     }
     if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
-    if (!goal) return { turnId: turn.turn.id };
+    if (!goal) return { turnId };
     try {
       await setThreadGoal(bridge, threadId, { status: "active" });
-      return { turnId: turn.turn.id };
+      return { turnId };
     } catch {
       return {
-        turnId: turn.turn.id,
+        turnId,
         goalWarning: "Первый ход начат, но цель осталась на паузе. Продолжите её вручную.",
       };
     }
@@ -427,9 +481,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
-      return startTurnUnlocked(threadId, input, images, clientMessageId, goal).finally(() =>
-        release?.(),
-      );
+      const run = () => startTurnUnlocked(threadId, input, images, clientMessageId, goal);
+      const result =
+        projection.summary(threadId)?.settings.collaborationMode === "team"
+          ? withKeyLock(teamParentLocks, threadId, run)
+          : run();
+      return result.finally(() => release?.());
     });
   };
 
@@ -482,7 +539,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return request;
   }
 
-  const steerTurn = async (
+  const steerTurnUnlocked = async (
     threadId: string,
     turnId: string,
     input: string,
@@ -494,13 +551,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.summary(threadId)?.settings.collaborationMode === "team"
         ? await claimTeamResults(store, threadId)
         : null;
-    let result;
+    const teamMarkerId = teamClaim
+      ? (clientMessageId ?? teamContinuationMarkerId(teamClaim.claimId))
+      : null;
+    if (teamClaim && teamMarkerId) {
+      await markTeamClaimDispatch(
+        store,
+        threadId,
+        teamClaim.claimId,
+        teamMarkerId,
+        teamContinuationContext(store, threadId, teamClaim),
+      );
+    }
+    let resultTurnId: string;
     try {
-      result = parseTurnSteer(
+      const result = parseTurnSteer(
         await bridge.request<unknown>("turn/steer", {
           threadId,
           expectedTurnId: turnId,
-          clientUserMessageId: clientMessageId,
+          clientUserMessageId: teamMarkerId ?? clientMessageId,
           input: messageInput(input, images),
           ...(teamClaim
             ? {
@@ -514,26 +583,53 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             : {}),
         }),
       );
+      resultTurnId = result.turnId;
     } catch (error) {
-      if (teamClaim) await releaseTeamClaim(store, threadId, teamClaim.claimId);
-      throw error;
+      if (teamClaim && teamMarkerId) {
+        let recoveredTurnId: string | null;
+        try {
+          recoveredTurnId = await deliveredClientMessageTurnId(bridge, threadId, teamMarkerId);
+        } catch {
+          throw error;
+        }
+        if (recoveredTurnId) {
+          resultTurnId = recoveredTurnId;
+        } else {
+          await releaseTeamClaim(store, threadId, teamClaim.claimId);
+          throw error;
+        }
+      } else {
+        throw error;
+      }
     }
-    if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, result.turnId);
+    if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, resultTurnId);
     if (clientMessageId) {
-      projection.recordUserMessage(threadId, result.turnId, clientMessageId, input, images);
+      projection.recordUserMessage(threadId, resultTurnId, clientMessageId, input, images);
     }
     if (teamClaim) {
-      await deliverTeamClaim(store, threadId, teamClaim.claimId, result.turnId);
+      await deliverTeamClaim(store, threadId, teamClaim.claimId, resultTurnId);
       await recordTeamNotice(
         projection,
         threadId,
-        result.turnId,
+        resultTurnId,
         teamClaim.results,
         clientMessageId,
       );
       projection.publishThreadState(threadId);
     }
-    return result.turnId;
+    return resultTurnId;
+  };
+  const steerTurn = (
+    threadId: string,
+    turnId: string,
+    input: string,
+    images: string[],
+    clientMessageId: string | null,
+  ): Promise<string> => {
+    const run = () => steerTurnUnlocked(threadId, turnId, input, images, clientMessageId);
+    return projection.summary(threadId)?.settings.collaborationMode === "team"
+      ? withKeyLock(teamParentLocks, threadId, run)
+      : run();
   };
   const queue = new MessageQueue(store, {
     paused: () => codexManager?.maintenanceActive ?? false,
@@ -562,61 +658,91 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
   const scheduledTeamContinuations = new Set<string>();
   const scheduledTeamTaskStarts = new Set<string>();
-  const teamTaskStartLocks = new Map<string, Promise<unknown>>();
+  const teamContinuationImmediates = new Map<string, NodeJS.Immediate>();
+  const teamTaskStartImmediates = new Map<string, NodeJS.Immediate>();
   const managedActivity = new Map<string, number>();
+  const teamBackgroundRuns = new Set<Promise<unknown>>();
+  const deferredServerRequests = new Map<string, [ServerRequest, JsonlTransport]>();
   let teamNotificationQueue = Promise.resolve();
+  let recoveryPromise: Promise<void> | undefined;
   let teamContinuationsClosed = false;
+  let teamContinuationsPaused = false;
+  const trackTeamBackground = <T>(promise: Promise<T>): Promise<T> => {
+    teamBackgroundRuns.add(promise);
+    const cleanup = () => teamBackgroundRuns.delete(promise);
+    void promise.then(cleanup, cleanup);
+    return lifecycle?.track(promise) ?? promise;
+  };
   const scheduleTeamContinuation = (threadId: string): void => {
-    if (teamContinuationsClosed || scheduledTeamContinuations.has(threadId)) return;
+    if (
+      teamContinuationsClosed ||
+      teamContinuationsPaused ||
+      scheduledTeamContinuations.has(threadId)
+    )
+      return;
     scheduledTeamContinuations.add(threadId);
-    setImmediate(() => {
-      void (async () => {
-        try {
-          if (teamContinuationsClosed) return;
-          const summary = projection.summary(threadId);
-          if (
-            !summary ||
-            summary.relation.kind !== "session" ||
-            summary.currentTurnId ||
-            !hasPendingTeamContinuation(store, threadId)
-          ) {
-            return;
+    const immediate = setImmediate(() => {
+      teamContinuationImmediates.delete(threadId);
+      void trackTeamBackground(
+        (async () => {
+          try {
+            if (teamContinuationsClosed || teamContinuationsPaused) return;
+            const summary = projection.summary(threadId);
+            if (
+              !summary ||
+              summary.relation.kind !== "session" ||
+              summary.currentTurnId ||
+              !hasPendingTeamContinuation(store, threadId)
+            ) {
+              return;
+            }
+            if (queue.count(threadId)) {
+              await queue.drain(threadId);
+              return;
+            }
+            await startTurn(threadId, "", [], null);
+          } catch (error) {
+            app.log.warn(
+              { err: safeError(error), threadId },
+              "Failed to continue Team orchestration",
+            );
+          } finally {
+            scheduledTeamContinuations.delete(threadId);
           }
-          if (queue.count(threadId)) {
-            await queue.drain(threadId);
-            return;
-          }
-          await startTurn(threadId, "", [], null);
-        } catch (error) {
-          app.log.warn(
-            { err: safeError(error), threadId },
-            "Failed to continue Team orchestration",
-          );
-        } finally {
-          scheduledTeamContinuations.delete(threadId);
-        }
-      })();
+        })(),
+      );
     });
+    teamContinuationImmediates.set(threadId, immediate);
   };
   const scheduleTeamTasks = (parentThreadId: string): void => {
-    if (teamContinuationsClosed || scheduledTeamTaskStarts.has(parentThreadId)) return;
+    if (
+      teamContinuationsClosed ||
+      teamContinuationsPaused ||
+      scheduledTeamTaskStarts.has(parentThreadId)
+    )
+      return;
     scheduledTeamTaskStarts.add(parentThreadId);
-    setImmediate(() => {
-      void withKeyLock(teamTaskStartLocks, parentThreadId, async () => {
-        try {
-          await startQueuedTeamTasks(bridge, store, projection, parentThreadId);
-          projection.publishThreadState(parentThreadId);
-          scheduleTeamContinuation(parentThreadId);
-        } catch (error) {
-          app.log.warn(
-            { err: safeError(error), parentThreadId },
-            "Failed to start managed Team task",
-          );
-        } finally {
-          scheduledTeamTaskStarts.delete(parentThreadId);
-        }
-      });
+    const immediate = setImmediate(() => {
+      teamTaskStartImmediates.delete(parentThreadId);
+      void trackTeamBackground(
+        withKeyLock(teamParentLocks, parentThreadId, async () => {
+          try {
+            if (teamContinuationsPaused) return;
+            await startQueuedTeamTasks(bridge, store, projection, parentThreadId);
+            projection.publishThreadState(parentThreadId);
+            scheduleTeamContinuation(parentThreadId);
+          } catch (error) {
+            app.log.warn(
+              { err: safeError(error), parentThreadId },
+              "Failed to start managed Team task",
+            );
+          } finally {
+            scheduledTeamTaskStarts.delete(parentThreadId);
+          }
+        }),
+      );
     });
+    teamTaskStartImmediates.set(parentThreadId, immediate);
   };
   const resumeTeamContinuations = (): void => {
     for (const threadId of pendingTeamParents(store)) {
@@ -625,21 +751,38 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
   };
   const teamNotificationHandler = (notification: ServerNotification) => {
+    if (teamContinuationsPaused) return;
+    if (
+      notification.method === "turn/completed" &&
+      Object.values(store.snapshot().teamToolOperations ?? {}).some(
+        (operation) =>
+          operation.status === "applied" &&
+          operation.threadId === notification.params.threadId &&
+          operation.turnId === notification.params.turn.id,
+      )
+    ) {
+      void pruneAppliedTeamToolOperations(
+        store,
+        notification.params.threadId,
+        notification.params.turn.id,
+      ).catch(() => undefined);
+    }
     const childThreadId = notificationThreadId(notification);
-    if (childThreadId && managedTaskForChild(store.snapshot(), childThreadId)) {
+    const managed = childThreadId
+      ? managedTaskForChild(store.snapshot(), childThreadId)
+      : undefined;
+    if (childThreadId && managed) {
       managedActivity.set(childThreadId, Date.now());
     }
     if (!isManagedTeamNotification(notification, store)) return;
     teamNotificationQueue = teamNotificationQueue
       .catch(() => undefined)
       .then(async () => {
-        const affected = await handleManagedTeamNotification(
-          notification,
-          bridge,
-          store,
-          projection,
-          managedActivity,
-        );
+        const run = () =>
+          handleManagedTeamNotification(notification, bridge, store, projection, managedActivity);
+        const affected = managed
+          ? await withKeyLock(teamParentLocks, managed.parentThreadId, run)
+          : await run();
         for (const threadId of affected) {
           projection.publishThreadState(threadId);
           scheduleTeamTasks(threadId);
@@ -651,22 +794,47 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       });
   };
   const teamRequestHandler = (request: ServerRequest, transport: JsonlTransport) => {
+    if (
+      teamContinuationsPaused ||
+      (lifecycle && lifecycle.state !== "ready" && lifecycle.state !== "draining")
+    ) {
+      deferredServerRequests.set(`${request.method}:${String(request.id)}`, [request, transport]);
+      return;
+    }
     if (request.method === "item/tool/call" && request.params.namespace === "codexnest") {
-      void handleManagedTeamToolCall(request, bridge, store, projection)
+      const operationKey = teamToolOperationKey(request);
+      const caller = request.params.threadId;
+      const parent =
+        projection.summary(caller)?.relation.kind === "session"
+          ? caller
+          : managedTaskForChild(store.snapshot(), caller)?.parentThreadId;
+      const operation = () => handleManagedTeamToolCall(request, bridge, store, projection);
+      const pending = withKeyLock(teamToolOperationLocks, operationKey, () =>
+        parent ? withKeyLock(teamParentLocks, parent, operation) : operation(),
+      );
+      void (lifecycle?.track(pending) ?? pending)
         .then(async (response) => {
-          transport.respond(request.id, response);
-          const caller = request.params.threadId;
-          const parent =
-            projection.summary(caller)?.relation.kind === "session"
-              ? caller
-              : managedTaskForChild(store.snapshot(), caller)?.parentThreadId;
+          try {
+            transport.respond(request.id, response);
+          } catch {
+            // The durable receipt will answer the replay on the next connection.
+            return;
+          }
           if (parent) {
             scheduleTeamTasks(parent);
             projection.publishThreadState(parent);
           }
         })
-        .catch((error: unknown) => {
-          transport.respond(request.id, dynamicToolError(safeError(error).message));
+        .catch(async (error: unknown) => {
+          const response = dynamicToolError(safeError(error).message);
+          if (isMutatingTeamTool(request.params.tool)) {
+            await completeTeamToolOperation(store, operationKey, response).catch(() => undefined);
+          }
+          try {
+            transport.respond(request.id, response);
+          } catch {
+            // A durable response, when persisted, will answer the replay.
+          }
         });
       return;
     }
@@ -679,6 +847,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   bridge.on("notification", teamNotificationHandler);
   bridge.on("request", teamRequestHandler);
   const teamWatchdogTimer = setInterval(() => {
+    if (teamContinuationsPaused) return;
     teamNotificationQueue = teamNotificationQueue
       .catch(() => undefined)
       .then(async () => {
@@ -693,12 +862,37 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       });
   }, 30_000);
   teamWatchdogTimer.unref();
+  const bridgeTeamStateHandler = (state: string) => {
+    if (state === "ready" || teamContinuationsClosed) return;
+    teamContinuationsPaused = true;
+    void queue.pause().catch(() => undefined);
+  };
+  bridge.on("state", bridgeTeamStateHandler);
   app.addHook("onClose", async () => {
     teamContinuationsClosed = true;
+    teamContinuationsPaused = true;
     clearInterval(teamWatchdogTimer);
+    for (const immediate of teamContinuationImmediates.values()) clearImmediate(immediate);
+    for (const immediate of teamTaskStartImmediates.values()) clearImmediate(immediate);
+    teamContinuationImmediates.clear();
+    teamTaskStartImmediates.clear();
+    deferredServerRequests.clear();
+    scheduledTeamContinuations.clear();
+    scheduledTeamTaskStarts.clear();
+    bridge.off("state", bridgeTeamStateHandler);
     bridge.off("notification", teamNotificationHandler);
     bridge.off("request", teamRequestHandler);
+    await queue.pause();
     await teamNotificationQueue;
+    await recoveryPromise?.catch(() => undefined);
+    await Promise.all(
+      [
+        ...teamBackgroundRuns,
+        ...teamParentLocks.values(),
+        ...teamToolOperationLocks.values(),
+        ...turnStartLocks.values(),
+      ].map((pending) => pending.catch(() => undefined)),
+    );
   });
   const voiceTranscriptions = services.transcription
     ? new VoiceTranscriptionManager({
@@ -716,26 +910,147 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     app.addHook("onClose", async () => voiceTranscriptions.stop());
   }
 
-  projection.on("event", (_sequence, event) => {
-    if (event.type === "resync.required") {
-      void queue.recover().catch(() => undefined);
-      void reconcileTeamOrchestration(bridge, store, projection)
-        .then((threadIds) => {
-          for (const threadId of threadIds) {
-            projection.publishThreadState(threadId);
+  let recoveryAgain = false;
+  const runRecovery = (): Promise<void> => {
+    if (recoveryPromise) {
+      recoveryAgain = true;
+      return recoveryPromise;
+    }
+    const pending = (async () => {
+      do {
+        recoveryAgain = false;
+        if (lifecycle && lifecycle.state !== "ready" && lifecycle.state !== "draining") {
+          lifecycle.recovering();
+        }
+        await queue.recover();
+        await pruneCompletedTeamToolOperations(bridge, store);
+        const threadIds = await reconcileTeamOrchestration(bridge, store, projection);
+        if (
+          Object.values(store.snapshot().threadMeta).some((meta) =>
+            Object.values(meta.teamOrchestration?.tasks ?? {}).some(
+              (task) => task.recoveryMisses === 1,
+            ),
+          )
+        ) {
+          recoveryAgain = true;
+        }
+        for (const threadId of threadIds) {
+          projection.publishThreadState(threadId);
+          if (!teamContinuationsPaused) {
             scheduleTeamTasks(threadId);
             scheduleTeamContinuation(threadId);
           }
-        })
-        .catch((error: unknown) => {
-          app.log.warn({ err: safeError(error) }, "Failed to reconcile Team orchestration");
-        });
+        }
+      } while (recoveryAgain && !teamContinuationsClosed);
+      if (bridge.state === "ready" && lifecycle?.state !== "draining" && !teamContinuationsClosed) {
+        teamContinuationsPaused = false;
+        await queue.resume();
+        resumeTeamContinuations();
+        lifecycle?.ready();
+        const deferred = [...deferredServerRequests.values()];
+        deferredServerRequests.clear();
+        for (const [request, transport] of deferred) teamRequestHandler(request, transport);
+      }
+    })()
+      .catch((error: unknown) => {
+        lifecycle?.failed();
+        app.log.warn({ err: safeError(error) }, "Failed to reconcile durable runtime state");
+        throw error;
+      })
+      .finally(() => {
+        recoveryPromise = undefined;
+      });
+    recoveryPromise = lifecycle?.track(pending) ?? pending;
+    return recoveryPromise;
+  };
+
+  const unregisterLifecycleParticipant = lifecycle?.register({
+    pause: async () => {
+      teamContinuationsPaused = true;
+      await queue.pause();
+      await teamNotificationQueue.catch(() => undefined);
+      await Promise.all(
+        [
+          ...teamBackgroundRuns,
+          ...teamParentLocks.values(),
+          ...teamToolOperationLocks.values(),
+          ...turnStartLocks.values(),
+        ].map((pending) => pending.catch(() => undefined)),
+      );
+      await recoveryPromise?.catch(() => undefined);
+    },
+    resume: async () => {
+      if (teamContinuationsClosed) return;
+      await runRecovery().catch(() => undefined);
+      teamContinuationsPaused = false;
+      await queue.resume();
+      const deferred = [...deferredServerRequests.values()];
+      deferredServerRequests.clear();
+      for (const [request, transport] of deferred) teamRequestHandler(request, transport);
+      resumeTeamContinuations();
+    },
+  });
+
+  projection.on("event", (_sequence, event) => {
+    if (event.type === "resync.required") {
+      void runRecovery().catch(() => undefined);
     } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
       void queue.drain(event.thread.id).catch(() => undefined);
-      if (event.thread.relation.kind === "session") scheduleTeamContinuation(event.thread.id);
+      if (event.thread.relation.kind === "session") {
+        if (hasClaimedTeamContinuation(store, event.thread.id)) {
+          void runRecovery().catch(() => undefined);
+        } else {
+          scheduleTeamContinuation(event.thread.id);
+        }
+      }
     } else if (event.type === "thread.removed") {
       void queue.removeThread(event.threadId).catch(() => undefined);
     }
+  });
+
+  app.addHook("onClose", async () => {
+    unregisterLifecycleParticipant?.();
+  });
+
+  const activeMutationRequests = new Map<string, () => void>();
+  const finishMutationRequest = (requestId: string): void => {
+    activeMutationRequests.get(requestId)?.();
+    activeMutationRequests.delete(requestId);
+  };
+  app.addHook("onRequest", async (request, reply) => {
+    if (!lifecycle || !request.url.startsWith("/api/v1/")) return;
+    const pathname = new URL(request.url, "http://localhost").pathname;
+    if (
+      request.method === "OPTIONS" ||
+      !["POST", "PUT", "PATCH", "DELETE"].includes(request.method) ||
+      pathname.startsWith("/api/v1/internal/restart/")
+    ) {
+      return;
+    }
+    if (!lifecycle.acceptsMutations) {
+      reply.header("Retry-After", "2");
+      return apiError(
+        reply,
+        503,
+        "app_server_unavailable",
+        `CodexNest is ${lifecycle.state}; retry after recovery`,
+      );
+    }
+    let resolveRequest!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      resolveRequest = resolve;
+    });
+    activeMutationRequests.set(request.id, resolveRequest);
+    lifecycle.track(pending);
+  });
+  app.addHook("onResponse", async (request) => {
+    finishMutationRequest(request.id);
+  });
+  app.addHook("onError", async (request) => {
+    finishMutationRequest(request.id);
+  });
+  app.addHook("onRequestAbort", async (request) => {
+    finishMutationRequest(request.id);
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -747,6 +1062,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (
       request.method === "OPTIONS" ||
       parsed.pathname === "/api/v1/health" ||
+      parsed.pathname.startsWith("/api/v1/internal/restart/") ||
       parsed.pathname === "/api/v1/events"
     )
       return;
@@ -757,14 +1073,103 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 
   app.get("/api/v1/health", async () => ({
-    status: bridge.state === "ready" ? "ok" : "degraded",
+    status:
+      bridge.state === "ready" && (!lifecycle || lifecycle.state === "ready") ? "ok" : "degraded",
     serverVersion: SERVER_VERSION,
+    recoveryState:
+      lifecycle?.state ??
+      (bridge.state === "ready" ? ("ready" as const) : ("unavailable" as const)),
+    restartProtocolVersion: RESTART_RECOVERY_PROTOCOL_VERSION,
+    transport: lifecycle?.transport ?? ("stdio" as const),
     appServer: {
       state: bridge.state,
       installedVersion: bridge.actualVersion ?? null,
       message: bridge.state === "ready" ? null : "Codex app-server is unavailable",
     },
   }));
+
+  app.post("/api/v1/internal/restart/prepare", async (request, reply) => {
+    if (!lifecycle) {
+      return apiError(reply, 409, "conflict", "Restart coordination is unavailable");
+    }
+    if (!isLoopbackAddress(request.ip)) {
+      return apiError(reply, 403, "forbidden", "Restart coordination is loopback-only");
+    }
+    const token = request.headers["x-codexnest-restart-token"];
+    if (typeof token !== "string") {
+      return apiError(reply, 403, "forbidden", "Restart token is required");
+    }
+    try {
+      await lifecycle.prepare(token);
+    } catch (error) {
+      if (error instanceof RestartTokenError) {
+        return apiError(reply, 403, "forbidden", error.message);
+      }
+      throw error;
+    }
+    const snapshot = store.snapshot();
+    const activeTurnCount = projection
+      .snapshot()
+      .threads.filter((thread) => thread.currentTurnId !== null).length;
+    const hasManagedWork = Object.values(snapshot.threadMeta).some((meta) =>
+      Boolean(meta.teamOrchestration && Object.keys(meta.teamOrchestration.tasks).length),
+    );
+    const hasDispatchingMessages = Object.values(snapshot.messageQueues ?? {}).some((messages) =>
+      messages.some((message) => message.status === "dispatching"),
+    );
+    const hasQueuedMessages = Object.values(snapshot.messageQueues ?? {}).some(
+      (messages) => messages.length > 0,
+    );
+    const pendingToolOperationCount = Object.values(snapshot.teamToolOperations ?? {}).filter(
+      (operation) => operation.status === "prepared",
+    ).length;
+    const pendingAttentionCount = attention.list().length;
+    const hasActiveVoiceTranscriptions = Object.values(snapshot.voiceTranscriptions ?? {}).some(
+      (job) => ["queued", "transcribing", "applying"].includes(job.status),
+    );
+    return {
+      restartProtocolVersion: RESTART_RECOVERY_PROTOCOL_VERSION,
+      transport: lifecycle.transport,
+      appServerReady: bridge.state === "ready",
+      recoveryState: lifecycle.state,
+      activeTurnCount,
+      hasManagedWork,
+      pendingToolOperationCount,
+      pendingAttentionCount,
+      hasDispatchingMessages,
+      hasQueuedMessages,
+      hasActiveVoiceTranscriptions,
+      quiescent:
+        activeTurnCount === 0 &&
+        !hasManagedWork &&
+        pendingToolOperationCount === 0 &&
+        pendingAttentionCount === 0 &&
+        !hasQueuedMessages &&
+        !hasActiveVoiceTranscriptions,
+    };
+  });
+
+  app.post("/api/v1/internal/restart/resume", async (request, reply) => {
+    if (!lifecycle) {
+      return apiError(reply, 409, "conflict", "Restart coordination is unavailable");
+    }
+    if (!isLoopbackAddress(request.ip)) {
+      return apiError(reply, 403, "forbidden", "Restart coordination is loopback-only");
+    }
+    const token = request.headers["x-codexnest-restart-token"];
+    if (typeof token !== "string") {
+      return apiError(reply, 403, "forbidden", "Restart token is required");
+    }
+    try {
+      await lifecycle.resume(token);
+    } catch (error) {
+      if (error instanceof RestartTokenError) {
+        return apiError(reply, 403, "forbidden", error.message);
+      }
+      throw error;
+    }
+    return reply.code(204).send();
+  });
 
   app.get("/api/v1/summary", async () => ({
     threadCount: projection.threadCount,
@@ -1972,9 +2377,25 @@ async function handleManagedTeamToolCall(
 ): Promise<DynamicToolCallResponse> {
   const { threadId, callId, tool } = request.params;
   const args = dynamicToolArguments(request.params.arguments);
+  const prepared = isMutatingTeamTool(tool)
+    ? await prepareTeamToolOperation(store, request, args)
+    : null;
+  if (prepared?.conflict) {
+    return dynamicToolError("This Team tool call id has already been used with other arguments");
+  }
+  if (prepared?.operation.status === "applied" && prepared.operation.response) {
+    return prepared.operation.response;
+  }
+  const finish = async (response: DynamicToolCallResponse): Promise<DynamicToolCallResponse> => {
+    if (prepared) {
+      await completeTeamToolOperation(store, prepared.key, response);
+    }
+    return response;
+  };
+
   if (tool === "submit_result") {
     const managed = managedTaskForChild(store.snapshot(), threadId);
-    if (!managed) return dynamicToolError("This thread is not a managed Team task");
+    if (!managed) return finish(dynamicToolError("This thread is not a managed Team task"));
     const summary = requiredToolString(args, "summary");
     const details = optionalToolString(args, "details");
     let accepted = false;
@@ -1997,9 +2418,11 @@ async function handleManagedTeamToolCall(
       delete task.watchdog;
       accepted = true;
     });
-    return accepted
-      ? dynamicToolSuccess({ accepted: true })
-      : dynamicToolError("The managed task is already terminal");
+    return finish(
+      accepted
+        ? dynamicToolSuccess({ accepted: true })
+        : dynamicToolError("The managed task is already terminal"),
+    );
   }
 
   const parent = projection.summary(threadId);
@@ -2008,18 +2431,68 @@ async function handleManagedTeamToolCall(
     parent.relation.kind !== "session" ||
     parent.settings.collaborationMode !== "team"
   ) {
-    return dynamicToolError("Managed task tools are only available to a Team parent session");
+    return finish(
+      dynamicToolError("Managed task tools are only available to a Team parent session"),
+    );
   }
 
   if (tool === "spawn_task") {
     const title = requiredToolString(args, "title");
     const prompt = requiredToolString(args, "prompt");
-    const task = await createManagedTeamTask(bridge, store, projection, parent, title, prompt);
-    return dynamicToolSuccess({
-      taskId: task.id,
-      threadId: task.childThreadId,
-      status: task.status,
-    });
+    const operation = prepared!.operation;
+    const taskId = operation.taskId!;
+    const childThreadSource = operation.childThreadSource!;
+    let task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+    if (!task) {
+      const recoveredThread = prepared!.created
+        ? null
+        : await findManagedThreadBySource(bridge, childThreadSource);
+      if (!prepared!.created && !recoveredThread) {
+        return finish(
+          dynamicToolError(
+            "The previous child creation is ambiguous; no replacement thread was created",
+          ),
+        );
+      }
+      try {
+        task = await createManagedTeamTask(
+          bridge,
+          store,
+          projection,
+          parent,
+          title,
+          prompt,
+          taskId,
+          childThreadSource,
+          recoveredThread,
+        );
+      } catch (error) {
+        const recoveredAfterError = await findManagedThreadBySource(bridge, childThreadSource);
+        if (!recoveredAfterError) {
+          return finish(
+            dynamicToolError(`Managed task creation failed: ${safeError(error).message}`),
+          );
+        }
+        task = await createManagedTeamTask(
+          bridge,
+          store,
+          projection,
+          parent,
+          title,
+          prompt,
+          taskId,
+          childThreadSource,
+          recoveredAfterError,
+        );
+      }
+    }
+    return finish(
+      dynamicToolSuccess({
+        taskId: task.id,
+        threadId: task.childThreadId,
+        status: task.status,
+      }),
+    );
   }
 
   if (tool === "list_tasks") {
@@ -2033,7 +2506,7 @@ async function handleManagedTeamToolCall(
 
   const taskId = requiredToolString(args, "taskId");
   const task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
-  if (!task) return dynamicToolError("Managed task not found");
+  if (!task) return finish(dynamicToolError("Managed task not found"));
 
   if (tool === "inspect_task") {
     let recentMessages: string[] = [];
@@ -2066,45 +2539,76 @@ async function handleManagedTeamToolCall(
 
   if (tool === "steer_task") {
     if (task.status !== "running" || !task.childTurnId) {
-      return dynamicToolError("Only a running managed task can be steered");
+      return finish(dynamicToolError("Only a running managed task can be steered"));
     }
     const message = requiredToolString(args, "message");
-    const result = parseTurnSteer(
-      await bridge.request<unknown>("turn/steer", {
-        threadId: task.childThreadId,
-        expectedTurnId: task.childTurnId,
-        input: messageInput(message, []),
-      }),
-    );
+    const markerId = teamToolMarkerId(prepared!.key);
+    let resultTurnId: string | null = null;
+    if (!prepared!.created) {
+      resultTurnId = await deliveredClientMessageTurnId(bridge, task.childThreadId, markerId);
+      if (!resultTurnId) {
+        return finish(
+          dynamicToolError(
+            "The previous steer delivery is ambiguous; inspect the task before steering again",
+          ),
+        );
+      }
+    } else {
+      try {
+        resultTurnId = parseTurnSteer(
+          await bridge.request<unknown>("turn/steer", {
+            threadId: task.childThreadId,
+            expectedTurnId: task.childTurnId,
+            clientUserMessageId: markerId,
+            input: messageInput(message, []),
+          }),
+        ).turnId;
+      } catch (error) {
+        let recovered: string | null;
+        try {
+          recovered = await deliveredClientMessageTurnId(bridge, task.childThreadId, markerId);
+        } catch {
+          throw error;
+        }
+        if (!recovered) {
+          return finish(
+            dynamicToolError(
+              "The steer request was not confirmed; inspect the task before retrying",
+            ),
+          );
+        }
+        resultTurnId = recovered;
+      }
+    }
     await store.update((state) => {
       const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
       if (!current || isTerminalTask(current)) return;
-      current.childTurnId = result.turnId;
+      current.childTurnId = resultTurnId!;
       current.lastActivityAt = Date.now();
       delete current.watchdog;
     });
-    return dynamicToolSuccess({ accepted: true, turnId: result.turnId });
+    return finish(dynamicToolSuccess({ accepted: true, turnId: resultTurnId }));
   }
 
   if (tool === "cancel_task") {
-    if (isTerminalTask(task)) return dynamicToolSuccess({ accepted: true, status: task.status });
+    if (isTerminalTask(task)) {
+      return finish(dynamicToolSuccess({ accepted: true, status: task.status }));
+    }
     if (task.childTurnId) {
-      await bridge
-        .request("turn/interrupt", {
-          threadId: task.childThreadId,
-          turnId: task.childTurnId,
-        })
-        .catch(() => undefined);
+      await bridge.request("turn/interrupt", {
+        threadId: task.childThreadId,
+        turnId: task.childTurnId,
+      });
     }
     const reason = optionalToolString(args, "reason");
     await finalizeManagedTask(store, task.childThreadId, `cancelled:${Date.now()}`, "interrupted", {
       summary: reason ? `Task cancelled: ${reason}` : "Task cancelled by the parent agent.",
       source: "status",
     });
-    return dynamicToolSuccess({ accepted: true, status: "interrupted" });
+    return finish(dynamicToolSuccess({ accepted: true, status: "interrupted" }));
   }
 
-  return dynamicToolError(`Unknown CodexNest tool: ${tool}`);
+  return finish(dynamicToolError(`Unknown CodexNest tool: ${tool}`));
 }
 
 async function createManagedTeamTask(
@@ -2114,20 +2618,25 @@ async function createManagedTeamTask(
   parent: ThreadSummary,
   title: string,
   prompt: string,
+  taskId: string,
+  childThreadSource: string,
+  recoveredThread: Thread | null,
 ): Promise<ManagedTeamTaskState> {
   if (store.snapshot().threadMeta[parent.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION) {
     throw new ProjectConflictError("This Team session does not have managed tools");
   }
-  const started = parseThreadStart(
-    await bridge.request<unknown>("thread/start", {
-      cwd: parent.cwd,
-      ...threadSettings(parent.settings),
-      config: teamRuntimeConfig(),
-      developerInstructions: TEAM_CHILD_INSTRUCTIONS,
-      dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
-      threadSource: "codexnest-managed-subagent",
-    }),
-  );
+  const started = recoveredThread
+    ? { thread: recoveredThread }
+    : parseThreadStart(
+        await bridge.request<unknown>("thread/start", {
+          cwd: parent.cwd,
+          ...threadSettings(parent.settings),
+          config: teamRuntimeConfig(),
+          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+          dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
+          threadSource: childThreadSource,
+        }),
+      );
   projection.upsertThread(started.thread);
   await projection.markUnmaterialized(started.thread.id);
   await bridge
@@ -2135,8 +2644,10 @@ async function createManagedTeamTask(
     .catch(() => undefined);
   const now = Date.now();
   const task: ManagedTeamTaskState = {
-    id: randomUUID(),
+    id: taskId,
     childThreadId: started.thread.id,
+    childThreadSource,
+    startMessageId: teamTaskStartMarkerId(taskId),
     title,
     prompt,
     status: "queued",
@@ -2207,6 +2718,7 @@ async function startQueuedTeamTasks(
       const turn = parseTurnStart(
         await bridge.request<unknown>("turn/start", {
           threadId: queued.childThreadId,
+          clientUserMessageId: queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
           input: messageInput(queued.prompt, []),
           ...managedChildTurnSettings(parent.settings, projection.availableModels),
         }),
@@ -2221,18 +2733,45 @@ async function startQueuedTeamTasks(
         task.childTurnId = turn.turn.id;
         task.startedAt = now;
         task.lastActivityAt = now;
+        delete task.recoveryMisses;
       });
     } catch (error) {
-      await finalizeManagedTask(
-        store,
-        queued.childThreadId,
-        `start-error:${Date.now()}`,
-        "failed",
-        {
-          summary: `Managed task failed to start: ${safeError(error).message}`,
-          source: "status",
-        },
-      );
+      let recoveredTurnId: string | null;
+      try {
+        recoveredTurnId = await deliveredClientMessageTurnId(
+          bridge,
+          queued.childThreadId,
+          queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
+        );
+      } catch {
+        // Keep "starting" durable while the bridge is ambiguous; cold recovery will retry.
+        projection.publishThreadState(queued.childThreadId);
+        return;
+      }
+      if (recoveredTurnId) {
+        await projection.markMaterialized(queued.childThreadId);
+        await projection.setCurrentTurn(queued.childThreadId, recoveredTurnId);
+        await store.update((state) => {
+          const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
+          if (!task || isTerminalTask(task)) return;
+          const now = Date.now();
+          task.status = "running";
+          task.childTurnId = recoveredTurnId!;
+          task.startedAt ??= now;
+          task.lastActivityAt = now;
+        });
+      } else {
+        await finalizeManagedTask(
+          store,
+          queued.childThreadId,
+          `start-error:${Date.now()}`,
+          "failed",
+          {
+            summary: `Managed task failed to start: ${safeError(error).message}`,
+            source: "status",
+          },
+        );
+      }
     }
     projection.publishThreadState(queued.childThreadId);
   }
@@ -2343,6 +2882,7 @@ async function finalizeManagedTask(
     task.lastActivityAt = Date.now();
     delete task.watchdog;
     delete task.delivery;
+    delete task.recoveryMisses;
     const childMeta = state.threadMeta[childThreadId];
     if (childMeta) {
       childMeta.lastOutcome = outcome;
@@ -2391,6 +2931,39 @@ async function claimTeamResults(
   return results.length || watchdogs.length ? { claimId, results, watchdogs } : null;
 }
 
+async function markTeamClaimDispatch(
+  store: StateStore,
+  parentThreadId: string,
+  claimId: string,
+  markerId: string,
+  context: string,
+): Promise<void> {
+  await store.update((state) => {
+    const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
+    if (!orchestration) return;
+    const dispatchStartedAt = Date.now();
+    const contextHash = sha256(context);
+    for (const task of Object.values(orchestration.tasks)) {
+      if (task.delivery?.status === "claimed" && task.delivery.claimId === claimId) {
+        task.delivery = {
+          ...task.delivery,
+          markerId,
+          dispatchStartedAt,
+          contextHash,
+        };
+      }
+      if (task.watchdog?.status === "claimed" && task.watchdog.claimId === claimId) {
+        task.watchdog = {
+          ...task.watchdog,
+          markerId,
+          dispatchStartedAt,
+          contextHash,
+        };
+      }
+    }
+  });
+}
+
 async function deliverTeamClaim(
   store: StateStore,
   parentThreadId: string,
@@ -2402,7 +2975,7 @@ async function deliverTeamClaim(
     if (!orchestration) return;
     for (const task of Object.values(orchestration.tasks)) {
       if (task.delivery?.status === "claimed" && task.delivery.claimId === claimId) {
-        task.delivery = { status: "delivered", claimId, parentTurnId };
+        task.delivery = { ...task.delivery, status: "delivered", parentTurnId };
       }
       if (task.watchdog?.status === "claimed" && task.watchdog.claimId === claimId) {
         delete task.watchdog;
@@ -2454,6 +3027,16 @@ function hasPendingTeamContinuation(store: StateStore, parentThreadId: string): 
           Boolean(task.result) &&
           task.delivery === undefined) ||
         task.watchdog?.status === "pending",
+    ),
+  );
+}
+
+function hasClaimedTeamContinuation(store: StateStore, parentThreadId: string): boolean {
+  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  return Boolean(
+    orchestration &&
+    Object.values(orchestration.tasks).some(
+      (task) => task.delivery?.status === "claimed" || task.watchdog?.status === "claimed",
     ),
   );
 }
@@ -2515,12 +3098,18 @@ async function reconcileTeamOrchestration(
     const orchestration = meta.teamOrchestration;
     if (!orchestration) continue;
     const parent = projection.summary(parentThreadId);
-    const claimedById = new Map<string, TeamResultClaim["results"]>();
+    const claimedById = new Map<
+      string,
+      { results: TeamResultClaim["results"]; markerId: string | null }
+    >();
     for (const task of Object.values(orchestration.tasks)) {
       if (task.delivery?.status === "claimed") {
-        const items = claimedById.get(task.delivery.claimId) ?? [];
+        const claim = claimedById.get(task.delivery.claimId) ?? {
+          results: [],
+          markerId: task.delivery.markerId ?? null,
+        };
         if (isTerminalTask(task) && task.terminalTurnId && task.result) {
-          items.push({
+          claim.results.push({
             taskId: task.id,
             childThreadId: task.childThreadId,
             terminalTurnId: task.terminalTurnId,
@@ -2529,11 +3118,31 @@ async function reconcileTeamOrchestration(
             result: task.result,
           });
         }
-        claimedById.set(task.delivery.claimId, items);
+        claim.markerId ??= task.delivery.markerId ?? null;
+        claimedById.set(task.delivery.claimId, claim);
+      }
+      if (task.watchdog?.status === "claimed" && task.watchdog.claimId) {
+        const claim = claimedById.get(task.watchdog.claimId) ?? {
+          results: [],
+          markerId: task.watchdog.markerId ?? null,
+        };
+        claim.markerId ??= task.watchdog.markerId ?? null;
+        claimedById.set(task.watchdog.claimId, claim);
       }
       if (task.status !== "running" && task.status !== "starting") continue;
       const summary = projection.summary(task.childThreadId);
-      if (summary?.currentTurnId) continue;
+      if (summary?.currentTurnId) {
+        await store.update((draft) => {
+          const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+          if (!current || isTerminalTask(current)) return;
+          current.status = "running";
+          current.childTurnId = summary.currentTurnId!;
+          current.startedAt ??= Date.now();
+          current.lastActivityAt = Date.now();
+          delete current.recoveryMisses;
+        });
+        continue;
+      }
       try {
         const page = parseTurnsList(
           await bridge.request<unknown>(
@@ -2570,7 +3179,9 @@ async function reconcileTeamOrchestration(
             if (!current || isTerminalTask(current)) return;
             current.status = "running";
             current.childTurnId = latest.id;
+            current.startedAt ??= Date.now();
             current.lastActivityAt = Date.now();
+            delete current.recoveryMisses;
           });
         } else if (!latest && task.status === "starting") {
           await store.update((draft) => {
@@ -2578,45 +3189,83 @@ async function reconcileTeamOrchestration(
             if (current?.status === "starting") current.status = "queued";
           });
         } else if (!latest && task.status === "running") {
-          if (
-            await finalizeManagedTask(
-              store,
-              task.childThreadId,
-              `reconcile-missing:${Date.now()}`,
-              "interrupted",
-              {
-                summary: "Managed task had no recoverable turn after CodexNest restarted.",
-                source: "status",
-              },
-            )
-          ) {
-            affected.add(parentThreadId);
+          const misses = task.recoveryMisses ?? 0;
+          if (misses < 1) {
+            await store.update((draft) => {
+              const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+              if (current?.status === "running") current.recoveryMisses = misses + 1;
+            });
+          } else {
+            if (
+              await finalizeManagedTask(
+                store,
+                task.childThreadId,
+                `reconcile-missing:${Date.now()}`,
+                "interrupted",
+                {
+                  summary: "Managed task had no recoverable turn after CodexNest restarted.",
+                  source: "status",
+                },
+              )
+            ) {
+              affected.add(parentThreadId);
+            }
           }
         }
       } catch (error) {
+        if (
+          isMissingRolloutError(error) &&
+          (await finalizeManagedTask(
+            store,
+            task.childThreadId,
+            `reconcile-deleted:${Date.now()}`,
+            "failed",
+            {
+              summary: "Managed task thread is no longer available in Codex.",
+              source: "status",
+            },
+          ))
+        ) {
+          affected.add(parentThreadId);
+          continue;
+        }
         projection.emit(
           "projectionError",
           error instanceof Error ? error : new Error(String(error)),
         );
       }
     }
-    for (const [claimId, results] of claimedById) {
-      if (parent?.currentTurnId) {
-        await deliverTeamClaim(store, parentThreadId, claimId, parent.currentTurnId);
-        await recordTeamNotice(projection, parentThreadId, parent.currentTurnId, results, null);
-      } else {
+    for (const [claimId, claim] of claimedById) {
+      if (!claim.markerId) {
         await releaseTeamClaim(store, parentThreadId, claimId);
+        affected.add(parentThreadId);
+        continue;
       }
-      affected.add(parentThreadId);
-    }
-    for (const task of Object.values(orchestration.tasks)) {
-      if (task.watchdog?.status !== "claimed" || !task.watchdog.claimId) continue;
-      if (parent?.currentTurnId) {
-        await deliverTeamClaim(store, parentThreadId, task.watchdog.claimId, parent.currentTurnId);
-      } else {
-        await releaseTeamClaim(store, parentThreadId, task.watchdog.claimId);
+      try {
+        const deliveredTurnId = await deliveredClientMessageTurnId(
+          bridge,
+          parentThreadId,
+          claim.markerId,
+        );
+        if (deliveredTurnId) {
+          await deliverTeamClaim(store, parentThreadId, claimId, deliveredTurnId);
+          await recordTeamNotice(
+            projection,
+            parentThreadId,
+            deliveredTurnId,
+            claim.results,
+            isTeamContinuationMarkerId(claim.markerId) ? null : claim.markerId,
+          );
+        } else if (!parent?.currentTurnId) {
+          await releaseTeamClaim(store, parentThreadId, claimId);
+        }
+        affected.add(parentThreadId);
+      } catch (error) {
+        projection.emit(
+          "projectionError",
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
-      affected.add(parentThreadId);
     }
     affected.add(parentThreadId);
   }
@@ -2792,6 +3441,217 @@ function publicManagedTask(task: ManagedTeamTaskState): Record<string, unknown> 
 function dynamicToolArguments(value: unknown): Record<string, unknown> {
   if (!isObjectRecord(value)) throw new ProjectValidationError("Tool arguments must be an object");
   return value;
+}
+
+type MutatingTeamTool = TeamToolOperationState["tool"];
+
+function isMutatingTeamTool(value: string): value is MutatingTeamTool {
+  return ["spawn_task", "steer_task", "cancel_task", "submit_result"].includes(value);
+}
+
+function teamToolOperationKey(
+  request: Extract<ServerRequest, { method: "item/tool/call" }>,
+): string {
+  const { threadId, turnId, callId, tool } = request.params;
+  return sha256(`${threadId}\0${turnId}\0${callId}\0${tool}`);
+}
+
+async function prepareTeamToolOperation(
+  store: StateStore,
+  request: Extract<ServerRequest, { method: "item/tool/call" }>,
+  args: Record<string, unknown>,
+): Promise<{
+  key: string;
+  operation: TeamToolOperationState;
+  created: boolean;
+  conflict: boolean;
+}> {
+  const key = teamToolOperationKey(request);
+  const argumentsHash = sha256(canonicalJson(args));
+  let created = false;
+  let conflict = false;
+  let operation: TeamToolOperationState | undefined;
+  await store.update((state) => {
+    state.teamToolOperations ??= {};
+    const existing = state.teamToolOperations[key];
+    if (existing) {
+      conflict = existing.argumentsHash !== argumentsHash;
+      operation = structuredClone(existing);
+      return;
+    }
+    const now = Date.now();
+    const next: TeamToolOperationState = {
+      threadId: request.params.threadId,
+      turnId: request.params.turnId,
+      callId: request.params.callId,
+      tool: request.params.tool as MutatingTeamTool,
+      argumentsHash,
+      status: "prepared",
+      createdAt: now,
+      updatedAt: now,
+      ...(request.params.tool === "spawn_task"
+        ? {
+            taskId: randomUUID(),
+            childThreadSource: `codexnest-managed:${key.slice(0, 32)}`,
+          }
+        : {}),
+    };
+    state.teamToolOperations[key] = next;
+    operation = structuredClone(next);
+    created = true;
+  });
+  return { key, operation: operation!, created, conflict };
+}
+
+async function completeTeamToolOperation(
+  store: StateStore,
+  key: string,
+  response: DynamicToolCallResponse,
+): Promise<void> {
+  await store.update((state) => {
+    const operation = state.teamToolOperations?.[key];
+    if (!operation || operation.status === "applied") return;
+    operation.status = "applied";
+    operation.response = structuredClone(response);
+    operation.updatedAt = Date.now();
+  });
+}
+
+async function pruneAppliedTeamToolOperations(
+  store: StateStore,
+  threadId: string,
+  turnId: string,
+): Promise<void> {
+  await store.update((state) => {
+    for (const [key, operation] of Object.entries(state.teamToolOperations ?? {})) {
+      if (
+        operation.status === "applied" &&
+        operation.threadId === threadId &&
+        operation.turnId === turnId
+      ) {
+        delete state.teamToolOperations![key];
+      }
+    }
+  });
+}
+
+async function pruneCompletedTeamToolOperations(
+  bridge: CodexBridge,
+  store: StateStore,
+): Promise<void> {
+  const grouped = new Map<string, TeamToolOperationState[]>();
+  for (const operation of Object.values(store.snapshot().teamToolOperations ?? {})) {
+    if (operation.status !== "applied") continue;
+    const operations = grouped.get(operation.threadId) ?? [];
+    operations.push(operation);
+    grouped.set(operation.threadId, operations);
+  }
+  const completedKeys = new Set<string>();
+  for (const [threadId, operations] of grouped) {
+    let turns: Turn[];
+    try {
+      turns = parseThreadRead(
+        await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
+      ).thread.turns;
+    } catch {
+      continue;
+    }
+    const terminalTurnIds = new Set(
+      turns.filter((turn) => turn.status !== "inProgress").map((turn) => turn.id),
+    );
+    for (const operation of operations) {
+      if (terminalTurnIds.has(operation.turnId)) {
+        completedKeys.add(
+          sha256(
+            `${operation.threadId}\0${operation.turnId}\0${operation.callId}\0${operation.tool}`,
+          ),
+        );
+      }
+    }
+  }
+  if (!completedKeys.size) return;
+  await store.update((state) => {
+    for (const key of completedKeys) delete state.teamToolOperations?.[key];
+  });
+}
+
+async function findManagedThreadBySource(
+  bridge: CodexBridge,
+  source: string,
+): Promise<Thread | null> {
+  const candidates: Thread[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page = parseThreadList(
+      await bridge.request<unknown>(
+        "thread/list",
+        {
+          cursor,
+          limit: 100,
+          sourceKinds: [],
+          sortKey: "created_at",
+          sortDirection: "asc",
+        },
+        30_000,
+      ),
+    );
+    candidates.push(...page.data.filter((thread) => thread.threadSource === source));
+    cursor = page.nextCursor;
+    if (cursor && seenCursors.has(cursor)) break;
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  return (
+    candidates.sort(
+      (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    )[0] ?? null
+  );
+}
+
+async function deliveredClientMessageTurnId(
+  bridge: CodexBridge,
+  threadId: string,
+  markerId: string,
+): Promise<string | null> {
+  const result = parseThreadRead(
+    await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
+  );
+  return (
+    result.thread.turns.find((turn) =>
+      turn.items.some((item) => item.type === "userMessage" && item.clientId === markerId),
+    )?.id ?? null
+  );
+}
+
+function teamToolMarkerId(operationKey: string): string {
+  return `codexnest-team-tool:${operationKey}`;
+}
+
+function teamTaskStartMarkerId(taskId: string): string {
+  return `codexnest-team-task:${taskId}`;
+}
+
+function teamContinuationMarkerId(claimId: string): string {
+  return `codexnest-team-claim:${claimId}`;
+}
+
+function isTeamContinuationMarkerId(value: string): boolean {
+  return value.startsWith("codexnest-team-claim:");
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isObjectRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function requiredToolString(args: Record<string, unknown>, key: string): string {

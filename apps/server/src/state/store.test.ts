@@ -141,6 +141,8 @@ describe("StateStore", () => {
             task: {
               id: "task",
               childThreadId: "child",
+              childThreadSource: "codexnest-managed:receipt",
+              startMessageId: "codexnest-team-task:task",
               title: "Проверить интерфейс",
               prompt: "Проверить интерфейс и вернуть результат.",
               status: "completed",
@@ -150,6 +152,13 @@ describe("StateStore", () => {
               result: {
                 summary: "Интерфейс проверен",
                 source: "submitted",
+              },
+              delivery: {
+                status: "claimed",
+                claimId: "claim",
+                markerId: "codexnest-team-claim:claim",
+                dispatchStartedAt: 3,
+                contextHash: "a".repeat(64),
               },
             },
           },
@@ -174,7 +183,26 @@ describe("StateStore", () => {
           ],
         },
       };
+      state.teamToolOperations = {
+        receipt: {
+          threadId: "parent",
+          turnId: "parent-turn",
+          callId: "call",
+          tool: "spawn_task",
+          argumentsHash: "b".repeat(64),
+          status: "applied",
+          createdAt: 1,
+          updatedAt: 2,
+          taskId: "task",
+          childThreadSource: "codexnest-managed:receipt",
+          response: {
+            success: true,
+            contentItems: [{ type: "inputText", text: '{"taskId":"task"}' }],
+          },
+        },
+      };
     });
+    await store.checkpoint();
 
     const reloaded = new StateStore(path);
     await reloaded.load();
@@ -185,6 +213,7 @@ describe("StateStore", () => {
             childThreadId: "child",
             status: "completed",
             terminalTurnId: "child-turn",
+            startMessageId: "codexnest-team-task:task",
             result: {
               summary: "Интерфейс проверен",
               source: "submitted",
@@ -199,6 +228,13 @@ describe("StateStore", () => {
             agents: [{ threadId: "child", outcome: "completed" }],
           },
         ],
+      },
+    });
+    expect(reloaded.snapshot().teamToolOperations).toMatchObject({
+      receipt: {
+        status: "applied",
+        taskId: "task",
+        response: { success: true },
       },
     });
   });

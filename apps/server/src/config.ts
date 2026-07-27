@@ -30,6 +30,7 @@ export interface AppConfig {
   firebaseProjectId?: string;
   managedInstall: boolean;
   updateStatusPath: string;
+  restartTokenPath: string;
   managementCli: string;
 }
 
@@ -109,6 +110,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     managedInstall: envBoolean("CODEXNEST_MANAGED_INSTALL", false),
     updateStatusPath:
       env("CODEXNEST_UPDATE_STATUS_PATH") ?? resolve(stateRoot, "codexnest/update.json"),
+    restartTokenPath:
+      env("CODEXNEST_RESTART_TOKEN_PATH") ?? resolve(stateRoot, "codexnest/restart-token"),
     managementCli: env("CODEXNEST_MANAGEMENT_CLI") ?? resolve(homedir(), ".local/bin/codexnest"),
     ...overrides,
   };

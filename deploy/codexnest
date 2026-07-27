@@ -11,6 +11,7 @@ codexnest_previous="$codexnest_root/previous"
 codexnest_config="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest/server.env"
 codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
 codexnest_update_status="$codexnest_state_root/update.json"
+codexnest_restart_token_default="$codexnest_state_root/restart-token"
 codexnest_service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 codexnest_rolling_manifest_url="https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.json"
 
@@ -43,6 +44,47 @@ codexnest_config_value() {
       exit
     }
   ' "$codexnest_config"
+}
+
+codexnest_restart_token_path() {
+  local configured
+  configured="$(codexnest_config_value CODEXNEST_RESTART_TOKEN_PATH || true)"
+  printf '%s\n' "${configured:-$codexnest_restart_token_default}"
+}
+
+codexnest_release_recovery_protocol() {
+  local release="$1"
+  local manifest="$release/deploy/restart-protocol.json"
+  local node_bin="$codexnest_root/runtime/current/bin/node"
+  [[ -f "$manifest" && -x "$node_bin" ]] || {
+    printf '0\n'
+    return
+  }
+  "$node_bin" -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (
+      value.schemaVersion !== 1 ||
+      !Number.isInteger(value.recoveryProtocolVersion) ||
+      value.recoveryProtocolVersion < 1 ||
+      !Array.isArray(value.supportedTeamToolsVersions) ||
+      !value.supportedTeamToolsVersions.every(Number.isInteger)
+    ) process.exit(1);
+    process.stdout.write(String(value.recoveryProtocolVersion));
+  ' "$manifest"
+}
+
+codexnest_release_supports_team_v1() {
+  local release="$1"
+  local manifest="$release/deploy/restart-protocol.json"
+  local node_bin="$codexnest_root/runtime/current/bin/node"
+  [[ -f "$manifest" && -x "$node_bin" ]] || return 1
+  "$node_bin" -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    process.exit(Array.isArray(value.supportedTeamToolsVersions) &&
+      value.supportedTeamToolsVersions.includes(1) ? 0 : 1);
+  ' "$manifest"
 }
 
 codexnest_update_channel() {
@@ -189,13 +231,73 @@ codexnest_switch_release() {
 }
 
 codexnest_health_ok() {
-  local expected="$1" attempt body
-  for attempt in $(seq 1 30); do
-    body="$(curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health 2>/dev/null || true)"
-    if [[ "$body" == *"\"serverVersion\":\"$expected\""* ]]; then return 0; fi
-    sleep 1
+  local expected="$1" attempt body node_bin current_target expected_protocol
+  local attempts="${CODEXNEST_HEALTH_ATTEMPTS:-120}"
+  local delay_seconds="${CODEXNEST_HEALTH_DELAY_SECONDS:-1}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=120
+  [[ "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || delay_seconds=1
+  node_bin="$codexnest_root/runtime/current/bin/node"
+  current_target="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
+  expected_protocol="$(codexnest_release_recovery_protocol "$current_target")" || return 1
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    body="$(curl --noproxy '*' --fail --silent --show-error \
+      http://127.0.0.1:4310/api/v1/health 2>/dev/null || true)"
+    if printf '%s' "$body" | "$node_bin" -e '
+      const fs = require("node:fs");
+      let value;
+      try { value = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+      process.exit(
+        value.serverVersion === process.argv[1] &&
+        value.status === "ok" &&
+        (Number(process.argv[2]) === 0 || value.recoveryState === "ready") ? 0 : 1
+      );
+    ' "$expected" "$expected_protocol"; then return 0; fi
+    sleep "$delay_seconds"
   done
   return 1
+}
+
+codexnest_resume_after_aborted_restart() {
+  local token_path token
+  token_path="$(codexnest_restart_token_path)"
+  [[ -f "$token_path" ]] || return
+  token="$(tr -d '\r\n' < "$token_path")"
+  [[ -n "$token" ]] || return
+  curl --noproxy '*' --fail --silent --show-error \
+    -X POST \
+    -H "X-CodexNest-Restart-Token: $token" \
+    http://127.0.0.1:4310/api/v1/internal/restart/resume \
+    >/dev/null 2>&1 || true
+}
+
+codexnest_prepare_restart() {
+  local target="$1" target_protocol target_team_v1=false token_path token body node_bin
+  target_protocol="$(codexnest_release_recovery_protocol "$target")" || return 1
+  if codexnest_release_supports_team_v1 "$target"; then target_team_v1=true; fi
+  token_path="$(codexnest_restart_token_path)"
+  [[ -f "$token_path" ]] || return 1
+  token="$(tr -d '\r\n' < "$token_path")"
+  [[ -n "$token" ]] || return 1
+  body="$(curl --noproxy '*' --fail --silent --show-error \
+    -X POST \
+    -H "X-CodexNest-Restart-Token: $token" \
+    http://127.0.0.1:4310/api/v1/internal/restart/prepare)" || return 1
+  node_bin="$codexnest_root/runtime/current/bin/node"
+  if ! printf '%s' "$body" | "$node_bin" -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(0, "utf8"));
+    const targetProtocol = Number(process.argv[1]);
+    const targetTeamV1 = process.argv[2] === "true";
+    const compatible =
+      value.transport === "daemon" &&
+      value.appServerReady === true &&
+      value.restartProtocolVersion === targetProtocol &&
+      (!value.hasManagedWork || targetTeamV1);
+    process.exit(compatible || value.quiescent === true ? 0 : 1);
+  ' "$target_protocol" "$target_team_v1"; then
+    codexnest_resume_after_aborted_restart
+    return 2
+  fi
 }
 
 codexnest_build_release() {
@@ -231,7 +333,16 @@ codexnest_build_release() {
 }
 
 codexnest_restore_release() {
-  local target="$1" version="$2" latest="$3" reason="$4" restored=true
+  local target="$1" version="$2" latest="$3" reason="$4" restored=true preflight_status=0 target_protocol
+  codexnest_prepare_restart "$target" || preflight_status=$?
+  target_protocol="$(codexnest_release_recovery_protocol "$target" 2>/dev/null || printf '0\n')"
+  if [[ "$preflight_status" -eq 2 || \
+        ( "$preflight_status" -ne 0 && "$target_protocol" -lt 1 ) ]]; then
+    codexnest_write_status idle failed \
+      "$reason; automatic rollback could not prove that the older release would protect active work" \
+      "$latest" true
+    return 1
+  fi
   codexnest_switch_release "$target" || restored=false
   codexnest_set_env_value CODEXNEST_VERSION "$version" || restored=false
   codexnest_install_assets "$target" || restored=false
@@ -266,11 +377,18 @@ codexnest_update_worker() {
     codexnest_write_status idle failed "Failed to build CodexNest $latest_version" "$latest_version" true
     return 1
   }
+  if ! codexnest_prepare_restart "$target"; then
+    codexnest_write_status idle failed \
+      "CodexNest restart preflight failed or the target cannot recover current work" \
+      "$latest_version" true
+    return 1
+  fi
   codexnest_write_status switching none "Switching to CodexNest $latest_version" "$latest_version" true
   old_target="$(readlink -f "$codexnest_current")"
   [[ "$old_target" == "$codexnest_releases"/* ]] || codexnest_die "invalid current release path"
   old_version="$(basename "$old_target" | sed 's/^v//')"
   if ! ln -sfn "$old_target" "$codexnest_previous"; then
+    codexnest_resume_after_aborted_restart
     codexnest_write_status idle failed "Failed to prepare rollback for CodexNest $latest_version" "$latest_version" true
     return 1
   fi
@@ -278,6 +396,7 @@ codexnest_update_worker() {
      ! codexnest_set_env_value CODEXNEST_VERSION "$latest_version" || \
      ! codexnest_install_assets "$target" || \
      ! codexnest_write_status restarting none "Restarting CodexNest $latest_version" "$latest_version" true || \
+     ! codexnest_prepare_restart "$target" || \
      ! systemctl --user restart codexnest.service; then
     codexnest_restore_release "$old_target" "$old_version" "$latest_version" \
       "Failed to activate CodexNest $latest_version"
@@ -310,14 +429,27 @@ codexnest_rollback() {
   current="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
   [[ -n "$target" && -d "$target" ]] || codexnest_die "no previous release is available"
   [[ "$target" == "$codexnest_releases"/* ]] || codexnest_die "invalid previous release path"
+  if ! codexnest_prepare_restart "$target"; then
+    codexnest_die "rollback cannot safely recover the current CodexNest work"
+  fi
   ln -sfn "$current" "$codexnest_previous"
   codexnest_switch_release "$target"
   version="$(basename "$target" | sed 's/^v//')"
   codexnest_set_env_value CODEXNEST_VERSION "$version"
   codexnest_install_assets "$target"
+  codexnest_prepare_restart "$target" || codexnest_die "rollback preflight expired"
   systemctl --user restart codexnest.service
   codexnest_health_ok "$version" || codexnest_die "rolled back release did not become healthy"
   printf 'Rolled back to CodexNest %s.\n' "$version"
+}
+
+codexnest_restart() {
+  local target
+  target="$(readlink -f "$codexnest_current" 2>/dev/null || true)"
+  [[ -n "$target" && -d "$target" ]] || codexnest_die "managed installation is not available"
+  codexnest_prepare_restart "$target" || codexnest_die "restart preflight failed"
+  systemctl --user restart codexnest.service
+  codexnest_health_ok "$(codexnest_current_version)" || codexnest_die "CodexNest did not recover"
 }
 
 codexnest_doctor() {
@@ -334,7 +466,8 @@ codexnest_doctor() {
   else
     printf 'Codex CLI: not installed (run codexnest repair after installing it)\n'
   fi
-  curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health || failed=1
+  curl --noproxy '*' --fail --silent --show-error \
+    http://127.0.0.1:4310/api/v1/health || failed=1
   printf '\n'
   return "$failed"
 }
@@ -348,7 +481,7 @@ case "${1:-help}" in
   update) systemctl --user start codexnest-update.service; cat "$codexnest_update_status" ;;
   update-worker) codexnest_update_worker ;;
   rollback) codexnest_rollback ;;
-  restart) systemctl --user restart codexnest.service ;;
+  restart) codexnest_restart ;;
   *)
     printf '%s\n' 'Usage: codexnest status|logs|doctor|repair|check-update|update|rollback|restart'
     ;;

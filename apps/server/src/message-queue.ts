@@ -20,6 +20,7 @@ export class MessageQueueValidationError extends Error {}
 
 export class MessageQueue {
   private readonly locks = new Map<string, Promise<unknown>>();
+  private suspended = false;
 
   constructor(
     private readonly store: StateStore,
@@ -193,8 +194,18 @@ export class MessageQueue {
   }
 
   async resume(): Promise<void> {
+    this.suspended = false;
     const threadIds = Object.keys(this.store.snapshot().messageQueues ?? {});
     await Promise.all(threadIds.map((threadId) => this.drain(threadId).catch(() => undefined)));
+  }
+
+  async pause(): Promise<void> {
+    this.suspended = true;
+    await Promise.all([...this.locks.values()].map((pending) => pending.catch(() => undefined)));
+  }
+
+  async idle(): Promise<void> {
+    await Promise.all([...this.locks.values()].map((pending) => pending.catch(() => undefined)));
   }
 
   async removeThread(threadId: string): Promise<void> {
@@ -210,6 +221,7 @@ export class MessageQueue {
     message: QueuedMessage,
     allowSteer: boolean,
   ): Promise<string> {
+    if (this.suspended) throw new MessageQueuePausedError("CodexNest is preparing to restart");
     const activeTurnId = this.delivery.currentTurnId(threadId);
     if (activeTurnId && !allowSteer) return activeTurnId;
     await this.setStatus(threadId, message.id, "dispatching");

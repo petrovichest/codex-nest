@@ -908,6 +908,7 @@ export class AppProjection extends EventEmitter {
         if (!this.progress.has(key)) this.progress.set(key, emptyProgress(turn.startedAt));
       }
       for (const rawItem of turn.items) {
+        if (isInternalTeamContinuationItem(rawItem)) continue;
         const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
         const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
         const item = normalizeActivity(
@@ -1286,6 +1287,7 @@ export class AppProjection extends EventEmitter {
       case "item/started":
       case "item/completed": {
         const sourceItem = notification.params.item;
+        if (isInternalTeamContinuationItem(sourceItem)) break;
         this.captureSubagentTitles(sourceItem);
         if (
           notification.method === "item/completed" &&
@@ -1819,9 +1821,14 @@ function normalizeTurn(
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
   const liveMerge = mergeLiveActivities(
-    turn.items.map((item) =>
-      normalizeActivity(item, item.type === "userMessage" ? startedAt : (completedAt ?? startedAt)),
-    ),
+    turn.items
+      .filter((item) => !isInternalTeamContinuationItem(item))
+      .map((item) =>
+        normalizeActivity(
+          item,
+          item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+        ),
+      ),
     liveActivities,
     turn.status !== "inProgress",
   );
@@ -1922,6 +1929,14 @@ function fresherLiveActivity(
     }
   }
   return live;
+}
+
+function isInternalTeamContinuationItem(item: Turn["items"][number]): boolean {
+  return (
+    item.type === "userMessage" &&
+    typeof item.clientId === "string" &&
+    item.clientId.startsWith("codexnest-team-claim:")
+  );
 }
 
 function normalizeActivity(

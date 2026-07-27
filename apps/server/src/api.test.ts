@@ -1,5 +1,16 @@
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,16 +23,19 @@ import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
-import type { Thread, Turn } from "./codex/generated/v2/index";
+import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
 import { RpcError } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
+import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
 import { TranscriptionError } from "./transcription";
 
 const directories: string[] = [];
+const TEAM_MARKER_TEXT =
+  "Continue CodexNest Team orchestration using the attached managed-task results.";
 afterEach(async () =>
   Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
@@ -29,6 +43,106 @@ afterEach(async () =>
 );
 
 describe("HTTP authentication", () => {
+  it("gates mutations until recovery and exposes a token-protected restart drain", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-recovery-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const tokenPath = join(directory, "restart-token");
+    const lifecycle = new RuntimeLifecycle({
+      transport: "daemon",
+      tokenPath,
+      bridgeReady: () => true,
+      checkpoint: () => store.checkpoint(),
+      drainLeaseMs: 1_000,
+    });
+    await lifecycle.initialize();
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        lifecycle,
+      },
+    );
+    const headers = { authorization: "Bearer correct" };
+    expect((await app.inject({ url: "/api/v1/health" })).json()).toMatchObject({
+      status: "degraded",
+      recoveryState: "starting",
+      restartProtocolVersion: 1,
+      transport: "daemon",
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/settings/ui-language",
+          headers,
+          payload: { language: "ru" },
+        })
+      ).statusCode,
+    ).toBe(503);
+
+    lifecycle.ready();
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/settings/ui-language",
+          headers,
+          payload: { language: "ru" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const token = (await readFile(tokenPath, "utf8")).trim();
+    const prepared = await app.inject({
+      method: "POST",
+      url: "/api/v1/internal/restart/prepare",
+      headers: { "x-codexnest-restart-token": token },
+    });
+    expect(prepared.statusCode).toBe(200);
+    expect(prepared.json()).toMatchObject({
+      recoveryState: "draining",
+      transport: "daemon",
+      quiescent: true,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/settings/ui-language",
+          headers,
+          payload: { language: "en" },
+        })
+      ).statusCode,
+    ).toBe(503);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/internal/restart/resume",
+          headers: { "x-codexnest-restart-token": token },
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect(lifecycle.state).toBe("ready");
+    await app.close();
+    await lifecycle.close();
+  });
+
   it("keeps health public and rejects missing, query, and bad tokens", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-api-test-"));
     directories.push(directory);
@@ -1978,6 +2092,374 @@ describe("thread settings", () => {
 });
 
 describe("Team orchestration", () => {
+  it("reattaches an ambiguously created child by its durable source marker", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const callId = "ambiguous-spawn-call";
+    const operationKey = createHash("sha256")
+      .update(`thread\0turn-thread\0${callId}\0spawn_task`)
+      .digest("hex");
+    const childThreadSource = `codexnest-managed:${operationKey.slice(0, 32)}`;
+    bridge.managedThreads.push({
+      ...testThread("recovered-managed"),
+      threadSource: childThreadSource,
+    });
+    await store.update((state) => {
+      state.teamToolOperations = {
+        [operationKey]: {
+          threadId: "thread",
+          turnId: "turn-thread",
+          callId,
+          tool: "spawn_task",
+          argumentsHash: createHash("sha256")
+            .update('{"prompt":"Восстанови созданный child.","title":"Восстановить создание"}')
+            .digest("hex"),
+          status: "prepared",
+          createdAt: 1,
+          updatedAt: 1,
+          taskId: "recovered-task",
+          childThreadSource,
+        },
+      };
+    });
+    const response = dynamicToolJson(
+      await callTeamTool(
+        bridge,
+        "thread",
+        "spawn_task",
+        {
+          title: "Восстановить создание",
+          prompt: "Восстанови созданный child.",
+        },
+        callId,
+      ),
+    );
+    expect(response).toMatchObject({
+      taskId: "recovered-task",
+      threadId: "recovered-managed",
+    });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+      0,
+    );
+    await app.close();
+  });
+
+  it("replays mutating tool calls without duplicating child threads or steering messages", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const requestId = "stable-spawn-call";
+    const args = {
+      title: "Идемпотентная задача",
+      prompt: "Проверь идемпотентность.",
+    };
+    const first = await callTeamTool(bridge, "thread", "spawn_task", args, requestId);
+    const managedStartsAfterFirst = bridge.request.mock.calls.filter(
+      ([method, params]) =>
+        method === "thread/start" &&
+        String((params as Record<string, unknown>).threadSource).startsWith("codexnest-managed:"),
+    ).length;
+    const replay = await callTeamTool(bridge, "thread", "spawn_task", args, requestId);
+    expect(replay).toEqual(first);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "thread/start" &&
+          String((params as Record<string, unknown>).threadSource).startsWith("codexnest-managed:"),
+      ),
+    ).toHaveLength(managedStartsAfterFirst);
+    const conflict = await callTeamTool(
+      bridge,
+      "thread",
+      "spawn_task",
+      { ...args, prompt: "Другие аргументы." },
+      requestId,
+    );
+    expect(conflict.success).toBe(false);
+
+    const spawned = dynamicToolJson(first);
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    const steerArgs = { taskId: spawned.taskId, message: "Продолжай один раз." };
+    const steer = await callTeamTool(
+      bridge,
+      "thread",
+      "steer_task",
+      steerArgs,
+      "stable-steer-call",
+    );
+    const steerCount = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/steer",
+    ).length;
+    const steerOperationKey = createHash("sha256")
+      .update("thread\0turn-thread\0stable-steer-call\0steer_task")
+      .digest("hex");
+    await store.update((state) => {
+      const operation = state.teamToolOperations?.[steerOperationKey];
+      if (!operation) return;
+      operation.status = "prepared";
+      delete operation.response;
+    });
+    const steerReplay = await callTeamTool(
+      bridge,
+      "thread",
+      "steer_task",
+      steerArgs,
+      "stable-steer-call",
+    );
+    expect(steerReplay).toEqual(steer);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
+      steerCount,
+    );
+
+    await app.close();
+  });
+
+  it("uses the durable receipt when the tool response transport is lost", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const requestId = "lost-response-spawn";
+    bridge.emit(
+      "request",
+      {
+        method: "item/tool/call",
+        id: requestId,
+        params: {
+          threadId: "thread",
+          turnId: "turn-thread",
+          callId: requestId,
+          namespace: "codexnest",
+          tool: "spawn_task",
+          arguments: {
+            title: "Ответ потерян",
+            prompt: "Не создавай дубль после replay.",
+          },
+        },
+      },
+      {
+        respond() {
+          throw new Error("transport disconnected");
+        },
+        respondError() {
+          throw new Error("transport disconnected");
+        },
+      },
+    );
+    await vi.waitFor(() =>
+      expect(Object.values(store.snapshot().teamToolOperations ?? {})[0]?.status).toBe("applied"),
+    );
+    expect(
+      Object.values(store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {}),
+    ).toEqual([expect.objectContaining({ status: "queued" })]);
+
+    const replay = await callTeamTool(
+      bridge,
+      "thread",
+      "spawn_task",
+      {
+        title: "Ответ потерян",
+        prompt: "Не создавай дубль после replay.",
+      },
+      requestId,
+    );
+    expect(replay.success).toBe(true);
+    await vi.waitFor(() =>
+      expect(
+        Object.values(store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {})[0]
+          ?.status,
+      ).toBe("running"),
+    );
+    expect(bridge.managedThreads).toHaveLength(1);
+    await app.close();
+  });
+
+  it("deduplicates replayed tool requests while reconnect recovery is pending", async () => {
+    const { app, bridge, lifecycle, projection, store } = await createTeamHarness({
+      lifecycle: true,
+    });
+    const requestId = "reconnect-spawn";
+    const request = {
+      method: "item/tool/call",
+      id: requestId,
+      params: {
+        threadId: "thread",
+        turnId: "turn-thread",
+        callId: requestId,
+        namespace: "codexnest",
+        tool: "spawn_task",
+        arguments: {
+          title: "Replay после reconnect",
+          prompt: "Создай ровно одну задачу.",
+        },
+      },
+    };
+    const staleRespond = vi.fn();
+    let resolveResponse!: (response: TestDynamicToolResponse) => void;
+    const response = new Promise<TestDynamicToolResponse>((resolve) => {
+      resolveResponse = resolve;
+    });
+    bridge.emit("request", request, {
+      respond: staleRespond,
+      respondError: vi.fn(),
+    });
+    bridge.emit("request", request, {
+      respond: (_id: string, result: TestDynamicToolResponse) => resolveResponse(result),
+      respondError: (_id: string, _code: number, message: string) =>
+        resolveResponse({
+          success: false,
+          contentItems: [{ type: "inputText", text: message }],
+        }),
+    });
+    expect(bridge.managedThreads).toHaveLength(0);
+
+    projection.emit("event", 3, { type: "resync.required" });
+    expect((await response).success).toBe(true);
+    await vi.waitFor(() =>
+      expect(
+        Object.values(store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {})[0]
+          ?.status,
+      ).toBe("running"),
+    );
+    expect(staleRespond).not.toHaveBeenCalled();
+    expect(bridge.managedThreads).toHaveLength(1);
+    expect(lifecycle?.state).toBe("ready");
+    await app.close();
+    await lifecycle?.close();
+  });
+
+  it("recovers starting tasks and delivered parent claims from durable Codex markers", async () => {
+    const { app, bridge, projection, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Восстановить задачу",
+        prompt: "Проверь восстановление.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    await store.update((state) => {
+      const task = state.threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      if (!task) return;
+      task.status = "starting";
+      delete task.childTurnId;
+    });
+    projection.emit("event", 0, { type: "resync.required" });
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
+      ).toMatchObject({ status: "running", childTurnId: `turn-${String(spawned.threadId)}` }),
+    );
+
+    const claimId = "recovered-claim";
+    const markerId = `codexnest-team-claim:${claimId}`;
+    await store.update((state) => {
+      const task = state.threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      if (!task) return;
+      task.status = "completed";
+      task.terminalTurnId = "child-terminal";
+      task.result = { summary: "Готово", source: "submitted" };
+      task.delivery = {
+        status: "claimed",
+        claimId,
+        markerId,
+        dispatchStartedAt: Date.now(),
+      };
+    });
+    bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("recovered-parent-turn", "completed"),
+        itemsView: "full",
+        items: [
+          {
+            type: "userMessage",
+            id: "claim-marker",
+            clientId: markerId,
+            content: [{ type: "text", text: TEAM_MARKER_TEXT, text_elements: [] }],
+          },
+        ],
+      },
+    ]);
+    const parentStarts = bridge.request.mock.calls.filter(
+      ([method, params]) =>
+        method === "turn/start" && (params as Record<string, unknown>).threadId === "thread",
+    ).length;
+    projection.emit("event", 1, { type: "resync.required" });
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
+      ).toBeUndefined(),
+    );
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "turn/start" && (params as Record<string, unknown>).threadId === "thread",
+      ),
+    ).toHaveLength(parentStarts);
+    await app.close();
+  });
+
+  it("releases an ambiguous parent claim after the active parent turn finishes", async () => {
+    const { app, bridge, projection, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Не потерять результат",
+        prompt: "Проверь восстановление claim.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    await projection.setCurrentTurn("thread", "active-parent-turn");
+    await store.update((state) => {
+      const task = state.threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      if (!task) return;
+      task.status = "completed";
+      task.terminalTurnId = "child-terminal";
+      task.result = { summary: "Готово", source: "submitted" };
+      task.delivery = {
+        status: "claimed",
+        claimId: "ambiguous-claim",
+        markerId: "codexnest-team-claim:ambiguous-claim",
+        dispatchStartedAt: Date.now(),
+      };
+    });
+
+    projection.emit("event", 2, { type: "resync.required" });
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.delivery,
+      ).toMatchObject({ status: "claimed" }),
+    );
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread",
+        turn: testTurn("active-parent-turn", "completed"),
+      },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
+      ).toBeUndefined(),
+    );
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "turn/start" && (params as Record<string, unknown>).threadId === "thread",
+      ),
+    ).toHaveLength(1);
+    await app.close();
+  });
+
   it("spawns managed threads and continues the parent after a submitted result becomes terminal", async () => {
     const { app, bridge, projection, store } = await createTeamHarness();
     const first = await callTeamTool(bridge, "thread", "spawn_task", {
@@ -2041,8 +2523,14 @@ describe("Team orchestration", () => {
       .at(-1)?.[1] as Record<string, unknown>;
     expect(continuation).toMatchObject({
       threadId: "thread",
-      clientUserMessageId: null,
-      input: [],
+      clientUserMessageId: expect.stringMatching(/^codexnest-team-claim:/),
+      input: [
+        {
+          type: "text",
+          text: "Continue CodexNest Team orchestration using the attached managed-task results.",
+          text_elements: [],
+        },
+      ],
       additionalContext: {
         "codexnest.team.results": {
           kind: "application",
@@ -2400,11 +2888,13 @@ class SettingsBridge extends EventEmitter {
   failNextGoalActivation = false;
   missingRolloutThreadIds = new Set<string>();
   managedThreadSequence = 0;
+  managedThreads: Thread[] = [];
+  threadTurns = new Map<string, Turn[]>();
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
         ? { data: [], nextCursor: null, backwardsCursor: null }
-        : { data: [testThread()], nextCursor: null, backwardsCursor: null };
+        : { data: [testThread(), ...this.managedThreads], nextCursor: null, backwardsCursor: null };
     }
     if (method === "thread/loaded/list") {
       return { data: ["thread"], nextCursor: null };
@@ -2419,9 +2909,14 @@ class SettingsBridge extends EventEmitter {
       };
     }
     if (method === "thread/start") {
-      if (params.threadSource === "codexnest-managed-subagent") {
+      if (String(params.threadSource).startsWith("codexnest-managed:")) {
         this.managedThreadSequence += 1;
-        return { thread: testThread(`managed-${this.managedThreadSequence}`) };
+        const thread = {
+          ...testThread(`managed-${this.managedThreadSequence}`),
+          threadSource: String(params.threadSource),
+        };
+        this.managedThreads.push(thread);
+        return { thread };
       }
       return { thread: testThread("created") };
     }
@@ -2438,7 +2933,20 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/name/set") return {};
     if (method === "thread/delete") return {};
     if (method === "thread/turns/list") {
-      return { data: [], nextCursor: null, backwardsCursor: null };
+      return {
+        data: [...(this.threadTurns.get(String(params.threadId)) ?? [])].reverse(),
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    }
+    if (method === "thread/read") {
+      const threadId = String(params.threadId);
+      const thread =
+        threadId === "thread"
+          ? testThread()
+          : (this.managedThreads.find((candidate) => candidate.id === threadId) ??
+            testThread(threadId));
+      return { thread: { ...thread, turns: this.threadTurns.get(threadId) ?? [] } };
     }
     if (method === "turn/start") {
       if (this.failNextTurnStart) {
@@ -2446,11 +2954,45 @@ class SettingsBridge extends EventEmitter {
         throw new Error("turn failed");
       }
       const threadId = String(params.threadId ?? "thread");
+      const turnId = threadId === "thread" ? "turn" : `turn-${threadId}`;
+      const input = Array.isArray(params.input) ? params.input : [];
+      const turn: Turn = {
+        ...testTurn(turnId, "inProgress"),
+        itemsView: "full",
+        items: input.length
+          ? [
+              {
+                type: "userMessage",
+                id: `user-${turnId}`,
+                clientId:
+                  typeof params.clientUserMessageId === "string"
+                    ? params.clientUserMessageId
+                    : null,
+                content: input as Extract<ThreadItem, { type: "userMessage" }>["content"],
+              },
+            ]
+          : [],
+      };
+      this.threadTurns.set(threadId, [...(this.threadTurns.get(threadId) ?? []), turn]);
       return {
-        turn: testTurn(threadId === "thread" ? "turn" : `turn-${threadId}`, "inProgress"),
+        turn,
       };
     }
-    if (method === "turn/steer") return { turnId: "steered" };
+    if (method === "turn/steer") {
+      const threadId = String(params.threadId);
+      const turns = this.threadTurns.get(threadId) ?? [];
+      const active = turns.at(-1);
+      if (active && Array.isArray(params.input)) {
+        active.items.push({
+          type: "userMessage",
+          id: `user-steer-${active.items.length}`,
+          clientId:
+            typeof params.clientUserMessageId === "string" ? params.clientUserMessageId : null,
+          content: params.input as Extract<ThreadItem, { type: "userMessage" }>["content"],
+        });
+      }
+      return { turnId: threadId.startsWith("managed-") ? (active?.id ?? "steered") : "steered" };
+    }
     if (method === "turn/interrupt") return {};
     if (method === "thread/goal/get") return { goal: this.goal };
     if (method === "thread/goal/clear") {
@@ -2545,7 +3087,7 @@ class SettingsBridge extends EventEmitter {
   });
 }
 
-async function createTeamHarness() {
+async function createTeamHarness(options: { lifecycle?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-team-api-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -2580,6 +3122,15 @@ async function createTeamHarness() {
     allowedOrigins: new Set(["http://localhost"]),
     websocketAuthTimeoutMs: 25,
   });
+  const lifecycle = options.lifecycle
+    ? new RuntimeLifecycle({
+        transport: "daemon",
+        tokenPath: join(directory, "restart-token"),
+        bridgeReady: () => true,
+        checkpoint: () => store.checkpoint(),
+      })
+    : undefined;
+  await lifecycle?.initialize();
   const app = await buildApp(config, {
     bridge: bridge as unknown as CodexBridge,
     store,
@@ -2587,6 +3138,7 @@ async function createTeamHarness() {
     attention,
     push: new PushNotifier(store),
     projectRoot: directory,
+    lifecycle,
   });
   return {
     app,
@@ -2594,6 +3146,7 @@ async function createTeamHarness() {
     headers: { authorization: "Bearer correct" },
     projection,
     store,
+    lifecycle,
   };
 }
 
@@ -2607,9 +3160,9 @@ async function callTeamTool(
   threadId: string,
   tool: string,
   args: Record<string, unknown>,
+  requestId = `tool-${Math.random()}`,
 ): Promise<TestDynamicToolResponse> {
   return new Promise((resolve, reject) => {
-    const requestId = `tool-${Math.random()}`;
     bridge.emit(
       "request",
       {

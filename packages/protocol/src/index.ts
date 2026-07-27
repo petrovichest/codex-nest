@@ -2,10 +2,15 @@ export const API_PREFIX = "/api/v1";
 export const EVENTS_PATH = `${API_PREFIX}/events`;
 
 export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
+export type RecoveryState =
+  "starting" | "syncing" | "recovering" | "ready" | "draining" | "unavailable" | "failed";
 
 export type HealthResponse = {
   status: "ok" | "degraded";
   serverVersion: string;
+  recoveryState: RecoveryState;
+  restartProtocolVersion: number;
+  transport: "stdio" | "daemon";
   appServer: {
     state: AppServerState;
     installedVersion: string | null;

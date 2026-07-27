@@ -32,18 +32,24 @@ export interface ManagedTeamTaskResult {
 export interface ManagedTeamTaskState {
   id: string;
   childThreadId: string;
+  childThreadSource?: string;
   childTurnId?: string;
+  startMessageId?: string;
   title: string;
   prompt: string;
   status: ManagedTeamTaskStatus;
   createdAt: number;
   startedAt?: number;
   lastActivityAt: number;
+  recoveryMisses?: number;
   lastWatchdogAt?: number;
   watchdog?: {
     status: "pending" | "claimed";
     triggeredAt: number;
     claimId?: string;
+    markerId?: string;
+    dispatchStartedAt?: number;
+    contextHash?: string;
   };
   terminalTurnId?: string;
   resultCandidate?: {
@@ -57,11 +63,33 @@ export interface ManagedTeamTaskState {
     status: "claimed" | "delivered";
     claimId: string;
     parentTurnId?: string;
+    markerId?: string;
+    dispatchStartedAt?: number;
+    contextHash?: string;
   };
 }
 
 export interface TeamOrchestrationState {
   tasks: Record<string, ManagedTeamTaskState>;
+}
+
+export interface TeamToolOperationState {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  tool: "spawn_task" | "steer_task" | "cancel_task" | "submit_result";
+  argumentsHash: string;
+  status: "prepared" | "applied";
+  createdAt: number;
+  updatedAt: number;
+  taskId?: string;
+  childThreadSource?: string;
+  response?: {
+    contentItems: Array<
+      { type: "inputText"; text: string } | { type: "inputImage"; imageUrl: string }
+    >;
+    success: boolean;
+  };
 }
 
 export interface ThreadMetaState {
@@ -140,6 +168,7 @@ export interface CodexNestState {
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
   messageReceipts?: Record<string, MessageReceiptState>;
+  teamToolOperations?: Record<string, TeamToolOperationState>;
   voiceTranscriptions?: Record<string, VoiceTranscriptionState>;
   voiceReceipts?: Record<string, VoiceReceiptState>;
 }
@@ -154,6 +183,7 @@ export function emptyState(): CodexNestState {
     uiLanguage: "en",
     messageQueues: {},
     messageReceipts: {},
+    teamToolOperations: {},
     voiceTranscriptions: {},
     voiceReceipts: {},
   };
@@ -213,6 +243,15 @@ export class StateStore extends EventEmitter {
 
   async flushed(): Promise<void> {
     await this.writeQueue;
+  }
+
+  async checkpoint(): Promise<void> {
+    const task = this.writeQueue.then(async () => {
+      if (!this.loaded) throw new Error("StateStore.load() must be called first");
+      await this.persist(this.state);
+    });
+    this.writeQueue = task.catch(() => undefined);
+    await task;
   }
 
   async refreshAuthVerifier(): Promise<boolean> {
@@ -282,6 +321,9 @@ function validateState(value: unknown): CodexNestState {
   }
   if (value.messageReceipts !== undefined && !isRecord(value.messageReceipts)) {
     throw new Error("Corrupt message receipts in CodexNest state");
+  }
+  if (value.teamToolOperations !== undefined && !isRecord(value.teamToolOperations)) {
+    throw new Error("Corrupt Team tool operations in CodexNest state");
   }
   if (value.voiceTranscriptions !== undefined && !isRecord(value.voiceTranscriptions)) {
     throw new Error("Corrupt voice transcriptions in CodexNest state");
@@ -359,6 +401,11 @@ function validateState(value: unknown): CodexNestState {
       typeof receipt.createdAt !== "number"
     ) {
       throw new Error("Corrupt message receipt");
+    }
+  }
+  for (const operation of Object.values(value.teamToolOperations ?? {})) {
+    if (!isTeamToolOperation(operation)) {
+      throw new Error("Corrupt Team tool operation");
     }
   }
   for (const [threadId, job] of Object.entries(value.voiceTranscriptions ?? {})) {
@@ -503,9 +550,15 @@ function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationSta
       typeof task.createdAt !== "number" ||
       typeof task.lastActivityAt !== "number" ||
       (task.startedAt !== undefined && typeof task.startedAt !== "number") ||
+      (task.recoveryMisses !== undefined &&
+        (typeof task.recoveryMisses !== "number" ||
+          !Number.isInteger(task.recoveryMisses) ||
+          task.recoveryMisses < 0)) ||
       (task.lastWatchdogAt !== undefined && typeof task.lastWatchdogAt !== "number") ||
       (task.watchdog !== undefined && !isManagedWatchdog(task.watchdog)) ||
+      (task.childThreadSource !== undefined && typeof task.childThreadSource !== "string") ||
       (task.childTurnId !== undefined && typeof task.childTurnId !== "string") ||
+      (task.startMessageId !== undefined && typeof task.startMessageId !== "string") ||
       (task.terminalTurnId !== undefined && typeof task.terminalTurnId !== "string") ||
       (task.resultCandidate !== undefined && !isManagedResultCandidate(task.resultCandidate)) ||
       (task.result !== undefined && !isManagedResult(task.result))
@@ -517,9 +570,48 @@ function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationSta
       isRecord(task.delivery) &&
       ["claimed", "delivered"].includes(String(task.delivery.status)) &&
       typeof task.delivery.claimId === "string" &&
-      (task.delivery.parentTurnId === undefined || typeof task.delivery.parentTurnId === "string")
+      (task.delivery.parentTurnId === undefined ||
+        typeof task.delivery.parentTurnId === "string") &&
+      (task.delivery.markerId === undefined || typeof task.delivery.markerId === "string") &&
+      (task.delivery.dispatchStartedAt === undefined ||
+        typeof task.delivery.dispatchStartedAt === "number") &&
+      (task.delivery.contextHash === undefined ||
+        (typeof task.delivery.contextHash === "string" &&
+          /^[a-f\d]{64}$/iu.test(task.delivery.contextHash)))
     );
   });
+}
+
+function isTeamToolOperation(value: unknown): value is TeamToolOperationState {
+  if (
+    !isRecord(value) ||
+    typeof value.threadId !== "string" ||
+    typeof value.turnId !== "string" ||
+    typeof value.callId !== "string" ||
+    !["spawn_task", "steer_task", "cancel_task", "submit_result"].includes(String(value.tool)) ||
+    typeof value.argumentsHash !== "string" ||
+    !/^[a-f\d]{64}$/iu.test(value.argumentsHash) ||
+    !["prepared", "applied"].includes(String(value.status)) ||
+    typeof value.createdAt !== "number" ||
+    typeof value.updatedAt !== "number" ||
+    (value.taskId !== undefined && typeof value.taskId !== "string") ||
+    (value.childThreadSource !== undefined && typeof value.childThreadSource !== "string")
+  ) {
+    return false;
+  }
+  if (value.response === undefined) return value.status === "prepared";
+  return (
+    value.status === "applied" &&
+    isRecord(value.response) &&
+    typeof value.response.success === "boolean" &&
+    Array.isArray(value.response.contentItems) &&
+    value.response.contentItems.every(
+      (item) =>
+        isRecord(item) &&
+        ((item.type === "inputText" && typeof item.text === "string") ||
+          (item.type === "inputImage" && typeof item.imageUrl === "string")),
+    )
+  );
 }
 
 function isLegacyTeamOrchestrationState(value: unknown): boolean {
@@ -549,7 +641,11 @@ function isManagedWatchdog(value: unknown): boolean {
     ["pending", "claimed"].includes(String(value.status)) &&
     typeof value.triggeredAt === "number" &&
     (value.claimId === undefined || typeof value.claimId === "string") &&
-    (value.status !== "claimed" || typeof value.claimId === "string")
+    (value.status !== "claimed" || typeof value.claimId === "string") &&
+    (value.markerId === undefined || typeof value.markerId === "string") &&
+    (value.dispatchStartedAt === undefined || typeof value.dispatchStartedAt === "number") &&
+    (value.contextHash === undefined ||
+      (typeof value.contextHash === "string" && /^[a-f\d]{64}$/iu.test(value.contextHash)))
   );
 }
 

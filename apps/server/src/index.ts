@@ -12,6 +12,7 @@ import { CodexManager } from "./codex-management";
 import { childProcessEnvironment, loadConfig, SERVER_VERSION } from "./config";
 import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
+import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
 import { ThreadTitleGenerator } from "./thread-title";
 import { TranscriptionService } from "./transcription";
@@ -48,6 +49,13 @@ const bridge = new CodexBridge({
 });
 const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
 const projection = new AppProjection(bridge, store, attention, push.configured);
+const lifecycle = new RuntimeLifecycle({
+  transport: config.codexTransport,
+  tokenPath: config.restartTokenPath,
+  bridgeReady: () => bridge.state === "ready",
+  checkpoint: () => store.checkpoint(),
+});
+await lifecycle.initialize();
 const threadTitles = new ThreadTitleGenerator(bridge);
 const transcriptRefiner = new TranscriptRefiner(bridge);
 const transcription = new TranscriptionService({
@@ -79,6 +87,7 @@ const appManager = new AppManager({
   managedInstall: config.managedInstall,
   statusPath: config.updateStatusPath,
   managementCli: config.managementCli,
+  transport: config.codexTransport,
   activeTurnCount: () =>
     projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
 });
@@ -88,10 +97,13 @@ projection.on("projectionError", (error: Error) => {
 
 bridge.on("state", (state) => {
   if (state === "ready") {
+    lifecycle.syncing();
     void projection.sync().catch((error: Error) => {
+      lifecycle.failed();
       process.stderr.write(`CodexNest initial sync failed (${error.name})\n`);
     });
   } else if (state === "unavailable") {
+    lifecycle.unavailable();
     attention.expireAll();
   }
 });
@@ -122,19 +134,46 @@ const app = await buildApp(config, {
   push,
   codexManager,
   appManager,
+  lifecycle,
   threadTitles,
   transcription,
 });
 await app.listen({ host: config.host, port: config.port });
 void bridge.start();
 
-async function shutdown(): Promise<void> {
-  stateWatcher.close();
-  if (authRefreshTimer) clearTimeout(authRefreshTimer);
-  bridge.stop();
-  await store.flushed();
-  await app.close();
+let shutdownPromise: Promise<void> | undefined;
+function shutdown(): Promise<void> {
+  shutdownPromise ??= (async () => {
+    stateWatcher.close();
+    if (authRefreshTimer) clearTimeout(authRefreshTimer);
+    await within(lifecycle.prepareShutdown(), 60_000).catch(() => undefined);
+    await within(app.close(), 10_000).catch(() => undefined);
+    await store.flushed().catch(() => undefined);
+    bridge.stop();
+    await lifecycle.close();
+  })();
+  return shutdownPromise;
 }
 
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+
+function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Timed out during CodexNest shutdown")),
+      timeoutMs,
+    );
+    timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
