@@ -124,17 +124,20 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     }
     case "goal":
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
-    case "voice.accepted":
+    case "voice.accepted": {
       if (!state.snapshot) return state;
       if (state.voiceRemovals[action.job.threadId]?.jobId === action.job.id) return state;
+      const voiceTranscriptions = state.snapshot.voiceTranscriptions ?? [];
+      const current = voiceTranscriptions.find((job) => job.id === action.job.id);
       return {
         ...state,
         snapshot: {
           ...state.snapshot,
-          voiceTranscriptions: upsert(state.snapshot.voiceTranscriptions ?? [], action.job),
+          voiceTranscriptions: upsert(voiceTranscriptions, current ?? action.job),
         },
         voiceRemovals: withoutKey(state.voiceRemovals, action.job.threadId),
       };
+    }
     case "optimistic.add":
       if (isMessageConfirmed(state, action.message)) return state;
       return {

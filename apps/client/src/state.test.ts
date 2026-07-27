@@ -164,6 +164,31 @@ describe("clientReducer", () => {
     expect(state.snapshot?.voiceTranscriptions).toEqual([]);
   });
 
+  it("does not let a late upload acknowledgement roll transcription back to queued", () => {
+    const queued = {
+      id: "voice",
+      threadId: "one",
+      mode: "draft" as const,
+      status: "queued" as const,
+      createdAt: 10,
+      startedAt: null,
+      audioDurationMs: 2_000,
+      estimatedTotalSeconds: null,
+      error: null,
+    };
+    const transcribing = { ...queued, status: "transcribing" as const, startedAt: 11 };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "voiceTranscription.upserted", job: transcribing },
+    });
+
+    state = clientReducer(state, { type: "voice.accepted", job: queued });
+
+    expect(state.snapshot?.voiceTranscriptions).toEqual([transcribing]);
+  });
+
   it("replaces an item completion after ordered streaming deltas", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
