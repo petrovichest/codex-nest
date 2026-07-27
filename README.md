@@ -28,6 +28,17 @@ Plain HTTP is suitable only inside an encrypted WireGuard/Tailscale tunnel or a
 fully trusted LAN. On a shared or untrusted network, connect through the private
 VPN or use HTTPS that remains restricted to the private LAN/VPN.
 
+### iPhone Home Screen app
+
+Open the root HTTPS URL in Safari, choose **Share → Add to Home Screen**, and
+leave **Open as Web App** enabled. CodexNest then runs in standalone mode, and
+all session routes remain inside the Home Screen app.
+
+When upgrading a Home Screen shortcut created before PWA metadata was available,
+remove the old icon and add it again from the root URL. iOS may clear that
+installation's local storage, so be prepared to enter the server URL and owner
+token again.
+
 ## Requirements
 
 - Node.js 24 LTS
