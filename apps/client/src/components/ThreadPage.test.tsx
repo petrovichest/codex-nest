@@ -216,6 +216,69 @@ describe("Activity", () => {
     expect(screen.getByText("Завершена")).toBeInTheDocument();
   });
 
+  it("renders a successful subagent launch as a linked orchestration card", () => {
+    render(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "subagentLaunch",
+            id: "launch",
+            status: "completed",
+            title: "Проверить интерфейс",
+            threadId: "child",
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Запущен субагент")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Проверить интерфейс" })).toHaveAttribute(
+      "href",
+      "/threads/child",
+    );
+    expect(screen.getByText("Запущен субагент").closest("article")).toHaveClass(
+      "orchestration-notice",
+    );
+  });
+
+  it("renders pending and failed subagent launches without broken links", () => {
+    const view = render(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "subagentLaunch",
+            id: "launch",
+            status: "inProgress",
+            title: "Проверить интерфейс",
+            threadId: null,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Запуск субагента")).toBeInTheDocument();
+    expect(screen.getByText("Выполняется")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+
+    view.rerender(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "subagentLaunch",
+            id: "launch",
+            status: "failed",
+            title: "Проверить интерфейс",
+            threadId: null,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Не удалось запустить субагента")).toBeInTheDocument();
+    expect(screen.getByText("Ошибка")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("omits empty text activities and hides copy for image-only messages", () => {
     const view = render(
       <Activity

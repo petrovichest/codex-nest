@@ -2000,6 +2000,21 @@ function normalizeActivity(
         detail: item.error ? "Инструмент завершился с ошибкой" : "MCP-инструмент",
       };
     case "dynamicToolCall":
+      if (
+        item.namespace === "codexnest" &&
+        item.tool === "spawn_task" &&
+        isRecord(item.arguments) &&
+        typeof item.arguments.title === "string" &&
+        item.arguments.title.trim()
+      ) {
+        return {
+          type: "subagentLaunch",
+          id: item.id,
+          status: normalizeItemStatus(item.status),
+          title: item.arguments.title.trim(),
+          threadId: managedSpawnThreadId(item.contentItems),
+        };
+      }
       return {
         type: "tool",
         id: item.id,
@@ -2016,6 +2031,23 @@ function normalizeActivity(
         detail: "Активность Codex",
       };
   }
+}
+
+function managedSpawnThreadId(
+  contentItems: Extract<Turn["items"][number], { type: "dynamicToolCall" }>["contentItems"],
+): string | null {
+  for (const content of contentItems ?? []) {
+    if (content.type !== "inputText") continue;
+    try {
+      const value: unknown = JSON.parse(content.text);
+      if (isRecord(value) && typeof value.threadId === "string" && value.threadId) {
+        return value.threadId;
+      }
+    } catch {
+      // A malformed tool response should not hide the launch activity.
+    }
+  }
+  return null;
 }
 
 function mergeTimelineArtifacts(
@@ -2123,6 +2155,10 @@ function commandKind(actions: Array<{ type: string }>): "read" | "search" | "com
     return "search";
   }
   return "command";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function emptyProgress(startedAt: number | null): TurnProgress {

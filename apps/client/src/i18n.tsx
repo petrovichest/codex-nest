@@ -363,6 +363,9 @@ const ENGLISH: Record<string, string> = {
   "Субагент управляется родительской сессией. Здесь доступен только просмотр.":
     "This subagent is managed by its parent session. This view is read-only.",
   "Открыть родительскую сессию": "Open parent session",
+  "Запуск субагента": "Starting subagent",
+  "Запущен субагент": "Subagent started",
+  "Не удалось запустить субагента": "Failed to start subagent",
   "Получен результат субагента": "Subagent result received",
   "Получены результаты субагентов": "Subagent results received",
   "Управление целью": "Manage goal",

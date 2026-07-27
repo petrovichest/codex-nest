@@ -113,6 +113,93 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
+  it("projects managed spawn tools as linked subagent launch activities", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const activities: ActivityItem[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "activity.upserted") activities.push(event.item);
+    });
+
+    bridge.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: "one",
+        turnId: "parent-turn",
+        item: {
+          type: "dynamicToolCall",
+          id: "spawn-child",
+          namespace: "codexnest",
+          tool: "spawn_task",
+          arguments: {
+            title: "Проверить интерфейс",
+            prompt: "Review the interface.",
+          },
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+        },
+        startedAtMs: 1_000,
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "parent-turn",
+        item: {
+          type: "dynamicToolCall",
+          id: "spawn-child",
+          namespace: "codexnest",
+          tool: "spawn_task",
+          arguments: {
+            title: "Проверить интерфейс",
+            prompt: "Review the interface.",
+          },
+          status: "completed",
+          contentItems: [
+            {
+              type: "inputText",
+              text: JSON.stringify({
+                taskId: "task",
+                threadId: "child",
+                status: "queued",
+              }),
+            },
+          ],
+          success: true,
+        },
+        completedAtMs: 2_000,
+      },
+    } satisfies ServerNotification);
+
+    expect(activities).toEqual([
+      {
+        type: "subagentLaunch",
+        id: "spawn-child",
+        status: "inProgress",
+        title: "Проверить интерфейс",
+        threadId: null,
+      },
+      {
+        type: "subagentLaunch",
+        id: "spawn-child",
+        status: "completed",
+        title: "Проверить интерфейс",
+        threadId: "child",
+      },
+    ]);
+  });
+
   it("keeps ephemeral helper threads out of the client projection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

@@ -319,6 +319,13 @@ export type ActivityItem =
       afterItemId: string | null;
     }
   | {
+      type: "subagentLaunch";
+      id: string;
+      status: "inProgress" | "completed" | "failed";
+      title: string;
+      threadId: string | null;
+    }
+  | {
       type: "error" | "unsupported";
       id: string;
       status: "failed";

@@ -1886,6 +1886,31 @@ export function Activity({
       </article>
     );
   }
+  if (item.type === "subagentLaunch") {
+    const label =
+      item.status === "failed"
+        ? t("Не удалось запустить субагента")
+        : item.status === "inProgress"
+          ? t("Запуск субагента")
+          : t("Запущен субагент");
+    return (
+      <article className="message orchestration-notice">
+        <div className="activity-label">{label}</div>
+        <ul>
+          <li>
+            {item.threadId ? (
+              <Link to={`/threads/${encodeURIComponent(item.threadId)}`}>{item.title}</Link>
+            ) : (
+              <strong>{item.title}</strong>
+            )}
+            {item.status !== "completed" && (
+              <span>{item.status === "failed" ? t("Ошибка") : t("Выполняется")}</span>
+            )}
+          </li>
+        </ul>
+      </article>
+    );
+  }
   if (item.type === "orchestrationNotice") {
     return (
       <article className="message orchestration-notice">

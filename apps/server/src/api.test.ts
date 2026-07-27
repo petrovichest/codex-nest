@@ -1503,7 +1503,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*only the minimum context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*finish the turn.*inspect_task.*steer_task.*cancel_task/is,
+            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*only the minimum context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
           ),
         },
       },

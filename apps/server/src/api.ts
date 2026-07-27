@@ -138,12 +138,15 @@ const TEAM_MODE_CONTEXT = [
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
   "Do not execute a delegated plan step in the parent session.",
   "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
-  "After scheduling tasks, you may finish the turn; CodexNest will resume this session when results arrive.",
+  "Never call sleep, run shell sleep commands, repeatedly call list_tasks or inspect_task, or otherwise poll to wait for managed tasks.",
+  "After scheduling all tasks that are ready now, finish the turn instead of waiting; child completion automatically notifies and resumes this parent session.",
   "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
   "Never run parallel subagents that may write to overlapping files.",
   "Use codexnest.inspect_task, codexnest.steer_task, or codexnest.cancel_task when a watchdog reports that a task is silent.",
+  "You may write managed-task prompts and steering messages in English whenever you judge that it improves efficiency or precision, regardless of the user's language.",
+  "Keep concise task titles and the consolidated user-facing response in the user's language.",
   "When the required results are ready, return one consolidated result to the user.",
   "The user should not need to coordinate subagents directly.",
 ].join(" ");
@@ -2466,7 +2469,7 @@ function teamContinuationContext(
   );
   const watchdogSections = claim.watchdogs.map(
     (item) =>
-      `Silent task: ${item.title} [${item.taskId}], status=${item.status}, last activity=${new Date(item.lastActivityAt).toISOString()}. Inspect it, steer it, cancel it, or explicitly continue waiting.`,
+      `Silent task: ${item.title} [${item.taskId}], status=${item.status}, last activity=${new Date(item.lastActivityAt).toISOString()}. Inspect it, steer it, cancel it, or end the turn and let CodexNest continue automatically after its next event.`,
   );
   return [
     "CodexNest orchestration continuation.",
