@@ -1261,8 +1261,6 @@ function formatRateLimitWindow(
       : new Intl.DateTimeFormat(language === "ru" ? "ru-RU" : "en-US", {
           day: "2-digit",
           month: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
         }).format(new Date(window.resetsAt));
   return `${reset} ${remaining}%`;
 }

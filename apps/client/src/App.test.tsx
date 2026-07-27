@@ -294,8 +294,6 @@ describe("App routing and navigation", () => {
     const formatter = new Intl.DateTimeFormat("ru-RU", {
       day: "2-digit",
       month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
     });
 
     renderApp("/threads/newer");
@@ -337,7 +335,7 @@ describe("App routing and navigation", () => {
     ).toHaveTextContent("Повторить лимиты");
   });
 
-  it("formats the Codex limit reset in English when English is selected", async () => {
+  it("formats the Codex limit reset date in English when English is selected", async () => {
     localStorage.setItem("codexnest.uiLanguage", "en");
     const englishSnapshot = { ...snapshot([baseThread]), uiLanguage: "en" as const };
     const api = mockConnection(englishSnapshot);
@@ -362,8 +360,6 @@ describe("App routing and navigation", () => {
     const formatted = new Intl.DateTimeFormat("en-US", {
       day: "2-digit",
       month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
     }).format(reset);
     expect(await screen.findByText(`${formatted} 75%`)).toBeInTheDocument();
   });
