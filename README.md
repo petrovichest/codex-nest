@@ -120,3 +120,7 @@ the normal build.
 
 External contributions are accepted through reviewed pull requests, not direct
 writes to the upstream repository. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## License
+
+CodexNest is licensed under the [Apache License 2.0](./LICENSE).
