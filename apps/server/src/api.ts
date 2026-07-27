@@ -24,6 +24,7 @@ import type {
   PermissionPreset,
   QueueMessageRequest,
   QueuedMessage,
+  RefreshThreadResponse,
   SessionSettings,
   StartTurnRequest,
   SteerTurnRequest,
@@ -1299,6 +1300,24 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return detail;
     },
   );
+
+  app.post<{ Params: { id: string } }>("/api/v1/threads/:id/refresh", async (request, reply) => {
+    await projection.sync();
+    const observed = projection.summary(request.params.id);
+    if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+    await projection.invalidateHistory(request.params.id);
+    const detail = await projection.readThread(request.params.id);
+    if (observed.unseen) {
+      await projection.markViewed(request.params.id, observed.updatedAt);
+    }
+    return {
+      snapshot: projection.snapshot(),
+      detail: {
+        ...detail,
+        summary: projection.summary(request.params.id) ?? detail.summary,
+      },
+    } satisfies RefreshThreadResponse;
+  });
 
   app.get<{
     Params: { id: string };

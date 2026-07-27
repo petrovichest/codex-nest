@@ -1450,6 +1450,29 @@ describe("Activity", () => {
     expect(screen.getByLabelText("Сведения о задаче")).toBeInTheDocument();
   });
 
+  it("forces an authoritative session refresh from the header", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    renderThread();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Принудительно обновить сессию",
+      }),
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Обновляем состояние сессии",
+      }),
+    ).toBeDisabled();
+    await waitFor(() => expect(context.forceRefreshDetail).toHaveBeenCalledWith("thread"));
+    expect(
+      await screen.findByRole("button", {
+        name: "Принудительно обновить сессию",
+      }),
+    ).toBeEnabled();
+  });
+
   it("refreshes Git changes when the active turn diff changes", async () => {
     const api = threadApi();
     api.readGitChanges
@@ -3141,6 +3164,7 @@ function mockThreadConnection(
       snapshotEpoch: 1,
     },
     refreshDetail: vi.fn().mockResolvedValue(detail),
+    forceRefreshDetail: vi.fn().mockResolvedValue(detail),
     loadOlderDetail: vi.fn().mockResolvedValue(detail),
     sendReliable: vi
       .fn()

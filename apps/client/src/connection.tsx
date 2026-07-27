@@ -75,6 +75,7 @@ interface ConnectionContextValue {
   state: ClientState;
   dispatch: Dispatch<ClientAction>;
   refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
+  forceRefreshDetail(threadId: string): Promise<ThreadDetail>;
   loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
   sendReliable(
     threadId: string,
@@ -340,6 +341,16 @@ export function ConnectionProvider({
   const refreshDetail = useCallback(
     (threadId: string, options?: DetailReadOptions) => readDetail(threadId, undefined, options),
     [readDetail],
+  );
+  const forceRefreshDetail = useCallback(
+    async (threadId: string): Promise<ThreadDetail> => {
+      const targetGeneration = generationRef.current;
+      const { snapshot, detail } = await api.refreshThread(threadId);
+      acceptSyncedSnapshot(snapshot, targetGeneration);
+      dispatch({ type: "detail", detail, page: "reset" });
+      return detail;
+    },
+    [acceptSyncedSnapshot, api],
   );
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
@@ -662,12 +673,22 @@ export function ConnectionProvider({
       state,
       dispatch,
       refreshDetail,
+      forceRefreshDetail,
       loadOlderDetail,
       sendReliable,
       queueVoiceRecording,
       reconnect,
     }),
-    [api, state, refreshDetail, loadOlderDetail, sendReliable, queueVoiceRecording, reconnect],
+    [
+      api,
+      state,
+      refreshDetail,
+      forceRefreshDetail,
+      loadOlderDetail,
+      sendReliable,
+      queueVoiceRecording,
+      reconnect,
+    ],
   );
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;
 }

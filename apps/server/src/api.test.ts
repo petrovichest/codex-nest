@@ -1102,6 +1102,28 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    const threadListsBeforeRefresh = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/list",
+    ).length;
+    const refreshed = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/refresh",
+      headers,
+    });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json()).toMatchObject({
+      snapshot: {
+        threads: [expect.objectContaining({ id: "thread" })],
+      },
+      detail: {
+        summary: expect.objectContaining({ id: "thread" }),
+        turns: [],
+      },
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/list").length,
+    ).toBeGreaterThan(threadListsBeforeRefresh);
+
     await store.update((state) => {
       state.threadMeta.viewed = {
         pinned: false,

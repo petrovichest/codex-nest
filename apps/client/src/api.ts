@@ -19,6 +19,7 @@ import type {
   Project,
   QueuedMessage,
   QueueMessageRequest,
+  RefreshThreadResponse,
   StartTurnRequest,
   SteerTurnRequest,
   SummaryResponse,
@@ -228,6 +229,13 @@ export class ApiClient {
     const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`, {
       cache: options?.fresh ? "no-store" : undefined,
+      retry: true,
+    });
+  }
+
+  refreshThread(id: string): Promise<RefreshThreadResponse> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/refresh`, {
+      method: "POST",
       retry: true,
     });
   }

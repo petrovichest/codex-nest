@@ -1260,6 +1260,10 @@ pre {
   gap: 3px;
 }
 
+.session-refresh.refreshing svg {
+  animation: spin 0.8s linear infinite;
+}
+
 .mobile-nav-toggle {
   display: none;
 }

@@ -66,6 +66,7 @@ import {
   MicrophoneIcon,
   PencilIcon,
   PinIcon,
+  RefreshIcon,
   SendIcon,
   TeamIcon,
   TerminalIcon,
@@ -142,6 +143,7 @@ export function ThreadPage({
     state,
     dispatch,
     refreshDetail,
+    forceRefreshDetail,
     loadOlderDetail,
     sendReliable,
     queueVoiceRecording,
@@ -168,6 +170,7 @@ export function ThreadPage({
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -995,6 +998,30 @@ export function ThreadPage({
     }
   }
 
+  async function forceRefreshSession() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await forceRefreshDetail(threadId);
+      if (inspectorOpen) await loadGitChanges();
+    } catch (caught) {
+      if (caught instanceof ApiClientError && caught.status === 404) {
+        dispatch({ type: "thread.remove", threadId });
+        setThreadMissing(true);
+        void acknowledgePendingThread(threadId);
+      } else {
+        setError(
+          caught instanceof Error
+            ? localizeKnownServerText(language, caught.message)
+            : t("Не удалось обновить сессию"),
+        );
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
   const toggleArchive = () => void api.archive(threadId, !summary!.archived);
 
@@ -1141,31 +1168,44 @@ export function ThreadPage({
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
-            isSubagent ? undefined : (
-              <details className="thread-action-menu" data-dismiss-on-outside-click>
-                <summary className="icon-button" aria-label={t("Действия с задачей")}>
-                  <MoreIcon />
-                </summary>
-                <div className="action-menu-popover">
-                  <button onClick={togglePin}>
-                    <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
-                  </button>
-                  <button onClick={() => setRenaming(true)}>
-                    <PencilIcon /> {t("Переименовать")}
-                  </button>
-                  <button onClick={toggleArchive}>
-                    <ArchiveIcon /> {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
-                  </button>
-                  <button
-                    className="danger"
-                    disabled={deleting}
-                    onClick={() => void deleteThread()}
-                  >
-                    <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
-                  </button>
-                </div>
-              </details>
-            )
+            <>
+              {!isSubagent && (
+                <details className="thread-action-menu" data-dismiss-on-outside-click>
+                  <summary className="icon-button" aria-label={t("Действия с задачей")}>
+                    <MoreIcon />
+                  </summary>
+                  <div className="action-menu-popover">
+                    <button onClick={togglePin}>
+                      <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
+                    </button>
+                    <button onClick={() => setRenaming(true)}>
+                      <PencilIcon /> {t("Переименовать")}
+                    </button>
+                    <button onClick={toggleArchive}>
+                      <ArchiveIcon />{" "}
+                      {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
+                    </button>
+                    <button
+                      className="danger"
+                      disabled={deleting}
+                      onClick={() => void deleteThread()}
+                    >
+                      <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
+                    </button>
+                  </div>
+                </details>
+              )}
+              <button
+                className={`icon-button session-refresh${refreshing ? " refreshing" : ""}`}
+                aria-label={
+                  refreshing ? t("Обновляем состояние сессии") : t("Принудительно обновить сессию")
+                }
+                disabled={refreshing}
+                onClick={() => void forceRefreshSession()}
+              >
+                <RefreshIcon />
+              </button>
+            </>
           }
         />
         <div

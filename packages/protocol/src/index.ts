@@ -689,6 +689,11 @@ export type CreateProjectThreadResponse = {
   thread: ThreadSummary;
 };
 
+export type RefreshThreadResponse = {
+  snapshot: AppSnapshot;
+  detail: ThreadDetail;
+};
+
 export type TurnStartResult = {
   turnId: string;
   goalWarning?: string;

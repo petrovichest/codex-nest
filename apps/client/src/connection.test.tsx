@@ -237,6 +237,89 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("applies the authoritative snapshot and replaces the full detail on a manual refresh", async () => {
+    const refreshedSummary = {
+      ...summary,
+      title: "Актуальная сессия",
+      updatedAt: 3,
+    };
+    const refreshedDetail: ThreadDetail = {
+      summary: refreshedSummary,
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: {
+            startedAt: 1,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "completed",
+              text: "Актуальный ответ",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          snapshot: snapshot(2, [refreshedSummary]),
+          detail: refreshedDetail,
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+
+    function Probe() {
+      const { forceRefreshDetail, state } = useConnection();
+      refresh = () => forceRefreshDetail("thread");
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return (
+        <>
+          <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>
+          <span>{latest && "text" in latest ? latest.text : ""}</span>
+        </>
+      );
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+
+    await act(async () => {
+      await refresh?.();
+    });
+
+    expect(screen.getByText("Актуальная сессия")).toBeInTheDocument();
+    expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread/refresh"),
+      expect.objectContaining({ method: "POST" }),
+    );
+    view.unmount();
+  });
+
   it("falls back to an authoritative page when a cached delta cursor fails", async () => {
     const staleSummary = { ...summary, state: "completed" as const, updatedAt: 3 };
     const staleDetail: ThreadDetail = {
