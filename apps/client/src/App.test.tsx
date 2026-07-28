@@ -146,15 +146,16 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
   });
 
-  it("redirects the removed /new flow to the project-only empty screen", async () => {
+  it("opens the new-session editor from /new", async () => {
     mockConnection(snapshot([]));
 
     renderApp("/new");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Нет открытых сессий" }),
+      await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Проект" })).toHaveValue("project");
   });
 
   it("removes the sidebar toolbar and keeps the project session action", () => {
@@ -536,6 +537,27 @@ describe("App routing and navigation", () => {
     expect(navigation.scrollTop).toBe(480);
   });
 
+  it("preserves the project-list scroll position across background snapshot updates", () => {
+    mockConnection(snapshot([baseThread]));
+    const view = renderApp("/threads/newer");
+    const navigation = view.container.querySelector(".thread-nav") as HTMLElement;
+    navigation.scrollTop = 240;
+    const context = connection.mock.results.at(-1)?.value;
+    context.state.snapshotEpoch += 1;
+    context.state.snapshot = { ...context.state.snapshot, sequence: 2 };
+
+    view.rerender(
+      <MemoryRouter initialEntries={["/threads/newer"]}>
+        <App
+          settings={{ baseUrl: "https://pi.local", token: "secret" }}
+          onDisconnected={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(navigation.scrollTop).toBe(240);
+  });
+
   it("reverses only project order while sessions still expand top-down", () => {
     localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
     localStorage.setItem("codexnest.projectListDirection", "bottom-up");
@@ -817,8 +839,7 @@ describe("App routing and navigation", () => {
   });
 
   it("collapses project sessions without toggling from project actions", () => {
-    const api = mockConnection(snapshot([baseThread]));
-    api.createProjectThread.mockImplementation(() => new Promise(() => undefined));
+    mockConnection(snapshot([baseThread]));
 
     renderApp("/threads/newer");
     const toggle = screen.getByRole("button", { name: "Проект" });
@@ -1113,37 +1134,19 @@ describe("App routing and navigation", () => {
 
     expect(await within(projectGroup).findByRole("alert")).toHaveTextContent("Сервер недоступен");
   });
-  it("creates an empty session from a project and opens it", async () => {
-    const created = {
-      ...baseThread,
-      id: "created",
-      title: "Без названия",
-      updatedAt: 30,
-      settings: { collaborationMode: "default" as const },
-    };
-    const api = mockConnection(snapshot([baseThread, created]));
-    api.createProjectThread.mockResolvedValue({ thread: created });
+  it("opens a project-scoped editor without waiting for session creation", async () => {
+    const secondProject = testProject("second", "Второй");
+    const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
 
     renderApp("/threads/newer");
-    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Второй" }));
 
-    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("project"));
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Без названия" }),
+      await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
     ).toBeInTheDocument();
-  });
-
-  it("shows a project-scoped error when session creation fails", async () => {
-    const api = mockConnection(snapshot([baseThread]));
-    api.createProjectThread.mockRejectedValue(new Error("Codex недоступен"));
-
-    renderApp("/threads/newer");
-    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Codex недоступен");
-    expect(
-      screen.getByRole("heading", { level: 1, name: "Новая задача в истории" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Проект" })).toHaveValue("second");
+    expect(api.createProjectThread).not.toHaveBeenCalled();
+    expect(api.createThread).not.toHaveBeenCalled();
   });
 
   it("opens global Codex settings and switches the saved server there", async () => {

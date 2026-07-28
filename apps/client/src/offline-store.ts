@@ -1,5 +1,6 @@
 import type {
   AppSnapshot,
+  SessionSettings,
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
@@ -40,6 +41,15 @@ export type LocalDraft = {
   connectionKey: string;
   threadId: string;
   value: UpdateThreadDraftRequest;
+  updatedAt: number;
+};
+
+export type LocalNewSessionDraft = {
+  key: string;
+  connectionKey: string;
+  projectId: string;
+  value: UpdateThreadDraftRequest;
+  settings: SessionSettings;
   updatedAt: number;
 };
 
@@ -161,6 +171,43 @@ export async function deleteLocalDraft(
   await deleteValue(DRAFT_STORE, scopedKey(connectionCacheKey(settings), threadId));
 }
 
+export async function loadNewSessionDraft(
+  settings: ConnectionSettings,
+  projectId: string,
+): Promise<LocalNewSessionDraft | null> {
+  return readValue<LocalNewSessionDraft>(
+    DRAFT_STORE,
+    newSessionDraftKey(connectionCacheKey(settings), projectId),
+  );
+}
+
+export async function saveNewSessionDraft(
+  connectionSettings: ConnectionSettings,
+  projectId: string,
+  value: UpdateThreadDraftRequest,
+  settings: SessionSettings,
+  updatedAt = Date.now(),
+): Promise<LocalNewSessionDraft> {
+  const connectionKey = connectionCacheKey(connectionSettings);
+  const draft: LocalNewSessionDraft = {
+    key: newSessionDraftKey(connectionKey, projectId),
+    connectionKey,
+    projectId,
+    value,
+    settings,
+    updatedAt,
+  };
+  await writeValue(DRAFT_STORE, draft);
+  return draft;
+}
+
+export async function deleteNewSessionDraft(
+  settings: ConnectionSettings,
+  projectId: string,
+): Promise<void> {
+  await deleteValue(DRAFT_STORE, newSessionDraftKey(connectionCacheKey(settings), projectId));
+}
+
 export async function confirmLocalDraft(
   settings: ConnectionSettings,
   threadId: string,
@@ -235,6 +282,10 @@ async function cleanupThreadCache(): Promise<void> {
 
 function scopedKey(connectionKey: string, id: string): string {
   return `${connectionKey}\0${id}`;
+}
+
+function newSessionDraftKey(connectionKey: string, projectId: string): string {
+  return scopedKey(connectionKey, `new-session:${projectId}`);
 }
 
 function tokenFingerprint(token: string): string {

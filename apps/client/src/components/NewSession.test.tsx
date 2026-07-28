@@ -7,8 +7,18 @@ import type { Project } from "@codexnest/protocol";
 import { NewSession } from "./NewSession";
 
 const connection = vi.hoisted(() => vi.fn());
+const drafts = vi.hoisted(() => ({
+  delete: vi.fn().mockResolvedValue(undefined),
+  load: vi.fn().mockResolvedValue(null),
+  save: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("../connection", () => ({ useConnection: connection }));
+vi.mock("../offline-store", () => ({
+  deleteNewSessionDraft: drafts.delete,
+  loadNewSessionDraft: drafts.load,
+  saveNewSessionDraft: drafts.save,
+}));
 
 const projects: Project[] = [
   {
@@ -21,6 +31,10 @@ const projects: Project[] = [
 ];
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  drafts.delete.mockResolvedValue(undefined);
+  drafts.load.mockResolvedValue(null);
+  drafts.save.mockResolvedValue(undefined);
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
 });
 
@@ -109,7 +123,167 @@ describe("NewSession", () => {
         turnId: "turn",
       }),
     });
+    expect(drafts.delete).toHaveBeenCalledWith(undefined, "project");
     expect(await screen.findByText("Созданная задача")).toBeInTheDocument();
+  });
+
+  it("restores a device-local project draft and its session mode", async () => {
+    drafts.load.mockResolvedValue({
+      key: "draft",
+      connectionKey: "connection",
+      projectId: "project",
+      value: {
+        input: "Продолжить локальный черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+      settings: { collaborationMode: "plan" },
+      updatedAt: 10,
+    });
+    connection.mockReturnValue({
+      api: { createThread: vi.fn(), settings: { baseUrl: "https://pi.local", token: "token" } },
+      dispatch: vi.fn(),
+      state: { snapshot: { connection: { state: "ready" }, models: [] }, network: "connected" },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/new?projectId=project"]}>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByDisplayValue("Продолжить локальный черновик")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выключить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(drafts.load).toHaveBeenCalledWith(
+      { baseUrl: "https://pi.local", token: "token" },
+      "project",
+    );
+  });
+
+  it("drops saved model settings that are no longer available", async () => {
+    drafts.load.mockResolvedValue({
+      key: "draft",
+      connectionKey: "connection",
+      projectId: "project",
+      value: {
+        input: "Использовать доступную модель",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+      settings: {
+        collaborationMode: "default",
+        model: "removed",
+        reasoningEffort: "extreme",
+        serviceTier: "removed",
+        personality: "removed",
+      },
+      updatedAt: 10,
+    });
+    const createThread = vi.fn().mockResolvedValue({ thread: { id: "created" }, turnId: "turn" });
+    connection.mockReturnValue({
+      api: {
+        createThread,
+        settings: { baseUrl: "https://pi.local", token: "token" },
+      },
+      dispatch: vi.fn(),
+      state: {
+        snapshot: {
+          connection: { state: "ready" },
+          models: [
+            {
+              id: "current",
+              displayName: "Current",
+              description: "",
+              isDefault: true,
+              reasoningEfforts: [{ value: "medium", description: null, isDefault: true }],
+              serviceTiers: [{ id: "standard", displayName: "Standard" }],
+              supportsPersonality: false,
+            },
+          ],
+        },
+        network: "connected",
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/new?projectId=project"]}>
+        <Routes>
+          <Route
+            path="/new"
+            element={
+              <NewSession
+                projects={projects}
+                onOpenNavigation={() => undefined}
+                onNewProject={() => undefined}
+              />
+            }
+          />
+          <Route path="/threads/:threadId" element={<div>Созданная задача</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByDisplayValue("Использовать доступную модель")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith({
+        projectId: "project",
+        input: "Использовать доступную модель",
+        clientMessageId: expect.any(String),
+        settings: { collaborationMode: "default" },
+      }),
+    );
+  });
+
+  it("keeps a local draft when creating the server session fails", async () => {
+    const createThread = vi.fn().mockRejectedValue(new Error("Codex недоступен"));
+    const connectionSettings = { baseUrl: "https://pi.local", token: "token" };
+    connection.mockReturnValue({
+      api: { createThread, settings: connectionSettings },
+      dispatch: vi.fn(),
+      state: { snapshot: { connection: { state: "ready" }, models: [] }, network: "connected" },
+    });
+
+    const view = render(
+      <MemoryRouter initialEntries={["/new?projectId=project"]}>
+        <NewSession
+          projects={projects}
+          onOpenNavigation={() => undefined}
+          onNewProject={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(drafts.load).toHaveBeenCalled());
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Не потерять это" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByText("Codex недоступен")).toBeInTheDocument();
+    view.unmount();
+    await waitFor(() =>
+      expect(drafts.save).toHaveBeenCalledWith(
+        connectionSettings,
+        "project",
+        {
+          input: "Не потерять это",
+          images: [],
+          goalMode: false,
+          annotations: [],
+        },
+        { collaborationMode: "default" },
+      ),
+    );
+    expect(drafts.delete).not.toHaveBeenCalled();
   });
 
   it("offers project creation and disables sending without projects", () => {

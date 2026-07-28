@@ -44,6 +44,7 @@ import {
   SlidersIcon,
   TrashIcon,
 } from "./components/Icons";
+import { NewSession } from "./components/NewSession";
 import { ProjectDialog } from "./components/ProjectDialog";
 import {
   SettingsPage,
@@ -338,7 +339,19 @@ export function App({
                 />
               }
             />
-            <Route path="/new" element={<Navigate to="/" replace />} />
+            <Route
+              path="/new"
+              element={
+                <NewSession
+                  key={location.search}
+                  projects={snapshot?.projects ?? []}
+                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
+                  transcriptionConfig={transcriptionConfig}
+                  onOpenNavigation={() => setDrawer(true)}
+                  onNewProject={() => setNewProject(true)}
+                />
+              }
+            />
             <Route
               path="/threads/:threadId"
               element={
@@ -618,7 +631,6 @@ function Sidebar({
   const [sidebarTree, setSidebarTree] = useState<SidebarTreeState>(() =>
     readSidebarTreeState(serverBaseUrl),
   );
-  const [creatingProjectId, setCreatingProjectId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [projectDrag, setProjectDrag] = useState<ProjectDragView | null>(null);
@@ -633,10 +645,8 @@ function Sidebar({
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
-  const [createError, setCreateError] = useState<{ projectId: string; message: string } | null>(
-    null,
-  );
   const snapshot = state.snapshot;
+  const snapshotReady = snapshot !== null;
   const allThreads = snapshot?.threads ?? [];
   const roots = topLevelThreads(allThreads);
   const activeRoots = roots.filter((thread) => !thread.archived);
@@ -665,10 +675,11 @@ function Sidebar({
   }, [snapshot]);
 
   useEffect(() => {
+    if (!snapshotReady) return;
     const navigation = threadNavRef.current;
     if (!navigation) return;
     navigation.scrollTop = projectListDirection === "bottom-up" ? navigation.scrollHeight : 0;
-  }, [projectListDirection, projectOrderKey, state.snapshotEpoch]);
+  }, [projectListDirection, snapshotReady]);
 
   useEffect(
     () => () => {
@@ -966,28 +977,9 @@ function Sidebar({
     void moveProject(gesture.projectId, { targetIndex }, null);
   }
 
-  async function createProjectThread(projectId: string) {
-    if (creatingProjectId || deletingProjectId) return;
-    setCreatingProjectId(projectId);
-    setCreateError(null);
-    try {
-      const result = await api.createProjectThread(projectId);
-      dispatch({ type: "thread", thread: result.thread });
-      onClose();
-      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
-        state: { focusComposer: true },
-      });
-    } catch (caught) {
-      setCreateError({
-        projectId,
-        message:
-          caught instanceof Error
-            ? (localizeKnownServerText(language, caught.message) ?? caught.message)
-            : t("Не удалось создать сессию"),
-      });
-    } finally {
-      setCreatingProjectId(null);
-    }
+  function openNewSession(projectId: string) {
+    onClose();
+    navigate(`/new?${new URLSearchParams({ projectId })}`);
   }
 
   async function refreshRateLimits() {
@@ -1212,20 +1204,15 @@ function Sidebar({
                       </div>
                     </details>
                     <button
-                      aria-busy={creatingProjectId === group.project.id}
                       aria-label={t("Создать новую сессию в проекте {{project}}", {
                         project: group.project.displayName,
                       })}
                       className="project-icon-action"
-                      disabled={creatingProjectId !== null || deletingProjectId !== null}
+                      disabled={deletingProjectId !== null}
                       type="button"
-                      onClick={() => void createProjectThread(group.project!.id)}
+                      onClick={() => openNewSession(group.project!.id)}
                     >
-                      {creatingProjectId === group.project.id ? (
-                        <span className="spinner small" />
-                      ) : (
-                        <PlusIcon />
-                      )}
+                      <PlusIcon />
                     </button>
                   </>
                 )}
@@ -1239,11 +1226,6 @@ function Sidebar({
                     role={projectNotice.kind === "error" ? "alert" : "status"}
                   >
                     {projectNotice.message}
-                  </div>
-                )}
-                {createError && createError.projectId === group.project?.id && (
-                  <div className="project-create-error" role="alert">
-                    {createError.message}
                   </div>
                 )}
               </>
