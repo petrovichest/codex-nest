@@ -603,45 +603,99 @@ describe("App routing and navigation", () => {
     expect(sessions.lastElementChild).toHaveTextContent("Показать меньше");
   });
 
-  it("keeps child sessions collapsed until the user expands them", () => {
-    const child: ThreadSummary = {
+  it("reveals project sessions five at a time", () => {
+    const threads = Array.from({ length: 12 }, (_, index): ThreadSummary => ({
       ...baseThread,
-      id: "child",
+      id: `root-${index + 1}`,
+      title: `Сессия ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `root-session-${index + 1}` },
+    }));
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/root-1");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const directBranches = () => sessions.querySelectorAll(":scope > .thread-branch");
+
+    expect(directBranches()).toHaveLength(5);
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 5" }));
+    expect(directBranches()).toHaveLength(10);
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 2" }));
+    expect(directBranches()).toHaveLength(12);
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать меньше" }));
+    expect(directBranches()).toHaveLength(5);
+  });
+
+  it("always shows running children and keeps history behind the button", () => {
+    const running: ThreadSummary = {
+      ...baseThread,
+      id: "running-child",
       title: "Проверить тесты",
       state: "running",
       updatedAt: 30,
       relation: {
         kind: "subagent",
-        sessionId: "child-session",
+        sessionId: "running-child-session",
         parentThreadId: baseThread.id,
         nickname: "tester",
         role: "worker",
       },
     };
-    mockConnection(snapshot([child, baseThread]));
+    const completed: ThreadSummary = {
+      ...running,
+      id: "completed-child",
+      title: "Старый отчёт",
+      state: "completed",
+      updatedAt: 29,
+      relation: {
+        kind: "subagent",
+        sessionId: "completed-child-session",
+        parentThreadId: baseThread.id,
+        nickname: "historian",
+        role: "worker",
+      },
+    };
+    mockConnection(snapshot([running, completed, baseThread]));
 
     const view = renderApp("/threads/newer");
 
-    expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
     const childLink = screen.getByRole("link", { name: /tester · Проверить тесты/ });
     expect(childLink.closest(".thread-branch-children")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Свернуть субагентов" }));
-    expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /historian · Старый отчёт/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /субагентов/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Показать ещё 1" }));
+    expect(screen.getByRole("link", { name: /historian · Старый отчёт/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Показать меньше" }));
+    expect(screen.queryByRole("link", { name: /historian · Старый отчёт/ })).toBeNull();
     expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(1);
   });
 
-  it("limits each expanded subagent branch independently", () => {
-    const children = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+  it("reveals each always-open subagent branch independently", () => {
+    const activeChildren = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
       ...baseThread,
-      id: `child-${index + 1}`,
-      title: `Субагент ${index + 1}`,
+      id: `active-child-${index + 1}`,
+      title: `Активный ${index + 1}`,
+      state: "running",
       updatedAt: 100 - index,
       relation: {
         kind: "subagent",
-        sessionId: `child-session-${index + 1}`,
+        sessionId: `active-child-session-${index + 1}`,
         parentThreadId: baseThread.id,
         nickname: `agent-${index + 1}`,
+        role: "worker",
+      },
+    }));
+    const historyChildren = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...activeChildren[index]!,
+      id: `history-child-${index + 1}`,
+      title: `История ${index + 1}`,
+      state: "completed",
+      updatedAt: 90 - index,
+      relation: {
+        kind: "subagent",
+        sessionId: `history-child-session-${index + 1}`,
+        parentThreadId: baseThread.id,
+        nickname: `history-${index + 1}`,
         role: "worker",
       },
     }));
@@ -653,15 +707,14 @@ describe("App routing and navigation", () => {
       relation: {
         kind: "subagent",
         sessionId: `grandchild-session-${index + 1}`,
-        parentThreadId: children[0]!.id,
+        parentThreadId: activeChildren[0]!.id,
         nickname: `nested-${index + 1}`,
         role: "worker",
       },
     }));
-    mockConnection(snapshot([...children, ...grandchildren, baseThread]));
+    mockConnection(snapshot([...activeChildren, ...historyChildren, ...grandchildren, baseThread]));
 
     const view = renderApp("/threads/newer");
-    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
 
     const rootChildren = view.container.querySelector(
       ".project-sessions > .thread-branch > .thread-branch-children",
@@ -670,16 +723,13 @@ describe("App routing and navigation", () => {
       Array.from(rootChildren.children).filter((element) =>
         element.classList.contains("thread-branch"),
       );
-    expect(directBranches()).toHaveLength(5);
-    expect(
-      within(rootChildren).getByRole("button", { name: "Показать ещё 1" }),
-    ).toBeInTheDocument();
+    expect(directBranches()).toHaveLength(6);
+    expect(rootChildren.querySelector(":scope > .show-more")).toHaveTextContent("Показать ещё 5");
 
     const firstChildLink = within(rootChildren).getByRole("link", {
-      name: /agent-1 · Субагент 1/,
+      name: /agent-1 · Активный 1/,
     });
     const firstChildBranch = firstChildLink.closest(".thread-branch") as HTMLElement;
-    fireEvent.click(within(firstChildBranch).getByRole("button", { name: "Показать субагентов" }));
 
     const nestedChildren = firstChildBranch.querySelector(
       ":scope > .thread-branch-children",
@@ -688,22 +738,26 @@ describe("App routing and navigation", () => {
       Array.from(nestedChildren.children).filter((element) =>
         element.classList.contains("thread-branch"),
       );
+    expect(nestedBranches()).toHaveLength(0);
+
+    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(directBranches()).toHaveLength(11);
+    expect(nestedBranches()).toHaveLength(0);
+
+    fireEvent.click(nestedChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(nestedBranches()).toHaveLength(5);
+
+    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
+    expect(directBranches()).toHaveLength(12);
+    expect(rootChildren.lastElementChild).toHaveTextContent("Показать меньше");
     expect(nestedBranches()).toHaveLength(5);
 
     fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
     expect(directBranches()).toHaveLength(6);
     expect(nestedBranches()).toHaveLength(5);
-
-    fireEvent.click(nestedChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
-    expect(nestedBranches()).toHaveLength(6);
-    expect(nestedChildren.lastElementChild).toHaveTextContent("Показать меньше");
-
-    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
-    expect(directBranches()).toHaveLength(5);
-    expect(nestedBranches()).toHaveLength(6);
   });
 
-  it("restores the complete sidebar tree state from local storage", () => {
+  it("restores project tree state and resets branch history", () => {
     const rootSiblings = Array.from({ length: 5 }, (_, index): ThreadSummary => ({
       ...baseThread,
       id: `root-${index + 1}`,
@@ -731,14 +785,14 @@ describe("App routing and navigation", () => {
       ".project-sessions",
     ) as HTMLElement;
     fireEvent.click(within(firstProjectSessions).getByRole("button", { name: "Показать ещё 1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
     const firstRootBranch = screen
       .getByRole("link", { name: "Новая задача в истории" })
       .closest(".thread-branch") as HTMLElement;
     const firstChildren = firstRootBranch.querySelector(
       ":scope > .thread-branch-children",
     ) as HTMLElement;
-    fireEvent.click(within(firstChildren).getByRole("button", { name: "Показать ещё 1" }));
+    fireEvent.click(within(firstChildren).getByRole("button", { name: "Показать ещё 5" }));
+    expect(firstChildren.querySelectorAll(":scope > .thread-branch")).toHaveLength(5);
     fireEvent.click(screen.getByRole("button", { name: "Проект" }));
     firstView.unmount();
 
@@ -755,11 +809,11 @@ describe("App routing and navigation", () => {
       .getByRole("link", { name: "Новая задача в истории" })
       .closest(".thread-branch") as HTMLElement;
     expect(
-      within(restoredRootBranch).getByRole("button", { name: "Свернуть субагентов" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(
       restoredRootBranch.querySelectorAll(":scope > .thread-branch-children > .thread-branch"),
-    ).toHaveLength(6);
+    ).toHaveLength(0);
+    expect(
+      within(restoredRootBranch).getByRole("button", { name: "Показать ещё 5" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps sidebar tree state isolated by server", () => {
@@ -777,6 +831,38 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute(
       "aria-expanded",
       "false",
+    );
+  });
+
+  it("migrates legacy fully expanded project state", async () => {
+    const storageKey = "codexnest.sidebarTree.v1:https%3A%2F%2Fpi.local";
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        version: 1,
+        collapsedProjectIds: [],
+        expandedProjectListIds: ["project"],
+        openBranchIds: [],
+        expandedBranchListIds: [],
+      }),
+    );
+    const threads = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `legacy-root-${index + 1}`,
+      title: `Старая сессия ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `legacy-root-session-${index + 1}` },
+    }));
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/legacy-root-1");
+    expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(6);
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
+        version: 1,
+        collapsedProjectIds: [],
+        projectListExpansions: [["project", "all"]],
+      }),
     );
   });
 
@@ -805,14 +891,12 @@ describe("App routing and navigation", () => {
       expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
         version: 1,
         collapsedProjectIds: [],
-        expandedProjectListIds: [],
-        openBranchIds: [],
-        expandedBranchListIds: [],
+        projectListExpansions: [],
       }),
     );
   });
 
-  it("does not auto-expand a selected child that needs attention", () => {
+  it("keeps a selected non-running child behind the history button", () => {
     const child: ThreadSummary = {
       ...baseThread,
       id: "child",
@@ -831,11 +915,8 @@ describe("App routing and navigation", () => {
 
     renderApp("/threads/child");
 
-    expect(screen.getByRole("button", { name: "Показать субагентов" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
     expect(screen.queryByRole("link", { name: /reviewer · Нужно решение/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Показать ещё 1" })).toBeInTheDocument();
   });
 
   it("collapses project sessions without toggling from project actions", () => {

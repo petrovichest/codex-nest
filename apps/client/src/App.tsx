@@ -72,11 +72,11 @@ const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
 
+type ListExpansion = number | "all";
+
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
-  expandedProjectListIds: Set<string>;
-  openBranchIds: Set<string>;
-  expandedBranchListIds: Set<string>;
+  projectListExpansions: Map<string, ListExpansion>;
 };
 
 type ProjectDragGesture = {
@@ -469,9 +469,7 @@ function readLayoutPreferences(): {
 function emptySidebarTreeState(): SidebarTreeState {
   return {
     collapsedProjectIds: new Set(),
-    expandedProjectListIds: new Set(),
-    openBranchIds: new Set(),
-    expandedBranchListIds: new Set(),
+    projectListExpansions: new Map(),
   };
 }
 
@@ -491,22 +489,19 @@ function readSidebarTreeState(serverBaseUrl: string): SidebarTreeState {
     const record = parsed as Record<string, unknown>;
     if (record.version !== 1) return emptySidebarTreeState();
     const collapsedProjectIds = readStringSet(record.collapsedProjectIds);
-    const expandedProjectListIds = readStringSet(record.expandedProjectListIds);
-    const openBranchIds = readStringSet(record.openBranchIds);
-    const expandedBranchListIds = readStringSet(record.expandedBranchListIds);
-    if (
-      !collapsedProjectIds ||
-      !expandedProjectListIds ||
-      !openBranchIds ||
-      !expandedBranchListIds
-    ) {
-      return emptySidebarTreeState();
+    let projectListExpansions: Map<string, ListExpansion> | null;
+    if (record.projectListExpansions === undefined) {
+      const expandedProjectListIds = readStringSet(record.expandedProjectListIds);
+      projectListExpansions = expandedProjectListIds
+        ? new Map([...expandedProjectListIds].map((id) => [id, "all" as const]))
+        : null;
+    } else {
+      projectListExpansions = readListExpansions(record.projectListExpansions);
     }
+    if (!collapsedProjectIds || !projectListExpansions) return emptySidebarTreeState();
     return {
       collapsedProjectIds,
-      expandedProjectListIds,
-      openBranchIds,
-      expandedBranchListIds,
+      projectListExpansions,
     };
   } catch {
     return emptySidebarTreeState();
@@ -518,6 +513,25 @@ function readStringSet(value: unknown): Set<string> | null {
   return new Set(value);
 }
 
+function readListExpansions(value: unknown): Map<string, ListExpansion> | null {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (item) =>
+        !Array.isArray(item) ||
+        item.length !== 2 ||
+        typeof item[0] !== "string" ||
+        (item[1] !== "all" &&
+          (typeof item[1] !== "number" ||
+            !Number.isInteger(item[1]) ||
+            item[1] <= THREAD_PREVIEW_LIMIT)),
+    )
+  ) {
+    return null;
+  }
+  return new Map(value as Array<[string, ListExpansion]>);
+}
+
 function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): void {
   try {
     localStorage.setItem(
@@ -525,9 +539,9 @@ function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): 
       JSON.stringify({
         version: 1,
         collapsedProjectIds: [...state.collapsedProjectIds].sort(),
-        expandedProjectListIds: [...state.expandedProjectListIds].sort(),
-        openBranchIds: [...state.openBranchIds].sort(),
-        expandedBranchListIds: [...state.expandedBranchListIds].sort(),
+        projectListExpansions: [...state.projectListExpansions].sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
       }),
     );
   } catch {
@@ -537,7 +551,7 @@ function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): 
 
 function toggleSidebarTreeEntry(
   state: SidebarTreeState,
-  field: keyof SidebarTreeState,
+  field: "collapsedProjectIds",
   id: string,
 ): SidebarTreeState {
   const values = new Set(state[field]);
@@ -546,34 +560,51 @@ function toggleSidebarTreeEntry(
   return { ...state, [field]: values };
 }
 
-function pruneSidebarTreeState(
-  state: SidebarTreeState,
-  projectIds: Set<string>,
-  threadIds: Set<string>,
-): SidebarTreeState {
+function pruneSidebarTreeState(state: SidebarTreeState, projectIds: Set<string>): SidebarTreeState {
   projectIds.add("ungrouped");
   const collapsedProjectIds = retainSidebarTreeEntries(state.collapsedProjectIds, projectIds);
-  const expandedProjectListIds = retainSidebarTreeEntries(state.expandedProjectListIds, projectIds);
-  const openBranchIds = retainSidebarTreeEntries(state.openBranchIds, threadIds);
-  const expandedBranchListIds = retainSidebarTreeEntries(state.expandedBranchListIds, threadIds);
+  const projectListExpansions = retainSidebarTreeMap(state.projectListExpansions, projectIds);
   if (
     collapsedProjectIds.size === state.collapsedProjectIds.size &&
-    expandedProjectListIds.size === state.expandedProjectListIds.size &&
-    openBranchIds.size === state.openBranchIds.size &&
-    expandedBranchListIds.size === state.expandedBranchListIds.size
+    projectListExpansions.size === state.projectListExpansions.size
   ) {
     return state;
   }
   return {
     collapsedProjectIds,
-    expandedProjectListIds,
-    openBranchIds,
-    expandedBranchListIds,
+    projectListExpansions,
   };
 }
 
 function retainSidebarTreeEntries(values: Set<string>, validIds: Set<string>): Set<string> {
   return new Set([...values].filter((id) => validIds.has(id)));
+}
+
+function retainSidebarTreeMap(
+  values: Map<string, ListExpansion>,
+  validIds: Set<string>,
+): Map<string, ListExpansion> {
+  if ([...values.keys()].every((id) => validIds.has(id))) return values;
+  return new Map([...values].filter(([id]) => validIds.has(id)));
+}
+
+function toggleListExpansion(
+  values: ReadonlyMap<string, ListExpansion>,
+  id: string,
+  total: number,
+  initial: number,
+): Map<string, ListExpansion> {
+  const next = new Map(values);
+  const expansion = next.get(id);
+  const visible = expansion === "all" ? total : (expansion ?? initial);
+  if (expansion === "all" || visible >= total) {
+    next.delete(id);
+  } else if (visible + THREAD_PREVIEW_LIMIT >= total) {
+    next.set(id, "all");
+  } else {
+    next.set(id, visible + THREAD_PREVIEW_LIMIT);
+  }
+  return next;
 }
 
 function HomeRoute({
@@ -631,6 +662,9 @@ function Sidebar({
   const [sidebarTree, setSidebarTree] = useState<SidebarTreeState>(() =>
     readSidebarTreeState(serverBaseUrl),
   );
+  const [branchHistoryExpansions, setBranchHistoryExpansions] = useState<
+    Map<string, ListExpansion>
+  >(() => new Map());
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [projectDrag, setProjectDrag] = useState<ProjectDragView | null>(null);
@@ -666,12 +700,10 @@ function Sidebar({
   useEffect(() => {
     if (!snapshot) return;
     setSidebarTree((current) =>
-      pruneSidebarTreeState(
-        current,
-        new Set(snapshot.projects.map((project) => project.id)),
-        new Set(snapshot.threads.map((thread) => thread.id)),
-      ),
+      pruneSidebarTreeState(current, new Set(snapshot.projects.map((project) => project.id))),
     );
+    const threadIds = new Set(snapshot.threads.map((thread) => thread.id));
+    setBranchHistoryExpansions((current) => retainSidebarTreeMap(current, threadIds));
   }, [snapshot]);
 
   useEffect(() => {
@@ -725,16 +757,20 @@ function Sidebar({
     setSidebarTree((current) => toggleSidebarTreeEntry(current, "collapsedProjectIds", key));
   }
 
-  function toggleShowAll(key: string) {
-    setSidebarTree((current) => toggleSidebarTreeEntry(current, "expandedProjectListIds", key));
+  function toggleProjectList(key: string, total: number) {
+    setSidebarTree((current) => ({
+      ...current,
+      projectListExpansions: toggleListExpansion(
+        current.projectListExpansions,
+        key,
+        total,
+        THREAD_PREVIEW_LIMIT,
+      ),
+    }));
   }
 
-  function toggleBranchOpen(threadId: string) {
-    setSidebarTree((current) => toggleSidebarTreeEntry(current, "openBranchIds", threadId));
-  }
-
-  function toggleBranchShowAll(threadId: string) {
-    setSidebarTree((current) => toggleSidebarTreeEntry(current, "expandedBranchListIds", threadId));
+  function toggleBranchHistory(threadId: string, total: number) {
+    setBranchHistoryExpansions((current) => toggleListExpansion(current, threadId, total, 0));
   }
 
   function showProjectNotice(
@@ -1013,14 +1049,12 @@ function Sidebar({
       </summary>
       {archivedRoots.map((thread) => (
         <ThreadBranch
-          expandedBranchListIds={sidebarTree.expandedBranchListIds}
+          branchHistoryExpansions={branchHistoryExpansions}
           thread={thread}
           childrenByParent={childrenByParent}
           key={thread.id}
           onNavigate={onClose}
-          onToggleOpen={toggleBranchOpen}
-          onToggleShowAll={toggleBranchShowAll}
-          openBranchIds={sidebarTree.openBranchIds}
+          onToggleHistory={toggleBranchHistory}
         />
       ))}
     </details>
@@ -1081,11 +1115,16 @@ function Sidebar({
           {orderedGroups.map((group) => {
             const key = group.project?.id ?? "ungrouped";
             const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
-            const groupShowsAll = sidebarTree.expandedProjectListIds.has(key);
+            const projectListExpansion = sidebarTree.projectListExpansions.get(key);
+            const projectListLimit =
+              projectListExpansion === "all"
+                ? group.threads.length
+                : (projectListExpansion ?? THREAD_PREVIEW_LIMIT);
+            const groupShowsAll =
+              group.threads.length > THREAD_PREVIEW_LIMIT &&
+              projectListLimit >= group.threads.length;
             const isBottomUp = projectListDirection === "bottom-up";
-            const visible = groupShowsAll
-              ? group.threads
-              : group.threads.slice(0, THREAD_PREVIEW_LIMIT);
+            const visible = group.threads.slice(0, projectListLimit);
             const projectThreads = group.project
               ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ?? [])
               : [];
@@ -1234,22 +1273,26 @@ function Sidebar({
               <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                 {visible.map((thread) => (
                   <ThreadBranch
-                    expandedBranchListIds={sidebarTree.expandedBranchListIds}
+                    branchHistoryExpansions={branchHistoryExpansions}
                     thread={thread}
                     childrenByParent={childrenByParent}
                     key={thread.id}
                     onNavigate={onClose}
-                    onToggleOpen={toggleBranchOpen}
-                    onToggleShowAll={toggleBranchShowAll}
-                    openBranchIds={sidebarTree.openBranchIds}
+                    onToggleHistory={toggleBranchHistory}
                   />
                 ))}
                 {group.threads.length > THREAD_PREVIEW_LIMIT && (
-                  <button className="show-more" onClick={() => toggleShowAll(key)}>
+                  <button
+                    className="show-more"
+                    onClick={() => toggleProjectList(key, group.threads.length)}
+                  >
                     {groupShowsAll
                       ? t("Показать меньше")
                       : t("Показать ещё {{count}}", {
-                          count: group.threads.length - THREAD_PREVIEW_LIMIT,
+                          count: Math.min(
+                            THREAD_PREVIEW_LIMIT,
+                            group.threads.length - visible.length,
+                          ),
                         })}
                   </button>
                 )}
@@ -1288,64 +1331,54 @@ function Sidebar({
 function ThreadBranch({
   thread,
   childrenByParent,
-  expandedBranchListIds,
+  branchHistoryExpansions,
   onNavigate,
-  onToggleOpen,
-  onToggleShowAll,
-  openBranchIds,
+  onToggleHistory,
 }: {
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
-  expandedBranchListIds: ReadonlySet<string>;
+  branchHistoryExpansions: ReadonlyMap<string, ListExpansion>;
   onNavigate(): void;
-  onToggleOpen(threadId: string): void;
-  onToggleShowAll(threadId: string): void;
-  openBranchIds: ReadonlySet<string>;
+  onToggleHistory(threadId: string, total: number): void;
 }) {
   const { t } = useI18n();
   const children = childrenByParent.get(thread.id) ?? [];
-  const open = openBranchIds.has(thread.id);
-  const showAllChildren = expandedBranchListIds.has(thread.id);
-  const visibleChildren = showAllChildren ? children : children.slice(0, THREAD_PREVIEW_LIMIT);
+  const activeChildren = children.filter((child) => child.state === "running");
+  const historyChildren = children.filter((child) => child.state !== "running");
+  const historyExpansion = branchHistoryExpansions.get(thread.id);
+  const historyLimit =
+    historyExpansion === "all" ? historyChildren.length : (historyExpansion ?? 0);
+  const showsAllHistory = historyChildren.length > 0 && historyLimit >= historyChildren.length;
+  const visibleChildren = [...activeChildren, ...historyChildren.slice(0, historyLimit)];
 
   return (
     <div className="thread-branch">
       <div className="thread-branch-row">
-        {children.length ? (
-          <button
-            aria-label={open ? t("Свернуть субагентов") : t("Показать субагентов")}
-            aria-expanded={open}
-            className="thread-branch-toggle"
-            type="button"
-            onClick={() => onToggleOpen(thread.id)}
-          >
-            {open ? <ChevronDownIcon /> : <ChevronRightIcon />}
-          </button>
-        ) : (
-          <span className="thread-branch-spacer" />
-        )}
+        <span className="thread-branch-spacer" />
         <ThreadLink thread={thread} onNavigate={onNavigate} />
       </div>
-      {open && children.length > 0 && (
+      {children.length > 0 && (
         <div className="thread-branch-children">
           {visibleChildren.map((child) => (
             <ThreadBranch
-              expandedBranchListIds={expandedBranchListIds}
+              branchHistoryExpansions={branchHistoryExpansions}
               thread={child}
               childrenByParent={childrenByParent}
               key={child.id}
               onNavigate={onNavigate}
-              onToggleOpen={onToggleOpen}
-              onToggleShowAll={onToggleShowAll}
-              openBranchIds={openBranchIds}
+              onToggleHistory={onToggleHistory}
             />
           ))}
-          {children.length > THREAD_PREVIEW_LIMIT && (
-            <button className="show-more" type="button" onClick={() => onToggleShowAll(thread.id)}>
-              {showAllChildren
+          {historyChildren.length > 0 && (
+            <button
+              className="show-more"
+              type="button"
+              onClick={() => onToggleHistory(thread.id, historyChildren.length)}
+            >
+              {showsAllHistory
                 ? t("Показать меньше")
                 : t("Показать ещё {{count}}", {
-                    count: children.length - THREAD_PREVIEW_LIMIT,
+                    count: Math.min(THREAD_PREVIEW_LIMIT, historyChildren.length - historyLimit),
                   })}
             </button>
           )}
