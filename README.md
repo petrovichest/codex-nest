@@ -92,18 +92,23 @@ reproducible.
 
 ## Production
 
-Install the latest stable release on Ubuntu or Debian (`amd64` or `arm64`) as a
-regular user:
+Install the latest successful rolling build on Ubuntu or Debian (`amd64` or
+`arm64`) as a regular user:
 
 ```bash
 curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
 ```
 
-The installer provides its own pinned Node.js runtime, creates a versioned
-release, installs user `systemd` services, generates the owner token, and prints
-the private LAN URL. It never installs Codex CLI: when Codex is missing,
-CodexNest starts in diagnostic mode and becomes ready after the user installs
-and signs in to Codex, then runs `codexnest repair`.
+The installer is pinned to the same tested commit as the release APK. It
+provides its own pinned Node.js runtime, creates a versioned release, installs
+user `systemd` services, generates the owner token, and prints the private LAN
+URL. It never installs Codex CLI: when Codex is missing, CodexNest starts in
+diagnostic mode and becomes ready after the user installs and signs in to
+Codex, then runs `codexnest repair`.
+
+Rolling versions are assigned automatically as `<package version>-<commit>`,
+for example `0.1.6-73e1842`. The GitHub Release title, APK, manifest, and Linux
+installer all use that same version.
 
 The managed install listens on the private LAN by default. Keep port `4310`
 inside the trusted LAN or private WireGuard/Tailscale network. HTTP is
@@ -112,9 +117,9 @@ reverse-proxy examples remain available under `deploy/` for private LAN/VPN
 deployments.
 
 See the [deployment and update guide](./deploy/DEPLOYMENT.md) and
-[Android build instructions](./apps/client/android/README.md). No commit, push,
-deployment, signing secret, Firebase credential, or release APK is produced by
-the normal build.
+[Android build instructions](./apps/client/android/README.md). A normal local
+build does not commit, push, deploy, use signing secrets, contact Firebase, or
+produce a release APK.
 
 ## Contributing
 

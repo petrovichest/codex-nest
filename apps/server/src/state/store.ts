@@ -42,6 +42,7 @@ export interface ManagedTeamTaskState {
   startedAt?: number;
   lastActivityAt: number;
   recoveryMisses?: number;
+  expectedWakeAt?: number;
   lastWatchdogAt?: number;
   watchdog?: {
     status: "pending" | "claimed";
@@ -550,6 +551,8 @@ function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationSta
       typeof task.createdAt !== "number" ||
       typeof task.lastActivityAt !== "number" ||
       (task.startedAt !== undefined && typeof task.startedAt !== "number") ||
+      (task.expectedWakeAt !== undefined &&
+        (typeof task.expectedWakeAt !== "number" || !Number.isFinite(task.expectedWakeAt))) ||
       (task.recoveryMisses !== undefined &&
         (typeof task.recoveryMisses !== "number" ||
           !Number.isInteger(task.recoveryMisses) ||

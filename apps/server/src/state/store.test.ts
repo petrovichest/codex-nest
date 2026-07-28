@@ -161,6 +161,16 @@ describe("StateStore", () => {
                 contextHash: "a".repeat(64),
               },
             },
+            sleeping: {
+              id: "sleeping",
+              childThreadId: "sleeping-child",
+              title: "Проверить результат позже",
+              prompt: "Проверить результат через час.",
+              status: "running",
+              createdAt: 3,
+              lastActivityAt: 4,
+              expectedWakeAt: 3_604_000,
+            },
           },
         },
         timelineArtifacts: {
@@ -218,6 +228,11 @@ describe("StateStore", () => {
               summary: "Интерфейс проверен",
               source: "submitted",
             },
+          },
+          sleeping: {
+            childThreadId: "sleeping-child",
+            status: "running",
+            expectedWakeAt: 3_604_000,
           },
         },
       },

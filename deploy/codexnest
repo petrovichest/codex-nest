@@ -105,13 +105,31 @@ codexnest_latest_tag() {
   curl -fsSL \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
-    https://api.github.com/repos/petrovichest/codex-nest/releases/latest \
+    'https://api.github.com/repos/petrovichest/codex-nest/releases?per_page=100' \
     | "$node_bin" -e '
         const fs = require("node:fs");
-        const release = JSON.parse(fs.readFileSync(0, "utf8"));
-        const tag = typeof release.tag_name === "string" ? release.tag_name : "";
-        if (release.draft || release.prerelease || !/^v\d+\.\d+\.\d+$/.test(tag)) process.exit(1);
-        process.stdout.write(tag);
+        const releases = JSON.parse(fs.readFileSync(0, "utf8"));
+        if (!Array.isArray(releases)) process.exit(1);
+        const stable = releases
+          .filter((release) =>
+            !release.draft &&
+            !release.prerelease &&
+            typeof release.tag_name === "string" &&
+            /^v\d+\.\d+\.\d+$/.test(release.tag_name))
+          .map((release) => ({
+            tag: release.tag_name,
+            parts: release.tag_name.slice(1).split(".").map(Number),
+          }))
+          .sort((left, right) => {
+            for (let index = 0; index < 3; index += 1) {
+              if (left.parts[index] !== right.parts[index]) {
+                return right.parts[index] - left.parts[index];
+              }
+            }
+            return 0;
+          })[0];
+        if (!stable) process.exit(1);
+        process.stdout.write(stable.tag);
       '
 }
 
@@ -306,7 +324,9 @@ codexnest_build_release() {
   target="$codexnest_releases/v$version"
   [[ "$target" == "$codexnest_releases"/v* ]] || codexnest_die "invalid release path"
   git -C "$codexnest_source" remote set-url origin "$codexnest_repository" || return 1
-  git -C "$codexnest_source" fetch --tags --prune origin || return 1
+  git -C "$codexnest_source" fetch --prune origin \
+    '+refs/heads/*:refs/remotes/origin/*' \
+    'refs/tags/v*:refs/tags/v*' || return 1
   resolved_ref="$(git -C "$codexnest_source" rev-parse "$ref^{commit}" 2>/dev/null)" || return 1
   if [[ -f "$target/.codexnest-built" && \
         "$(cat "$target/.codexnest-built")" == "$resolved_ref" && \

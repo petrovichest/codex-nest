@@ -150,6 +150,7 @@ const TEAM_MODE_CONTEXT = [
   "Do not execute a delegated plan step in the parent session.",
   "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
   "Never call sleep, run shell sleep commands, repeatedly call list_tasks or inspect_task, or otherwise poll to wait for managed tasks.",
+  "When a task explicitly requires checking results after a fixed delay or deadline, delegate the complete start, initial health check, sleep, and final inspection cycle to one managed child; never wait in the parent.",
   "After scheduling all tasks that are ready now, finish the turn instead of waiting; child completion automatically notifies and resumes this parent session.",
   "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
@@ -164,6 +165,10 @@ const TEAM_MODE_CONTEXT = [
 const TEAM_CHILD_INSTRUCTIONS = [
   "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
   "Do not create or delegate to subagents.",
+  "When the task explicitly requires checking results after a fixed delay or deadline, start the workload asynchronously so it continues independently.",
+  "Perform one brief task-appropriate startup check, such as confirming the process is alive and its first logs contain no immediate failure; if startup failed, diagnose it or report the failure instead of sleeping.",
+  "Then use the built-in sleep tool once for only the time remaining until the requested check, without shell sleep commands, loops, or periodic polling.",
+  "After waking, inspect the result and complete the task normally; do not introduce a delay when the task did not explicitly request one.",
   "Before finishing, call codexnest.submit_result with a concise summary and optional Markdown details.",
   "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
 ].join(" ");
@@ -2790,13 +2795,25 @@ async function handleManagedTeamNotification(
   const managed = managedTaskForChild(store.snapshot(), childThreadId);
   if (!managed) return affected;
   const now = activity.get(childThreadId) ?? Date.now();
-  if (now - managed.task.lastActivityAt >= TEAM_ACTIVITY_PERSIST_MS) {
+  const expectedWakeAt = managedSleepExpectedWakeAt(notification);
+  const sleepCompleted =
+    notification.method === "item/completed" && notification.params.item.type === "sleep";
+  if (
+    expectedWakeAt !== null ||
+    sleepCompleted ||
+    now - managed.task.lastActivityAt >= TEAM_ACTIVITY_PERSIST_MS
+  ) {
     await store.update((state) => {
       const task =
         state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
       if (!task || isTerminalTask(task)) return;
       task.lastActivityAt = now;
       delete task.watchdog;
+      if (expectedWakeAt !== null) {
+        task.expectedWakeAt = expectedWakeAt;
+      } else if (sleepCompleted) {
+        delete task.expectedWakeAt;
+      }
     });
   }
 
@@ -2883,6 +2900,7 @@ async function finalizeManagedTask(
     delete task.watchdog;
     delete task.delivery;
     delete task.recoveryMisses;
+    delete task.expectedWakeAt;
     const childMeta = state.threadMeta[childThreadId];
     if (childMeta) {
       childMeta.lastOutcome = outcome;
@@ -3318,6 +3336,7 @@ export async function triggerTeamWatchdogs(
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
       if (task.status !== "running" || task.watchdog) continue;
+      if (teamWatchdogIsPaused(task, now)) continue;
       const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
       if (
         now - lastActivityAt >= TEAM_WATCHDOG_MS &&
@@ -3332,6 +3351,7 @@ export async function triggerTeamWatchdogs(
     for (const item of due) {
       const task = draft.threadMeta[item.parentThreadId]?.teamOrchestration?.tasks[item.taskId];
       if (!task || task.status !== "running" || task.watchdog) continue;
+      if (teamWatchdogIsPaused(task, now)) continue;
       const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
       if (now - lastActivityAt < TEAM_WATCHDOG_MS) continue;
       task.lastActivityAt = lastActivityAt;
@@ -3341,6 +3361,19 @@ export async function triggerTeamWatchdogs(
     }
   });
   return affected;
+}
+
+function managedSleepExpectedWakeAt(notification: ServerNotification): number | null {
+  if (notification.method !== "item/started" || notification.params.item.type !== "sleep") {
+    return null;
+  }
+  const durationMs = notification.params.item.durationMs;
+  if (!Number.isFinite(durationMs) || durationMs < 0) return null;
+  return notification.params.startedAtMs + durationMs;
+}
+
+function teamWatchdogIsPaused(task: ManagedTeamTaskState, now: number): boolean {
+  return task.expectedWakeAt !== undefined && now - task.expectedWakeAt < TEAM_WATCHDOG_MS;
 }
 
 function managedTaskForChild(

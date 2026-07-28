@@ -188,13 +188,17 @@ trap adopt_on_signal INT TERM
 adopt_log "Preparing managed source"
 if [[ -d "$adopt_source/.git" ]]; then
   git -C "$adopt_source" remote set-url origin "$adopt_origin"
-  git -C "$adopt_source" fetch --tags --prune origin
+  git -C "$adopt_source" fetch --prune origin \
+    '+refs/heads/*:refs/remotes/origin/*' \
+    'refs/tags/v*:refs/tags/v*'
 else
   if [[ -e "$adopt_source" ]]; then
     rm -rf -- "$adopt_source"
   fi
   git clone --filter=blob:none --no-checkout "$adopt_origin" "$adopt_source"
-  git -C "$adopt_source" fetch --tags --prune origin
+  git -C "$adopt_source" fetch --prune origin \
+    '+refs/heads/*:refs/remotes/origin/*' \
+    'refs/tags/v*:refs/tags/v*'
 fi
 [[ "$(git -C "$adopt_source" rev-parse "$adopt_tag^{commit}")" == "$adopt_head" ]] \
   || adopt_die "managed source resolved $adopt_tag to a different commit"

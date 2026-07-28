@@ -16,19 +16,25 @@ CodexNest рассчитан на одного владельца и локал�
 Codex CLI, поэтому утечка token может открыть доступ к проектам и другим файлам
 этого пользователя.
 
-## Рекомендуемая установка через GitHub Release
+## Рекомендуемая установка через rolling GitHub Release
 
-На Ubuntu или Debian (`amd64`/`arm64`) последнюю стабильную версию можно
-установить одной командой от обычного пользователя:
+На Ubuntu или Debian (`amd64`/`arm64`) последнюю успешную CI-сборку ветки
+`codex/mvp` можно установить одной командой от обычного пользователя:
 
 ```bash
 curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
 ```
 
-Installer загрузит закреплённый Node.js в пользовательский каталог, соберёт
-помеченный semver-тег, создаст user-systemd services, owner token и versioned
-release с symlink-ами `current`/`previous`. Существующие config, state и token
-при повторном запуске сохраняются.
+Installer закреплён на том же проверенном commit, что APK и manifest в GitHub
+Release. Он загрузит закреплённый Node.js в пользовательский каталог, соберёт
+этот commit, создаст user-systemd services, owner token и versioned release с
+symlink-ами `current`/`previous`. Существующие config, state и token при
+повторном запуске сохраняются.
+
+Rolling-версия назначается автоматически в формате
+`<версия package.json>-<короткий commit>`, например `0.1.6-73e1842`. Одно и то
+же значение используется в названии GitHub Release, APK, manifest и Linux
+installer.
 
 Установка конкретной версии:
 

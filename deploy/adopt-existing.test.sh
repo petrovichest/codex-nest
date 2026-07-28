@@ -95,10 +95,13 @@ if [[ "$*" == *CodexNest-latest.json* ]]; then
     "${commit:0:7}" "$commit"
   exit 0
 fi
+if [[ "$*" == *'/releases?per_page=100'* ]]; then
+  printf '%s\n' \
+    '[{"tag_name":"android-latest","draft":false,"prerelease":false},{"tag_name":"v0.1.0","draft":false,"prerelease":false},{"tag_name":"v0.1.1","draft":false,"prerelease":false}]'
+  exit 0
+fi
 if [[ "$*" == *api.github.com* ]]; then
-  tag=v0.1.0
-  if [[ "$*" == *'/releases/latest'* ]]; then tag=v0.1.1; fi
-  printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "$tag"
+  printf '%s\n' '{"tag_name":"v0.1.0","draft":false,"prerelease":false}'
   exit 0
 fi
 if [[ "$*" == *'/api/v1/internal/restart/prepare'* ]]; then

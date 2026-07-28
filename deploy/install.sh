@@ -4,6 +4,7 @@ set -euo pipefail
 
 codexnest_repository="https://github.com/petrovichest/codex-nest.git"
 codexnest_default_version="__CODEXNEST_VERSION__"
+codexnest_default_ref="__CODEXNEST_REF__"
 codexnest_node_version="24.18.0"
 codexnest_requested_version="${CODEXNEST_VERSION:-$codexnest_default_version}"
 codexnest_dry_run=false
@@ -99,13 +100,17 @@ ln -sfn "$codexnest_node_directory" "$codexnest_runtime/current"
 codexnest_log "Preparing CodexNest source"
 if [[ -d "$codexnest_source/.git" ]]; then
   git -C "$codexnest_source" remote set-url origin "$codexnest_repository"
-  git -C "$codexnest_source" fetch --tags --prune origin
+  git -C "$codexnest_source" fetch --prune origin \
+    '+refs/heads/*:refs/remotes/origin/*' \
+    'refs/tags/v*:refs/tags/v*'
 else
   if [[ -e "$codexnest_source" ]]; then
     rm -rf -- "$codexnest_source"
   fi
   git clone --filter=blob:none --no-checkout "$codexnest_repository" "$codexnest_source"
-  git -C "$codexnest_source" fetch --tags --prune origin
+  git -C "$codexnest_source" fetch --prune origin \
+    '+refs/heads/*:refs/remotes/origin/*' \
+    'refs/tags/v*:refs/tags/v*'
 fi
 
 if [[ "$codexnest_requested_version" == "__CODEXNEST_VERSION__" ]]; then
@@ -114,13 +119,27 @@ if [[ "$codexnest_requested_version" == "__CODEXNEST_VERSION__" ]]; then
       | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1
   )"
 fi
-[[ "$codexnest_requested_version" == v* ]] || codexnest_requested_version="v$codexnest_requested_version"
-[[ "$codexnest_requested_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || codexnest_die "a stable semver release is required"
-git -C "$codexnest_source" rev-parse --verify "$codexnest_requested_version^{commit}" >/dev/null \
-  || codexnest_die "release $codexnest_requested_version does not exist"
+if [[ "$codexnest_requested_version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  [[ "$codexnest_requested_version" == v* ]] \
+    || codexnest_requested_version="v$codexnest_requested_version"
+  codexnest_version="${codexnest_requested_version#v}"
+  codexnest_requested_ref="$codexnest_requested_version"
+elif [[ "$codexnest_requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7}$ ]]; then
+  codexnest_version="$codexnest_requested_version"
+  codexnest_requested_ref="$codexnest_default_ref"
+  [[ "$codexnest_requested_ref" =~ ^[0-9a-f]{40}$ ]] \
+    && [[ "$codexnest_version" == *-"${codexnest_requested_ref:0:7}" ]] \
+    || codexnest_die "the rolling release reference is invalid"
+else
+  codexnest_die "a stable semver or rolling release is required"
+fi
+codexnest_resolved_ref="$(
+  git -C "$codexnest_source" rev-parse --verify "$codexnest_requested_ref^{commit}" 2>/dev/null
+)" || codexnest_die "release $codexnest_requested_version does not exist"
 
-codexnest_release="$codexnest_releases/$codexnest_requested_version"
+codexnest_release="$codexnest_releases/v$codexnest_version"
 if [[ ! -f "$codexnest_release/.codexnest-built" || \
+      "$(cat "$codexnest_release/.codexnest-built" 2>/dev/null)" != "$codexnest_resolved_ref" || \
       ! -f "$codexnest_release/apps/server/dist/index.js" || \
       ! -f "$codexnest_release/apps/client/dist/index.html" ]]; then
   codexnest_log "Building CodexNest $codexnest_requested_version"
@@ -129,14 +148,14 @@ if [[ ! -f "$codexnest_release/.codexnest-built" || \
     rm -rf -- "$codexnest_release"
   fi
   git -C "$codexnest_source" worktree prune
-  git -C "$codexnest_source" worktree add --detach "$codexnest_release" "$codexnest_requested_version"
+  git -C "$codexnest_source" worktree add --detach "$codexnest_release" "$codexnest_resolved_ref"
   codexnest_node_bin="$codexnest_runtime/current/bin"
   (
     cd "$codexnest_release"
     PATH="$codexnest_node_bin:$PATH" "$codexnest_node_bin/npm" ci
-    PATH="$codexnest_node_bin:$PATH" CODEXNEST_VERSION="${codexnest_requested_version#v}" \
+    PATH="$codexnest_node_bin:$PATH" CODEXNEST_VERSION="$codexnest_version" \
       "$codexnest_node_bin/npm" run build
-    printf '%s\n' "$codexnest_requested_version" > .codexnest-built
+    printf '%s\n' "$codexnest_resolved_ref" > .codexnest-built
   ) || {
     git -C "$codexnest_source" worktree remove --force "$codexnest_release" || true
     codexnest_die "build failed"
@@ -169,7 +188,7 @@ if [[ ! -f "$codexnest_config" ]]; then
     printf 'CODEXNEST_MANAGEMENT_CLI=%s/.local/bin/codexnest\n' "$HOME"
     printf 'CODEXNEST_UPDATE_STATUS_PATH=%s/update.json\n' "$codexnest_state_root"
     printf 'CODEXNEST_UPDATE_CHANNEL=rolling\n'
-    printf 'CODEXNEST_VERSION=%s\n' "${codexnest_requested_version#v}"
+    printf 'CODEXNEST_VERSION=%s\n' "$codexnest_version"
   } > "$codexnest_config"
   chmod 600 "$codexnest_config"
 fi
@@ -203,7 +222,7 @@ codexnest_set_env_value CODEXNEST_MANAGED_INSTALL true
 codexnest_set_env_value CODEXNEST_MANAGEMENT_CLI "$HOME/.local/bin/codexnest"
 codexnest_set_env_value CODEXNEST_UPDATE_STATUS_PATH "$codexnest_state_root/update.json"
 codexnest_ensure_env_value CODEXNEST_UPDATE_CHANNEL rolling
-codexnest_set_env_value CODEXNEST_VERSION "${codexnest_requested_version#v}"
+codexnest_set_env_value CODEXNEST_VERSION "$codexnest_version"
 
 install -m 0755 "$codexnest_release/deploy/codexnest" "$HOME/.local/bin/codexnest"
 install -m 0644 "$codexnest_release/deploy/systemd/codexnest-managed.service" \

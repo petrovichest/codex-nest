@@ -1639,7 +1639,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*only the minimum context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
+            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*only the minimum context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
           ),
         },
       },
@@ -2794,6 +2794,75 @@ describe("Team orchestration", () => {
           (params as Record<string, unknown>).threadId === spawned.threadId,
       ),
     ).toBe(true);
+
+    await app.close();
+    await store.flushed();
+  });
+
+  it("pauses the watchdog while a managed child uses the built-in sleep tool", async () => {
+    const { app, bridge, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Проверить результат через час",
+        prompt: "Запусти скрипт и проверь результат через час.",
+      }),
+    );
+    await vi.waitFor(() => {
+      const task =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      expect(task?.status).toBe("running");
+    });
+
+    const childStart = bridge.request.mock.calls.find(
+      ([method, params]) =>
+        method === "thread/start" &&
+        String((params as Record<string, unknown>).threadSource).startsWith("codexnest-managed:"),
+    );
+    expect(childStart?.[1]).toMatchObject({
+      developerInstructions: expect.stringMatching(
+        /fixed delay.*asynchronously.*startup check.*built-in sleep tool once.*without shell sleep commands.*periodic polling.*After waking/is,
+      ),
+    });
+
+    const startedAt = Date.now();
+    bridge.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: String(spawned.threadId),
+        turnId: `turn-${String(spawned.threadId)}`,
+        item: { type: "sleep", id: "sleep", durationMs: 60 * 60_000 },
+        startedAtMs: startedAt,
+      },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.expectedWakeAt,
+      ).toBe(startedAt + 60 * 60_000),
+    );
+    await expect(triggerTeamWatchdogs(store, new Map(), startedAt + 69 * 60_000)).resolves.toEqual(
+      new Set(),
+    );
+    await expect(triggerTeamWatchdogs(store, new Map(), startedAt + 70 * 60_000)).resolves.toEqual(
+      new Set(["thread"]),
+    );
+
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: String(spawned.threadId),
+        turnId: `turn-${String(spawned.threadId)}`,
+        item: { type: "sleep", id: "sleep", durationMs: 60 * 60_000 },
+        completedAtMs: startedAt + 60 * 60_000,
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => {
+      const task =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      expect(task?.expectedWakeAt).toBeUndefined();
+      expect(task?.watchdog).toBeUndefined();
+    });
 
     await app.close();
     await store.flushed();

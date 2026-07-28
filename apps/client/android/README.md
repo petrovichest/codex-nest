@@ -52,9 +52,9 @@ export CODEXNEST_KEY_PASSWORD=...
 ./gradlew assembleRelease
 ```
 
-Every successful push to `codex/mvp` publishes the signed rolling build as
-`CodexNest-latest.apk` together with `CodexNest-latest.json`. The manifest pins
-the server updater and APK to the same tested commit.
+Every successful push to `codex/mvp` updates the GitHub `Latest` release with
+`CodexNest-latest.apk`, `CodexNest-latest.json`, and `install.sh`. The manifest
+and installer pin Android and Linux installations to the same tested commit.
 
 Notifications do not use Firebase, Google Play Services, or a third-party push provider.
 The Android app starts a `remoteMessaging` foreground service that keeps an authenticated
