@@ -544,6 +544,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return request;
   }
 
+  const pendingUserInput = (threadId: string, turnId: string) => {
+    for (const request of attention.list()) {
+      if (
+        request.kind === "userInput" &&
+        request.threadId === threadId &&
+        request.turnId === turnId
+      ) {
+        return request;
+      }
+    }
+    return undefined;
+  };
+
   const steerTurnUnlocked = async (
     threadId: string,
     turnId: string,
@@ -552,6 +565,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
+    const userInput = pendingUserInput(threadId, turnId);
+    if (userInput) {
+      const firstQuestion = userInput.questions[0];
+      const response: AttentionResponse = {
+        kind: "userInput",
+        answers:
+          firstQuestion && input.trim() && images.length === 0
+            ? { [firstQuestion.id]: [input.trim()] }
+            : {},
+      };
+      const resolved = attention.resolve(userInput.id, response);
+      if (resolved) {
+        await projection.recordAttentionResponse(resolved, response);
+        if (images.length === 0) return turnId;
+      }
+    }
     const teamClaim =
       projection.summary(threadId)?.settings.collaborationMode === "team"
         ? await claimTeamResults(store, threadId)
@@ -639,6 +668,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const queue = new MessageQueue(store, {
     paused: () => codexManager?.maintenanceActive ?? false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
+    shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
     start: (threadId, message) =>
       startTurn(
         threadId,

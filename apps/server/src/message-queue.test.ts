@@ -33,7 +33,7 @@ describe("MessageQueue", () => {
     expect(queue.list("thread")).toEqual([second]);
   });
 
-  it("steers a selected queued message immediately and serializes duplicate requests", async () => {
+  it("steers a selected queued message once and replays its receipt to duplicate requests", async () => {
     const { queue, delivery } = await setup("active");
     const message = await queue.enqueue("thread", "Сейчас");
 
@@ -43,9 +43,22 @@ describe("MessageQueue", () => {
     ]);
 
     expect(sent).toMatchObject({ status: "fulfilled", value: "steered" });
-    expect(duplicate.status).toBe("rejected");
+    expect(duplicate).toMatchObject({ status: "fulfilled", value: "steered" });
     expect(delivery.steer).toHaveBeenCalledOnce();
     expect(queue.list("thread")).toEqual([]);
+  });
+
+  it("steers a newly queued answer without consuming older queued work", async () => {
+    const { queue, delivery } = await setup("active");
+    const older = await queue.enqueue("thread", "Сделать следующим ходом");
+    delivery.shouldSteerQueuedMessage.mockReturnValue(true);
+
+    const message = await queue.enqueue("thread", "Ответ без формы");
+
+    await vi.waitFor(() => expect(queue.list("thread")).toEqual([older]));
+    expect(delivery.steer).toHaveBeenCalledWith("thread", "active", message);
+    await expect(queue.sendNow("thread", message.id)).resolves.toBe("steered");
+    expect(delivery.steer).toHaveBeenCalledOnce();
   });
 
   it("returns a failed delivery to queued state", async () => {
@@ -254,6 +267,7 @@ async function setup(initialTurn: string | null) {
   const delivery = {
     paused: vi.fn(() => paused),
     currentTurnId: vi.fn(() => currentTurn),
+    shouldSteerQueuedMessage: vi.fn(() => false),
     start: vi.fn(async () => {
       currentTurn = "started";
       return "started";

@@ -24,7 +24,7 @@ import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
-import { RpcError } from "./codex/transport";
+import { RpcError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
@@ -1600,6 +1600,83 @@ describe("thread settings", () => {
       turnId: "turn",
       item: { type: "userMessage", id: "client-started", text: "Составь план" },
     });
+
+    const userInputTransport = {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    };
+    const userInputRequest = attention.receive(
+      {
+        method: "item/tool/requestUserInput",
+        id: 7,
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "question",
+          autoResolutionMs: null,
+          questions: [
+            {
+              id: "transition",
+              header: "Переходы",
+              question: "Что делать с раскрытой веткой?",
+              isOther: true,
+              isSecret: false,
+              options: [
+                {
+                  label: "Оставлять открытой",
+                  description: "Сохранять состояние.",
+                },
+              ],
+            },
+          ],
+        },
+      } as ServerRequest,
+      userInputTransport as unknown as JsonlTransport,
+    );
+    const steersBeforeUserInput = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/steer",
+    ).length;
+    const queuedUserInput = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Закрывать автоматически", clientMessageId: "client-user-input" },
+    });
+    expect(queuedUserInput.statusCode).toBe(202);
+    await vi.waitFor(() =>
+      expect(userInputTransport.respond).toHaveBeenCalledWith(7, {
+        answers: {
+          transition: {
+            answers: ["Закрывать автоматически"],
+          },
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(store.snapshot().messageQueues?.thread).toBeUndefined());
+    expect(attention.list()).not.toContainEqual(
+      expect.objectContaining({ id: userInputRequest.id }),
+    );
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
+      steersBeforeUserInput,
+    );
+    expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toContainEqual(
+      expect.objectContaining({
+        type: "userInputResponse",
+        entries: [
+          expect.objectContaining({
+            question: "Что делать с раскрытой веткой?",
+            answers: ["Закрывать автоматически"],
+          }),
+        ],
+      }),
+    );
+    const repeatedUserInputSend = await app.inject({
+      method: "POST",
+      url: `/api/v1/threads/thread/queue/${queuedUserInput.json().id}/send`,
+      headers,
+    });
+    expect(repeatedUserInputSend.statusCode).toBe(200);
+    expect(repeatedUserInputSend.json()).toEqual({ turnId: "turn" });
 
     const teamCreated = await app.inject({
       method: "POST",

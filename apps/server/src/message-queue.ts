@@ -7,6 +7,7 @@ import type { StateStore } from "./state/store";
 export interface MessageQueueDelivery {
   paused(): boolean;
   currentTurnId(threadId: string): string | null;
+  shouldSteerQueuedMessage(threadId: string, turnId: string): boolean;
   start(threadId: string, message: QueuedMessage): Promise<string>;
   steer(threadId: string, turnId: string, message: QueuedMessage): Promise<string>;
   deliveredTurnId(threadId: string, messageId: string): Promise<string | null>;
@@ -101,7 +102,12 @@ export class MessageQueue {
       }
     });
     this.publish(threadId);
-    void this.drain(threadId).catch(() => undefined);
+    const activeTurnId = this.delivery.currentTurnId(threadId);
+    if (activeTurnId && this.delivery.shouldSteerQueuedMessage(threadId, activeTurnId)) {
+      void this.sendNow(threadId, stored.id).catch(() => undefined);
+    } else {
+      void this.drain(threadId).catch(() => undefined);
+    }
     return stored;
   }
 
@@ -110,7 +116,11 @@ export class MessageQueue {
       if (this.delivery.paused())
         throw new MessageQueuePausedError("Codex maintenance is in progress");
       const message = this.list(threadId).find((candidate) => candidate.id === messageId);
-      if (!message) throw new MessageQueueNotFoundError("Queued message not found");
+      if (!message) {
+        const receipt = this.store.snapshot().messageReceipts?.[messageId];
+        if (receipt?.threadId === threadId && receipt.turnId) return receipt.turnId;
+        throw new MessageQueueNotFoundError("Queued message not found");
+      }
       return this.dispatch(threadId, message, true);
     });
   }
