@@ -54,9 +54,8 @@ export function NewSession({
   const [searchParams] = useSearchParams();
   const projectId = searchParams.get("projectId") ?? "";
   const project = projects.find((candidate) => candidate.id === projectId) ?? null;
-  const navigationProjectId = (
-    location.state as { newSessionProjectId?: unknown } | null
-  )?.newSessionProjectId;
+  const navigationProjectId = (location.state as { newSessionProjectId?: unknown } | null)
+    ?.newSessionProjectId;
   const openedFromProject = navigationProjectId === projectId;
   const [admitted, setAdmitted] = useState(openedFromProject);
   const [rejected, setRejected] = useState(false);
@@ -102,17 +101,12 @@ export function NewSession({
     const request = draftSaveChainRef.current
       .catch(() => undefined)
       .then(async () => {
-        const saved = await saveNewSessionDraft(
-          api.settings,
-          snapshot.projectId,
-          snapshot.value,
-          {
-            phase: snapshot.phase,
-            threadId: snapshot.threadId,
-            thread: snapshot.thread,
-            revision: snapshot.revision,
-          },
-        );
+        const saved = await saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
+          phase: snapshot.phase,
+          threadId: snapshot.threadId,
+          thread: snapshot.thread,
+          revision: snapshot.revision,
+        });
         if (!saved && aliveRef.current) setStorageWarning(true);
       });
     draftSaveChainRef.current = request;
@@ -260,9 +254,7 @@ export function NewSession({
         transferring.value.images.length > 0 ||
         transferring.value.goalMode ||
         transferring.value.annotations.length > 0;
-      const saved = hasDraft
-        ? await saveTransferredDraft(api, threadId, transferring.value)
-        : null;
+      const saved = hasDraft ? await saveTransferredDraft(api, threadId, transferring.value) : null;
       if (preparationRef.current.revision !== transferring.revision) continue;
 
       if (saved) {

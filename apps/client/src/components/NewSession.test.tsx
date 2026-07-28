@@ -56,12 +56,12 @@ describe("NewSession", () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const dispatch = vi.fn();
     const createProjectThread = vi.fn().mockReturnValue(creation.promise);
-    const updateThreadDraft = vi.fn().mockImplementation(
-      async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
+    const updateThreadDraft = vi
+      .fn()
+      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
         ...value,
         updatedAt: 20,
-      }),
-    );
+      }));
     connection.mockReturnValue(
       mockConnection({ createProjectThread, updateThreadDraft, dispatch }),
     );
@@ -182,12 +182,10 @@ describe("NewSession", () => {
     const updateThreadDraft = vi
       .fn()
       .mockReturnValueOnce(firstTransfer.promise)
-      .mockImplementation(
-        async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
-          ...value,
-          updatedAt: 30,
-        }),
-      );
+      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
+        ...value,
+        updatedAt: 30,
+      }));
     connection.mockReturnValue(
       mockConnection({
         createProjectThread: vi.fn().mockReturnValue(creation.promise),
@@ -220,12 +218,12 @@ describe("NewSession", () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const deletion = deferred<void>();
     drafts.delete.mockReturnValueOnce(deletion.promise).mockResolvedValueOnce(undefined);
-    const updateThreadDraft = vi.fn().mockImplementation(
-      async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
+    const updateThreadDraft = vi
+      .fn()
+      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
         ...value,
         updatedAt: Date.now(),
-      }),
-    );
+      }));
     connection.mockReturnValue(
       mockConnection({
         createProjectThread: vi.fn().mockReturnValue(creation.promise),
@@ -325,7 +323,9 @@ describe("NewSession", () => {
   it("warns when the preparation cannot be stored locally", async () => {
     drafts.save.mockResolvedValue(false);
     connection.mockReturnValue(
-      mockConnection({ createProjectThread: vi.fn().mockReturnValue(new Promise(() => undefined)) }),
+      mockConnection({
+        createProjectThread: vi.fn().mockReturnValue(new Promise(() => undefined)),
+      }),
     );
 
     renderNewSession();
@@ -339,7 +339,9 @@ describe("NewSession", () => {
 
   it("keeps the inspector closed until the user opens it", async () => {
     connection.mockReturnValue(
-      mockConnection({ createProjectThread: vi.fn().mockReturnValue(new Promise(() => undefined)) }),
+      mockConnection({
+        createProjectThread: vi.fn().mockReturnValue(new Promise(() => undefined)),
+      }),
     );
     renderNewSession();
 
