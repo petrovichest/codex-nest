@@ -1613,6 +1613,7 @@ function mockConnection(
 function appUpdateStatus(overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus {
   return {
     supported: true,
+    canUpdateWithActiveTurns: false,
     currentVersion: "0.1.4",
     latestVersion: "0.1.4",
     updateAvailable: false,

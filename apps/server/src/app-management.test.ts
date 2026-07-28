@@ -58,7 +58,10 @@ describe("AppManager", () => {
       runCommand,
     });
 
-    await expect(manager.update()).resolves.toMatchObject({ operation: "preparing" });
+    await expect(manager.update()).resolves.toMatchObject({
+      operation: "preparing",
+      canUpdateWithActiveTurns: false,
+    });
     expect(runCommand).toHaveBeenCalledWith(
       "systemctl",
       ["--user", "start", "--no-block", "codexnest-update.service"],
@@ -93,7 +96,10 @@ describe("AppManager", () => {
       runCommand,
     });
 
-    await expect(manager.update()).resolves.toMatchObject({ operation: "preparing" });
+    await expect(manager.update()).resolves.toMatchObject({
+      operation: "preparing",
+      canUpdateWithActiveTurns: true,
+    });
     expect(runCommand).toHaveBeenCalledWith(
       "systemctl",
       ["--user", "start", "--no-block", "codexnest-update.service"],

@@ -138,6 +138,7 @@ export function ApplicationSettingsCard({
 
   const activeTurnCount =
     state.snapshot?.threads.filter((thread) => thread.currentTurnId !== null).length ?? 0;
+  const activeTurnsBlockUpdate = activeTurnCount > 0 && status?.canUpdateWithActiveTurns !== true;
   const busy = action !== null || (status !== null && status.operation !== "idle");
 
   return (
@@ -198,7 +199,7 @@ export function ApplicationSettingsCard({
               {localizeKnownServerText(language, status.message) ?? status.message}
             </div>
           )}
-          {activeTurnCount > 0 && (
+          {activeTurnsBlockUpdate && (
             <div className="settings-notice warning" role="status">
               {t("Дождитесь завершения активных ответов: {{count}}.", {
                 count: activeTurnCount,
@@ -227,7 +228,7 @@ export function ApplicationSettingsCard({
               disabled={
                 !status?.supported ||
                 busy ||
-                activeTurnCount > 0 ||
+                activeTurnsBlockUpdate ||
                 status?.updateAvailable !== true
               }
               type="button"

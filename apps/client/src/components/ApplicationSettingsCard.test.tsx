@@ -146,6 +146,35 @@ describe("ApplicationSettingsCard", () => {
     expect(api.updateApp).not.toHaveBeenCalled();
   });
 
+  it("allows the update while daemon turns are active", async () => {
+    const current = updateStatus({
+      latestVersion: "0.1.4-abcdef0",
+      updateAvailable: true,
+      canUpdateWithActiveTurns: true,
+    });
+    const api = {
+      readAppSettings: vi.fn(async () => current),
+      checkAppUpdate: vi.fn(async () => current),
+      updateApp: vi.fn(async () => current),
+    };
+    connection.mockReturnValue({
+      api,
+      state: {
+        network: "connected",
+        snapshot: { threads: [{ currentTurnId: "turn-1" }] },
+      },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<ApplicationSettingsCard />);
+
+    const update = await screen.findByRole("button", { name: "Обновить CodexNest" });
+    expect(update).toBeEnabled();
+    expect(screen.queryByText("Дождитесь завершения активных ответов: 1.")).not.toBeInTheDocument();
+    fireEvent.click(update);
+    await waitFor(() => expect(api.updateApp).toHaveBeenCalledOnce());
+  });
+
   it("explains when the current checkout is not managed", async () => {
     const api = {
       readAppSettings: vi.fn(async () =>
@@ -280,6 +309,7 @@ describe("ApplicationSettingsCard", () => {
 function updateStatus(overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus {
   return {
     supported: true,
+    canUpdateWithActiveTurns: false,
     currentVersion: "0.1.0",
     latestVersion: null,
     updateAvailable: null,

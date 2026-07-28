@@ -141,6 +141,7 @@ export type AppUpdateResult = "none" | "updated" | "rolled_back" | "failed";
 
 export type AppUpdateStatus = {
   supported: boolean;
+  canUpdateWithActiveTurns: boolean;
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean | null;

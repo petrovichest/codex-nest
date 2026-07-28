@@ -42,7 +42,12 @@ export class AppManager {
 
   async status(): Promise<AppUpdateStatus> {
     const disk = await readStatus(this.options.statusPath);
-    const status = normalizeStatus(disk, this.options.currentVersion, this.options.managedInstall);
+    const status = normalizeStatus(
+      disk,
+      this.options.currentVersion,
+      this.options.managedInstall,
+      this.options.transport === "daemon",
+    );
     if (!status.supported || status.operation === "idle") return status;
     try {
       const { stdout } = await this.runCommand(
@@ -79,6 +84,7 @@ export class AppManager {
         JSON.parse(stdout) as unknown,
         this.options.currentVersion,
         this.options.managedInstall,
+        this.options.transport === "daemon",
       );
     } catch (error) {
       if (error instanceof AppManagementError) throw error;
@@ -151,9 +157,11 @@ function normalizeStatus(
   value: unknown,
   currentVersion: string,
   supported: boolean,
+  canUpdateWithActiveTurns: boolean,
 ): AppUpdateStatus {
   const base: AppUpdateStatus = {
     supported,
+    canUpdateWithActiveTurns: supported && canUpdateWithActiveTurns,
     currentVersion,
     latestVersion: null,
     updateAvailable: null,
