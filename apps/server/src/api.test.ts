@@ -2548,18 +2548,20 @@ describe("Team orchestration", () => {
     expect(
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(secondResult.taskId)],
     ).toMatchObject({ status: "running" });
-    expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toEqual([
-      expect.objectContaining({
-        type: "orchestrationNotice",
-        agents: [
-          expect.objectContaining({
-            threadId: firstResult.threadId,
-            title: "Проверить интерфейс",
-            outcome: "completed",
-          }),
-        ],
-      }),
-    ]);
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toEqual([
+        expect.objectContaining({
+          type: "orchestrationNotice",
+          agents: [
+            expect.objectContaining({
+              threadId: firstResult.threadId,
+              title: "Проверить интерфейс",
+              outcome: "completed",
+            }),
+          ],
+        }),
+      ]),
+    );
     const deliveredChild = projection.summary(String(firstResult.threadId));
     expect(deliveredChild).toMatchObject({
       unread: false,
