@@ -6,3 +6,7 @@ EnvironmentFile=-%h/.config/codex/app-server.env
 # The official command is idempotent. If the daemon is already running, it is
 # left untouched; after a host reboot it starts before CodexNest connects.
 ExecStartPre=%h/.local/bin/codex app-server daemon start
+
+# `daemon start` leaves the app-server in this unit's cgroup. Stop only the
+# CodexNest main process so application updates do not interrupt active turns.
+KillMode=process

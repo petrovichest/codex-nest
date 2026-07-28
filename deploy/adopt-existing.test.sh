@@ -156,6 +156,7 @@ grep -q 'Environment=PRESERVED_DROP_IN=true' \
   "$case_home/.config/systemd/user/codexnest.service.d/preserved.conf"
 test -x "$case_home/.local/bin/codexnest"
 test -f "$case_home/.config/systemd/user/codexnest-update.service"
+grep -q '^KillMode=process$' "$case_home/.config/systemd/user/codexnest.service"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
 test -z "$(find "$case_home/.local/state/codexnest" -maxdepth 1 -name 'adoption-backup.*' -print -quit)"
 success_commit="$(git -C "$case_repo" rev-parse codex/mvp)"
@@ -164,6 +165,7 @@ run_cli update-worker >/dev/null
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = "v$success_version"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/previous")")" = v0.1.0
 test "$(cat "$case_home/.local/share/codexnest/current/.codexnest-built")" = "$success_commit"
+grep -q '^KillMode=process$' "$case_home/.config/systemd/user/codexnest.service"
 grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
 run_cli check-update | grep -q '"updateAvailable":false'
 

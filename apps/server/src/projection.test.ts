@@ -2135,6 +2135,95 @@ describe("AppProjection", () => {
     });
   });
 
+  it("keeps live activities chronological when a later canonical message has a different id", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const canonicalTurn = {
+      ...testTurn("live", "completed"),
+      itemsView: "full" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "canonical-final",
+          text: "Работа завершена",
+          phase: "final_answer" as const,
+          memoryCitation: null,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [canonicalTurn], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "stream-commentary",
+        delta: "Сейчас дополнительно проверяю",
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: {
+          type: "commandExecution",
+          id: "command",
+          command: "npm test",
+          cwd: "/work",
+          processId: null,
+          source: "agent",
+          status: "completed",
+          commandActions: [],
+          aggregatedOutput: "passed",
+          exitCode: 0,
+          durationMs: 1,
+        },
+        completedAtMs: 11_000,
+      },
+    } as ServerNotification);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "stream-final",
+        delta: "Работа завершена",
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: canonicalTurn.items[0],
+        completedAtMs: 12_000,
+      },
+    } as ServerNotification);
+
+    expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
+      "stream-commentary",
+      "command",
+      "canonical-final",
+    ]);
+  });
+
   it("rejoins and restores an active turn once per app-server connection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

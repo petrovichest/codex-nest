@@ -212,6 +212,10 @@ cp deploy/systemd/codex-daemon.conf.example \
   "$HOME/.config/systemd/user/codexnest.service.d/codex-daemon.conf"
 ```
 
+Основной unit и drop-in используют `KillMode=process`: при обновлении
+останавливается только Node.js-процесс CodexNest, а запущенный через
+`ExecStartPre` Codex daemon остаётся в работе вместе с активными turn'ами.
+
 Если доступ к ChatGPT требует HTTP proxy, используйте fail-closed wrapper. Он
 передаёт proxy только внутреннему клиенту Codex и отказывается запускать Codex,
 если proxy-окружение отсутствует или противоречиво. Остальные процессы сервера

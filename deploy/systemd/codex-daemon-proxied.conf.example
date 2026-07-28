@@ -3,3 +3,7 @@
 # CodexNest Node.js service. The wrapper passes the proxy only to Codex and its
 # managed app-server/update processes.
 ExecStartPre=%h/bin/codex app-server daemon start
+
+# `daemon start` leaves the app-server in this unit's cgroup. Stop only the
+# CodexNest main process so application updates do not interrupt active turns.
+KillMode=process

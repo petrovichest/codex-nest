@@ -11,6 +11,9 @@ ExecStart=%h/.local/share/codexnest/runtime/current/bin/node %h/.local/share/cod
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=75
+# The Codex daemon is bootstrapped by ExecStartPre in a drop-in and intentionally
+# remains alive while CodexNest is restarted during an application update.
+KillMode=process
 NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=false

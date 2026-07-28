@@ -1858,31 +1858,34 @@ function mergeLiveActivities(
   turnIsTerminal: boolean,
 ): { items: ActivityItem[]; aliases: Map<string, string> } {
   const result = [...items];
-  const canonicalIds = new Set(items.map((item) => item.id));
-  const matchedCanonicalIds = new Set<string>();
+  const unmatchedCanonicalIds = new Set(items.map((item) => item.id));
+  const canonicalMatchByLiveId = new Map<string, string>();
   const aliases = new Map<string, string>();
+  for (const item of liveActivities) {
+    const exact = unmatchedCanonicalIds.has(item.id)
+      ? item.id
+      : items.find(
+          (candidate) =>
+            unmatchedCanonicalIds.has(candidate.id) &&
+            sameRenderedActivity(
+              candidate,
+              item,
+              candidate.status === "inProgress" || item.status === "inProgress",
+            ),
+        )?.id;
+    if (!exact) continue;
+    canonicalMatchByLiveId.set(item.id, exact);
+    unmatchedCanonicalIds.delete(exact);
+  }
   for (const [itemIndex, item] of liveActivities.entries()) {
-    const existing = result.findIndex((candidate) => candidate.id === item.id);
+    const canonicalId = canonicalMatchByLiveId.get(item.id);
+    const existing = canonicalId
+      ? result.findIndex((candidate) => candidate.id === canonicalId)
+      : -1;
     if (existing >= 0) {
-      result[existing] = fresherLiveActivity(result[existing]!, item, turnIsTerminal);
-      if (canonicalIds.has(item.id)) matchedCanonicalIds.add(item.id);
-      continue;
-    }
-    const semanticMatch = result.findIndex(
-      (candidate) =>
-        canonicalIds.has(candidate.id) &&
-        !matchedCanonicalIds.has(candidate.id) &&
-        sameRenderedActivity(
-          candidate,
-          item,
-          candidate.status === "inProgress" || item.status === "inProgress",
-        ),
-    );
-    if (semanticMatch >= 0) {
-      const canonical = result[semanticMatch]!;
-      aliases.set(item.id, canonical.id);
-      matchedCanonicalIds.add(canonical.id);
-      result[semanticMatch] = {
+      const canonical = result[existing]!;
+      if (item.id !== canonical.id) aliases.set(item.id, canonical.id);
+      result[existing] = {
         ...fresherLiveActivity(canonical, item, turnIsTerminal),
         id: canonical.id,
       } as ActivityItem;
@@ -1895,11 +1898,16 @@ function mergeLiveActivities(
       result.unshift(item);
       continue;
     }
-    const nextLiveId = liveActivities
+    const nextCanonicalId = liveActivities
       .slice(itemIndex + 1)
-      .find((candidate) => result.some((existingItem) => existingItem.id === candidate.id))?.id;
-    const insertion = nextLiveId
-      ? result.findIndex((candidate) => candidate.id === nextLiveId)
+      .map((candidate) => canonicalMatchByLiveId.get(candidate.id))
+      .find(
+        (candidateId) =>
+          candidateId !== undefined &&
+          result.some((existingItem) => existingItem.id === candidateId),
+      );
+    const insertion = nextCanonicalId
+      ? result.findIndex((candidate) => candidate.id === nextCanonicalId)
       : result.length;
     result.splice(insertion, 0, item);
   }

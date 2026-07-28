@@ -11,6 +11,9 @@ ExecStart=%h/.local/node-v24/bin/node %h/codex-nest/apps/server/dist/index.js
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=75
+# The Codex daemon is bootstrapped by ExecStartPre in a drop-in and intentionally
+# remains alive while CodexNest is restarted during an application update.
+KillMode=process
 NoNewPrivileges=true
 # Codex provides its own Linux sandbox through bubblewrap. PrivateTmp and
 # ProtectSystem would put this user service in an AppArmor user namespace first,
