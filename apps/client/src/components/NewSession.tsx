@@ -81,6 +81,8 @@ export function NewSession({
   const operationRef = useRef(false);
   const draftTimerRef = useRef<number | null>(null);
   const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingAttachmentsRef = useRef(false);
+  const attachmentWaitersRef = useRef(new Set<() => void>());
   const models = state.snapshot?.models ?? [];
   const settings = useMemo(() => ({ ...DEFAULT_SESSION_SETTINGS }), []);
 
@@ -120,6 +122,18 @@ export function NewSession({
     }
     if (!admittedRef.current || discardRef.current) return draftSaveChainRef.current;
     return enqueuePreparationSave(snapshotPreparation());
+  }
+
+  function setPendingAttachments(pending: boolean): void {
+    pendingAttachmentsRef.current = pending;
+    if (pending) return;
+    for (const resolve of attachmentWaitersRef.current) resolve();
+    attachmentWaitersRef.current.clear();
+  }
+
+  function waitForPendingAttachments(): Promise<void> {
+    if (!pendingAttachmentsRef.current) return Promise.resolve();
+    return new Promise((resolve) => attachmentWaitersRef.current.add(resolve));
   }
 
   useEffect(() => {
@@ -248,6 +262,7 @@ export function NewSession({
     }
 
     while (true) {
+      await waitForPendingAttachments();
       const transferring = snapshotPreparation();
       const hasDraft =
         Boolean(transferring.value.input) ||
@@ -255,18 +270,38 @@ export function NewSession({
         transferring.value.goalMode ||
         transferring.value.annotations.length > 0;
       const saved = hasDraft ? await saveTransferredDraft(api, threadId, transferring.value) : null;
-      if (preparationRef.current.revision !== transferring.revision) continue;
+      if (
+        pendingAttachmentsRef.current ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
 
       if (saved) {
         await saveLocalDraft(api.settings, threadId, transferring.value, saved.updatedAt);
       } else {
         await deleteLocalDraft(api.settings, threadId);
       }
-      if (preparationRef.current.revision !== transferring.revision) continue;
+      if (
+        pendingAttachmentsRef.current ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
       await flushPreparation();
-      if (preparationRef.current.revision !== transferring.revision) continue;
+      if (
+        pendingAttachmentsRef.current ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
       await deleteNewSessionDraft(api.settings, activeProject.id);
-      if (preparationRef.current.revision !== transferring.revision) continue;
+      if (
+        pendingAttachmentsRef.current ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
 
       discardRef.current = true;
       if (draftTimerRef.current !== null) {
@@ -338,6 +373,7 @@ export function NewSession({
           onInput={(input) => updateDraft({ ...preparationRef.current.value, input })}
           images={draftValue.images}
           onImagesChange={(images) => updateDraft({ ...preparationRef.current.value, images })}
+          onPendingAttachmentsChange={setPendingAttachments}
           onSubmit={preventSubmit}
           busy
           settings={settings}

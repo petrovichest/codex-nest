@@ -59,6 +59,7 @@ export function Composer({
   onInput,
   images,
   onImagesChange,
+  onPendingAttachmentsChange,
   onSubmit,
   busy,
   running = false,
@@ -98,6 +99,7 @@ export function Composer({
   onInput(value: string): void;
   images: ComposerImage[];
   onImagesChange(value: ComposerImage[]): void;
+  onPendingAttachmentsChange?(pending: boolean): void;
   onSubmit(event: FormEvent): void;
   busy: boolean;
   running?: boolean;
@@ -151,6 +153,7 @@ export function Composer({
   const transcriptionStartedAtRef = useRef(0);
   const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
+  const pendingAttachmentReadsRef = useRef(0);
   const [viewer, setViewer] = useState<{ index: number; opener: HTMLButtonElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -308,6 +311,8 @@ export function Composer({
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     if (!imageFiles.length) return;
     setAttachmentError(null);
+    pendingAttachmentReadsRef.current += 1;
+    onPendingAttachmentsChange?.(true);
     try {
       const added = await Promise.all(
         imageFiles.map(async (file, index) => ({
@@ -321,6 +326,8 @@ export function Composer({
       setAttachmentError(t("Не удалось прочитать выбранное изображение"));
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
+      pendingAttachmentReadsRef.current = Math.max(0, pendingAttachmentReadsRef.current - 1);
+      onPendingAttachmentsChange?.(pendingAttachmentReadsRef.current > 0);
     }
   }
 

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import type { Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
@@ -49,6 +49,10 @@ beforeEach(() => {
   drafts.save.mockResolvedValue(true);
   drafts.saveLocal.mockResolvedValue(undefined);
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("NewSession", () => {
@@ -249,6 +253,79 @@ describe("NewSession", () => {
       goalMode: false,
       annotations: [],
     });
+    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
+  });
+
+  it("waits for a selected image before opening the created thread", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const imageRead = deferred<string>();
+    class PendingFileReader {
+      result: string | ArrayBuffer | null = null;
+      error: DOMException | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        void imageRead.promise.then(
+          (result) => {
+            this.result = result;
+            this.onload?.();
+          },
+          () => this.onerror?.(),
+        );
+      }
+    }
+    vi.stubGlobal("FileReader", PendingFileReader);
+    const updateThreadDraft = vi
+      .fn()
+      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
+        ...value,
+        updatedAt: Date.now(),
+      }));
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread: vi.fn().mockReturnValue(creation.promise),
+        updateThreadDraft,
+      }),
+    );
+
+    const view = renderNewSession();
+    const fileInput = view.container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["image"], "screenshot.png", { type: "image/png" })] },
+    });
+    creation.resolve({ thread });
+
+    await waitFor(() =>
+      expect(drafts.save).toHaveBeenCalledWith(
+        connectionSettings,
+        project.id,
+        expect.anything(),
+        expect.objectContaining({ phase: "transferring", threadId: thread.id }),
+      ),
+    );
+    expect(screen.queryByText("Созданная сессия")).not.toBeInTheDocument();
+    expect(updateThreadDraft).not.toHaveBeenCalled();
+
+    imageRead.resolve("data:image/png;base64,aW1hZ2U=");
+
+    await waitFor(() =>
+      expect(updateThreadDraft).toHaveBeenCalledWith(
+        thread.id,
+        {
+          input: "",
+          images: [
+            expect.objectContaining({
+              name: "screenshot.png",
+              url: "data:image/png;base64,aW1hZ2U=",
+            }),
+          ],
+          goalMode: false,
+          annotations: [],
+        },
+        { retry: true },
+      ),
+    );
     expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
   });
 
