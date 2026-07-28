@@ -2898,6 +2898,19 @@ pre {
   line-height: 1.5;
 }
 
+.new-session-storage-warning {
+  width: min(760px, calc(100% - 32px));
+  margin: -6px auto 10px;
+  color: var(--warning-text);
+  font-size: 12px;
+  text-align: center;
+}
+
+.new-session-retry {
+  align-self: center;
+  margin: -4px auto 10px;
+}
+
 .session-inspector {
   width: 320px;
   max-width: 320px;

@@ -161,7 +161,14 @@ export function ThreadPage({
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
-    value: emptyComposerDraft(),
+    value: detail?.draft
+      ? {
+          input: detail.draft.input,
+          images: detail.draft.images,
+          goalMode: detail.draft.goalMode,
+          annotations: detail.draft.annotations,
+        }
+      : emptyComposerDraft(),
   }));
   const activeComposerDraft =
     composerDraftState.threadId === threadId ? composerDraftState.value : emptyComposerDraft();

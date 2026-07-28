@@ -5,7 +5,10 @@ import type { ThreadDraft } from "@codexnest/protocol";
 import { ApiClient } from "./api";
 
 describe("ApiClient", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("does not send the server-only draft timestamp back to the draft endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
@@ -41,5 +44,26 @@ describe("ApiClient", () => {
       new URL("https://codexnest.example/api/v1/threads/thread%2Fid/voice-transcriptions"),
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("retries project thread creation after an ambiguous connection failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection lost"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ thread: { id: "thread" } }), {
+          headers: { "Content-Type": "application/json" },
+          status: 201,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    const creation = api.createProjectThread("project");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(creation).resolves.toMatchObject({ thread: { id: "thread" } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

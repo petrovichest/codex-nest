@@ -4,6 +4,7 @@ import type {
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
+  ThreadSummary,
   UpdateThreadDraftRequest,
   VoiceTranscriptionMode,
 } from "@codexnest/protocol";
@@ -49,7 +50,11 @@ export type LocalNewSessionDraft = {
   connectionKey: string;
   projectId: string;
   value: UpdateThreadDraftRequest;
-  settings: SessionSettings;
+  phase?: "creating" | "transferring";
+  threadId?: string | null;
+  thread?: ThreadSummary | null;
+  revision?: number;
+  settings?: SessionSettings;
   updatedAt: number;
 };
 
@@ -185,20 +190,24 @@ export async function saveNewSessionDraft(
   connectionSettings: ConnectionSettings,
   projectId: string,
   value: UpdateThreadDraftRequest,
-  settings: SessionSettings,
+  preparation: {
+    phase: "creating" | "transferring";
+    threadId: string | null;
+    thread: ThreadSummary | null;
+    revision: number;
+  },
   updatedAt = Date.now(),
-): Promise<LocalNewSessionDraft> {
+): Promise<boolean> {
   const connectionKey = connectionCacheKey(connectionSettings);
   const draft: LocalNewSessionDraft = {
     key: newSessionDraftKey(connectionKey, projectId),
     connectionKey,
     projectId,
     value,
-    settings,
+    ...preparation,
     updatedAt,
   };
-  await writeValue(DRAFT_STORE, draft);
-  return draft;
+  return writeValue(DRAFT_STORE, draft);
 }
 
 export async function deleteNewSessionDraft(

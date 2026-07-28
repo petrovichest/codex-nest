@@ -1,35 +1,39 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router";
+import { Navigate, useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
-  ModelOption,
   Project,
-  SessionSettings,
-  TaskDefaults,
+  ThreadSummary,
   TranscriptionConfigResponse,
   TranscriptionProvider,
   UpdateThreadDraftRequest,
-  UpdateThreadSettingsRequest,
 } from "@codexnest/protocol";
 
+import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n } from "../i18n";
-import { deleteNewSessionDraft, loadNewSessionDraft, saveNewSessionDraft } from "../offline-store";
-import type { OptimisticMessage } from "../state";
-import type { ConnectionSettings } from "../storage";
-import { Composer, type ComposerImage } from "./Composer";
+import {
+  deleteLocalDraft,
+  deleteNewSessionDraft,
+  loadNewSessionDraft,
+  saveLocalDraft,
+  saveNewSessionDraft,
+} from "../offline-store";
+import { Composer } from "./Composer";
 import { NewTaskIcon } from "./Icons";
 import { NewSessionInspector } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 const DRAFT_SAVE_DELAY_MS = 500;
 
-type NewSessionDraftSnapshot = {
+type PreparationSnapshot = {
   projectId: string;
   value: UpdateThreadDraftRequest;
-  settings: SessionSettings;
-  defaultSettings: SessionSettings;
+  phase: "creating" | "transferring";
+  threadId: string | null;
+  thread: ThreadSummary | null;
+  revision: number;
 };
 
 export function NewSession({
@@ -37,196 +41,291 @@ export function NewSession({
   transcriptionConfig = null,
   transcriptionProvider = null,
   onOpenNavigation,
-  onNewProject,
 }: {
   projects: Project[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
   onOpenNavigation(): void;
-  onNewProject(): void;
 }) {
   const { api, state, dispatch } = useConnection();
   const { language, t } = useI18n();
+  const location = useLocation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const requestedProjectId = searchParams.get("projectId") ?? "";
-  const projectId =
-    projects.find((candidate) => candidate.id === requestedProjectId)?.id ?? projects[0]?.id ?? "";
-  const models = state.snapshot?.models ?? [];
-  const defaultSettings = useMemo(
-    () =>
-      initialSettings(state.snapshot?.defaultReasoningEffort, models, state.snapshot?.taskDefaults),
-    [models, state.snapshot?.defaultReasoningEffort, state.snapshot?.taskDefaults],
-  );
-  const hydrationDefaultsRef = useRef({ defaultSettings, models });
-  const [input, setInput] = useState("");
-  const [images, setImages] = useState<ComposerImage[]>([]);
-  const [goalMode, setGoalMode] = useState(false);
-  const [settings, setSettings] = useState<SessionSettings>(() => defaultSettings);
-  const [draftHydrated, setDraftHydrated] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [searchParams] = useSearchParams();
+  const projectId = searchParams.get("projectId") ?? "";
+  const project = projects.find((candidate) => candidate.id === projectId) ?? null;
+  const navigationProjectId = (
+    location.state as { newSessionProjectId?: unknown } | null
+  )?.newSessionProjectId;
+  const openedFromProject = navigationProjectId === projectId;
+  const [admitted, setAdmitted] = useState(openedFromProject);
+  const [rejected, setRejected] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [draftValue, setDraftValue] = useState<UpdateThreadDraftRequest>(emptyDraft);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [storageWarning, setStorageWarning] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const preparationRef = useRef<PreparationSnapshot>({
+    projectId,
+    value: emptyDraft(),
+    phase: "creating",
+    threadId: null,
+    thread: null,
+    revision: 0,
+  });
   const draftTouchedRef = useRef(false);
-  const discardDraftRef = useRef(false);
+  const admittedRef = useRef(openedFromProject);
+  const aliveRef = useRef(true);
+  const discardRef = useRef(false);
+  const operationRef = useRef(false);
   const draftTimerRef = useRef<number | null>(null);
-  const latestDraftRef = useRef<NewSessionDraftSnapshot | null>(null);
   const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const models = state.snapshot?.models ?? [];
+  const settings = useMemo(() => ({ ...DEFAULT_SESSION_SETTINGS }), []);
 
-  useEffect(() => {
-    if (requestedProjectId === projectId) return;
-    setSearchParams(projectId ? { projectId } : {}, { replace: true });
-  }, [projectId, requestedProjectId, setSearchParams]);
-
-  const project = useMemo(
-    () => projects.find((candidate) => candidate.id === projectId) ?? null,
-    [projectId, projects],
-  );
-
-  useEffect(() => {
-    if (!projectId) {
-      setDraftHydrated(true);
-      return;
-    }
-    let active = true;
-    void loadNewSessionDraft(api.settings, projectId).then((draft) => {
-      if (!active) return;
-      if (draft && !draftTouchedRef.current) {
-        const restoredSettings = normalizeSavedSettings(
-          draft.settings,
-          hydrationDefaultsRef.current.defaultSettings,
-          hydrationDefaultsRef.current.models,
-        );
-        setInput(draft.value.input);
-        setImages(draft.value.images);
-        setGoalMode(restoredSettings.collaborationMode === "default" && draft.value.goalMode);
-        setSettings(restoredSettings);
-      }
-      setDraftHydrated(true);
-    });
-    return () => {
-      active = false;
+  function snapshotPreparation(): PreparationSnapshot {
+    const current = preparationRef.current;
+    return {
+      ...current,
+      value: {
+        input: current.value.input,
+        images: [...current.value.images],
+        goalMode: current.value.goalMode,
+        annotations: [...current.value.annotations],
+      },
     };
-  }, [api.settings, projectId]);
+  }
 
-  latestDraftRef.current =
-    draftHydrated && projectId
-      ? {
-          projectId,
-          value: { input, images, goalMode, annotations: [] },
-          settings,
-          defaultSettings,
-        }
-      : null;
-
-  function enqueueDraftSave(snapshot: NewSessionDraftSnapshot): Promise<void> {
+  function enqueuePreparationSave(snapshot: PreparationSnapshot): Promise<void> {
     const request = draftSaveChainRef.current
       .catch(() => undefined)
-      .then(() => persistNewSessionDraft(api.settings, snapshot));
+      .then(async () => {
+        const saved = await saveNewSessionDraft(
+          api.settings,
+          snapshot.projectId,
+          snapshot.value,
+          {
+            phase: snapshot.phase,
+            threadId: snapshot.threadId,
+            thread: snapshot.thread,
+            revision: snapshot.revision,
+          },
+        );
+        if (!saved && aliveRef.current) setStorageWarning(true);
+      });
     draftSaveChainRef.current = request;
     return request;
   }
 
-  function flushDraft(): Promise<void> {
+  function flushPreparation(): Promise<void> {
     if (draftTimerRef.current !== null) {
       window.clearTimeout(draftTimerRef.current);
       draftTimerRef.current = null;
     }
-    const snapshot = latestDraftRef.current;
-    return snapshot ? enqueueDraftSave(snapshot) : draftSaveChainRef.current;
+    if (!admittedRef.current || discardRef.current) return draftSaveChainRef.current;
+    return enqueuePreparationSave(snapshotPreparation());
   }
 
   useEffect(() => {
-    if (!draftHydrated || !projectId || discardDraftRef.current) return;
+    if (!project) {
+      setHydrated(true);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      const stored = await loadNewSessionDraft(api.settings, project.id);
+      if (!active) return;
+      if (!stored && !openedFromProject) {
+        setRejected(true);
+        setHydrated(true);
+        return;
+      }
+
+      const current = preparationRef.current;
+      const value =
+        stored && !draftTouchedRef.current
+          ? normalizeDraft(stored.value)
+          : current.projectId === project.id
+            ? current.value
+            : emptyDraft();
+      const threadId = stored?.threadId ?? null;
+      const preparation: PreparationSnapshot = {
+        projectId: project.id,
+        value,
+        phase: threadId ? "transferring" : "creating",
+        threadId,
+        thread: stored?.thread?.id === threadId ? stored.thread : null,
+        revision: Math.max(current.revision, stored?.revision ?? 0),
+      };
+      preparationRef.current = preparation;
+      if (stored && !draftTouchedRef.current) setDraftValue(value);
+      admittedRef.current = true;
+      setAdmitted(true);
+      await enqueuePreparationSave(snapshotPreparation());
+      if (active) setHydrated(true);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [api.settings, openedFromProject, project?.id]);
+
+  useEffect(() => {
+    if (!hydrated || !admitted || discardRef.current) return;
     if (draftTimerRef.current !== null) window.clearTimeout(draftTimerRef.current);
     const timer = window.setTimeout(() => {
       if (draftTimerRef.current === timer) draftTimerRef.current = null;
-      const snapshot = latestDraftRef.current;
-      if (snapshot && !discardDraftRef.current) void enqueueDraftSave(snapshot);
+      if (!discardRef.current) void enqueuePreparationSave(snapshotPreparation());
     }, DRAFT_SAVE_DELAY_MS);
     draftTimerRef.current = timer;
-  }, [draftHydrated, goalMode, images, input, projectId, settings]);
+  }, [admitted, draftValue, hydrated]);
 
   useEffect(() => {
+    if (!hydrated || !admitted || !project || operationRef.current) return;
+    operationRef.current = true;
+    setWorking(true);
+    setError(null);
+    void runPreparation(project)
+      .catch(async (caught: unknown) => {
+        if (
+          caught instanceof ApiClientError &&
+          caught.status === 404 &&
+          preparationRef.current.threadId
+        ) {
+          preparationRef.current = {
+            ...preparationRef.current,
+            phase: "creating",
+            threadId: null,
+            thread: null,
+          };
+        }
+        await flushPreparation();
+        if (aliveRef.current) {
+          setError(
+            caught instanceof Error
+              ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+              : t("Не удалось создать сессию"),
+          );
+        }
+      })
+      .finally(() => {
+        operationRef.current = false;
+        if (aliveRef.current) setWorking(false);
+      });
+  }, [admitted, hydrated, projectId, retryAttempt]);
+
+  useEffect(() => {
+    aliveRef.current = true;
     const flushBeforePageExit = () => {
-      if (!discardDraftRef.current) void flushDraft();
+      if (!discardRef.current) void flushPreparation();
     };
     window.addEventListener("pagehide", flushBeforePageExit);
     return () => {
+      aliveRef.current = false;
       window.removeEventListener("pagehide", flushBeforePageExit);
-      if (!discardDraftRef.current) void flushDraft();
+      if (!discardRef.current) void flushPreparation();
       else if (draftTimerRef.current !== null) window.clearTimeout(draftTimerRef.current);
     };
   }, []);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!projectId || (!input.trim() && !images.length) || (goalMode && !input.trim())) return;
-    const clientMessageId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-    const createdAt = Date.now();
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api.createThread({
-        projectId,
-        input,
-        ...(images.length ? { images: images.map((image) => image.url) } : {}),
-        ...(goalMode ? { goal: true } : {}),
-        clientMessageId,
-        settings: {
-          ...settings,
-          ...(settings.reasoningEffort === undefined && state.snapshot?.defaultReasoningEffort
-            ? { reasoningEffort: null }
-            : {}),
-        },
-      });
-      discardDraftRef.current = true;
+  async function runPreparation(activeProject: Project): Promise<void> {
+    let thread = preparationRef.current.thread;
+    let threadId = preparationRef.current.threadId;
+    if (!threadId) {
+      const created = await api.createProjectThread(activeProject.id);
+      thread = created.thread;
+      threadId = thread.id;
+      preparationRef.current = {
+        ...preparationRef.current,
+        phase: "transferring",
+        threadId,
+        thread,
+      };
+      await enqueuePreparationSave(snapshotPreparation());
+    }
+
+    if (!thread) {
+      thread =
+        state.snapshot?.threads.find((candidate) => candidate.id === threadId) ??
+        (await api.readThread(threadId, undefined, { fresh: true })).summary;
+      preparationRef.current = { ...preparationRef.current, thread };
+      await enqueuePreparationSave(snapshotPreparation());
+    }
+
+    while (true) {
+      const transferring = snapshotPreparation();
+      const hasDraft =
+        Boolean(transferring.value.input) ||
+        transferring.value.images.length > 0 ||
+        transferring.value.goalMode ||
+        transferring.value.annotations.length > 0;
+      const saved = hasDraft
+        ? await saveTransferredDraft(api, threadId, transferring.value)
+        : null;
+      if (preparationRef.current.revision !== transferring.revision) continue;
+
+      if (saved) {
+        await saveLocalDraft(api.settings, threadId, transferring.value, saved.updatedAt);
+      } else {
+        await deleteLocalDraft(api.settings, threadId);
+      }
+      if (preparationRef.current.revision !== transferring.revision) continue;
+      await flushPreparation();
+      if (preparationRef.current.revision !== transferring.revision) continue;
+      await deleteNewSessionDraft(api.settings, activeProject.id);
+      if (preparationRef.current.revision !== transferring.revision) continue;
+
+      discardRef.current = true;
       if (draftTimerRef.current !== null) {
         window.clearTimeout(draftTimerRef.current);
         draftTimerRef.current = null;
       }
-      await draftSaveChainRef.current.catch(() => undefined);
-      await deleteNewSessionDraft(api.settings, projectId);
-      dispatch({ type: "thread", thread: result.thread });
+      dispatch({ type: "thread", thread });
       dispatch({
-        type: "optimistic.add",
-        message: {
-          id: clientMessageId,
-          threadId: result.thread.id,
-          text: input.trim(),
-          images: images.map((image) => image.url),
-          createdAt,
-          destination: "turn",
-          turnId: result.turnId,
-        } satisfies OptimisticMessage,
-      });
-      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
-        state: {
-          focusComposer: true,
-          ...(result.goalWarning
-            ? {
-                notice: localizeKnownServerText(language, result.goalWarning) ?? result.goalWarning,
-              }
-            : {}),
+        type: "detail",
+        detail: {
+          summary: thread,
+          turns: [],
+          queuedMessages: [],
+          olderTurnsCursor: null,
+          draft: saved,
         },
+        page: "latest",
       });
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
-          : t("Не удалось создать задачу"),
-      );
-    } finally {
-      setBusy(false);
+      if (aliveRef.current) {
+        navigate(`/threads/${encodeURIComponent(threadId)}`, {
+          replace: true,
+          state: { focusComposer: true },
+        });
+      }
+      return;
     }
   }
+
+  function updateDraft(value: UpdateThreadDraftRequest): void {
+    draftTouchedRef.current = true;
+    preparationRef.current = {
+      ...preparationRef.current,
+      value,
+      revision: preparationRef.current.revision + 1,
+    };
+    setDraftValue(value);
+  }
+
+  function preventSubmit(event: FormEvent): void {
+    event.preventDefault();
+  }
+
+  if (!project || rejected) return <Navigate to="/" replace />;
+  if (!admitted) return null;
 
   return (
     <div className="thread-workspace new-session-page">
       <div className="conversation-pane">
         <WorkspaceHeader
           title={t("Новая задача")}
-          subtitle={project?.displayName ?? t("Выберите проект")}
+          subtitle={project.displayName}
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
         />
@@ -236,44 +335,24 @@ export function NewSession({
           </span>
           <h2>{t("Что поручим Codex?")}</h2>
           <p>
-            {t("Опишите задачу — работа продолжится на сервере, даже если закрыть приложение.")}
+            {working
+              ? t("Готовим сессию — уже можно вводить сообщение.")
+              : t("Черновик сохранён. Повторите создание сессии.")}
           </p>
         </div>
         <Composer
           autoFocus
-          input={input}
-          onInput={(value) => {
-            draftTouchedRef.current = true;
-            setInput(value);
-          }}
-          images={images}
-          onImagesChange={(value) => {
-            draftTouchedRef.current = true;
-            setImages(value);
-          }}
-          onSubmit={submit}
-          busy={busy}
+          input={draftValue.input}
+          onInput={(input) => updateDraft({ ...preparationRef.current.value, input })}
+          images={draftValue.images}
+          onImagesChange={(images) => updateDraft({ ...preparationRef.current.value, images })}
+          onSubmit={preventSubmit}
+          busy
           settings={settings}
-          onSettingsChange={(patch) => {
-            draftTouchedRef.current = true;
-            if (patch.collaborationMode !== undefined && patch.collaborationMode !== "default") {
-              setGoalMode(false);
-            }
-            setSettings((current) => applySettingsPatch(current, patch));
-          }}
-          goalMode={goalMode}
-          onGoalModeChange={(value) => {
-            draftTouchedRef.current = true;
-            setGoalMode(value);
-          }}
+          onSettingsChange={() => undefined}
+          goalMode={false}
+          onGoalModeChange={() => undefined}
           models={models}
-          projects={projects}
-          projectId={projectId}
-          onProjectChange={(nextProjectId) => {
-            void flushDraft();
-            setSearchParams({ projectId: nextProjectId }, { replace: true });
-          }}
-          onNewProject={onNewProject}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
           onTranscribe={async (audio, durationMs) => {
@@ -284,6 +363,23 @@ export function NewSession({
           }}
           error={error}
         />
+        {storageWarning && (
+          <p className="new-session-storage-warning" role="status">
+            {t(
+              "Локальное сохранение недоступно. Не закрывайте страницу, пока сессия не откроется.",
+            )}
+          </p>
+        )}
+        {error && (
+          <button
+            className="new-session-retry"
+            type="button"
+            disabled={working}
+            onClick={() => setRetryAttempt((value) => value + 1)}
+          >
+            {t("Повторить")}
+          </button>
+        )}
       </div>
       <NewSessionInspector
         open={inspectorOpen}
@@ -301,107 +397,24 @@ export function NewSession({
   );
 }
 
-function initialSettings(
-  defaultReasoningEffort: string | undefined,
-  models: ModelOption[],
-  taskDefaults?: TaskDefaults,
-): SessionSettings {
-  const settings = { ...DEFAULT_SESSION_SETTINGS };
-  const model = models.find((candidate) => candidate.isDefault) ?? models[0];
-  if (
-    defaultReasoningEffort &&
-    (!model || model.reasoningEfforts.some((option) => option.value === defaultReasoningEffort))
-  ) {
-    settings.reasoningEffort = defaultReasoningEffort;
-  }
-  if (
-    taskDefaults?.serviceTier &&
-    model?.serviceTiers.some((tier) => tier.id === taskDefaults.serviceTier)
-  ) {
-    settings.serviceTier = taskDefaults.serviceTier;
-  }
-  if (taskDefaults?.personality && model?.supportsPersonality) {
-    settings.personality = taskDefaults.personality;
-  }
-  return settings;
+function emptyDraft(): UpdateThreadDraftRequest {
+  return { input: "", images: [], goalMode: false, annotations: [] };
 }
 
-function normalizeSavedSettings(
-  saved: SessionSettings,
-  defaults: SessionSettings,
-  models: ModelOption[],
-): SessionSettings {
-  const collaborationMode = ["default", "plan", "team"].includes(saved.collaborationMode)
-    ? saved.collaborationMode
-    : defaults.collaborationMode;
-  if (!models.length) {
-    return {
-      ...defaults,
-      ...saved,
-      collaborationMode,
-    };
-  }
-  const savedModel = saved.model
-    ? models.find((candidate) => candidate.id === saved.model)
-    : undefined;
-  const model = savedModel ?? models.find((candidate) => candidate.isDefault) ?? models[0];
-  const next: SessionSettings = { collaborationMode };
-  if (savedModel) next.model = savedModel.id;
-  const reasoningEffort = saved.reasoningEffort ?? defaults.reasoningEffort;
-  if (
-    reasoningEffort &&
-    model?.reasoningEfforts.some((option) => option.value === reasoningEffort)
-  ) {
-    next.reasoningEffort = reasoningEffort;
-  }
-  const serviceTier = saved.serviceTier ?? defaults.serviceTier;
-  if (serviceTier && model?.serviceTiers.some((tier) => tier.id === serviceTier)) {
-    next.serviceTier = serviceTier;
-  }
-  const personality = saved.personality ?? defaults.personality;
-  if (personality && model?.supportsPersonality) next.personality = personality;
-  return next;
+function normalizeDraft(value: UpdateThreadDraftRequest): UpdateThreadDraftRequest {
+  return {
+    input: value.input,
+    images: value.images,
+    goalMode: false,
+    annotations: [],
+  };
 }
 
-async function persistNewSessionDraft(
-  connectionSettings: ConnectionSettings,
-  snapshot: NewSessionDraftSnapshot,
-): Promise<void> {
-  if (
-    snapshot.value.input === "" &&
-    snapshot.value.images.length === 0 &&
-    !snapshot.value.goalMode &&
-    sessionSettingsEqual(snapshot.settings, snapshot.defaultSettings)
-  ) {
-    await deleteNewSessionDraft(connectionSettings, snapshot.projectId);
-    return;
-  }
-  await saveNewSessionDraft(
-    connectionSettings,
-    snapshot.projectId,
-    snapshot.value,
-    snapshot.settings,
-  );
-}
-
-function sessionSettingsEqual(left: SessionSettings, right: SessionSettings): boolean {
-  return (
-    left.collaborationMode === right.collaborationMode &&
-    left.model === right.model &&
-    left.reasoningEffort === right.reasoningEffort &&
-    left.serviceTier === right.serviceTier &&
-    left.personality === right.personality
-  );
-}
-
-function applySettingsPatch(
-  current: SessionSettings,
-  patch: UpdateThreadSettingsRequest,
-): SessionSettings {
-  const next = { ...current };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete next[key as keyof SessionSettings];
-    else if (value !== undefined) Object.assign(next, { [key]: value });
-  }
-  return next;
+async function saveTransferredDraft(
+  api: ReturnType<typeof useConnection>["api"],
+  threadId: string,
+  value: UpdateThreadDraftRequest,
+) {
+  await saveLocalDraft(api.settings, threadId, value, Date.now());
+  return api.updateThreadDraft(threadId, value, { retry: true });
 }

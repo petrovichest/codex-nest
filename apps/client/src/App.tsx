@@ -348,7 +348,6 @@ export function App({
                   transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
                   transcriptionConfig={transcriptionConfig}
                   onOpenNavigation={() => setDrawer(true)}
-                  onNewProject={() => setNewProject(true)}
                 />
               }
             />
@@ -1015,7 +1014,9 @@ function Sidebar({
 
   function openNewSession(projectId: string) {
     onClose();
-    navigate(`/new?${new URLSearchParams({ projectId })}`);
+    navigate(`/new?${new URLSearchParams({ projectId })}`, {
+      state: { newSessionProjectId: projectId },
+    });
   }
 
   async function refreshRateLimits() {

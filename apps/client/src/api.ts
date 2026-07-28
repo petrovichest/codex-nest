@@ -222,6 +222,7 @@ export class ApiClient {
   createProjectThread(projectId: string): Promise<CreateProjectThreadResponse> {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
+      retry: true,
     });
   }
 

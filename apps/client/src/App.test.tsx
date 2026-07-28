@@ -146,16 +146,15 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
   });
 
-  it("opens the new-session editor from /new", async () => {
+  it("does not open the new-session editor without a project action", async () => {
     mockConnection(snapshot([]));
 
     renderApp("/new");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
+      await screen.findByRole("heading", { level: 1, name: "Нет открытых сессий" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Проект" })).toHaveValue("project");
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
   });
 
   it("removes the sidebar toolbar and keeps the project session action", () => {
@@ -1218,6 +1217,7 @@ describe("App routing and navigation", () => {
   it("opens a project-scoped editor without waiting for session creation", async () => {
     const secondProject = testProject("second", "Второй");
     const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+    api.createProjectThread.mockReturnValue(new Promise(() => undefined));
 
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Второй" }));
@@ -1225,8 +1225,10 @@ describe("App routing and navigation", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Проект" })).toHaveValue("second");
-    expect(api.createProjectThread).not.toHaveBeenCalled();
+    expect(screen.queryByRole("combobox", { name: "Проект" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("second"));
     expect(api.createThread).not.toHaveBeenCalled();
   });
 
