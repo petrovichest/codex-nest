@@ -2534,7 +2534,11 @@ export function ThreadPage({
                 {!isSubagent && autoVoiceProgress && (
                   <VoiceTranscriptionBubble progress={autoVoiceProgress} />
                 )}
-                <AttentionPanel requests={attention} />
+                <AttentionPanel
+                  requests={attention}
+                  transcriptionConfig={transcriptionConfig}
+                  transcriptionProvider={transcriptionProvider}
+                />
                 {!isSubagent &&
                   !activeVoiceJob &&
                   !voiceUpload &&

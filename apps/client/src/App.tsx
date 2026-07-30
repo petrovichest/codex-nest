@@ -386,7 +386,11 @@ export function App({
       </main>
       {attention.some((item) => !item.threadId) && (
         <div className="global-attention">
-          <AttentionPanel requests={attention.filter((item) => !item.threadId)} />
+          <AttentionPanel
+            requests={attention.filter((item) => !item.threadId)}
+            transcriptionConfig={transcriptionConfig}
+            transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
+          />
         </div>
       )}
       {newProject && <ProjectDialog onClose={() => setNewProject(false)} />}

@@ -1,30 +1,61 @@
 import { Browser } from "@capacitor/browser";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   AttentionRequest,
   AttentionResponse,
   ElicitationPrimitive,
   PermissionGrant,
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
-import { AlertIcon } from "./Icons";
+import { AlertIcon, MicrophoneIcon, XIcon } from "./Icons";
+import {
+  formatRecordingTime,
+  insertTranscriptAtSelection,
+  microphoneUnavailableReason,
+  recordingErrorMessage,
+  recordingMimeType,
+  type TextSelection,
+} from "./speech-input";
 
-export function AttentionPanel({ requests }: { requests: AttentionRequest[] }) {
+export function AttentionPanel({
+  requests,
+  transcriptionConfig = null,
+  transcriptionProvider = null,
+}: {
+  requests: AttentionRequest[];
+  transcriptionConfig?: TranscriptionConfigResponse | null;
+  transcriptionProvider?: TranscriptionProvider | null;
+}) {
   const { t } = useI18n();
   if (!requests.length) return null;
   return (
     <section className="attention-stack" aria-label={t("Требуется внимание")}>
       {requests.map((request) => (
-        <AttentionCard request={request} key={request.id} />
+        <AttentionCard
+          request={request}
+          transcriptionConfig={transcriptionConfig}
+          transcriptionProvider={transcriptionProvider}
+          key={request.id}
+        />
       ))}
     </section>
   );
 }
 
-function AttentionCard({ request }: { request: AttentionRequest }) {
+function AttentionCard({
+  request,
+  transcriptionConfig,
+  transcriptionProvider,
+}: {
+  request: AttentionRequest;
+  transcriptionConfig: TranscriptionConfigResponse | null;
+  transcriptionProvider: TranscriptionProvider | null;
+}) {
   const { api } = useConnection();
   const { language, t } = useI18n();
   const [busy, setBusy] = useState(false);
@@ -97,7 +128,13 @@ function AttentionCard({ request }: { request: AttentionRequest }) {
         <PermissionForm request={request} busy={busy} respond={respond} />
       )}
       {request.kind === "userInput" && (
-        <UserInputForm request={request} busy={busy} respond={respond} />
+        <UserInputForm
+          request={request}
+          busy={busy}
+          transcriptionConfig={transcriptionConfig}
+          transcriptionProvider={transcriptionProvider}
+          respond={respond}
+        />
       )}
       {request.kind === "elicitation" && (
         <ElicitationForm request={request} busy={busy} respond={respond} />
@@ -231,29 +268,274 @@ function PermissionForm({
 function UserInputForm({
   request,
   busy,
+  transcriptionConfig,
+  transcriptionProvider,
   respond,
 }: {
   request: Extract<AttentionRequest, { kind: "userInput" }>;
   busy: boolean;
+  transcriptionConfig: TranscriptionConfigResponse | null;
+  transcriptionProvider: TranscriptionProvider | null;
   respond(response: AttentionResponse): Promise<void>;
 }) {
-  const { t } = useI18n();
+  const { api } = useConnection();
+  const { language, t } = useI18n();
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const [questionIndex, setQuestionIndex] = useState(0);
+  const [speechState, setSpeechState] = useState<
+    "idle" | "requesting" | "recording" | "transcribing"
+  >("idle");
+  const [speechSeconds, setSpeechSeconds] = useState(0);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const answerInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioBytesRef = useRef(0);
+  const discardRecordingRef = useRef(false);
+  const recordingStartedAtRef = useRef(0);
+  const speechTimerStartedAtRef = useRef(0);
+  const speechTimerRef = useRef<number | undefined>(undefined);
+  const recordingLimitRef = useRef<number | undefined>(undefined);
+  const aliveRef = useRef(true);
+  const recordingTargetRef = useRef<{
+    questionId: string;
+    selection: TextSelection;
+    value: string;
+  } | null>(null);
   const question = request.questions[questionIndex];
+  const currentQuestionIdRef = useRef(question?.id ?? null);
+  currentQuestionIdRef.current = question?.id ?? null;
   const isLastQuestion = questionIndex === request.questions.length - 1;
   const currentAnswer = question ? answers[question.id]?.[0]?.trim() : "";
+  const selectedOption = question?.options?.some(
+    (option) => option.label === answers[question.id]?.[0],
+  );
+  const freeformAnswer = selectedOption ? "" : question ? (answers[question.id]?.[0] ?? "") : "";
+  const speechBusy = speechState !== "idle";
+  const speechUnavailable = microphoneUnavailableReason(
+    transcriptionConfig,
+    transcriptionProvider,
+    true,
+    t,
+  );
+  const speechTimerText =
+    speechState === "recording" || speechState === "transcribing"
+      ? formatRecordingTime(speechSeconds)
+      : null;
 
   function updateAnswer(questionId: string, answer: string) {
     setAnswers((current) => ({ ...current, [questionId]: [answer] }));
   }
 
+  function captureAnswerSelection() {
+    if (!question) return;
+    const input = answerInputRef.current;
+    recordingTargetRef.current = {
+      questionId: question.id,
+      value: freeformAnswer,
+      selection: input
+        ? {
+            start: input.selectionStart ?? freeformAnswer.length,
+            end: input.selectionEnd ?? freeformAnswer.length,
+          }
+        : { start: freeformAnswer.length, end: freeformAnswer.length },
+    };
+  }
+
+  function clearSpeechTimer() {
+    if (speechTimerRef.current === undefined) return;
+    window.clearInterval(speechTimerRef.current);
+    speechTimerRef.current = undefined;
+  }
+
+  function clearRecordingLimit() {
+    if (recordingLimitRef.current === undefined) return;
+    window.clearTimeout(recordingLimitRef.current);
+    recordingLimitRef.current = undefined;
+  }
+
+  function stopMediaStream() {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }
+
+  function startSpeechTimer(startedAt: number) {
+    clearSpeechTimer();
+    speechTimerStartedAtRef.current = startedAt;
+    setSpeechSeconds(0);
+    speechTimerRef.current = window.setInterval(() => {
+      setSpeechSeconds(
+        Math.max(0, Math.floor((Date.now() - speechTimerStartedAtRef.current) / 1_000)),
+      );
+    }, 250);
+  }
+
+  async function startRecording() {
+    if (!question || speechState !== "idle" || busy || speechUnavailable) return;
+    const mimeType = recordingMimeType();
+    if (!mimeType) {
+      setSpeechError(t("Этот браузер не поддерживает запись WebM или MP4"));
+      return;
+    }
+    captureAnswerSelection();
+    setSpeechError(null);
+    setSpeechState("requesting");
+    discardRecordingRef.current = false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!aliveRef.current || currentQuestionIdRef.current !== question.id) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      audioBytesRef.current = 0;
+      recorder.addEventListener("dataavailable", (event) => {
+        if (!event.data.size) return;
+        audioChunksRef.current.push(event.data);
+        audioBytesRef.current += event.data.size;
+        if (audioBytesRef.current >= (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
+          stopRecording();
+        }
+      });
+      recorder.addEventListener("error", () => {
+        discardRecordingRef.current = true;
+        clearSpeechTimer();
+        clearRecordingLimit();
+        stopMediaStream();
+        mediaRecorderRef.current = null;
+        if (aliveRef.current) {
+          setSpeechState("idle");
+          setSpeechError(t("Не удалось записать аудио"));
+        }
+      });
+      recorder.addEventListener("stop", () => void finishRecording(mimeType));
+      recorder.start(1_000);
+      recordingStartedAtRef.current = Date.now();
+      startSpeechTimer(recordingStartedAtRef.current);
+      setSpeechState("recording");
+      recordingLimitRef.current = window.setTimeout(
+        stopRecording,
+        (transcriptionConfig?.maxRecordingSeconds ?? 300) * 1_000,
+      );
+    } catch (caught) {
+      stopMediaStream();
+      if (aliveRef.current) {
+        setSpeechState("idle");
+        setSpeechError(recordingErrorMessage(caught, t));
+      }
+    }
+  }
+
+  function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    clearSpeechTimer();
+    clearRecordingLimit();
+    setSpeechState("transcribing");
+    startSpeechTimer(Date.now());
+    recorder.stop();
+    stopMediaStream();
+  }
+
+  function cancelRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    discardRecordingRef.current = true;
+    clearSpeechTimer();
+    clearRecordingLimit();
+    recorder.stop();
+    stopMediaStream();
+  }
+
+  async function finishRecording(mimeType: string) {
+    clearRecordingLimit();
+    stopMediaStream();
+    mediaRecorderRef.current = null;
+    const chunks = audioChunksRef.current;
+    const bytes = audioBytesRef.current;
+    audioChunksRef.current = [];
+    audioBytesRef.current = 0;
+    if (discardRecordingRef.current) {
+      clearSpeechTimer();
+      if (aliveRef.current) {
+        setSpeechSeconds(0);
+        setSpeechState("idle");
+      }
+      return;
+    }
+    if (!chunks.length || !bytes) {
+      clearSpeechTimer();
+      if (aliveRef.current) {
+        setSpeechState("idle");
+        setSpeechError(t("Запись не содержит аудио"));
+      }
+      return;
+    }
+    if (bytes > (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
+      clearSpeechTimer();
+      if (aliveRef.current) {
+        setSpeechState("idle");
+        setSpeechError(t("Запись слишком большая"));
+      }
+      return;
+    }
+    const target = recordingTargetRef.current;
+    try {
+      const response = await api.transcribe(
+        new Blob(chunks, { type: mimeType }),
+        Math.max(1, Date.now() - recordingStartedAtRef.current),
+      );
+      if (!aliveRef.current || !target || currentQuestionIdRef.current !== target.questionId) {
+        return;
+      }
+      const inserted = insertTranscriptAtSelection(target.value, response.text, target.selection);
+      if (!inserted) throw new Error(t("Распознавание не вернуло текст"));
+      updateAnswer(target.questionId, inserted.value);
+      setSpeechError(null);
+      window.setTimeout(() => {
+        if (!aliveRef.current || currentQuestionIdRef.current !== target.questionId) return;
+        answerInputRef.current?.focus();
+        answerInputRef.current?.setSelectionRange(inserted.caret, inserted.caret);
+      });
+    } catch (caught) {
+      if (aliveRef.current) {
+        setSpeechError(
+          caught instanceof Error
+            ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+            : t("Не удалось распознать запись"),
+        );
+      }
+    } finally {
+      clearSpeechTimer();
+      if (aliveRef.current) setSpeechState("idle");
+    }
+  }
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      discardRecordingRef.current = true;
+      clearSpeechTimer();
+      clearRecordingLimit();
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+      stopMediaStream();
+    };
+  }, []);
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (!question || !currentAnswer) return;
+        if (!question || !currentAnswer || speechBusy) return;
         if (!isLastQuestion) {
+          setSpeechError(null);
+          recordingTargetRef.current = null;
           setQuestionIndex((current) => current + 1);
           return;
         }
@@ -283,6 +565,7 @@ function UserInputForm({
                   value={option.label}
                   checked={answers[question.id]?.[0] === option.label}
                   onChange={() => updateAnswer(question.id, option.label)}
+                  disabled={busy || speechBusy}
                   required={!question.isOther}
                 />
                 <span>
@@ -292,21 +575,81 @@ function UserInputForm({
               </label>
             ))}
             {(question.isOther || !question.options) && (
-              <input
-                type={question.isSecret ? "password" : "text"}
-                placeholder={t("Свой ответ")}
-                value={
-                  question.options?.some((option) => option.label === answers[question.id]?.[0])
-                    ? ""
-                    : (answers[question.id]?.[0] ?? "")
-                }
-                onChange={(event) => updateAnswer(question.id, event.target.value)}
-                required={!answers[question.id]?.[0]}
-              />
+              <>
+                <div className="user-input-freeform">
+                  <input
+                    ref={answerInputRef}
+                    aria-label={t("Свой ответ")}
+                    type={question.isSecret ? "password" : "text"}
+                    placeholder={t("Свой ответ")}
+                    value={freeformAnswer}
+                    onChange={(event) => updateAnswer(question.id, event.target.value)}
+                    onSelect={captureAnswerSelection}
+                    disabled={busy}
+                    readOnly={speechBusy}
+                    required={!answers[question.id]?.[0]}
+                  />
+                  {transcriptionConfig && (
+                    <div className="user-input-voice-actions">
+                      <button
+                        aria-label={
+                          speechState === "recording"
+                            ? t("Остановить запись")
+                            : speechState === "requesting"
+                              ? t("Запрашиваем доступ к микрофону")
+                              : speechState === "transcribing"
+                                ? t("Распознаём запись")
+                                : speechUnavailable
+                                  ? speechUnavailable
+                                  : t("Начать запись")
+                        }
+                        aria-pressed={speechState === "recording"}
+                        className={`composer-action microphone user-input-microphone${speechState === "recording" ? " recording" : ""}${speechTimerText ? " timing" : ""}`}
+                        disabled={
+                          speechState === "requesting" ||
+                          speechState === "transcribing" ||
+                          (speechState === "idle" && (busy || Boolean(speechUnavailable)))
+                        }
+                        title={speechUnavailable ?? undefined}
+                        type="button"
+                        onPointerDown={speechState === "idle" ? captureAnswerSelection : undefined}
+                        onClick={() =>
+                          speechState === "recording" ? stopRecording() : void startRecording()
+                        }
+                      >
+                        {speechTimerText ? (
+                          <span className="composer-action-timer" aria-hidden="true">
+                            {speechTimerText}
+                          </span>
+                        ) : speechState === "requesting" ? (
+                          <span className="spinner small" />
+                        ) : (
+                          <MicrophoneIcon />
+                        )}
+                      </button>
+                      {speechState === "recording" && (
+                        <button
+                          aria-label={t("Отменить запись")}
+                          className="composer-action stop"
+                          type="button"
+                          onClick={cancelRecording}
+                        >
+                          <XIcon />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {speechError && (
+                  <div className="user-input-speech-error" role="alert">
+                    {speechError}
+                  </div>
+                )}
+              </>
             )}
           </fieldset>
           <div className="user-input-actions">
-            <button className="primary" disabled={busy || !currentAnswer}>
+            <button className="primary" disabled={busy || speechBusy || !currentAnswer}>
               {isLastQuestion ? t("Отправить ответы") : t("Далее")}
             </button>
           </div>

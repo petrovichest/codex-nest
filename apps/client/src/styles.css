@@ -3142,6 +3142,35 @@ pre {
   font-weight: 600;
 }
 
+.user-input-freeform {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.user-input-freeform > input {
+  min-width: 0;
+  flex: 1;
+}
+
+.user-input-voice-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.user-input-microphone {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.user-input-speech-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .user-input-actions {
   display: flex;
   justify-content: flex-end;

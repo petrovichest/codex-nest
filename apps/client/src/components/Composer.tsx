@@ -26,6 +26,13 @@ import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, VoiceSendIcon, XIcon } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
+import {
+  formatRecordingTime,
+  insertTranscriptAtSelection,
+  microphoneUnavailableReason,
+  recordingErrorMessage,
+  recordingMimeType,
+} from "./speech-input";
 
 export type ComposerImage = {
   id: string;
@@ -46,7 +53,6 @@ export type ComposerTranscriptionStatus = {
 };
 
 const KEYBOARD_VIEWPORT_DELTA = 120;
-const RECORDING_MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
 type SpeechState = "idle" | "requesting" | "recording" | "uploading" | "transcribing";
 
@@ -658,32 +664,23 @@ export function Composer({
 
   function insertTranscript(transcript: string) {
     const latest = latestPropsRef.current;
-    const clean = transcript.trim();
-    if (!clean) throw new Error(latest.t("Распознавание не вернуло текст"));
     const selection = insertionRef.current ?? {
       start: latest.input.length,
       end: latest.input.length,
     };
-    const start = Math.min(selection.start, latest.input.length);
-    const end = Math.max(start, Math.min(selection.end, latest.input.length));
-    const before = latest.input.slice(0, start);
-    const after = latest.input.slice(end);
-    const leading = before && !/\s$/.test(before) ? " " : "";
-    const trailing = after && !/^\s/.test(after) ? " " : "";
-    const completeInsertion = `${leading}${clean}${trailing}`;
-    let inserted = completeInsertion;
-    if (latest.goalMode) {
-      inserted = inserted.slice(0, Math.max(0, 4_000 - before.length - after.length));
-    }
-    const next = `${before}${inserted}${after}`;
-    latest.onInput(next);
-    const caret =
-      before.length + inserted.length - (inserted === completeInsertion ? trailing.length : 0);
+    const inserted = insertTranscriptAtSelection(
+      latest.input,
+      transcript,
+      selection,
+      latest.goalMode ? 4_000 : undefined,
+    );
+    if (!inserted) throw new Error(latest.t("Распознавание не вернуло текст"));
+    latest.onInput(inserted.value);
     window.setTimeout(() => {
       const textarea = textareaRef.current;
       textarea?.focus();
-      textarea?.setSelectionRange(caret, caret);
-      insertionRef.current = { start: caret, end: caret };
+      textarea?.setSelectionRange(inserted.caret, inserted.caret);
+      insertionRef.current = { start: inserted.caret, end: inserted.caret };
     });
   }
 
@@ -1014,52 +1011,6 @@ function clipboardImageFiles(data: DataTransfer): File[] {
 function pastedImageName(mimeType: string, index: number): string {
   const extension = mimeType.split("/")[1]?.replace(/[^a-z0-9.+-]/gi, "") || "png";
   return `pasted-image-${index + 1}.${extension}`;
-}
-
-function microphoneUnavailableReason(
-  config: TranscriptionConfigResponse | null,
-  provider: TranscriptionProvider | null,
-  canTranscribe: boolean,
-  t: Translate,
-): string | null {
-  if (!config || !provider || !config.providers.includes(provider) || !canTranscribe) {
-    return t("Распознавание речи не настроено");
-  }
-  if (
-    typeof navigator === "undefined" ||
-    !navigator.mediaDevices?.getUserMedia ||
-    typeof MediaRecorder === "undefined"
-  ) {
-    return typeof window !== "undefined" && window.isSecureContext === false
-      ? t("Для доступа к микрофону откройте CodexNest по HTTPS")
-      : t("Запись с микрофона не поддерживается на этом устройстве");
-  }
-  return recordingMimeType() ? null : t("Этот браузер не поддерживает запись WebM или MP4");
-}
-
-function recordingMimeType(): string | null {
-  if (typeof MediaRecorder === "undefined") return null;
-  return (
-    RECORDING_MIME_TYPES.find(
-      (type) => !MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(type),
-    ) ?? null
-  );
-}
-
-function recordingErrorMessage(error: unknown, t: Translate): string {
-  if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-      return t("Нет доступа к микрофону. Разрешите его в настройках приложения или браузера");
-    }
-    if (error.name === "NotFoundError") return t("Микрофон не найден");
-    if (error.name === "NotReadableError") return t("Микрофон занят другим приложением");
-  }
-  return t("Не удалось начать запись с микрофона");
-}
-
-function formatRecordingTime(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function formatTranscriptionStatus(
