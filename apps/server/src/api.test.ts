@@ -1716,7 +1716,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /codexnest managed-task tools.*Never use native subagent tools.*codexnest\.spawn_task.*self-contained prompt.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
+            /codexnest managed-task tools.*Never use native subagent tools.*smallest sufficient solution.*concrete, confirmed risk.*Before calling codexnest\.spawn_task.*necessary to achieve the user's original goal.*necessary executable step.*codexnest\.spawn_task.*self-contained prompt.*Do not create managed tasks for optional improvements.*checks without a concrete target.*After every meaningful stage.*reassess the remaining plan.*only with steps that are still necessary.*Every test, command run, and checklist item.*specific product risk or an observed defect.*Omit it otherwise.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
           ),
         },
       },
@@ -2872,6 +2872,56 @@ describe("Team orchestration", () => {
       ),
     ).toBe(true);
 
+    await app.close();
+    await store.flushed();
+  });
+
+  it("stops a completed Team orchestration without interrupting managed children", async () => {
+    const { app, bridge, headers, projection, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Долгая задача",
+        prompt: "Выполни долгую задачу.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    await store.update((state) => {
+      const task = state.threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)];
+      if (!task) return;
+      task.status = "completed";
+      task.terminalTurnId = "child-terminal";
+      task.result = { summary: "Готово", source: "submitted" };
+    });
+    expect(projection.summary("thread")).toMatchObject({
+      state: "running",
+      currentTurnId: null,
+    });
+
+    const stopped = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers,
+      payload: {},
+    });
+
+    expect(stopped.statusCode).toBe(204);
+    expect(store.snapshot().threadMeta.thread?.teamOrchestration).toBeUndefined();
+    expect(
+      bridge.request.mock.calls.some(
+        ([method, params]) =>
+          method === "turn/interrupt" &&
+          (params as Record<string, unknown>).threadId === spawned.threadId,
+      ),
+    ).toBe(false);
+    expect(projection.summary("thread")).toMatchObject({
+      state: "interrupted",
+      currentTurnId: null,
+    });
     await app.close();
     await store.flushed();
   });

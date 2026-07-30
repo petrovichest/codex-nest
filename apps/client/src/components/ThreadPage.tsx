@@ -1787,6 +1787,23 @@ export function ThreadPage({
     }
   }
 
+  async function stopTask(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.interrupt(threadId, workspaceSummary.currentTurnId ?? undefined);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось остановить задачу"),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitPreparingSession(activeProject: Project): Promise<void> {
     const generation = preparationGenerationRef.current;
     assertPreparationGeneration(generation);
@@ -2564,7 +2581,11 @@ export function ThreadPage({
             onPendingAttachmentsChange={setPendingAttachments}
             onSubmit={submit}
             busy={busy}
-            running={Boolean(workspaceSummary.currentTurnId)}
+            running={
+              Boolean(workspaceSummary.currentTurnId) ||
+              (workspaceSummary.settings.collaborationMode === "team" &&
+                workspaceSummary.state === "running")
+            }
             settings={preparationRef.current.active ? pendingSettings : workspaceSummary.settings}
             onSettingsChange={(patch) => void updateSettings(patch)}
             settingsBusy={settingsBusy}
@@ -2582,8 +2603,11 @@ export function ThreadPage({
             onGoalClear={() => void clearGoal()}
             models={state.snapshot?.models ?? []}
             onStop={
-              workspaceSummary.currentTurnId
-                ? () => void api.interrupt(threadId, workspaceSummary.currentTurnId!)
+              !busy &&
+              (workspaceSummary.currentTurnId ||
+                (workspaceSummary.settings.collaborationMode === "team" &&
+                  workspaceSummary.state === "running"))
+                ? () => void stopTask()
                 : undefined
             }
             transcriptionConfig={transcriptionConfig}

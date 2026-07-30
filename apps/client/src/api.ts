@@ -378,10 +378,10 @@ export class ApiClient {
     });
   }
 
-  interrupt(id: string, turnId: string): Promise<void> {
+  interrupt(id: string, turnId?: string): Promise<void> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/interrupt`, {
       method: "POST",
-      body: { turnId },
+      body: turnId ? { turnId } : {},
     });
   }
 

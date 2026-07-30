@@ -113,6 +113,47 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
+  it("does not reactivate a turn after its completion notification wins the response race", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    await projection.setCurrentTurn("one", "turn");
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "one",
+        turn: {
+          id: "turn",
+          items: [],
+          itemsView: "summary",
+          status: "completed",
+          error: null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+        },
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBeNull());
+
+    await projection.setCurrentTurn("one", "turn");
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      currentTurnId: null,
+    });
+    await store.flushed();
+  });
+
   it("projects managed spawn tools as linked subagent launch activities", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

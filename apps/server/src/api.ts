@@ -144,7 +144,12 @@ const TEAM_SESSION_UPGRADE_MESSAGE =
 const TEAM_MODE_CONTEXT = [
   "This session is in CodexNest Team mode. Act only as the root coordinator.",
   "Use only the codexnest managed-task tools for delegation. Never use native subagent tools.",
-  "For every independent executable step, call codexnest.spawn_task with a concise title and one self-contained prompt.",
+  "Use the smallest sufficient solution that resolves the user's main problem. Add complexity only to address a concrete, confirmed risk.",
+  "Before calling codexnest.spawn_task, confirm that the task is necessary to achieve the user's original goal.",
+  "For each necessary executable step that is ready, call codexnest.spawn_task with a concise title and one self-contained prompt.",
+  "Do not create managed tasks for optional improvements, speculative risks, extra completeness, or checks without a concrete target.",
+  "After every meaningful stage, pause and reassess the remaining plan against the user's original goal. Continue without asking the user only with steps that are still necessary; never proceed merely because a step was previously planned.",
+  "Every test, command run, and checklist item must target a specific product risk or an observed defect. Omit it otherwise.",
   "Keep the full conversation and complete plan only in the root coordinator's context.",
   "In each managed child prompt, include only the single assigned plan step and the minimum task-specific context needed to complete it: its objective, relevant constraints, affected scope, and expected result.",
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
@@ -300,6 +305,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const turnStartLocks = new Map<string, Promise<unknown>>();
   const teamParentLocks = new Map<string, Promise<unknown>>();
   const teamToolOperationLocks = new Map<string, Promise<unknown>>();
+  const stoppedTeamParents = new Set<string>();
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
@@ -343,6 +349,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
     assertWritableThread(summary);
+    if (summary.settings.collaborationMode === "team") {
+      const automaticContinuation = !clientMessageId && !input.trim() && !images.length;
+      if (automaticContinuation && stoppedTeamParents.has(threadId)) {
+        throw new TeamContinuationStoppedError();
+      }
+      if (!automaticContinuation) stoppedTeamParents.delete(threadId);
+    }
     const shouldGenerateTitle =
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (
@@ -724,6 +737,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           try {
             if (teamContinuationsClosed || teamContinuationsPaused) return;
             const summary = projection.summary(threadId);
+            if (stoppedTeamParents.has(threadId)) {
+              const tasks = Object.values(
+                store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
+              );
+              if (tasks.length && tasks.every(isTerminalTask)) {
+                await store.update((state) => {
+                  const meta = state.threadMeta[threadId];
+                  if (meta) delete meta.teamOrchestration;
+                });
+                projection.publishThreadState(threadId);
+              }
+              return;
+            }
             if (
               !summary ||
               summary.relation.kind !== "session" ||
@@ -738,10 +764,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             }
             await startTurn(threadId, "", [], null);
           } catch (error) {
-            app.log.warn(
-              { err: safeError(error), threadId },
-              "Failed to continue Team orchestration",
-            );
+            if (!(error instanceof TeamContinuationStoppedError)) {
+              app.log.warn(
+                { err: safeError(error), threadId },
+                "Failed to continue Team orchestration",
+              );
+            }
           } finally {
             scheduledTeamContinuations.delete(threadId);
           }
@@ -2262,9 +2290,44 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
       const body = requireRecord<InterruptTurnRequest>(request.body);
-      if (typeof body.turnId !== "string")
-        return apiError(reply, 400, "validation_failed", "turnId is required");
-      await bridge.request("turn/interrupt", { threadId: request.params.id, turnId: body.turnId });
+      if (body.turnId !== undefined && typeof body.turnId !== "string") {
+        return apiError(reply, 400, "validation_failed", "turnId must be a string");
+      }
+      const requestedTurnId = summary.currentTurnId ?? body.turnId;
+      const orchestration = store.snapshot().threadMeta[request.params.id]?.teamOrchestration;
+      if (!requestedTurnId && !orchestration) {
+        return apiError(reply, 400, "validation_failed", "There is no running task to stop");
+      }
+      if (orchestration) {
+        stoppedTeamParents.add(request.params.id);
+        const immediate = teamContinuationImmediates.get(request.params.id);
+        if (immediate) clearImmediate(immediate);
+        teamContinuationImmediates.delete(request.params.id);
+        scheduledTeamContinuations.delete(request.params.id);
+      }
+      const interruptedTurnIds: string[] = [];
+      await withKeyLock(teamParentLocks, request.params.id, async () => {
+        if (requestedTurnId) {
+          const interrupted = await interruptTurnIfRunning(
+            bridge,
+            request.params.id,
+            requestedTurnId,
+          );
+          interruptedTurnIds.push(requestedTurnId);
+          if (interrupted && interrupted !== requestedTurnId) interruptedTurnIds.push(interrupted);
+        }
+        const tasks = Object.values(
+          store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
+        );
+        if (tasks.length && tasks.every(isTerminalTask)) {
+          await store.update((state) => {
+            const meta = state.threadMeta[request.params.id];
+            if (meta) delete meta.teamOrchestration;
+          });
+        }
+      });
+      await projection.markInterrupted(request.params.id, interruptedTurnIds);
+      projection.publishThreadState(request.params.id);
       return reply.code(204).send();
     },
   );
@@ -3809,8 +3872,50 @@ function teamOrchestrationHasWork(store: StateStore, parentThreadId: string): bo
   );
 }
 
+async function interruptTurnIfRunning(
+  bridge: CodexBridge,
+  threadId: string,
+  turnId: string,
+): Promise<string | null> {
+  try {
+    await bridge.request("turn/interrupt", { threadId, turnId });
+    return turnId;
+  } catch (error) {
+    if (!(error instanceof RpcError)) throw error;
+    let latest: Turn | undefined;
+    try {
+      latest = parseTurnsList(
+        await bridge.request<unknown>(
+          "thread/turns/list",
+          {
+            threadId,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "summary",
+          },
+          30_000,
+        ),
+      ).data[0];
+    } catch (readError) {
+      if (isMissingRolloutError(readError)) return null;
+      throw error;
+    }
+    if (!latest || latest.status !== "inProgress") return null;
+    if (latest.id === turnId) throw error;
+    await bridge.request("turn/interrupt", { threadId, turnId: latest.id });
+    return latest.id;
+  }
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+class TeamContinuationStoppedError extends Error {
+  constructor() {
+    super("Team orchestration was stopped");
+    this.name = "TeamContinuationStoppedError";
+  }
 }
 
 function withKeyLock<T>(

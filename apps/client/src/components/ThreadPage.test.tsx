@@ -1599,6 +1599,21 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
   });
 
+  it("stops a Team orchestration while the parent is between turns", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, {
+      ...summary,
+      state: "running",
+      currentTurnId: null,
+      settings: { ...summary.settings, collaborationMode: "team" },
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
+
+    await waitFor(() => expect(api.interrupt).toHaveBeenCalledWith("thread", undefined));
+  });
+
   it("restores the complete server draft and debounces text autosave", async () => {
     const api = threadApi();
     const annotation = pendingAnnotation();

@@ -576,6 +576,8 @@ export class AppProjection extends EventEmitter {
   async setCurrentTurn(threadId: string, turnId: string): Promise<void> {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
+    const knownTurn = cached.thread.turns.find((turn) => turn.id === turnId);
+    if (knownTurn && knownTurn.status !== "inProgress") return;
     cached.currentTurnId = turnId;
     cached.liveOutcome = undefined;
     cached.thread.status = { type: "active", activeFlags: [] };
@@ -586,6 +588,24 @@ export class AppProjection extends EventEmitter {
         if (meta) meta.awaitingPlanResponse = false;
       });
     }
+    this.publishThread(threadId);
+  }
+
+  async markInterrupted(threadId: string, expectedTurnIds: readonly string[]): Promise<void> {
+    const cached = this.threads.get(threadId);
+    if (!cached) throw new Error("Thread not found");
+    if (cached.currentTurnId && !expectedTurnIds.includes(cached.currentTurnId)) return;
+    cached.currentTurnId = null;
+    cached.liveOutcome = "interrupted";
+    cached.thread.status = { type: "idle" };
+    cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+    const updatedAt = cached.thread.updatedAt * 1_000;
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      meta.lastOutcome = "interrupted";
+      meta.outcomeUpdatedAt = updatedAt;
+      state.threadMeta[threadId] = meta;
+    });
     this.publishThread(threadId);
   }
 
@@ -1199,6 +1219,16 @@ export class AppProjection extends EventEmitter {
       case "turn/completed": {
         const cached = this.threads.get(notification.params.threadId);
         const outcome = normalizeOutcome(notification.params.turn.status);
+        if (cached) {
+          const turnIndex = cached.thread.turns.findIndex(
+            (turn) => turn.id === notification.params.turn.id,
+          );
+          if (turnIndex >= 0) {
+            cached.thread.turns[turnIndex] = notification.params.turn;
+          } else {
+            cached.thread.turns.push(notification.params.turn);
+          }
+        }
         if (cached?.currentTurnId && cached.currentTurnId !== notification.params.turn.id) break;
         if (cached) {
           cached.currentTurnId = null;

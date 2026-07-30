@@ -738,7 +738,7 @@ export type SteerTurnRequest = {
 };
 
 export type InterruptTurnRequest = {
-  turnId: string;
+  turnId?: string;
 };
 
 export type UpdateThreadRequest = {
