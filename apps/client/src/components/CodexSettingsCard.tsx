@@ -42,7 +42,13 @@ type CodexSettingsContextValue = {
 
 const CodexSettingsContext = createContext<CodexSettingsContextValue | null>(null);
 
-export function CodexSettingsProvider({ children }: { children: ReactNode }) {
+export function CodexSettingsProvider({
+  children,
+  onStatusChange,
+}: {
+  children: ReactNode;
+  onStatusChange?(status: CodexManagementStatus): void;
+}) {
   const { api, state } = useConnection();
   const { language, t } = useI18n();
   const localizationRef = useRef({ language, t });
@@ -89,6 +95,10 @@ export function CodexSettingsProvider({ children }: { children: ReactNode }) {
     }, 1_000);
     return () => window.clearTimeout(timer);
   }, [api, status]);
+
+  useEffect(() => {
+    if (status) onStatusChange?.(status);
+  }, [onStatusChange, status]);
 
   const liveThreads = state?.snapshot?.threads;
   const activeTurnCount = liveThreads

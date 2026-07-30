@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { TranscriptionConfigResponse } from "@codexnest/protocol";
@@ -118,7 +118,21 @@ describe("AttentionPanel", () => {
     const track = { stop: vi.fn() };
     installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
     const respond = vi.fn().mockResolvedValue(undefined);
-    const transcribe = vi.fn().mockResolvedValue({ text: "голос" });
+    const updatedTimingEstimate = {
+      sampleCount: 6,
+      estimatedFixedProcessingMs: 1_500,
+      estimatedProcessingMsPerAudioSecond: 3_000,
+    };
+    let resolveTranscription:
+      | ((response: { text: string; timingEstimate: typeof updatedTimingEstimate }) => void)
+      | undefined;
+    const transcribe = vi.fn(
+      () =>
+        new Promise<{ text: string; timingEstimate: typeof updatedTimingEstimate }>((resolve) => {
+          resolveTranscription = resolve;
+        }),
+    );
+    const timingChanged = vi.fn();
     connection.mockReturnValue({ api: { respond, transcribe } });
     render(
       <AttentionPanel
@@ -143,8 +157,16 @@ describe("AttentionPanel", () => {
             ],
           },
         ]}
-        transcriptionConfig={transcriptionConfig}
+        transcriptionConfig={{
+          ...transcriptionConfig,
+          timingEstimate: {
+            sampleCount: 5,
+            estimatedFixedProcessingMs: 2_000,
+            estimatedProcessingMsPerAudioSecond: 0,
+          },
+        }}
         transcriptionProvider="local"
+        onTranscriptionTimingEstimateChange={timingChanged}
       />,
     );
 
@@ -162,13 +184,22 @@ describe("AttentionPanel", () => {
     expect(screen.getByRole("button", { name: "Отправить ответы" })).toBeDisabled();
 
     fireEvent.click(stop);
-    await screen.findByRole("button", { name: "Распознаём запись" });
+    expect(await screen.findByRole("button", { name: "Распознаём запись" })).toHaveTextContent(
+      "≈0:02",
+    );
+    await act(async () =>
+      resolveTranscription?.({
+        text: "голос",
+        timingEstimate: updatedTimingEstimate,
+      }),
+    );
     await waitFor(() => expect(input).toHaveValue("Начало голос конец"));
     expect(transcribe).toHaveBeenCalledWith(
       expect.objectContaining({ type: "audio/webm;codecs=opus" }),
       expect.any(Number),
     );
     expect(respond).not.toHaveBeenCalled();
+    expect(timingChanged).toHaveBeenCalledWith(updatedTimingEstimate);
     expect(track.stop).toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));

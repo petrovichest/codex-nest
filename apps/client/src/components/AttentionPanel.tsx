@@ -8,12 +8,15 @@ import type {
   PermissionGrant,
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  TranscriptionTimingEstimate,
 } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { AlertIcon, MicrophoneIcon, XIcon } from "./Icons";
 import {
+  estimatedTranscriptionSeconds,
+  formatEstimatedTranscriptionTime,
   formatRecordingTime,
   insertTranscriptAtSelection,
   microphoneUnavailableReason,
@@ -26,10 +29,12 @@ export function AttentionPanel({
   requests,
   transcriptionConfig = null,
   transcriptionProvider = null,
+  onTranscriptionTimingEstimateChange,
 }: {
   requests: AttentionRequest[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
+  onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
 }) {
   const { t } = useI18n();
   if (!requests.length) return null;
@@ -40,6 +45,7 @@ export function AttentionPanel({
           request={request}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
+          onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
           key={request.id}
         />
       ))}
@@ -51,10 +57,12 @@ function AttentionCard({
   request,
   transcriptionConfig,
   transcriptionProvider,
+  onTranscriptionTimingEstimateChange,
 }: {
   request: AttentionRequest;
   transcriptionConfig: TranscriptionConfigResponse | null;
   transcriptionProvider: TranscriptionProvider | null;
+  onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
 }) {
   const { api } = useConnection();
   const { language, t } = useI18n();
@@ -133,6 +141,7 @@ function AttentionCard({
           busy={busy}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
+          onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
           respond={respond}
         />
       )}
@@ -270,12 +279,14 @@ function UserInputForm({
   busy,
   transcriptionConfig,
   transcriptionProvider,
+  onTranscriptionTimingEstimateChange,
   respond,
 }: {
   request: Extract<AttentionRequest, { kind: "userInput" }>;
   busy: boolean;
   transcriptionConfig: TranscriptionConfigResponse | null;
   transcriptionProvider: TranscriptionProvider | null;
+  onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
   respond(response: AttentionResponse): Promise<void>;
 }) {
   const { api } = useConnection();
@@ -286,6 +297,9 @@ function UserInputForm({
     "idle" | "requesting" | "recording" | "transcribing"
   >("idle");
   const [speechSeconds, setSpeechSeconds] = useState(0);
+  const [speechEstimatedTotalSeconds, setSpeechEstimatedTotalSeconds] = useState<number | null>(
+    null,
+  );
   const [speechError, setSpeechError] = useState<string | null>(null);
   const answerInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -294,10 +308,14 @@ function UserInputForm({
   const audioBytesRef = useRef(0);
   const discardRecordingRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
+  const recordingDurationMsRef = useRef(0);
   const speechTimerStartedAtRef = useRef(0);
   const speechTimerRef = useRef<number | undefined>(undefined);
   const recordingLimitRef = useRef<number | undefined>(undefined);
   const aliveRef = useRef(true);
+  const timingEstimateRef = useRef<TranscriptionTimingEstimate | null>(
+    transcriptionConfig?.timingEstimate ?? null,
+  );
   const recordingTargetRef = useRef<{
     questionId: string;
     selection: TextSelection;
@@ -320,9 +338,11 @@ function UserInputForm({
     t,
   );
   const speechTimerText =
-    speechState === "recording" || speechState === "transcribing"
+    speechState === "recording"
       ? formatRecordingTime(speechSeconds)
-      : null;
+      : speechState === "transcribing"
+        ? formatEstimatedTranscriptionTime(speechSeconds, speechEstimatedTotalSeconds)
+        : null;
 
   function updateAnswer(questionId: string, answer: string) {
     setAnswers((current) => ({ ...current, [questionId]: [answer] }));
@@ -380,8 +400,10 @@ function UserInputForm({
     }
     captureAnswerSelection();
     setSpeechError(null);
+    setSpeechEstimatedTotalSeconds(null);
     setSpeechState("requesting");
     discardRecordingRef.current = false;
+    recordingDurationMsRef.current = 0;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!aliveRef.current || currentQuestionIdRef.current !== question.id) {
@@ -433,6 +455,10 @@ function UserInputForm({
   function stopRecording() {
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
+    recordingDurationMsRef.current = Math.max(1, Date.now() - recordingStartedAtRef.current);
+    setSpeechEstimatedTotalSeconds(
+      estimatedTranscriptionSeconds(timingEstimateRef.current, recordingDurationMsRef.current),
+    );
     clearSpeechTimer();
     clearRecordingLimit();
     setSpeechState("transcribing");
@@ -445,6 +471,7 @@ function UserInputForm({
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
     discardRecordingRef.current = true;
+    setSpeechEstimatedTotalSeconds(null);
     clearSpeechTimer();
     clearRecordingLimit();
     recorder.stop();
@@ -487,8 +514,10 @@ function UserInputForm({
     try {
       const response = await api.transcribe(
         new Blob(chunks, { type: mimeType }),
-        Math.max(1, Date.now() - recordingStartedAtRef.current),
+        recordingDurationMsRef.current || Math.max(1, Date.now() - recordingStartedAtRef.current),
       );
+      timingEstimateRef.current = response.timingEstimate;
+      onTranscriptionTimingEstimateChange?.(response.timingEstimate);
       if (!aliveRef.current || !target || currentQuestionIdRef.current !== target.questionId) {
         return;
       }
@@ -514,6 +543,10 @@ function UserInputForm({
       if (aliveRef.current) setSpeechState("idle");
     }
   }
+
+  useEffect(() => {
+    timingEstimateRef.current = transcriptionConfig?.timingEstimate ?? null;
+  }, [transcriptionConfig?.timingEstimate]);
 
   useEffect(() => {
     aliveRef.current = true;

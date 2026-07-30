@@ -18,6 +18,7 @@ import type {
   Project,
   ThreadSummary,
   TranscriptionConfigResponse,
+  TranscriptionTimingEstimate,
   UiLanguage,
 } from "@codexnest/protocol";
 
@@ -135,6 +136,11 @@ export function App({
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [transcriptionConfig, setTranscriptionConfig] =
     useState<TranscriptionConfigResponse | null>(null);
+  const updateTranscriptionTimingEstimate = useCallback(
+    (timingEstimate: TranscriptionTimingEstimate) =>
+      setTranscriptionConfig((current) => (current ? { ...current, timingEstimate } : current)),
+    [],
+  );
   const [transcriptionConfigError, setTranscriptionConfigError] = useState<string | null>(null);
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [installedApkVersion, setInstalledApkVersion] = useState<string | null>(null);
@@ -343,6 +349,7 @@ export function App({
             projects={snapshot?.projects ?? []}
             transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
             transcriptionConfig={transcriptionConfig}
+            onTranscriptionTimingEstimateChange={updateTranscriptionTimingEstimate}
             onOpenNavigation={() => setDrawer(true)}
           />
         ) : (
@@ -390,6 +397,7 @@ export function App({
             requests={attention.filter((item) => !item.threadId)}
             transcriptionConfig={transcriptionConfig}
             transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
+            onTranscriptionTimingEstimateChange={updateTranscriptionTimingEstimate}
           />
         </div>
       )}

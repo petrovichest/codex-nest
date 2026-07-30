@@ -220,6 +220,27 @@ const ENGLISH: Record<string, string> = {
     "Update CodexNest{{target}}? The interface will briefly reconnect.",
   "Не удалось запустить обновление CodexNest": "Failed to start the CodexNest update",
   "Не удалось открыть загрузку APK": "Failed to open the APK download",
+  "Аварийное восстановление": "Emergency recovery",
+  "Используйте только если обычное обновление или работа сессий зависли. Эти действия обходят безопасное ожидание активных задач.":
+    "Use this only when a normal update or session operation is stuck. These actions bypass the safe wait for active tasks.",
+  "Активных ответов: {{count}}. Жёсткий перезапуск может их прервать.":
+    "Active responses: {{count}}. A force restart may interrupt them.",
+  "Жёсткий перезапуск может прервать незавершённые операции.":
+    "A force restart may interrupt unfinished operations.",
+  "Жёстко перезапустить CodexNest? Текущее обновление будет остановлено, а незавершённые операции интерфейса могут быть прерваны. Codex daemon останется запущен.":
+    "Force restart CodexNest? The current update will be stopped and unfinished interface operations may be interrupted. The Codex daemon will remain running.",
+  "Жёстко перезапустить Codex daemon? Все активные ответы Codex будут прерваны.":
+    "Force restart the Codex daemon? All active Codex responses will be interrupted.",
+  "Жёстко перезапустить CodexNest": "Force restart CodexNest",
+  "Жёстко перезапустить Codex": "Force restart Codex",
+  "Перезапускаем CodexNest…": "Restarting CodexNest…",
+  "Перезапускаем Codex…": "Restarting Codex…",
+  "Codex daemon аварийно перезапущен.": "The Codex daemon was force restarted.",
+  "Не удалось запустить аварийный перезапуск CodexNest":
+    "Failed to start the CodexNest force restart",
+  "Не удалось аварийно перезапустить Codex daemon": "Failed to force restart the Codex daemon",
+  "CodexNest не восстановил соединение после перезапуска.":
+    "CodexNest did not reconnect after the restart.",
   "Обновление CodexNest": "CodexNest update",
   "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.":
     "The server and APK update from the same verified CI build with automatic rollback.",

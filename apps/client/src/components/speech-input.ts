@@ -1,4 +1,8 @@
-import type { TranscriptionConfigResponse, TranscriptionProvider } from "@codexnest/protocol";
+import type {
+  TranscriptionConfigResponse,
+  TranscriptionProvider,
+  TranscriptionTimingEstimate,
+} from "@codexnest/protocol";
 
 import type { Translate } from "../i18n";
 
@@ -53,6 +57,29 @@ export function recordingErrorMessage(error: unknown, t: Translate): string {
 export function formatRecordingTime(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+export function estimatedTranscriptionSeconds(
+  estimate: TranscriptionTimingEstimate | null,
+  audioDurationMs: number,
+): number | null {
+  const fixed = estimate?.estimatedFixedProcessingMs;
+  const perSecond = estimate?.estimatedProcessingMsPerAudioSecond;
+  if (fixed === null || fixed === undefined || perSecond === null || perSecond === undefined) {
+    return null;
+  }
+  return Math.max(1, Math.ceil((fixed + (audioDurationMs / 1_000) * perSecond) / 1_000));
+}
+
+export function formatEstimatedTranscriptionTime(
+  elapsedSeconds: number,
+  estimatedTotalSeconds: number | null,
+): string {
+  if (estimatedTotalSeconds === null) return formatRecordingTime(elapsedSeconds);
+  if (elapsedSeconds <= estimatedTotalSeconds) {
+    return `≈${formatRecordingTime(Math.max(0, estimatedTotalSeconds - elapsedSeconds))}`;
+  }
+  return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
 }
 
 export function insertTranscriptAtSelection(

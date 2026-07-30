@@ -152,6 +152,10 @@ export type AppUpdateStatus = {
   updatedAt: string | null;
 };
 
+export type ForceRestartAccepted = {
+  accepted: true;
+};
+
 export type UpdateCodexProxyRequest = {
   proxy: string;
 };

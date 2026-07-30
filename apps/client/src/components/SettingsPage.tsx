@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 
 import type {
   AppUpdateStatus,
+  CodexManagementStatus,
   GlobalPermissionSettings,
   PermissionPreset,
   TaskDefaults,
@@ -24,6 +25,7 @@ import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from ".
 import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
+import { RecoverySettingsCard } from "./RecoverySettingsCard";
 
 export type SidebarSide = "left" | "right";
 export type ProjectListDirection = "bottom-up" | "top-down";
@@ -97,6 +99,10 @@ export function SettingsPage({
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [languageSaving, setLanguageSaving] = useState(false);
   const [languageError, setLanguageError] = useState<string | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [codexManagementStatus, setCodexManagementStatus] = useState<CodexManagementStatus | null>(
+    null,
+  );
   const defaultModel =
     state?.snapshot?.models.find((model) => model.isDefault) ?? state?.snapshot?.models[0];
 
@@ -209,6 +215,13 @@ export function SettingsPage({
   }
 
   const changed = settings !== null && settings.preset !== selected;
+  const acceptAppUpdateStatus = useCallback(
+    (next: AppUpdateStatus) => {
+      setAppUpdateStatus(next);
+      onAppUpdateStatusChange?.(next);
+    },
+    [onAppUpdateStatusChange],
+  );
 
   return (
     <div className="settings-workspace">
@@ -218,11 +231,13 @@ export function SettingsPage({
         onOpenNavigation={onOpenNavigation}
       />
       <main className="settings-scroll">
-        <CodexSettingsProvider>
+        <CodexSettingsProvider onStatusChange={setCodexManagementStatus}>
           <div className="settings-stack">
-            <ApplicationSettingsCard onStatusChange={onAppUpdateStatusChange} />
+            <ApplicationSettingsCard onStatusChange={acceptAppUpdateStatus} />
 
             <CodexSettingsCard />
+
+            <RecoverySettingsCard appStatus={appUpdateStatus} codexStatus={codexManagementStatus} />
 
             <form className="settings-card" onSubmit={saveTaskDefaults}>
               <div className="settings-card-heading">

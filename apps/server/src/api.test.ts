@@ -63,6 +63,15 @@ describe("HTTP authentication", () => {
       drainLeaseMs: 1_000,
     });
     await lifecycle.initialize();
+    const appManager = {
+      forceRestart: vi.fn(async () => ({ accepted: true as const })),
+    } as unknown as AppManager;
+    const codexManager = {
+      maintenanceActive: false,
+      forceRestart: vi.fn(async () => ({
+        operation: "idle",
+      })),
+    } as unknown as CodexManager;
     const app = await buildApp(
       loadConfig({
         statePath: store.path,
@@ -76,6 +85,8 @@ describe("HTTP authentication", () => {
         attention,
         push: new PushNotifier(store),
         lifecycle,
+        appManager,
+        codexManager,
       },
     );
     const headers = { authorization: "Bearer correct" };
@@ -95,6 +106,14 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(503);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/settings/app/force-restart",
+        })
+      ).statusCode,
+    ).toBe(401);
 
     lifecycle.ready();
     expect(
@@ -129,6 +148,21 @@ describe("HTTP authentication", () => {
         })
       ).statusCode,
     ).toBe(503);
+    const appRestart = await app.inject({
+      method: "POST",
+      url: "/api/v1/settings/app/force-restart",
+      headers,
+    });
+    expect(appRestart.statusCode).toBe(202);
+    expect(appRestart.json()).toEqual({ accepted: true });
+    const codexRestart = await app.inject({
+      method: "POST",
+      url: "/api/v1/settings/codex/force-restart",
+      headers,
+    });
+    expect(codexRestart.statusCode).toBe(200);
+    expect(appManager.forceRestart).toHaveBeenCalledOnce();
+    expect(codexManager.forceRestart).toHaveBeenCalledOnce();
     expect(
       (
         await app.inject({
@@ -3032,6 +3066,7 @@ function createCodexManagerMock() {
     applyProxy: vi.fn(async () => codexStatus),
     update: vi.fn(async () => codexStatus),
     restart: vi.fn(async () => codexStatus),
+    forceRestart: vi.fn(async () => codexStatus),
   } as unknown as CodexManager;
   return { codexManager, codexStatus };
 }
@@ -3056,6 +3091,7 @@ function createAppManagerMock() {
       updateAvailable: true,
     })),
     update: vi.fn(async () => ({ ...appStatus, operation: "preparing" as const })),
+    forceRestart: vi.fn(async () => ({ accepted: true as const })),
   } as unknown as AppManager;
   return { appManager, appStatus };
 }

@@ -27,6 +27,7 @@ import type {
   ThreadState,
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  TranscriptionTimingEstimate,
   TurnProgress,
   TurnView,
   UiLanguage,
@@ -293,11 +294,13 @@ export function ThreadPage({
   projects,
   transcriptionConfig = null,
   transcriptionProvider = null,
+  onTranscriptionTimingEstimateChange,
   onOpenNavigation,
 }: {
   projects?: Project[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
+  onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
   onOpenNavigation(): void;
 }) {
   const { threadId: parameterThreadId = "" } = useParams();
@@ -2540,6 +2543,7 @@ export function ThreadPage({
                   requests={attention}
                   transcriptionConfig={transcriptionConfig}
                   transcriptionProvider={transcriptionProvider}
+                  onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
                 />
                 {!isSubagent &&
                   !activeVoiceJob &&
@@ -2632,7 +2636,9 @@ export function ThreadPage({
                     if (!transcriptionProvider) {
                       throw new Error(t("Распознавание речи не настроено"));
                     }
-                    return (await api.transcribe(audio, durationMs)).text;
+                    const response = await api.transcribe(audio, durationMs);
+                    onTranscriptionTimingEstimateChange?.(response.timingEstimate);
+                    return response.text;
                   }
                 : undefined
             }

@@ -107,6 +107,56 @@ describe("AppManager", () => {
     );
   });
 
+  it("force restarts the app during active work and stops the updater first", async () => {
+    const emergency = vi.fn();
+    const runCommand = vi.fn(async (_command, args) => {
+      if (args.includes("stop")) throw new Error("updater is stuck");
+      return { stdout: "", stderr: "" };
+    });
+    const manager = new AppManager({
+      currentVersion: "0.1.0",
+      managedInstall: true,
+      statusPath: "/missing/update.json",
+      managementCli: "/home/user/.local/bin/codexnest",
+      activeTurnCount: () => 4,
+      setEmergencyShutdown: emergency,
+      runCommand,
+    });
+
+    await expect(manager.forceRestart()).resolves.toEqual({ accepted: true });
+    await expect(manager.forceRestart()).resolves.toEqual({ accepted: true });
+    expect(runCommand.mock.calls).toEqual([
+      [
+        "systemctl",
+        ["--user", "stop", "--no-block", "codexnest-update.service"],
+        { timeout: 10_000 },
+      ],
+      ["systemctl", ["--user", "restart", "--no-block", "codexnest.service"], { timeout: 10_000 }],
+    ]);
+    expect(emergency).toHaveBeenCalledOnce();
+    expect(emergency).toHaveBeenCalledWith(true);
+  });
+
+  it("resets emergency shutdown when systemd rejects the app restart", async () => {
+    const emergency = vi.fn();
+    const runCommand = vi.fn(async (_command, args) => {
+      if (args.includes("restart")) throw new Error("systemd unavailable");
+      return { stdout: "", stderr: "" };
+    });
+    const manager = new AppManager({
+      currentVersion: "0.1.0",
+      managedInstall: true,
+      statusPath: "/missing/update.json",
+      managementCli: "/home/user/.local/bin/codexnest",
+      activeTurnCount: () => 0,
+      setEmergencyShutdown: emergency,
+      runCommand,
+    });
+
+    await expect(manager.forceRestart()).rejects.toMatchObject({ kind: "failed" });
+    expect(emergency.mock.calls).toEqual([[true], [false]]);
+  });
+
   it("recovers a stale in-progress status after a reboot", async () => {
     const statusDirectory = await mkdtemp(join(tmpdir(), "codexnest-interrupted-update-"));
     const statusPath = join(statusDirectory, "update.json");
@@ -213,6 +263,9 @@ describe("AppManager", () => {
         activeTurnCount: () => 0,
       });
       await expect(unmanaged.update()).rejects.toEqual(
+        expect.objectContaining({ kind: "unsupported" }),
+      );
+      await expect(unmanaged.forceRestart()).rejects.toEqual(
         expect.objectContaining({ kind: "unsupported" }),
       );
     } finally {

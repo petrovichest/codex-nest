@@ -11,6 +11,7 @@ import type {
   CreateThreadRequest,
   DeviceRegistrationRequest,
   DirectoryListing,
+  ForceRestartAccepted,
   GitChangesSummary,
   GlobalPermissionSettings,
   HealthResponse,
@@ -73,6 +74,13 @@ export class ApiClient {
 
   updateApp(): Promise<AppUpdateStatus> {
     return this.request("/api/v1/settings/app/update", { method: "POST", timeoutMs: null });
+  }
+
+  forceRestartApp(): Promise<ForceRestartAccepted> {
+    return this.request("/api/v1/settings/app/force-restart", {
+      method: "POST",
+      timeoutMs: 10_000,
+    });
   }
 
   readTranscriptionConfig(): Promise<TranscriptionConfigResponse> {
@@ -167,6 +175,13 @@ export class ApiClient {
 
   restartCodex(): Promise<CodexManagementStatus> {
     return this.request("/api/v1/settings/codex/restart", { method: "POST", timeoutMs: null });
+  }
+
+  forceRestartCodex(): Promise<CodexManagementStatus> {
+    return this.request("/api/v1/settings/codex/force-restart", {
+      method: "POST",
+      timeoutMs: null,
+    });
   }
 
   readPermissionSettings(): Promise<GlobalPermissionSettings> {

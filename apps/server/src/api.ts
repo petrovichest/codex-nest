@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ApiErrorCode,
   AppUpdateStatus,
+  ForceRestartAccepted,
   AttentionResponse,
   CodexManagementStatus,
   CodexRateLimitsResponse,
@@ -1084,10 +1085,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.addHook("onRequest", async (request, reply) => {
     if (!lifecycle || !request.url.startsWith("/api/v1/")) return;
     const pathname = new URL(request.url, "http://localhost").pathname;
+    const emergencyRestart =
+      pathname === "/api/v1/settings/app/force-restart" ||
+      pathname === "/api/v1/settings/codex/force-restart";
     if (
       request.method === "OPTIONS" ||
       !["POST", "PUT", "PATCH", "DELETE"].includes(request.method) ||
-      pathname.startsWith("/api/v1/internal/restart/")
+      pathname.startsWith("/api/v1/internal/restart/") ||
+      emergencyRestart
     ) {
       return;
     }
@@ -1567,6 +1572,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
   });
 
+  app.post("/api/v1/settings/codex/force-restart", async (): Promise<CodexManagementStatus> => {
+    const manager = requireCodexManager(codexManager);
+    try {
+      return await manager.forceRestart();
+    } finally {
+      if (!manager.maintenanceActive) {
+        await queue.resume();
+        resumeTeamContinuations();
+      }
+    }
+  });
+
   app.get("/api/v1/settings/app", async (): Promise<AppUpdateStatus> => {
     return requireAppManager(appManager).status();
   });
@@ -1578,6 +1595,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.post("/api/v1/settings/app/update", async (): Promise<AppUpdateStatus> => {
     return requireAppManager(appManager).update();
   });
+
+  app.post(
+    "/api/v1/settings/app/force-restart",
+    async (request, reply): Promise<ForceRestartAccepted> => {
+      const result = await requireAppManager(appManager).forceRestart();
+      return reply.code(202).send(result);
+    },
+  );
 
   app.get<{ Querystring: { path?: string } }>("/api/v1/directories", async (request) => {
     if (request.query.path !== undefined && typeof request.query.path !== "string") {

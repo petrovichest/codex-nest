@@ -82,6 +82,7 @@ const codexManager = new CodexManager({
   bridgeState: () => bridge.state,
   bridgeVersion: () => bridge.actualVersion,
 });
+let emergencyShutdownRequested = false;
 const appManager = new AppManager({
   currentVersion: SERVER_VERSION,
   managedInstall: config.managedInstall,
@@ -90,6 +91,9 @@ const appManager = new AppManager({
   transport: config.codexTransport,
   activeTurnCount: () =>
     projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
+  setEmergencyShutdown: (requested) => {
+    emergencyShutdownRequested = requested;
+  },
 });
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
@@ -146,9 +150,14 @@ function shutdown(): Promise<void> {
   shutdownPromise ??= (async () => {
     stateWatcher.close();
     if (authRefreshTimer) clearTimeout(authRefreshTimer);
-    await within(lifecycle.prepareShutdown(), 60_000).catch(() => undefined);
-    await within(app.close(), 10_000).catch(() => undefined);
-    await store.flushed().catch(() => undefined);
+    if (emergencyShutdownRequested) {
+      await within(app.close(), 2_000).catch(() => undefined);
+      await within(store.flushed(), 2_000).catch(() => undefined);
+    } else {
+      await within(lifecycle.prepareShutdown(), 60_000).catch(() => undefined);
+      await within(app.close(), 10_000).catch(() => undefined);
+      await store.flushed().catch(() => undefined);
+    }
     bridge.stop();
     await lifecycle.close();
   })();

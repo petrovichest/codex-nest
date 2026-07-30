@@ -76,6 +76,7 @@ export class CodexManagementError extends Error {
 export class CodexManager {
   private operation: CodexManagementOperation = "idle";
   private turnStartsInFlight = 0;
+  private forceRestartPromise?: Promise<void>;
   private readonly runCommand: RunCommand;
 
   constructor(private readonly options: CodexManagerOptions) {
@@ -86,7 +87,8 @@ export class CodexManager {
     return (
       this.operation === "applying_proxy" ||
       this.operation === "updating" ||
-      this.operation === "restarting"
+      this.operation === "restarting" ||
+      this.forceRestartPromise !== undefined
     );
   }
 
@@ -123,7 +125,7 @@ export class CodexManager {
     return {
       supported,
       unavailableReason,
-      operation: this.operation,
+      operation: this.forceRestartPromise ? "restarting" : this.operation,
       activeTurnCount: this.options.activeTurnCount(),
       daemonStatus: daemon?.status ?? (supported ? "unavailable" : "unsupported"),
       cliVersion,
@@ -198,6 +200,18 @@ export class CodexManager {
     return this.status();
   }
 
+  async forceRestart(): Promise<CodexManagementStatus> {
+    this.assertSupported();
+    if (!this.forceRestartPromise) {
+      const tracked = this.restartDaemonAndWait().finally(() => {
+        if (this.forceRestartPromise === tracked) this.forceRestartPromise = undefined;
+      });
+      this.forceRestartPromise = tracked;
+    }
+    await this.forceRestartPromise;
+    return this.status();
+  }
+
   private assertSupported(): void {
     if (this.options.transport !== "daemon") {
       throw new CodexManagementError(
@@ -208,7 +222,7 @@ export class CodexManager {
   }
 
   private async runExclusive<T>(operation: CodexManagementOperation, task: () => Promise<T>) {
-    if (this.operation !== "idle") {
+    if (this.operation !== "idle" || this.forceRestartPromise) {
       throw new CodexManagementError("busy", "Another Codex management operation is in progress");
     }
     this.operation = operation;

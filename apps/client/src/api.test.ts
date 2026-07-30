@@ -46,6 +46,38 @@ describe("ApiClient", () => {
     );
   });
 
+  it("targets the separate force-restart endpoints", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ accepted: true }), {
+          headers: { "Content-Type": "application/json" },
+          status: 202,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ operation: "idle" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await expect(api.forceRestartApp()).resolves.toEqual({ accepted: true });
+    await expect(api.forceRestartCodex()).resolves.toMatchObject({ operation: "idle" });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://codexnest.example/api/v1/settings/app/force-restart"),
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://codexnest.example/api/v1/settings/codex/force-restart"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("retries project thread creation after an ambiguous connection failure", async () => {
     vi.useFakeTimers();
     const fetchMock = vi

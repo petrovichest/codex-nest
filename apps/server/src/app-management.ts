@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
-import type { AppUpdateStatus } from "@codexnest/protocol";
+import type { AppUpdateStatus, ForceRestartAccepted } from "@codexnest/protocol";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +20,7 @@ export type AppManagerOptions = {
   activeTurnCount(): number;
   transport?: "stdio" | "daemon";
   systemctlBin?: string;
+  setEmergencyShutdown?(requested: boolean): void;
   runCommand?: RunCommand;
 };
 
@@ -35,6 +36,7 @@ export class AppManagementError extends Error {
 
 export class AppManager {
   private readonly runCommand: RunCommand;
+  private forceRestartQueued = false;
 
   constructor(private readonly options: AppManagerOptions) {
     this.runCommand = options.runCommand ?? defaultRunCommand;
@@ -120,6 +122,27 @@ export class AppManager {
       message: "CodexNest update has been queued",
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  async forceRestart(): Promise<ForceRestartAccepted> {
+    this.assertSupported();
+    if (this.forceRestartQueued) return { accepted: true };
+    this.forceRestartQueued = true;
+    const systemctl = this.options.systemctlBin ?? "systemctl";
+    await this.runCommand(systemctl, ["--user", "stop", "--no-block", "codexnest-update.service"], {
+      timeout: 10_000,
+    }).catch(() => undefined);
+    this.options.setEmergencyShutdown?.(true);
+    try {
+      await this.runCommand(systemctl, ["--user", "restart", "--no-block", "codexnest.service"], {
+        timeout: 10_000,
+      });
+    } catch {
+      this.forceRestartQueued = false;
+      this.options.setEmergencyShutdown?.(false);
+      throw new AppManagementError("failed", "Failed to restart CodexNest");
+    }
+    return { accepted: true };
   }
 
   private assertSupported(): void {

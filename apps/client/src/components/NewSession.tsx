@@ -2,6 +2,7 @@ import type {
   Project,
   TranscriptionConfigResponse,
   TranscriptionProvider,
+  TranscriptionTimingEstimate,
 } from "@codexnest/protocol";
 
 import { ThreadPage } from "./ThreadPage";
@@ -15,11 +16,13 @@ export function NewSession({
   projects,
   transcriptionConfig = null,
   transcriptionProvider = null,
+  onTranscriptionTimingEstimateChange,
   onOpenNavigation,
 }: {
   projects: Project[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
+  onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
   onOpenNavigation(): void;
 }) {
   return (
@@ -27,6 +30,7 @@ export function NewSession({
       projects={projects}
       transcriptionConfig={transcriptionConfig}
       transcriptionProvider={transcriptionProvider}
+      onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
       onOpenNavigation={onOpenNavigation}
     />
   );

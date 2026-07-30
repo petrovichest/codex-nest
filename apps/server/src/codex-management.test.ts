@@ -215,6 +215,52 @@ describe("CodexManager", () => {
     releaseDoctor!();
     await check;
   });
+
+  it("coalesces force restarts while active turns and regular management are running", async () => {
+    const directory = await temporaryDirectory();
+    const proxyEnvFile = join(directory, "app-server.env");
+    await writeFile(proxyEnvFile, renderProxyEnvironment("http://proxy.example:8000"), {
+      mode: 0o600,
+    });
+    let releaseDoctor: (() => void) | undefined;
+    const doctorWaiting = new Promise<void>((resolve) => {
+      releaseDoctor = resolve;
+    });
+    let releaseRestart: (() => void) | undefined;
+    const restartWaiting = new Promise<void>((resolve) => {
+      releaseRestart = resolve;
+    });
+    let restartCount = 0;
+    const runCommand = vi.fn(async (_command, args) => {
+      const command = args.join(" ");
+      if (args.includes("doctor")) {
+        await doctorWaiting;
+        return { stdout: doctorReport("0.144.6"), stderr: "" };
+      }
+      if (command === "app-server daemon restart") {
+        restartCount += 1;
+        await restartWaiting;
+        return { stdout: "", stderr: "" };
+      }
+      if (command === "app-server daemon version") {
+        return { stdout: daemonVersion("0.144.6"), stderr: "" };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const manager = createManager(proxyEnvFile, runCommand, () => 2);
+
+    const check = manager.check();
+    await vi.waitFor(() => expect(manager.maintenanceActive).toBe(false));
+    const first = manager.forceRestart();
+    const second = manager.forceRestart();
+    expect(manager.maintenanceActive).toBe(true);
+    await expect(manager.status()).resolves.toMatchObject({ operation: "restarting" });
+    releaseRestart!();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(restartCount).toBe(1);
+    releaseDoctor!();
+    await check;
+  });
 });
 
 function createManager(

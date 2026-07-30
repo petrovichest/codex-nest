@@ -32,6 +32,13 @@ vi.mock("./ApplicationSettingsCard", () => ({
     </section>
   ),
 }));
+vi.mock("./RecoverySettingsCard", () => ({
+  RecoverySettingsCard: () => (
+    <section>
+      <h2>Аварийное восстановление</h2>
+    </section>
+  ),
+}));
 
 beforeEach(() => {
   connection.mockReset();
@@ -193,6 +200,7 @@ describe("SettingsPage", () => {
     ).toEqual([
       "Обновление CodexNest",
       "Codex CLI",
+      "Аварийное восстановление",
       "Новые задачи",
       "Разрешения Codex",
       "Распознавание речи",
