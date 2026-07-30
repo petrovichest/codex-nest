@@ -2298,7 +2298,9 @@ export function ThreadPage({
     (detail?.queuedMessages.length ?? 0) === 0 &&
     optimisticMessages.length === 0;
   const showEmptySessionHero =
-    pendingOptimisticMessage === null && (preparationRef.current.active || emptyCreatedWorkspace);
+    pendingOptimisticMessage === null &&
+    !autoVoiceProgress &&
+    (preparationRef.current.active || emptyCreatedWorkspace);
   const showNewSessionChrome = preparationRef.current.active || showEmptySessionHero;
   const latestPlanId =
     !workspaceSummary.currentTurnId && workspaceSummary.settings.collaborationMode === "plan"

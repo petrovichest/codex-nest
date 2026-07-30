@@ -1908,13 +1908,16 @@ describe("App routing and navigation", () => {
     expect(textarea).toHaveValue("Черновик A\n\nНовый черновик B");
   });
 
-  it("queues a recording stopped after activation on the real thread", async () => {
+  it("queues a recording stopped after activation and shows its progress without reopening", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
     });
     const creation = deferred<{ thread: ThreadSummary }>();
-    const api = mockConnection(snapshot([baseThread]));
+    const upload = deferred<void>();
+    const appSnapshot = snapshot([baseThread]);
+    const api = mockConnection(appSnapshot);
     api.createProjectThread.mockReturnValue(creation.promise);
+    api.queueVoiceRecording.mockReturnValue(upload.promise);
     api.readTranscriptionConfig.mockResolvedValue({
       providers: ["local"],
       provider: "local",
@@ -1932,6 +1935,7 @@ describe("App routing and navigation", () => {
         estimatedProcessingMsPerAudioSecond: null,
       },
     });
+    localStorage.setItem("codexnest.voiceInputMode", "send");
 
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
@@ -1953,13 +1957,35 @@ describe("App routing and navigation", () => {
         expect.objectContaining({
           threadId: "created",
           audio: expect.any(Blob),
+          mode: "send",
         }),
       ),
     );
+    const uploading = screen.getByRole("status", { name: "Отправляем запись" });
+    expect(uploading).toHaveClass("voice-transcription-message");
     expect(
       api.queueVoiceRecording.mock.calls.some(([recording]) => recording.threadId === ""),
     ).toBe(false);
     expect(api.updateThreadDraft.mock.calls.some(([id]) => id === "")).toBe(false);
+
+    const recording = api.queueVoiceRecording.mock.calls[0]![0];
+    appSnapshot.voiceTranscriptions = [
+      {
+        id: recording.id,
+        threadId: recording.threadId,
+        mode: "send",
+        status: "transcribing",
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+        audioDurationMs: recording.durationMs,
+        estimatedTotalSeconds: null,
+        error: null,
+      },
+    ];
+    upload.resolve();
+
+    const transcribing = await screen.findByRole("status", { name: "Распознаём" });
+    expect(transcribing).toHaveClass("voice-transcription-message");
   });
 
   it("restores an early draft after creation fails without replacing the editor", async () => {
