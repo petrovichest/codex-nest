@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { Link, MemoryRouter, Route, Routes } from "react-router";
 
-import type { Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
+import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
+import { ApiClientError } from "../api";
 import { NewSession } from "./NewSession";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -40,6 +41,15 @@ const thread = {
 } as unknown as ThreadSummary;
 
 const connectionSettings = { baseUrl: "https://pi.local", token: "token" };
+const model: ModelOption = {
+  id: "gpt",
+  displayName: "GPT",
+  description: "",
+  isDefault: true,
+  reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+  serviceTiers: [{ id: "fast", displayName: "Fast" }],
+  supportsPersonality: true,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -178,6 +188,291 @@ describe("NewSession", () => {
       updatedAt: 20,
     });
     expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
+  });
+
+  it("retries a failed resumed thread read with a fresh promise", async () => {
+    drafts.load.mockResolvedValue({
+      key: "draft",
+      connectionKey: "connection",
+      projectId: project.id,
+      value: {
+        input: "Восстановленный черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+      phase: "transferring",
+      threadId: thread.id,
+      thread: null,
+      revision: 4,
+      updatedAt: 10,
+    });
+    const readThread = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Чтение недоступно"))
+      .mockResolvedValueOnce({ summary: thread });
+    const createProjectThread = vi.fn();
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread,
+        readThread,
+        updateThreadDraft: vi.fn().mockResolvedValue(null),
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/new?projectId=project"]}>
+        <Routes>
+          <Route
+            path="/new"
+            element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
+          />
+          <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Чтение недоступно")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+
+    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
+    expect(readThread).toHaveBeenCalledTimes(2);
+    expect(createProjectThread).not.toHaveBeenCalled();
+  });
+
+  it("recovers a missing resumed thread by creating a replacement on retry", async () => {
+    drafts.load.mockResolvedValue({
+      key: "draft",
+      connectionKey: "connection",
+      projectId: project.id,
+      value: {
+        input: "Восстановленный черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+      phase: "transferring",
+      threadId: "missing",
+      thread: null,
+      revision: 4,
+      updatedAt: 10,
+    });
+    const readThread = vi
+      .fn()
+      .mockRejectedValue(new ApiClientError("not_found", "Сессия не найдена", 404));
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread,
+        readThread,
+        updateThreadDraft: vi.fn().mockResolvedValue(null),
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/new?projectId=project"]}>
+        <Routes>
+          <Route
+            path="/new"
+            element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
+          />
+          <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Сессия не найдена")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+
+    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
+    expect(readThread).toHaveBeenCalledOnce();
+    expect(createProjectThread).toHaveBeenCalledOnce();
+  });
+
+  it("restores an abandoned early submission with its images and settings without sending it", async () => {
+    let stored: {
+      projectId: string;
+      value: ThreadDraft;
+      settings?: ThreadSummary["settings"];
+      phase: "creating" | "transferring";
+      threadId: string | null;
+      thread: ThreadSummary | null;
+      revision: number;
+    } | null = null;
+    drafts.load.mockImplementation(async () => stored);
+    drafts.save.mockImplementation(
+      async (
+        _settings,
+        projectId,
+        value,
+        preparation: Omit<NonNullable<typeof stored>, "projectId" | "value">,
+      ) => {
+        stored = {
+          projectId,
+          value: structuredClone(value),
+          ...structuredClone(preparation),
+        };
+        return true;
+      },
+    );
+    const abandonedCreation = deferred<{ thread: ThreadSummary }>();
+    const createProjectThread = vi
+      .fn()
+      .mockReturnValueOnce(abandonedCreation.promise)
+      .mockReturnValue(new Promise(() => undefined));
+    const sendReliable = vi.fn();
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread,
+        models: [model],
+        sendReliable,
+        taskDefaults: { serviceTier: "fast", personality: "friendly" },
+      }),
+    );
+
+    const view = render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: "/new",
+            search: "?projectId=project",
+            state: { newSessionProjectId: project.id, newSessionWorkspaceId: "first" },
+          },
+        ]}
+      >
+        <Routes>
+          <Route
+            path="/new"
+            element={
+              <>
+                <NewSession projects={[project]} onOpenNavigation={() => undefined} />
+                <Link to="/away">Покинуть подготовку</Link>
+              </>
+            }
+          />
+          <Route
+            path="/away"
+            element={<Link to="/new?projectId=project">Открыть проект снова</Link>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Сохрани после ухода" } });
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["image"], "saved.png", { type: "image/png" })] },
+    });
+    expect(await screen.findByAltText("saved.png")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    expect(textbox).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("link", { name: "Покинуть подготовку" }));
+    expect(await screen.findByRole("link", { name: "Открыть проект снова" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(stored?.value.input).toBe("Сохрани после ухода");
+      expect(stored?.value.images).toEqual([
+        expect.objectContaining({
+          name: "saved.png",
+          url: expect.stringMatching(/^data:image\/png/),
+        }),
+      ]);
+      expect(stored?.settings).toEqual({
+        collaborationMode: "plan",
+        serviceTier: "fast",
+        personality: "friendly",
+      });
+    });
+    await act(async () => {
+      abandonedCreation.resolve({
+        thread: { ...thread, id: "abandoned", title: "Оставленная задача" },
+      });
+      await Promise.resolve();
+    });
+    expect(sendReliable).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("link", { name: "Открыть проект снова" }));
+
+    expect(await screen.findByDisplayValue("Сохрани после ухода")).toBeInTheDocument();
+    expect(screen.getByAltText("saved.png")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Выключить режим планирования" }),
+    ).toBeInTheDocument();
+    expect(createProjectThread).toHaveBeenCalledTimes(2);
+    expect(sendReliable).not.toHaveBeenCalled();
+  });
+
+  it("clears a claimed automatic transfer after it settles behind accepted sending", async () => {
+    const transfer = deferred<ThreadDraft | null>();
+    const order: string[] = [];
+    const updateThreadDraft = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        order.push("transfer-started");
+        const saved = await transfer.promise;
+        order.push("transfer-settled");
+        return saved;
+      })
+      .mockImplementationOnce(async (_threadId, value) => {
+        order.push("server-cleared");
+        expect(value).toEqual({
+          input: "",
+          images: [],
+          goalMode: false,
+          annotations: [],
+        });
+        return null;
+      });
+    const sendReliable = vi.fn().mockImplementation(async () => {
+      order.push("send-accepted");
+      return "delivered";
+    });
+    drafts.deleteLocal.mockImplementation(async () => {
+      order.push("local-cleared");
+    });
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread: vi.fn().mockResolvedValue({ thread }),
+        sendReliable,
+        updateThreadDraft,
+      }),
+    );
+
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Отправь только один раз" } });
+    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(updateThreadDraft).toHaveBeenCalledOnce();
+
+    transfer.resolve({
+      input: "Отправь только один раз",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 20,
+    });
+
+    await waitFor(() =>
+      expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
+    );
+    expect(updateThreadDraft).toHaveBeenCalledTimes(2);
+    expect(updateThreadDraft).toHaveBeenLastCalledWith(
+      thread.id,
+      { input: "", images: [], goalMode: false, annotations: [] },
+      { retry: true },
+    );
+    expect(sendReliable).toHaveBeenCalledOnce();
+    expect(order).toEqual([
+      "transfer-started",
+      "send-accepted",
+      "transfer-settled",
+      "server-cleared",
+      "local-cleared",
+    ]);
   });
 
   it("repeats transfer when the user types while the previous draft is being saved", async () => {
@@ -452,24 +747,34 @@ function renderNewSession() {
 
 function mockConnection({
   createProjectThread = vi.fn(),
+  models = [],
+  readThread = vi.fn(),
+  sendReliable = vi.fn(),
+  taskDefaults,
   updateThreadDraft = vi.fn(),
   dispatch = vi.fn(),
 }: {
   createProjectThread?: ReturnType<typeof vi.fn>;
+  models?: ModelOption[];
+  readThread?: ReturnType<typeof vi.fn>;
+  sendReliable?: ReturnType<typeof vi.fn>;
+  taskDefaults?: { serviceTier?: string; personality?: string };
   updateThreadDraft?: ReturnType<typeof vi.fn>;
   dispatch?: ReturnType<typeof vi.fn>;
 }) {
   return {
     api: {
       createProjectThread,
-      readThread: vi.fn(),
+      readThread,
       settings: connectionSettings,
       transcribe: vi.fn(),
       updateThreadDraft,
     },
     dispatch,
+    sendReliable,
     state: {
-      snapshot: { connection: { state: "ready" }, models: [], threads: [] },
+      details: {},
+      snapshot: { connection: { state: "ready" }, models, taskDefaults, threads: [] },
       network: "connected",
     },
   };

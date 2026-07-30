@@ -2865,7 +2865,7 @@ pre {
 }
 
 .new-session-empty {
-  min-height: 0;
+  min-height: 100%;
   flex: 1;
   display: grid;
   place-content: center;

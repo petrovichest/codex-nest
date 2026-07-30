@@ -10,14 +10,20 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Link, useLocation, useNavigate, useParams } from "react-router";
+import { Link, matchPath, Navigate, useLocation, useNavigate, useParams } from "react-router";
 
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ActivityItem,
   GitChangesSummary,
+  ModelOption,
+  Project,
   QueuedMessage,
+  SessionSettings,
+  TaskDefaults,
   ThreadDetail,
   ThreadDraft,
+  ThreadSummary,
   ThreadState,
   TranscriptionConfigResponse,
   TranscriptionProvider,
@@ -49,8 +55,11 @@ import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import {
   confirmLocalDraft,
   deleteLocalDraft,
+  deleteNewSessionDraft,
   loadLocalDraft,
+  loadNewSessionDraft,
   saveLocalDraft,
+  saveNewSessionDraft,
 } from "../offline-store";
 import { acknowledgePendingThread } from "../push";
 import type { OptimisticMessage } from "../state";
@@ -64,6 +73,7 @@ import {
   FileIcon,
   MoreIcon,
   MicrophoneIcon,
+  NewTaskIcon,
   PencilIcon,
   PinIcon,
   RefreshIcon,
@@ -75,13 +85,46 @@ import {
   XIcon,
 } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
-import { SessionInspector, type GitChangesView } from "./SessionInspector";
+import { NewSessionInspector, SessionInspector, type GitChangesView } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 type ComposerDraftState = {
   threadId: string;
   value: UpdateThreadDraftRequest;
 };
+
+type NewSessionPreparation = {
+  active: boolean;
+  projectId: string;
+  value: UpdateThreadDraftRequest;
+  settings: SessionSettings;
+  phase: "creating" | "transferring";
+  threadId: string | null;
+  thread: ThreadSummary | null;
+  revision: number;
+};
+
+type EarlySubmission = {
+  attachmentScope: number;
+  clearedRevision: number;
+  draft: UpdateThreadDraftRequest;
+  editRevision: number;
+};
+
+type PreparationDraftTransfer = {
+  generation: number;
+  promise: Promise<ThreadDraft | null>;
+  revision: number;
+  serverWriteStarted: boolean;
+};
+
+type AcceptedDraftClearGuard = {
+  editRevision: number;
+  generation: number;
+  pendingRevision: number;
+};
+
+type PendingSettingsField = keyof UpdateThreadSettingsRequest;
 
 type QueueAction = {
   messageId: string;
@@ -107,9 +150,132 @@ function emptyComposerDraft(): UpdateThreadDraftRequest {
   return { input: "", images: [], goalMode: false, annotations: [] };
 }
 
+function composerDraftHasContent(value: UpdateThreadDraftRequest): boolean {
+  return (
+    Boolean(value.input) ||
+    value.images.length > 0 ||
+    value.goalMode ||
+    value.annotations.length > 0
+  );
+}
+
+function normalizeNewSessionDraft(value: UpdateThreadDraftRequest): UpdateThreadDraftRequest {
+  return structuredClone(value);
+}
+
+export function initialSessionSettings(
+  defaultReasoningEffort: string | undefined,
+  models: ModelOption[],
+  taskDefaults?: TaskDefaults,
+): SessionSettings {
+  const settings = { ...DEFAULT_SESSION_SETTINGS, ...(taskDefaults ?? {}) };
+  const model = models.find((candidate) => candidate.isDefault) ?? models[0];
+  if (
+    defaultReasoningEffort &&
+    (!model || model.reasoningEfforts.some((option) => option.value === defaultReasoningEffort))
+  ) {
+    settings.reasoningEffort = defaultReasoningEffort;
+  }
+  return settings;
+}
+
+function applySessionSettingsPatch(
+  current: SessionSettings,
+  patch: UpdateThreadSettingsRequest,
+): SessionSettings {
+  const next = { ...current };
+  if (patch.collaborationMode !== undefined) {
+    next.collaborationMode = patch.collaborationMode;
+  }
+  for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (value === null) delete next[key];
+    else next[key] = value;
+  }
+  return next;
+}
+
+function settingsPatchBetween(
+  current: SessionSettings,
+  target: SessionSettings,
+  touched: ReadonlySet<PendingSettingsField>,
+): UpdateThreadSettingsRequest {
+  const patch: UpdateThreadSettingsRequest = {};
+  if (touched.has("collaborationMode") && current.collaborationMode !== target.collaborationMode) {
+    patch.collaborationMode = target.collaborationMode;
+  }
+  for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
+    if (!touched.has(key) || current[key] === target[key]) continue;
+    patch[key] = target[key] ?? null;
+  }
+  return patch;
+}
+
+function mergeComposerImages(
+  first: readonly ComposerImage[],
+  second: readonly ComposerImage[],
+): ComposerImage[] {
+  const merged = [...first];
+  const known = new Set(first.map((image) => image.id || image.url));
+  for (const image of second) {
+    const key = image.id || image.url;
+    if (known.has(key)) continue;
+    known.add(key);
+    merged.push(image);
+  }
+  return merged;
+}
+
+function mergeComposerDrafts(
+  submitted: UpdateThreadDraftRequest,
+  newer: UpdateThreadDraftRequest,
+): UpdateThreadDraftRequest {
+  const submittedInput = submitted.input.trimEnd();
+  const newerInput = newer.input.trimStart();
+  const input =
+    !submittedInput || !newerInput || submittedInput === newerInput
+      ? submittedInput || newerInput
+      : `${submittedInput}\n\n${newerInput}`;
+  const annotationIds = new Set(submitted.annotations.map((annotation) => annotation.id));
+  return {
+    input,
+    images: mergeComposerImages(submitted.images, newer.images),
+    goalMode: newer.goalMode || (!newerInput && submitted.goalMode),
+    annotations: [
+      ...submitted.annotations,
+      ...newer.annotations.filter((annotation) => !annotationIds.has(annotation.id)),
+    ],
+  };
+}
+
+const PREPARATION_SUPERSEDED = Symbol("preparation superseded");
+
+function pendingThreadSummary(project: Project, settings: SessionSettings): ThreadSummary {
+  return {
+    id: "",
+    projectId: project.id,
+    title: "Новая задача",
+    preview: "",
+    cwd: project.path,
+    state: "idle",
+    unread: false,
+    unseen: false,
+    pinned: false,
+    archived: false,
+    createdAt: 0,
+    updatedAt: 0,
+    currentTurnId: null,
+    queuedMessageCount: 0,
+    settings,
+    relation: { kind: "session", sessionId: "" },
+  };
+}
+
 const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
 const COMPLETED_CHAT_RETRY_MS = 500;
 const TAIL_FOLLOW_THRESHOLD_PX = 120;
+const DRAFT_SAVE_DELAY_MS = 500;
 
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
@@ -124,17 +290,42 @@ function resolveVoiceTranscriptionMode(
 }
 
 export function ThreadPage({
+  projects,
   transcriptionConfig = null,
   transcriptionProvider = null,
   onOpenNavigation,
 }: {
+  projects?: Project[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
   onOpenNavigation(): void;
 }) {
-  const { threadId = "" } = useParams();
+  const { threadId: parameterThreadId = "" } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const newSessionRoute = location.pathname === "/new";
+  const requestedProjectId = newSessionRoute
+    ? (new URLSearchParams(location.search).get("projectId") ?? "")
+    : "";
+  const initialNewSessionRef = useRef({
+    active: newSessionRoute,
+    projectId: requestedProjectId,
+    workspaceId:
+      typeof (location.state as { newSessionWorkspaceId?: unknown } | null)
+        ?.newSessionWorkspaceId === "string"
+        ? (
+            location.state as {
+              newSessionWorkspaceId: string;
+            }
+          ).newSessionWorkspaceId
+        : `direct:${location.search}`,
+    admitted:
+      (location.state as { newSessionProjectId?: unknown } | null)?.newSessionProjectId ===
+      requestedProjectId,
+  });
+  const [createdThreadId, setCreatedThreadId] = useState<string | null>(null);
+  const matchedThreadId = matchPath("/threads/:threadId", location.pathname)?.params.threadId ?? "";
+  const threadId = parameterThreadId || matchedThreadId || createdThreadId || "";
   const { language, t } = useI18n();
   const languageRef = useRef(language);
   languageRef.current = language;
@@ -148,7 +339,68 @@ export function ThreadPage({
     sendReliable,
     queueVoiceRecording,
   } = useConnection();
-  const detail = state.details[threadId];
+  const activeThreadIdRef = useRef(threadId);
+  activeThreadIdRef.current = threadId;
+  const availableProjects = projects ?? state.snapshot?.projects ?? [];
+  const newSessionProject =
+    availableProjects.find(
+      (candidate) => candidate.id === initialNewSessionRef.current.projectId,
+    ) ?? null;
+  const [newSessionAdmitted, setNewSessionAdmitted] = useState(
+    initialNewSessionRef.current.admitted,
+  );
+  const [newSessionRejected, setNewSessionRejected] = useState(false);
+  const [newSessionHydrated, setNewSessionHydrated] = useState(
+    !initialNewSessionRef.current.active,
+  );
+  const [preparationWorking, setPreparationWorking] = useState(false);
+  const [preparationRetry, setPreparationRetry] = useState(0);
+  const [storageWarning, setStorageWarning] = useState(false);
+  const [pendingSettings, setPendingSettings] = useState<SessionSettings>(() =>
+    initialSessionSettings(
+      state.snapshot?.defaultReasoningEffort,
+      state.snapshot?.models ?? [],
+      state.snapshot?.taskDefaults,
+    ),
+  );
+  const pendingSettingsRef = useRef(pendingSettings);
+  const preparationRef = useRef<NewSessionPreparation>({
+    active: initialNewSessionRef.current.active,
+    projectId: initialNewSessionRef.current.projectId,
+    value: emptyComposerDraft(),
+    settings: pendingSettings,
+    phase: "creating",
+    threadId: null,
+    thread: null,
+    revision: 0,
+  });
+  const pendingSettingsRevisionRef = useRef(0);
+  const pendingSettingsTouchedRef = useRef(new Set<PendingSettingsField>());
+  const appliedSettingsRevisionRef = useRef(0);
+  const settingsApplyPromiseRef = useRef<Promise<ThreadSummary> | null>(null);
+  const creationPromiseRef = useRef<Promise<ThreadSummary> | null>(null);
+  const preparationOperationRef = useRef<Promise<void> | null>(null);
+  const preparationGenerationRef = useRef(1);
+  const preparationAliveRef = useRef(true);
+  const preparationDiscardRef = useRef(false);
+  const preparationDraftTouchedRef = useRef(false);
+  const preparationDraftTimerRef = useRef<number | null>(null);
+  const preparationDraftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const [attachmentScope, setAttachmentScope] = useState(0);
+  const attachmentScopeRef = useRef(attachmentScope);
+  const pendingAttachmentScopesRef = useRef(new Set<number>());
+  const attachmentWaitersRef = useRef(new Set<{ scope: number | null; resolve: () => void }>());
+  const earlySubmitRef = useRef(false);
+  const preparationClaimedForSubmitRef = useRef(false);
+  const preparationDraftTransferGenerationRef = useRef(0);
+  const activePreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
+  const claimedPreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
+  const earlySubmissionRef = useRef<EarlySubmission | null>(null);
+  const composerEditRevisionRef = useRef(0);
+  const createdInWorkspaceRef = useRef<string | null>(null);
+  const [pendingOptimisticMessage, setPendingOptimisticMessage] =
+    useState<OptimisticMessage | null>(null);
+  const detail = state.details?.[threadId];
   const summary =
     state.snapshot?.threads.find((thread) => thread.id === threadId) ?? detail?.summary;
   const parentThreadId =
@@ -158,7 +410,9 @@ export function ThreadPage({
     ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
     : undefined;
   const project =
-    state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ?? null;
+    newSessionProject ??
+    state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ??
+    null;
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
     value: detail?.draft
@@ -251,7 +505,7 @@ export function ThreadPage({
     [],
   );
   const attention = useMemo(
-    () => state.snapshot?.attention.filter((item) => item.threadId === threadId) ?? [],
+    () => state.snapshot?.attention?.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
   const goal = state.goals?.[threadId];
@@ -333,8 +587,364 @@ export function ThreadPage({
     [api, threadId],
   );
 
-  function currentComposerDraft(): UpdateThreadDraftRequest {
-    return composerDraftRef.current.threadId === threadId
+  function snapshotPreparation(): NewSessionPreparation {
+    const current = preparationRef.current;
+    const claimedDraft = earlySubmissionRef.current?.draft;
+    return {
+      ...current,
+      value: structuredClone(
+        claimedDraft
+          ? composerDraftHasContent(current.value)
+            ? mergeComposerDrafts(claimedDraft, current.value)
+            : claimedDraft
+          : current.value,
+      ),
+      settings: structuredClone(current.settings),
+    };
+  }
+
+  function preparationGenerationActive(generation: number): boolean {
+    return (
+      preparationAliveRef.current &&
+      preparationGenerationRef.current === generation &&
+      preparationRef.current.active &&
+      !preparationDiscardRef.current
+    );
+  }
+
+  function assertPreparationGeneration(generation: number): void {
+    if (!preparationGenerationActive(generation)) throw PREPARATION_SUPERSEDED;
+  }
+
+  function invalidatePreparation(): void {
+    preparationAliveRef.current = false;
+    preparationGenerationRef.current += 1;
+    for (const waiter of attachmentWaitersRef.current) waiter.resolve();
+    attachmentWaitersRef.current.clear();
+  }
+
+  function enqueuePreparationSave(snapshot: NewSessionPreparation): Promise<void> {
+    const request = preparationDraftSaveChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const saved = await saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
+          phase: snapshot.phase,
+          threadId: snapshot.threadId,
+          thread: snapshot.thread,
+          revision: snapshot.revision,
+          settings: snapshot.settings,
+        });
+        if (!saved && preparationAliveRef.current) setStorageWarning(true);
+      });
+    preparationDraftSaveChainRef.current = request;
+    return request;
+  }
+
+  function flushPreparation(): Promise<void> {
+    if (preparationDraftTimerRef.current !== null) {
+      window.clearTimeout(preparationDraftTimerRef.current);
+      preparationDraftTimerRef.current = null;
+    }
+    if (!preparationRef.current.active || !newSessionAdmitted || preparationDiscardRef.current) {
+      return preparationDraftSaveChainRef.current;
+    }
+    return enqueuePreparationSave(snapshotPreparation());
+  }
+
+  function setPendingAttachments(pending: boolean, scope = attachmentScopeRef.current): void {
+    if (pending) {
+      pendingAttachmentScopesRef.current.add(scope);
+      return;
+    }
+    pendingAttachmentScopesRef.current.delete(scope);
+    for (const waiter of attachmentWaitersRef.current) {
+      if (waiter.scope !== null && pendingAttachmentScopesRef.current.has(waiter.scope)) {
+        continue;
+      }
+      if (waiter.scope === null && pendingAttachmentScopesRef.current.size > 0) continue;
+      attachmentWaitersRef.current.delete(waiter);
+      waiter.resolve();
+    }
+  }
+
+  function waitForPendingAttachments(scope: number | null = null): Promise<void> {
+    if (
+      scope === null
+        ? pendingAttachmentScopesRef.current.size === 0
+        : !pendingAttachmentScopesRef.current.has(scope)
+    ) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => attachmentWaitersRef.current.add({ scope, resolve }));
+  }
+
+  function replacePreparationDraft(value: UpdateThreadDraftRequest): void {
+    preparationDraftTouchedRef.current = true;
+    preparationRef.current = {
+      ...preparationRef.current,
+      value,
+      revision: preparationRef.current.revision + 1,
+    };
+    const next = { threadId, value };
+    composerDraftRef.current = next;
+    setComposerDraftState(next);
+  }
+
+  function preparationDraftTransferActive(transfer: PreparationDraftTransfer): boolean {
+    return (
+      preparationDraftTransferGenerationRef.current === transfer.generation &&
+      !preparationClaimedForSubmitRef.current &&
+      preparationRef.current.active &&
+      !preparationDiscardRef.current &&
+      preparationRef.current.revision === transfer.revision &&
+      pendingAttachmentScopesRef.current.size === 0
+    );
+  }
+
+  function transferPreparationDraft(
+    targetThreadId: string,
+    value: UpdateThreadDraftRequest,
+  ): Promise<ThreadDraft | null> {
+    const transfer: PreparationDraftTransfer = {
+      generation: preparationDraftTransferGenerationRef.current,
+      promise: Promise.resolve(null),
+      revision: preparationRef.current.revision,
+      serverWriteStarted: false,
+    };
+    const request = (async () => {
+      if (!preparationDraftTransferActive(transfer)) return null;
+      await saveLocalDraft(api.settings, targetThreadId, value, Date.now());
+      if (!preparationDraftTransferActive(transfer)) return null;
+      transfer.serverWriteStarted = true;
+      try {
+        const saved = await api.updateThreadDraft(targetThreadId, value, { retry: true });
+        if (!preparationDraftTransferActive(transfer)) return saved;
+        if (saved) {
+          await saveLocalDraft(api.settings, targetThreadId, value, saved.updatedAt);
+        } else {
+          await deleteLocalDraft(api.settings, targetThreadId);
+        }
+        return saved;
+      } catch (caught) {
+        if (!preparationDraftTransferActive(transfer)) return null;
+        throw caught;
+      }
+    })().finally(() => {
+      if (activePreparationDraftTransferRef.current === transfer) {
+        activePreparationDraftTransferRef.current = null;
+      }
+    });
+    transfer.promise = request;
+    activePreparationDraftTransferRef.current = transfer;
+    return request;
+  }
+
+  async function settleClaimedPreparationDraftTransfer(): Promise<boolean> {
+    const transfer = claimedPreparationDraftTransferRef.current;
+    if (!transfer) return false;
+    await transfer.promise.catch(() => undefined);
+    if (claimedPreparationDraftTransferRef.current === transfer) {
+      claimedPreparationDraftTransferRef.current = null;
+    }
+    return transfer.serverWriteStarted;
+  }
+
+  async function ensureCreatedThread(
+    activeProject: Project,
+    generation: number,
+  ): Promise<ThreadSummary> {
+    assertPreparationGeneration(generation);
+    const prepared = preparationRef.current.thread;
+    if (prepared) return prepared;
+    if (!creationPromiseRef.current) {
+      const request = (async () => {
+        assertPreparationGeneration(generation);
+        const existingThreadId = preparationRef.current.threadId;
+        let thread = existingThreadId
+          ? state.snapshot?.threads.find((candidate) => candidate.id === existingThreadId)
+          : undefined;
+        if (!thread) {
+          thread = existingThreadId
+            ? (await api.readThread(existingThreadId, undefined, { fresh: true })).summary
+            : (await api.createProjectThread(activeProject.id)).thread;
+          assertPreparationGeneration(generation);
+        }
+        preparationRef.current = {
+          ...preparationRef.current,
+          phase: "transferring",
+          threadId: thread.id,
+          thread,
+        };
+        await enqueuePreparationSave(snapshotPreparation());
+        assertPreparationGeneration(generation);
+        return thread;
+      })();
+      creationPromiseRef.current = request;
+      void request.catch(() => {
+        if (creationPromiseRef.current === request) creationPromiseRef.current = null;
+      });
+    }
+    const thread = await creationPromiseRef.current;
+    assertPreparationGeneration(generation);
+    return thread;
+  }
+
+  async function applyPendingSettings(
+    thread: ThreadSummary,
+    generation: number,
+  ): Promise<ThreadSummary> {
+    assertPreparationGeneration(generation);
+    if (settingsApplyPromiseRef.current) {
+      await settingsApplyPromiseRef.current;
+      assertPreparationGeneration(generation);
+      return applyPendingSettings(preparationRef.current.thread ?? thread, generation);
+    }
+    if (appliedSettingsRevisionRef.current === pendingSettingsRevisionRef.current) {
+      return preparationRef.current.thread ?? thread;
+    }
+    const request = (async () => {
+      let configured = preparationRef.current.thread ?? thread;
+      while (appliedSettingsRevisionRef.current !== pendingSettingsRevisionRef.current) {
+        assertPreparationGeneration(generation);
+        const revision = pendingSettingsRevisionRef.current;
+        const patch = settingsPatchBetween(
+          configured.settings,
+          pendingSettingsRef.current,
+          pendingSettingsTouchedRef.current,
+        );
+        if (Object.keys(patch).length > 0) {
+          configured = await api.updateThreadSettings(thread.id, patch);
+          assertPreparationGeneration(generation);
+          preparationRef.current = { ...preparationRef.current, thread: configured };
+        }
+        appliedSettingsRevisionRef.current = revision;
+      }
+      return configured;
+    })();
+    settingsApplyPromiseRef.current = request;
+    try {
+      return await request;
+    } finally {
+      if (settingsApplyPromiseRef.current === request) {
+        settingsApplyPromiseRef.current = null;
+      }
+    }
+  }
+
+  function activateCreatedThread(
+    thread: ThreadSummary,
+    draft: ThreadDraft | null,
+    generation: number,
+  ): boolean {
+    if (!preparationGenerationActive(generation)) return false;
+    const targetThreadId = thread.id;
+    preparationDiscardRef.current = true;
+    preparationRef.current = {
+      ...preparationRef.current,
+      active: false,
+      threadId: targetThreadId,
+      thread,
+    };
+    activeThreadIdRef.current = targetThreadId;
+    createdInWorkspaceRef.current = targetThreadId;
+    draftTouchedThreadsRef.current.add(targetThreadId);
+    hydratedDraftSourcesRef.current.set(targetThreadId, draft);
+    const value = composerDraftRef.current.value;
+    const next = { threadId: targetThreadId, value };
+    composerDraftRef.current = next;
+    setComposerDraftState(next);
+    setCreatedThreadId(targetThreadId);
+    if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) {
+      return false;
+    }
+    dispatch({ type: "thread", thread });
+    dispatch({
+      type: "detail",
+      detail: {
+        summary: thread,
+        turns: [],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+        draft,
+      },
+      page: "latest",
+    });
+    if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) {
+      return false;
+    }
+    navigate(`/threads/${encodeURIComponent(targetThreadId)}`, {
+      replace: true,
+      state: {
+        ...(typeof location.state === "object" && location.state ? location.state : {}),
+        focusComposer: true,
+        newSessionWorkspaceId: initialNewSessionRef.current.workspaceId,
+      },
+    });
+    return true;
+  }
+
+  async function finishNewSessionPreparation(
+    activeProject: Project,
+    generation: number,
+  ): Promise<void> {
+    let thread = await ensureCreatedThread(activeProject, generation);
+    assertPreparationGeneration(generation);
+    thread = await applyPendingSettings(thread, generation);
+    assertPreparationGeneration(generation);
+    preparationRef.current = { ...preparationRef.current, thread };
+    if (preparationClaimedForSubmitRef.current) return;
+
+    while (true) {
+      await waitForPendingAttachments();
+      assertPreparationGeneration(generation);
+      if (preparationClaimedForSubmitRef.current) return;
+      const transferring = snapshotPreparation();
+      const hasDraft =
+        Boolean(transferring.value.input) ||
+        transferring.value.images.length > 0 ||
+        transferring.value.goalMode ||
+        transferring.value.annotations.length > 0;
+      const saved = hasDraft ? await transferPreparationDraft(thread.id, transferring.value) : null;
+      assertPreparationGeneration(generation);
+      if (
+        preparationClaimedForSubmitRef.current ||
+        pendingAttachmentScopesRef.current.size > 0 ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
+
+      await flushPreparation();
+      assertPreparationGeneration(generation);
+      if (
+        preparationClaimedForSubmitRef.current ||
+        pendingAttachmentScopesRef.current.size > 0 ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
+      await deleteNewSessionDraft(api.settings, activeProject.id);
+      assertPreparationGeneration(generation);
+      if (
+        preparationClaimedForSubmitRef.current ||
+        pendingAttachmentScopesRef.current.size > 0 ||
+        preparationRef.current.revision !== transferring.revision
+      ) {
+        continue;
+      }
+
+      thread = await applyPendingSettings(thread, generation);
+      assertPreparationGeneration(generation);
+      preparationRef.current = { ...preparationRef.current, thread };
+      activateCreatedThread(thread, saved, generation);
+      return;
+    }
+  }
+
+  function currentComposerDraft(
+    targetThreadId = activeThreadIdRef.current,
+  ): UpdateThreadDraftRequest {
+    return composerDraftRef.current.threadId === targetThreadId
       ? composerDraftRef.current.value
       : emptyComposerDraft();
   }
@@ -402,25 +1012,48 @@ export function ThreadPage({
     value: UpdateThreadDraftRequest,
     persistence: "debounced" | "immediate" | false,
   ): void {
-    const next = { threadId, value };
+    if (preparationRef.current.active) {
+      replacePreparationDraft(value);
+      return;
+    }
+    const targetThreadId = activeThreadIdRef.current;
+    const next = { threadId: targetThreadId, value };
     composerDraftRef.current = next;
     setComposerDraftState(next);
     if (!persistence) return;
-    draftTouchedThreadsRef.current.add(threadId);
-    scheduleDraftSave(threadId, value, persistence === "immediate");
+    draftTouchedThreadsRef.current.add(targetThreadId);
+    scheduleDraftSave(targetThreadId, value, persistence === "immediate");
   }
 
   function setInput(value: string): void {
+    composerEditRevisionRef.current += 1;
     replaceComposerDraft({ ...currentComposerDraft(), input: value }, "debounced");
   }
 
-  function setImages(value: ComposerImage[]): void {
+  function setImages(value: ComposerImage[], sourceScope = attachmentScopeRef.current): void {
+    if (preparationRef.current.active && earlySubmitRef.current) {
+      const submission = earlySubmissionRef.current;
+      if (submission && sourceScope === submission.attachmentScope) {
+        submission.draft = {
+          ...submission.draft,
+          images: mergeComposerImages(submission.draft.images, value),
+        };
+        setPendingOptimisticMessage((message) =>
+          message
+            ? { ...message, images: submission.draft.images.map((image) => image.url) }
+            : message,
+        );
+        return;
+      }
+    }
+    composerEditRevisionRef.current += 1;
     replaceComposerDraft({ ...currentComposerDraft(), images: value }, "immediate");
   }
 
   function setGoalMode(value: boolean): void {
     const current = currentComposerDraft();
     if (current.goalMode === value) return;
+    composerEditRevisionRef.current += 1;
     replaceComposerDraft({ ...current, goalMode: value }, "immediate");
   }
 
@@ -492,6 +1125,178 @@ export function ThreadPage({
     }
   }
 
+  useLayoutEffect(() => {
+    if (!preparationRef.current.active) return;
+    const workspaceId =
+      typeof (location.state as { newSessionWorkspaceId?: unknown } | null)
+        ?.newSessionWorkspaceId === "string"
+        ? (
+            location.state as {
+              newSessionWorkspaceId: string;
+            }
+          ).newSessionWorkspaceId
+        : `direct:${location.search}`;
+    if (location.pathname !== "/new" || workspaceId !== initialNewSessionRef.current.workspaceId) {
+      invalidatePreparation();
+    }
+  }, [location.pathname, location.search, location.state]);
+
+  useEffect(() => {
+    if (!preparationRef.current.active) return;
+    if (!newSessionProject) {
+      setNewSessionHydrated(true);
+      return;
+    }
+    let active = true;
+    const generation = preparationGenerationRef.current;
+    void (async () => {
+      const stored = await loadNewSessionDraft(api.settings, newSessionProject.id);
+      if (!active || !preparationGenerationActive(generation)) return;
+      if (!stored && !initialNewSessionRef.current.admitted) {
+        setNewSessionRejected(true);
+        setNewSessionHydrated(true);
+        return;
+      }
+
+      const current = preparationRef.current;
+      const value =
+        stored && !preparationDraftTouchedRef.current
+          ? normalizeNewSessionDraft(stored.value)
+          : current.value;
+      const settings =
+        stored?.settings && pendingSettingsTouchedRef.current.size === 0
+          ? structuredClone(stored.settings)
+          : current.settings;
+      if (stored?.settings && pendingSettingsTouchedRef.current.size === 0) {
+        for (const key of [
+          "collaborationMode",
+          "model",
+          "reasoningEffort",
+          "serviceTier",
+          "personality",
+        ] as const) {
+          if (pendingSettingsRef.current[key] !== settings[key]) {
+            pendingSettingsTouchedRef.current.add(key);
+          }
+        }
+        pendingSettingsRef.current = settings;
+        pendingSettingsRevisionRef.current += 1;
+        setPendingSettings(settings);
+      }
+      const storedThreadId = stored?.threadId ?? null;
+      preparationRef.current = {
+        ...current,
+        projectId: newSessionProject.id,
+        value,
+        settings,
+        phase: storedThreadId ? "transferring" : "creating",
+        threadId: storedThreadId,
+        thread: stored?.thread?.id === storedThreadId ? stored.thread : null,
+        revision: Math.max(current.revision, stored?.revision ?? 0),
+      };
+      if (stored && !preparationDraftTouchedRef.current) {
+        const next = { threadId, value };
+        composerDraftRef.current = next;
+        setComposerDraftState(next);
+      }
+      setNewSessionAdmitted(true);
+      await enqueuePreparationSave(snapshotPreparation());
+      if (active && preparationGenerationActive(generation)) setNewSessionHydrated(true);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [api.settings, newSessionProject?.id]);
+
+  useEffect(() => {
+    if (
+      !preparationRef.current.active ||
+      !newSessionHydrated ||
+      !newSessionAdmitted ||
+      preparationDiscardRef.current
+    ) {
+      return;
+    }
+    if (preparationDraftTimerRef.current !== null) {
+      window.clearTimeout(preparationDraftTimerRef.current);
+    }
+    const timer = window.setTimeout(() => {
+      if (preparationDraftTimerRef.current === timer) {
+        preparationDraftTimerRef.current = null;
+      }
+      if (!preparationDiscardRef.current) {
+        void enqueuePreparationSave(snapshotPreparation());
+      }
+    }, DRAFT_SAVE_DELAY_MS);
+    preparationDraftTimerRef.current = timer;
+  }, [activeComposerDraft, newSessionAdmitted, newSessionHydrated]);
+
+  useEffect(() => {
+    if (
+      !preparationRef.current.active ||
+      !newSessionHydrated ||
+      !newSessionAdmitted ||
+      !newSessionProject ||
+      preparationOperationRef.current
+    ) {
+      return;
+    }
+    setPreparationWorking(true);
+    setError(null);
+    const generation = preparationGenerationRef.current;
+    const operation = finishNewSessionPreparation(newSessionProject, generation)
+      .catch(async (caught: unknown) => {
+        if (caught === PREPARATION_SUPERSEDED) return;
+        if (
+          caught instanceof ApiClientError &&
+          caught.status === 404 &&
+          preparationRef.current.threadId &&
+          preparationGenerationActive(generation)
+        ) {
+          preparationRef.current = {
+            ...preparationRef.current,
+            phase: "creating",
+            threadId: null,
+            thread: null,
+          };
+          creationPromiseRef.current = null;
+        }
+        await flushPreparation();
+        if (preparationAliveRef.current && preparationGenerationRef.current === generation) {
+          setError(
+            caught instanceof Error
+              ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+              : t("Не удалось создать сессию"),
+          );
+        }
+      })
+      .finally(() => {
+        if (preparationOperationRef.current === operation) {
+          preparationOperationRef.current = null;
+        }
+        if (preparationAliveRef.current && preparationGenerationRef.current === generation) {
+          setPreparationWorking(false);
+        }
+      });
+    preparationOperationRef.current = operation;
+  }, [newSessionAdmitted, newSessionHydrated, newSessionProject, preparationRetry]);
+
+  useEffect(() => {
+    preparationAliveRef.current = true;
+    const flushBeforePageExit = () => {
+      if (!preparationDiscardRef.current) void flushPreparation();
+    };
+    window.addEventListener("pagehide", flushBeforePageExit);
+    return () => {
+      invalidatePreparation();
+      window.removeEventListener("pagehide", flushBeforePageExit);
+      if (!preparationDiscardRef.current) void flushPreparation();
+      else if (preparationDraftTimerRef.current !== null) {
+        window.clearTimeout(preparationDraftTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const startedAt = activeVoiceJob
       ? activeVoiceJob.status === "queued"
@@ -548,8 +1353,10 @@ export function ThreadPage({
   }, [goal]);
 
   useEffect(() => {
-    draftTouchedThreadsRef.current.delete(threadId);
-    hydratedDraftSourcesRef.current.delete(threadId);
+    if (createdInWorkspaceRef.current !== threadId) {
+      draftTouchedThreadsRef.current.delete(threadId);
+      hydratedDraftSourcesRef.current.delete(threadId);
+    }
     return () => {
       void flushDraft(threadId);
     };
@@ -608,7 +1415,9 @@ export function ThreadPage({
   }, [threadId]);
 
   useEffect(() => {
-    if (!threadId || isSubagent) return;
+    if (!threadId || isSubagent || createdInWorkspaceRef.current === threadId) {
+      return;
+    }
     const request = api.readGoal?.(threadId);
     if (!request) return;
     void request
@@ -646,7 +1455,7 @@ export function ThreadPage({
 
   useEffect(() => {
     setThreadMissing(false);
-    if (threadId) {
+    if (threadId && createdInWorkspaceRef.current !== threadId) {
       void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
         if (caught instanceof ApiClientError && caught.status === 404) {
           dispatch({ type: "thread.remove", threadId });
@@ -781,6 +1590,7 @@ export function ThreadPage({
   }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, threadId]);
 
   function persistAnnotations(next: PendingAnnotation[]): boolean {
+    composerEditRevisionRef.current += 1;
     replaceComposerDraft(
       { ...currentComposerDraft(), annotations: next, ...(next.length ? { goalMode: false } : {}) },
       "immediate",
@@ -810,17 +1620,116 @@ export function ThreadPage({
     return persistAnnotations(annotations.filter((annotation) => annotation.id !== annotationId));
   }
 
-  function clearLegacyAnnotations() {
+  function clearLegacyAnnotations(targetThreadId = threadId) {
     try {
-      savePendingAnnotations(threadId, []);
+      savePendingAnnotations(targetThreadId, []);
     } catch {
       // The sent server draft is already authoritative.
     }
-    legacyAnnotationThreadsRef.current.delete(threadId);
+    legacyAnnotationThreadsRef.current.delete(targetThreadId);
+  }
+
+  function persistDraftAfterAcceptedSend(
+    targetThreadId: string,
+    value: UpdateThreadDraftRequest,
+  ): void {
+    draftTouchedThreadsRef.current.add(targetThreadId);
+    scheduleDraftSave(targetThreadId, value, true);
+  }
+
+  function reconcileAcceptedDraftAfterClear(
+    targetThreadId: string,
+    guard: AcceptedDraftClearGuard,
+    clearFailed: boolean,
+  ): boolean {
+    if (!preparationAliveRef.current || preparationGenerationRef.current !== guard.generation) {
+      return false;
+    }
+    const pending = pendingDraftsRef.current.get(targetThreadId);
+    const editorHasNewerDraft =
+      composerDraftRef.current.threadId === targetThreadId &&
+      composerEditRevisionRef.current !== guard.editRevision;
+    if (editorHasNewerDraft || (pending?.revision ?? 0) > guard.pendingRevision) {
+      persistDraftAfterAcceptedSend(
+        targetThreadId,
+        structuredClone(editorHasNewerDraft ? composerDraftRef.current.value : pending!.value),
+      );
+      return false;
+    }
+    if (!clearFailed) return true;
+    if ((pendingDraftsRef.current.get(targetThreadId)?.revision ?? 0) <= guard.pendingRevision) {
+      persistDraftAfterAcceptedSend(targetThreadId, emptyComposerDraft());
+    }
+    return false;
+  }
+
+  async function cleanupAcceptedDraft(
+    targetThreadId: string,
+    submittedEditRevision: number,
+  ): Promise<void> {
+    if (composerEditRevisionRef.current !== submittedEditRevision) {
+      persistDraftAfterAcceptedSend(
+        targetThreadId,
+        structuredClone(composerDraftRef.current.value),
+      );
+      return;
+    }
+    try {
+      await deleteLocalDraft(api.settings, targetThreadId);
+    } catch {
+      // Delivery is authoritative; local cleanup is best-effort.
+    }
+    if (composerEditRevisionRef.current !== submittedEditRevision) {
+      persistDraftAfterAcceptedSend(
+        targetThreadId,
+        structuredClone(composerDraftRef.current.value),
+      );
+      return;
+    }
+    pendingDraftsRef.current.delete(targetThreadId);
+    savedDraftUpdatedAtRef.current.set(targetThreadId, null);
+    dispatch({ type: "draft", threadId: targetThreadId, draft: null });
+    clearLegacyAnnotations(targetThreadId);
+  }
+
+  async function preserveAcceptedDraft(
+    targetThreadId: string,
+    value: UpdateThreadDraftRequest,
+    expectedEditRevision = composerEditRevisionRef.current,
+  ): Promise<boolean> {
+    let savedLocally = false;
+    try {
+      await saveLocalDraft(api.settings, targetThreadId, value, Date.now());
+      savedLocally = true;
+    } catch {
+      // The debounced server persistence below will keep retrying.
+    }
+    if (composerEditRevisionRef.current !== expectedEditRevision) {
+      persistDraftAfterAcceptedSend(
+        targetThreadId,
+        structuredClone(composerDraftRef.current.value),
+      );
+      return savedLocally;
+    }
+    persistDraftAfterAcceptedSend(targetThreadId, value);
+    return savedLocally;
+  }
+
+  async function deletePreparationPersistence(projectId: string): Promise<void> {
+    try {
+      await preparationDraftSaveChainRef.current.catch(() => undefined);
+      await deleteNewSessionDraft(api.settings, projectId);
+    } catch {
+      // The created thread and its local draft are already authoritative.
+    }
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (preparationRef.current.active && newSessionProject) {
+      await submitPreparingSession(newSessionProject);
+      return;
+    }
     const submittedComposerInput = input;
     const submittedAnnotations = annotations;
     const submittedInput = formatAnnotatedMessage(
@@ -832,6 +1741,7 @@ export function ThreadPage({
     const submittedImages = images;
     const submittedGoalMode = goalMode;
     const submittedDraft = structuredClone(activeComposerDraft);
+    const submittedEditRevision = composerEditRevisionRef.current;
     const clientMessageId = createClientMessageId();
     const optimisticMessage: OptimisticMessage = {
       id: clientMessageId,
@@ -855,21 +1765,201 @@ export function ThreadPage({
         ...(submittedGoalMode ? { goal: true } : {}),
         clientMessageId,
       });
-      pendingDraftsRef.current.delete(threadId);
-      await deleteLocalDraft(api.settings, threadId);
-      savedDraftUpdatedAtRef.current.set(threadId, null);
-      dispatch({ type: "draft", threadId, draft: null });
-      clearLegacyAnnotations();
     } catch (caught) {
       dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
-      replaceComposerDraft(submittedDraft, false);
+      const restore =
+        composerEditRevisionRef.current === submittedEditRevision
+          ? submittedDraft
+          : mergeComposerDrafts(submittedDraft, currentComposerDraft());
+      replaceComposerDraft(restore, "immediate");
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
           : t("Не удалось отправить сообщение"),
       );
+      setBusy(false);
+      return;
+    }
+    try {
+      await cleanupAcceptedDraft(threadId, submittedEditRevision);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function submitPreparingSession(activeProject: Project): Promise<void> {
+    const generation = preparationGenerationRef.current;
+    assertPreparationGeneration(generation);
+    const submittedDraft = structuredClone(preparationRef.current.value);
+    const submittedInput = formatAnnotatedMessage(
+      submittedDraft.input,
+      submittedDraft.annotations,
+      language,
+    );
+    if (
+      (!submittedInput.trim() &&
+        !submittedDraft.images.length &&
+        !pendingAttachmentScopesRef.current.has(attachmentScopeRef.current)) ||
+      (submittedDraft.goalMode && !submittedDraft.input.trim())
+    ) {
+      return;
+    }
+
+    const clientMessageId = createClientMessageId();
+    earlySubmitRef.current = true;
+    preparationClaimedForSubmitRef.current = true;
+    preparationDraftTransferGenerationRef.current += 1;
+    claimedPreparationDraftTransferRef.current = activePreparationDraftTransferRef.current;
+    setBusy(true);
+    setError(null);
+    setPendingOptimisticMessage({
+      id: clientMessageId,
+      threadId: "",
+      text: submittedInput.trim(),
+      images: submittedDraft.images.map((image) => image.url),
+      createdAt: Date.now(),
+      destination: "queue",
+      turnId: null,
+    });
+    replacePreparationDraft(emptyComposerDraft());
+    const submittedAttachmentScope = attachmentScopeRef.current;
+    attachmentScopeRef.current += 1;
+    setAttachmentScope(attachmentScopeRef.current);
+    earlySubmissionRef.current = {
+      attachmentScope: submittedAttachmentScope,
+      clearedRevision: preparationRef.current.revision,
+      draft: submittedDraft,
+      editRevision: composerEditRevisionRef.current,
+    };
+
+    let activatedThreadId: string | null = null;
+    let accepted = false;
+    try {
+      await waitForPendingAttachments(submittedAttachmentScope);
+      assertPreparationGeneration(generation);
+      const submission = earlySubmissionRef.current;
+      const completeDraft = structuredClone(submission?.draft ?? submittedDraft);
+      const completeInput = formatAnnotatedMessage(
+        completeDraft.input,
+        completeDraft.annotations,
+        language,
+      );
+      let thread = await ensureCreatedThread(activeProject, generation);
+      assertPreparationGeneration(generation);
+      thread = await applyPendingSettings(thread, generation);
+      assertPreparationGeneration(generation);
+      preparationRef.current = { ...preparationRef.current, thread };
+      const optimisticMessage: OptimisticMessage = {
+        id: clientMessageId,
+        threadId: thread.id,
+        text: completeInput.trim(),
+        images: completeDraft.images.map((image) => image.url),
+        createdAt: Date.now(),
+        destination: "queue",
+        turnId: null,
+      };
+      assertPreparationGeneration(generation);
+      dispatch({ type: "optimistic.add", message: optimisticMessage });
+      setPendingOptimisticMessage(null);
+      if (!activateCreatedThread(thread, null, generation)) throw PREPARATION_SUPERSEDED;
+      activatedThreadId = thread.id;
+      await sendReliable(thread.id, {
+        input: completeInput,
+        ...(completeDraft.images.length
+          ? { images: completeDraft.images.map((image) => image.url) }
+          : {}),
+        ...(completeDraft.goalMode ? { goal: true } : {}),
+        clientMessageId,
+      });
+      accepted = true;
+      await waitForPendingAttachments();
+      const staleServerWrite = await settleClaimedPreparationDraftTransfer();
+      await waitForPendingAttachments();
+      const settledSubmission = earlySubmissionRef.current;
+      const submittedEditRevision =
+        settledSubmission?.editRevision ?? composerEditRevisionRef.current;
+      const hasNewerDraft =
+        composerEditRevisionRef.current !== submittedEditRevision ||
+        (settledSubmission !== null &&
+          preparationRef.current.revision !== settledSubmission.clearedRevision);
+      const remainingDraft = structuredClone(composerDraftRef.current.value);
+      const remainingEditRevision = composerEditRevisionRef.current;
+      earlySubmissionRef.current = null;
+      earlySubmitRef.current = false;
+      let newerDraftStored = true;
+      if (hasNewerDraft) {
+        newerDraftStored = await preserveAcceptedDraft(
+          thread.id,
+          remainingDraft,
+          remainingEditRevision,
+        );
+      } else {
+        if (staleServerWrite) {
+          const clearGuard: AcceptedDraftClearGuard = {
+            editRevision: composerEditRevisionRef.current,
+            generation,
+            pendingRevision: draftRevisionRef.current,
+          };
+          let clearFailed = false;
+          try {
+            await api.updateThreadDraft(thread.id, emptyComposerDraft(), { retry: true });
+          } catch {
+            clearFailed = true;
+          }
+          if (reconcileAcceptedDraftAfterClear(thread.id, clearGuard, clearFailed)) {
+            await cleanupAcceptedDraft(thread.id, clearGuard.editRevision);
+          }
+        } else {
+          await cleanupAcceptedDraft(thread.id, submittedEditRevision);
+        }
+      }
+      if (!hasNewerDraft || newerDraftStored) {
+        await deletePreparationPersistence(activeProject.id);
+      }
+    } catch (caught) {
+      if (accepted) return;
+      if (caught === PREPARATION_SUPERSEDED) return;
+      await waitForPendingAttachments();
+      const targetThreadId = activatedThreadId ?? preparationRef.current.threadId;
+      if (activatedThreadId) {
+        dispatch({
+          type: "optimistic.remove",
+          threadId: activatedThreadId,
+          messageId: clientMessageId,
+        });
+      }
+      setPendingOptimisticMessage(null);
+      const submission = earlySubmissionRef.current;
+      const submitted = submission?.draft ?? submittedDraft;
+      const hasNewerDraft =
+        composerEditRevisionRef.current !==
+          (submission?.editRevision ?? composerEditRevisionRef.current) ||
+        (submission !== null && preparationRef.current.revision !== submission.clearedRevision);
+      const current = structuredClone(composerDraftRef.current.value);
+      const restore = hasNewerDraft ? mergeComposerDrafts(submitted, current) : submitted;
+      earlySubmissionRef.current = null;
+      earlySubmitRef.current = false;
+      if (!activatedThreadId) preparationClaimedForSubmitRef.current = false;
+      if (activatedThreadId) {
+        const restored = { threadId: activatedThreadId, value: restore };
+        composerDraftRef.current = restored;
+        draftTouchedThreadsRef.current.add(activatedThreadId);
+        setComposerDraftState(restored);
+        const savedLocally = await preserveAcceptedDraft(activatedThreadId, restore);
+        if (savedLocally) await deletePreparationPersistence(activeProject.id);
+      } else {
+        replacePreparationDraft(restore);
+      }
+      if (!targetThreadId) creationPromiseRef.current = null;
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось отправить сообщение"),
+      );
+    } finally {
+      if (preparationAliveRef.current && preparationGenerationRef.current === generation) {
+        setBusy(false);
+      }
     }
   }
 
@@ -1051,6 +2141,23 @@ export function ThreadPage({
   }
 
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
+    if (preparationRef.current.active) {
+      const next = applySessionSettingsPatch(pendingSettingsRef.current, patch);
+      for (const key of [
+        "collaborationMode",
+        "model",
+        "reasoningEffort",
+        "serviceTier",
+        "personality",
+      ] as const) {
+        if (patch[key] !== undefined) pendingSettingsTouchedRef.current.add(key);
+      }
+      pendingSettingsRef.current = next;
+      pendingSettingsRevisionRef.current += 1;
+      preparationRef.current = { ...preparationRef.current, settings: next };
+      setPendingSettings(next);
+      return;
+    }
     setSettingsBusy(true);
     setError(null);
     setTeamUpgradeRequired(false);
@@ -1143,7 +2250,14 @@ export function ThreadPage({
     };
   });
 
-  if (!summary)
+  if (
+    initialNewSessionRef.current.active &&
+    (newSessionRejected || (newSessionHydrated && !newSessionProject))
+  ) {
+    return <Navigate to="/" replace />;
+  }
+  if (preparationRef.current.active && !newSessionAdmitted) return null;
+  if (!summary && !preparationRef.current.active && !preparationRef.current.thread)
     return (
       <div className="center-state">
         {threadMissing ? (
@@ -1157,11 +2271,23 @@ export function ThreadPage({
       </div>
     );
 
+  const workspaceSummary =
+    summary ??
+    preparationRef.current.thread ??
+    pendingThreadSummary(newSessionProject!, pendingSettings);
+  const emptyCreatedWorkspace =
+    createdInWorkspaceRef.current === threadId &&
+    (detail?.turns.length ?? 0) === 0 &&
+    (detail?.queuedMessages.length ?? 0) === 0 &&
+    optimisticMessages.length === 0;
+  const showEmptySessionHero =
+    pendingOptimisticMessage === null && (preparationRef.current.active || emptyCreatedWorkspace);
+  const showNewSessionChrome = preparationRef.current.active || showEmptySessionHero;
   const latestPlanId =
-    !summary.currentTurnId && summary.settings.collaborationMode === "plan"
+    !workspaceSummary.currentTurnId && workspaceSummary.settings.collaborationMode === "plan"
       ? findLatestCompletedPlan(detail)
       : null;
-  const latestAnnotatableId = findLatestAnnotatable(detail, summary.currentTurnId);
+  const latestAnnotatableId = findLatestAnnotatable(detail, workspaceSummary.currentTurnId);
   const latestPlanHasAnnotations = Boolean(
     latestPlanId && annotations.some((annotation) => annotation.messageId === latestPlanId),
   );
@@ -1170,49 +2296,58 @@ export function ThreadPage({
     <div className="thread-workspace">
       <div className="conversation-pane">
         <WorkspaceHeader
-          title={localizeKnownServerText(language, summary.title) ?? summary.title}
-          subtitle={project?.displayName ?? summary.cwd}
+          title={
+            showNewSessionChrome
+              ? t("Новая задача")
+              : (localizeKnownServerText(language, workspaceSummary.title) ??
+                workspaceSummary.title)
+          }
+          subtitle={project?.displayName ?? workspaceSummary.cwd}
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           actions={
-            <>
-              {!isSubagent && (
-                <details className="thread-action-menu" data-dismiss-on-outside-click>
-                  <summary className="icon-button" aria-label={t("Действия с задачей")}>
-                    <MoreIcon />
-                  </summary>
-                  <div className="action-menu-popover">
-                    <button onClick={togglePin}>
-                      <PinIcon /> {summary.pinned ? t("Открепить") : t("Закрепить")}
-                    </button>
-                    <button onClick={() => setRenaming(true)}>
-                      <PencilIcon /> {t("Переименовать")}
-                    </button>
-                    <button onClick={toggleArchive}>
-                      <ArchiveIcon />{" "}
-                      {summary.archived ? t("Вернуть из архива") : t("Архивировать")}
-                    </button>
-                    <button
-                      className="danger"
-                      disabled={deleting}
-                      onClick={() => void deleteThread()}
-                    >
-                      <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
-                    </button>
-                  </div>
-                </details>
-              )}
-              <button
-                className={`icon-button session-refresh${refreshing ? " refreshing" : ""}`}
-                aria-label={
-                  refreshing ? t("Обновляем состояние сессии") : t("Принудительно обновить сессию")
-                }
-                disabled={refreshing}
-                onClick={() => void forceRefreshSession()}
-              >
-                <RefreshIcon />
-              </button>
-            </>
+            showNewSessionChrome ? undefined : (
+              <>
+                {!isSubagent && (
+                  <details className="thread-action-menu" data-dismiss-on-outside-click>
+                    <summary className="icon-button" aria-label={t("Действия с задачей")}>
+                      <MoreIcon />
+                    </summary>
+                    <div className="action-menu-popover">
+                      <button onClick={togglePin}>
+                        <PinIcon /> {workspaceSummary.pinned ? t("Открепить") : t("Закрепить")}
+                      </button>
+                      <button onClick={() => setRenaming(true)}>
+                        <PencilIcon /> {t("Переименовать")}
+                      </button>
+                      <button onClick={toggleArchive}>
+                        <ArchiveIcon />{" "}
+                        {workspaceSummary.archived ? t("Вернуть из архива") : t("Архивировать")}
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={deleting}
+                        onClick={() => void deleteThread()}
+                      >
+                        <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
+                      </button>
+                    </div>
+                  </details>
+                )}
+                <button
+                  className={`icon-button session-refresh${refreshing ? " refreshing" : ""}`}
+                  aria-label={
+                    refreshing
+                      ? t("Обновляем состояние сессии")
+                      : t("Принудительно обновить сессию")
+                  }
+                  disabled={refreshing}
+                  onClick={() => void forceRefreshSession()}
+                >
+                  <RefreshIcon />
+                </button>
+              </>
+            )
           }
         />
         <div
@@ -1227,155 +2362,177 @@ export function ThreadPage({
           }}
         >
           <section className="timeline" aria-live="polite">
-            {loadingOlder && (
-              <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
-                <span className="spinner small" />
+            {showEmptySessionHero ? (
+              <div className="new-session-empty">
+                <span className="new-session-glyph">
+                  <NewTaskIcon />
+                </span>
+                <h2>{t("Что поручим Codex?")}</h2>
+                <p>{t("Введите сообщение или добавьте контекст.")}</p>
               </div>
-            )}
-            {olderError && (
-              <button className="history-retry" type="button" onClick={() => void loadOlder()}>
-                {t("Повторить загрузку старых сообщений")}
-              </button>
-            )}
-            {!detail && optimisticTurnMessages.length === 0 && (
-              <div className="center-state compact">
-                <div className="spinner" />
-              </div>
-            )}
-            {detail?.turns.map((turn) => {
-              const entries = groupedTurnActivities.get(turn.id)!;
-              const turnOptimisticMessages = optimisticTurnMessages.filter(
-                (message) =>
-                  message.turnId === turn.id ||
-                  (!message.turnId && summary.currentTurnId === turn.id),
-              );
-              const active = summary.currentTurnId === turn.id;
-              if (
-                isSubagent &&
-                entries.length === 0 &&
-                turnOptimisticMessages.length === 0 &&
-                !active
-              ) {
-                return null;
-              }
-              return (
-                <div className="turn" key={turn.id}>
-                  {turnOptimisticMessages.map((message) => (
-                    <Activity
-                      item={optimisticActivity(message)}
-                      cwd={summary.cwd}
-                      onDownload={downloadFile}
-                      key={message.id}
-                    />
-                  ))}
-                  {entries.map((entry) =>
-                    Array.isArray(entry) ? (
-                      <MemoizedActivityGroup
-                        items={entry}
-                        cwd={summary.cwd}
-                        onDownload={downloadFile}
-                        key={entry.map((item) => item.id).join(":")}
-                      />
-                    ) : (
-                      <div key={entry.id}>
-                        <MemoizedActivity
-                          item={entry}
-                          cwd={summary.cwd}
-                          onDownload={downloadFile}
-                          annotations={annotations}
-                          annotationEnabled={
-                            !isSubagent && !busy && entry.id === latestAnnotatableId
-                          }
-                          annotationBusy={busy}
-                          onCreateAnnotation={createAnnotationEvent}
-                          onUpdateAnnotation={updateAnnotationEvent}
-                          onDeleteAnnotation={deleteAnnotationEvent}
-                        />
-                        {!isSubagent && entry.id === latestPlanId && (
-                          <div className="implement-plan-actions">
-                            <button
-                              className="implement-plan"
-                              disabled={busy || latestPlanHasAnnotations}
-                              title={
-                                latestPlanHasAnnotations
-                                  ? t("Сначала отправьте или удалите аннотации к плану")
-                                  : undefined
-                              }
-                              type="button"
-                              onClick={() => void implementPlan("default")}
-                            >
-                              {t("Да, реализуй этот план")}
-                            </button>
-                            <button
-                              className="implement-plan orchestrator"
-                              disabled={busy || latestPlanHasAnnotations}
-                              title={
-                                latestPlanHasAnnotations
-                                  ? t("Сначала отправьте или удалите аннотации к плану")
-                                  : undefined
-                              }
-                              type="button"
-                              onClick={() => void implementPlan("team")}
-                            >
-                              <TeamIcon />
-                              {t("Запустить в режиме оркестратора")}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ),
-                  )}
-                  {isSubagent ? (
-                    active && (
-                      <ActiveTurnStatus
-                        progress={{
-                          ...turn.progress,
-                          startedAt: turn.startedAt ?? turn.progress.startedAt,
-                        }}
-                      />
-                    )
-                  ) : (
-                    <MemoizedTurnTiming turn={turn} active={active} />
-                  )}
-                </div>
-              );
-            })}
-            {summary.currentTurnId &&
-              !detail?.turns.some((turn) => turn.id === summary.currentTurnId) && (
-                <div className="turn active-turn-placeholder">
-                  <ActiveTurnStatus progress={activeProgress} />
-                </div>
-              )}
-            {detachedOptimisticMessages(
-              optimisticTurnMessages,
-              detail?.turns ?? [],
-              summary.currentTurnId,
-            ).map((message) => (
-              <div className="turn optimistic-turn" key={`optimistic:${message.id}`}>
+            ) : pendingOptimisticMessage ? (
+              <div className="turn optimistic-turn">
                 <Activity
-                  item={optimisticActivity(message)}
-                  cwd={summary.cwd}
-                  onDownload={downloadFile}
+                  item={optimisticActivity(pendingOptimisticMessage)}
+                  cwd={project?.path ?? workspaceSummary.cwd}
+                  onDownload={async () => undefined}
                 />
               </div>
-            ))}
-            {!isSubagent && autoVoiceProgress && (
-              <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+            ) : (
+              <>
+                {loadingOlder && (
+                  <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
+                    <span className="spinner small" />
+                  </div>
+                )}
+                {olderError && (
+                  <button className="history-retry" type="button" onClick={() => void loadOlder()}>
+                    {t("Повторить загрузку старых сообщений")}
+                  </button>
+                )}
+                {!detail &&
+                  optimisticTurnMessages.length === 0 &&
+                  createdInWorkspaceRef.current !== threadId && (
+                    <div className="center-state compact">
+                      <div className="spinner" />
+                    </div>
+                  )}
+                {detail?.turns.map((turn) => {
+                  const entries = groupedTurnActivities.get(turn.id)!;
+                  const turnOptimisticMessages = optimisticTurnMessages.filter(
+                    (message) =>
+                      message.turnId === turn.id ||
+                      (!message.turnId && workspaceSummary.currentTurnId === turn.id),
+                  );
+                  const active = workspaceSummary.currentTurnId === turn.id;
+                  if (
+                    isSubagent &&
+                    entries.length === 0 &&
+                    turnOptimisticMessages.length === 0 &&
+                    !active
+                  ) {
+                    return null;
+                  }
+                  return (
+                    <div className="turn" key={turn.id}>
+                      {turnOptimisticMessages.map((message) => (
+                        <Activity
+                          item={optimisticActivity(message)}
+                          cwd={workspaceSummary.cwd}
+                          onDownload={downloadFile}
+                          key={message.id}
+                        />
+                      ))}
+                      {entries.map((entry) =>
+                        Array.isArray(entry) ? (
+                          <MemoizedActivityGroup
+                            items={entry}
+                            cwd={workspaceSummary.cwd}
+                            onDownload={downloadFile}
+                            key={entry.map((item) => item.id).join(":")}
+                          />
+                        ) : (
+                          <div key={entry.id}>
+                            <MemoizedActivity
+                              item={entry}
+                              cwd={workspaceSummary.cwd}
+                              onDownload={downloadFile}
+                              annotations={annotations}
+                              annotationEnabled={
+                                !isSubagent && !busy && entry.id === latestAnnotatableId
+                              }
+                              annotationBusy={busy}
+                              onCreateAnnotation={createAnnotationEvent}
+                              onUpdateAnnotation={updateAnnotationEvent}
+                              onDeleteAnnotation={deleteAnnotationEvent}
+                            />
+                            {!isSubagent && entry.id === latestPlanId && (
+                              <div className="implement-plan-actions">
+                                <button
+                                  className="implement-plan"
+                                  disabled={busy || latestPlanHasAnnotations}
+                                  title={
+                                    latestPlanHasAnnotations
+                                      ? t("Сначала отправьте или удалите аннотации к плану")
+                                      : undefined
+                                  }
+                                  type="button"
+                                  onClick={() => void implementPlan("default")}
+                                >
+                                  {t("Да, реализуй этот план")}
+                                </button>
+                                <button
+                                  className="implement-plan orchestrator"
+                                  disabled={busy || latestPlanHasAnnotations}
+                                  title={
+                                    latestPlanHasAnnotations
+                                      ? t("Сначала отправьте или удалите аннотации к плану")
+                                      : undefined
+                                  }
+                                  type="button"
+                                  onClick={() => void implementPlan("team")}
+                                >
+                                  <TeamIcon />
+                                  {t("Запустить в режиме оркестратора")}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ),
+                      )}
+                      {isSubagent ? (
+                        active && (
+                          <ActiveTurnStatus
+                            progress={{
+                              ...turn.progress,
+                              startedAt: turn.startedAt ?? turn.progress.startedAt,
+                            }}
+                          />
+                        )
+                      ) : (
+                        <MemoizedTurnTiming turn={turn} active={active} />
+                      )}
+                    </div>
+                  );
+                })}
+                {workspaceSummary.currentTurnId &&
+                  !detail?.turns.some((turn) => turn.id === workspaceSummary.currentTurnId) && (
+                    <div className="turn active-turn-placeholder">
+                      <ActiveTurnStatus progress={activeProgress} />
+                    </div>
+                  )}
+                {detachedOptimisticMessages(
+                  optimisticTurnMessages,
+                  detail?.turns ?? [],
+                  workspaceSummary.currentTurnId,
+                ).map((message) => (
+                  <div className="turn optimistic-turn" key={`optimistic:${message.id}`}>
+                    <Activity
+                      item={optimisticActivity(message)}
+                      cwd={workspaceSummary.cwd}
+                      onDownload={downloadFile}
+                    />
+                  </div>
+                ))}
+                {!isSubagent && autoVoiceProgress && (
+                  <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+                )}
+                <AttentionPanel requests={attention} />
+                {!isSubagent &&
+                  !activeVoiceJob &&
+                  !voiceUpload &&
+                  ["completed", "interrupted"].includes(workspaceSummary.state) &&
+                  workspaceSummary.unread && (
+                    <button
+                      className="finish-thread-action"
+                      disabled={finishing}
+                      onClick={() => void finishThread()}
+                    >
+                      {finishing ? t("Заканчиваем…") : t("Закончить")}
+                    </button>
+                  )}
+              </>
             )}
-            <AttentionPanel requests={attention} />
-            {!isSubagent &&
-              !activeVoiceJob &&
-              !voiceUpload &&
-              ["completed", "interrupted"].includes(summary.state) &&
-              summary.unread && (
-                <button
-                  className="finish-thread-action"
-                  disabled={finishing}
-                  onClick={() => void finishThread()}
-                >
-                  {finishing ? t("Заканчиваем…") : t("Закончить")}
-                </button>
-              )}
           </section>
         </div>
         {isSubagent ? (
@@ -1392,18 +2549,23 @@ export function ThreadPage({
           </div>
         ) : (
           <Composer
-            key={threadId}
             autoFocus={
+              preparationRef.current.active ||
               (location.state as { focusComposer?: unknown } | null)?.focusComposer === true
+            }
+            sessionIdentity={
+              initialNewSessionRef.current.active ? "new-session-workspace" : threadId
             }
             input={input}
             onInput={setInput}
             images={images}
             onImagesChange={setImages}
+            attachmentScope={attachmentScope}
+            onPendingAttachmentsChange={setPendingAttachments}
             onSubmit={submit}
             busy={busy}
-            running={Boolean(summary.currentTurnId)}
-            settings={summary.settings}
+            running={Boolean(workspaceSummary.currentTurnId)}
+            settings={preparationRef.current.active ? pendingSettings : workspaceSummary.settings}
             onSettingsChange={(patch) => void updateSettings(patch)}
             settingsBusy={settingsBusy}
             goalMode={goalMode}
@@ -1420,8 +2582,8 @@ export function ThreadPage({
             onGoalClear={() => void clearGoal()}
             models={state.snapshot?.models ?? []}
             onStop={
-              summary.currentTurnId
-                ? () => void api.interrupt(threadId, summary.currentTurnId!)
+              workspaceSummary.currentTurnId
+                ? () => void api.interrupt(threadId, workspaceSummary.currentTurnId!)
                 : undefined
             }
             transcriptionConfig={transcriptionConfig}
@@ -1434,7 +2596,21 @@ export function ThreadPage({
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
             voiceCancellationPending={voiceCancellationPending}
-            onRecordingReady={(recording) => beginTranscription(threadId, recording)}
+            onTranscribe={
+              preparationRef.current.active
+                ? async (audio, durationMs) => {
+                    if (!transcriptionProvider) {
+                      throw new Error(t("Распознавание речи не настроено"));
+                    }
+                    return (await api.transcribe(audio, durationMs)).text;
+                  }
+                : undefined
+            }
+            onRecordingReady={
+              preparationRef.current.active
+                ? undefined
+                : (recording) => beginTranscription(activeThreadIdRef.current, recording)
+            }
             transcriptionStatus={draftVoiceProgress}
             transcriptionError={
               voiceJob?.status === "failed"
@@ -1444,6 +2620,26 @@ export function ThreadPage({
             error={error}
             hasSupplementalContent={annotations.length > 0}
           >
+            {storageWarning && preparationRef.current.active && (
+              <p className="new-session-storage-warning" role="status">
+                {t(
+                  "Локальное сохранение недоступно. Не закрывайте страницу, пока сессия не откроется.",
+                )}
+              </p>
+            )}
+            {error && preparationRef.current.active && (
+              <button
+                className="new-session-retry"
+                type="button"
+                disabled={preparationWorking || busy}
+                onClick={() => {
+                  if (!preparationRef.current.threadId) creationPromiseRef.current = null;
+                  setPreparationRetry((value) => value + 1);
+                }}
+              >
+                {t("Повторить")}
+              </button>
+            )}
             {teamUpgradeRequired && project && (
               <button
                 className="team-session-upgrade"
@@ -1468,10 +2664,11 @@ export function ThreadPage({
               </button>
             )}
             <QueuedMessages
-              messages={mergeOptimisticQueue(
-                detail?.queuedMessages ?? [],
-                optimisticQueuedMessages,
-              )}
+              messages={
+                preparationRef.current.active
+                  ? []
+                  : mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)
+              }
               action={queueAction}
               onSendNow={sendQueuedNow}
               onUpdate={updateQueued}
@@ -1480,16 +2677,24 @@ export function ThreadPage({
           </Composer>
         )}
       </div>
-      <SessionInspector
-        open={inspectorOpen}
-        summary={summary}
-        project={project}
-        gitChanges={gitChangesState?.threadId === threadId ? gitChangesState.value : null}
-        onClose={() => setInspectorOpen(false)}
-        onPin={togglePin}
-        onArchive={toggleArchive}
-        readOnly={isSubagent}
-      />
+      {showNewSessionChrome ? (
+        <NewSessionInspector
+          open={inspectorOpen}
+          project={project}
+          onClose={() => setInspectorOpen(false)}
+        />
+      ) : (
+        <SessionInspector
+          open={inspectorOpen}
+          summary={workspaceSummary}
+          project={project}
+          gitChanges={gitChangesState?.threadId === threadId ? gitChangesState.value : null}
+          onClose={() => setInspectorOpen(false)}
+          onPin={togglePin}
+          onArchive={toggleArchive}
+          readOnly={isSubagent}
+        />
+      )}
       {inspectorOpen && (
         <button
           className="inspector-backdrop"
@@ -1499,7 +2704,7 @@ export function ThreadPage({
       )}
       {renaming && (
         <RenameDialog
-          initialValue={summary.title}
+          initialValue={workspaceSummary.title}
           onClose={() => setRenaming(false)}
           onRename={async (name) => {
             await api.updateThread(threadId, { name });

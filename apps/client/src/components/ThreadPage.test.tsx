@@ -2,7 +2,9 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
+  ModelOption,
   AttentionRequest,
   ThreadDetail,
   ThreadDraft,
@@ -15,7 +17,13 @@ import type {
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
 import type { OptimisticMessage } from "../state";
-import { Activity, ThreadPage, TurnTiming, formatMessageTime } from "./ThreadPage";
+import {
+  Activity,
+  ThreadPage,
+  TurnTiming,
+  formatMessageTime,
+  initialSessionSettings,
+} from "./ThreadPage";
 
 const connection = vi.hoisted(() => vi.fn());
 const openDownloadUrl = vi.hoisted(() => vi.fn());
@@ -58,6 +66,35 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+});
+
+describe("initialSessionSettings", () => {
+  const taskDefaults = { serviceTier: "fast", personality: "friendly" };
+
+  it("mirrors server defaults when model metadata is missing", () => {
+    expect(initialSessionSettings("high", [], taskDefaults)).toEqual({
+      ...DEFAULT_SESSION_SETTINGS,
+      reasoningEffort: "high",
+      ...taskDefaults,
+    });
+  });
+
+  it("keeps task defaults with stale metadata while validating only reasoning effort", () => {
+    const staleModel: ModelOption = {
+      id: "gpt",
+      displayName: "GPT",
+      description: "",
+      isDefault: true,
+      reasoningEfforts: [{ value: "low", description: null, isDefault: true }],
+      serviceTiers: [],
+      supportsPersonality: false,
+    };
+
+    expect(initialSessionSettings("high", [staleModel], taskDefaults)).toEqual({
+      ...DEFAULT_SESSION_SETTINGS,
+      ...taskDefaults,
+    });
+  });
 });
 
 describe("Activity", () => {
@@ -1713,6 +1750,26 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
     await waitFor(() => expect(screen.queryByAltText("screen.png")).toBeNull());
+  });
+
+  it("does not roll back a delivered message when local draft cleanup rejects", async () => {
+    deleteLocalDraft.mockRejectedValueOnce(new Error("IndexedDB недоступен"));
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary);
+    renderThread();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Уже доставлено" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledOnce());
+    await waitFor(() => expect(textbox).toHaveValue(""));
+    expect(screen.queryByText("IndexedDB недоступен")).not.toBeInTheDocument();
+    expect(context.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "optimistic.remove",
+      }),
+    );
   });
 
   it("keeps task settings in the composer without permission controls", async () => {

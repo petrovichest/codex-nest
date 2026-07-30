@@ -195,6 +195,7 @@ export async function saveNewSessionDraft(
     threadId: string | null;
     thread: ThreadSummary | null;
     revision: number;
+    settings?: SessionSettings;
   },
   updatedAt = Date.now(),
 ): Promise<boolean> {

@@ -2,12 +2,35 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
 
-import type { AppSnapshot, AppUpdateStatus, Project, ThreadSummary } from "@codexnest/protocol";
+import type {
+  AppSnapshot,
+  AppUpdateStatus,
+  Project,
+  ThreadDraft,
+  ThreadSummary,
+  UpdateThreadDraftRequest,
+} from "@codexnest/protocol";
 
 import { App } from "./App";
 import { I18nProvider } from "./i18n";
 
 const connection = vi.hoisted(() => vi.fn());
+const saveLocalDraft = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _settings: unknown,
+      threadId: string,
+      value: UpdateThreadDraftRequest,
+      updatedAt = Date.now(),
+    ) => ({
+      key: threadId,
+      connectionKey: "test",
+      threadId,
+      value,
+      updatedAt,
+    }),
+  ),
+);
 const capacitor = vi.hoisted(() => ({
   addListener: vi.fn(),
   backHandler: null as (() => void) | null,
@@ -18,6 +41,10 @@ const capacitor = vi.hoisted(() => ({
 }));
 
 vi.mock("./connection", () => ({ useConnection: connection }));
+vi.mock("./offline-store", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  saveLocalDraft,
+}));
 vi.mock("./push", () => ({
   acknowledgePendingThread: vi.fn().mockResolvedValue(undefined),
   stopPushNotifications: vi.fn().mockResolvedValue(undefined),
@@ -1232,6 +1259,754 @@ describe("App routing and navigation", () => {
     expect(api.createThread).not.toHaveBeenCalled();
   });
 
+  it("does not activate a created thread after navigating away from its preparation", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const abandonedProject = testProject("abandoned-project", "Отменяемый");
+    const api = mockConnection(snapshot([baseThread], [defaultProject(), abandonedProject]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Создать новую сессию в проекте Отменяемый",
+      }),
+    );
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("link", { name: "Новая задача в истории" }));
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Новая задача в истории" }),
+    ).toBeInTheDocument();
+
+    creation.resolve({ thread: { ...baseThread, id: "abandoned", title: "Оставленная задача" } });
+    await act(async () => Promise.resolve());
+
+    expect(api.dispatch).not.toHaveBeenCalledWith({
+      type: "thread",
+      thread: expect.objectContaining({ id: "abandoned" }),
+    });
+    expect(screen.queryByText("Оставленная задача")).not.toBeInTheDocument();
+  });
+
+  it("lets a second new-session route supersede the first preparation", async () => {
+    const firstCreation = deferred<{ thread: ThreadSummary }>();
+    const secondCreation = deferred<{ thread: ThreadSummary }>();
+    const firstProject = testProject("first-project", "Первый");
+    const secondProject = testProject("second-project", "Второй");
+    const api = mockConnection(
+      snapshot([baseThread], [defaultProject(), firstProject, secondProject]),
+    );
+    api.createProjectThread.mockImplementation((projectId: string) =>
+      projectId === "first-project" ? firstCreation.promise : secondCreation.promise,
+    );
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Первый" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("first-project"));
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Второй" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("second-project"));
+
+    secondCreation.resolve({
+      thread: {
+        ...baseThread,
+        id: "second-created",
+        projectId: "second-project",
+        title: "Вторая задача",
+      },
+    });
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "second-created" }),
+      }),
+    );
+    firstCreation.resolve({
+      thread: { ...baseThread, id: "first-abandoned", title: "Первая задача" },
+    });
+    await act(async () => Promise.resolve());
+
+    expect(api.dispatch).not.toHaveBeenCalledWith({
+      type: "thread",
+      thread: expect.objectContaining({ id: "first-abandoned" }),
+    });
+  });
+
+  it("keeps the same focused textarea, caret, draft, and empty greeting after creation resolves", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    fireEvent.change(textarea, { target: { value: "Сохрани редактор целиком" } });
+    textarea.focus();
+    textarea.setSelectionRange(7, 15);
+
+    expect(screen.getByRole("heading", { name: "Что поручим Codex?" })).toBeInTheDocument();
+    expect(screen.getByText("Введите сообщение или добавьте контекст.")).toBeInTheDocument();
+    expect(screen.queryByText(/Готовим сессию|Получаем состояние/)).not.toBeInTheDocument();
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBe(textarea);
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe(7);
+    expect(textarea.selectionEnd).toBe(15);
+    expect(textarea).toHaveValue("Сохрани редактор целиком");
+    expect(screen.getByRole("heading", { name: "Что поручим Codex?" })).toBeInTheDocument();
+    expect(screen.getByText("Введите сообщение или добавьте контекст.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Действия с задачей")).not.toBeInTheDocument();
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps pending controls open and applies only a user-changed settings patch", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const appSnapshot = snapshot([baseThread]);
+    appSnapshot.models = [
+      {
+        id: "gpt",
+        displayName: "GPT",
+        description: "",
+        isDefault: true,
+        reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+        serviceTiers: [{ id: "fast", displayName: "Fast" }],
+        supportsPersonality: true,
+      },
+    ];
+    appSnapshot.defaultReasoningEffort = "high";
+    appSnapshot.taskDefaults = { serviceTier: "fast", personality: "friendly" };
+    const api = mockConnection(appSnapshot);
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
+    expect(screen.getByRole("dialog", { name: "Настройки модели" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+
+    creation.resolve({
+      thread: {
+        ...baseThread,
+        id: "created",
+        title: "Новая задача",
+        settings: {
+          collaborationMode: "default",
+          reasoningEffort: "high",
+          serviceTier: "fast",
+          personality: "friendly",
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("created", {
+        collaborationMode: "plan",
+      }),
+    );
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+    expect(screen.getByRole("dialog", { name: "Настройки модели" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(api.updateThreadSettings).toHaveBeenCalledOnce();
+  });
+
+  it("does not null-clear task defaults after a collaboration-only edit with stale metadata", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const appSnapshot = snapshot([baseThread]);
+    appSnapshot.models = [
+      {
+        id: "gpt",
+        displayName: "GPT",
+        description: "",
+        isDefault: true,
+        reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+        serviceTiers: [],
+        supportsPersonality: false,
+      },
+    ];
+    appSnapshot.defaultReasoningEffort = "high";
+    appSnapshot.taskDefaults = { serviceTier: "fast", personality: "friendly" };
+    const api = mockConnection(appSnapshot);
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+
+    creation.resolve({
+      thread: {
+        ...baseThread,
+        id: "created",
+        title: "Новая задача",
+        settings: {
+          collaborationMode: "default",
+          reasoningEffort: "high",
+          serviceTier: "fast",
+          personality: "friendly",
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("created", {
+        collaborationMode: "plan",
+      }),
+    );
+    expect(api.updateThreadSettings).toHaveBeenCalledOnce();
+  });
+
+  it("skips settings RPC when pending plan mode returns to the created default", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const appSnapshot = snapshot([baseThread]);
+    appSnapshot.models = [
+      {
+        id: "gpt",
+        displayName: "GPT",
+        description: "",
+        isDefault: true,
+        reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+        serviceTiers: [{ id: "fast", displayName: "Fast" }],
+        supportsPersonality: true,
+      },
+    ];
+    appSnapshot.defaultReasoningEffort = "high";
+    appSnapshot.taskDefaults = { serviceTier: "fast", personality: "friendly" };
+    const api = mockConnection(appSnapshot);
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+
+    creation.resolve({
+      thread: {
+        ...baseThread,
+        id: "created",
+        title: "Новая задача",
+        settings: {
+          collaborationMode: "default",
+          reasoningEffort: "high",
+          serviceTier: "fast",
+          personality: "friendly",
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+  });
+
+  it("submits once through the in-flight creation request and transfers its optimistic message", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Отправь без ожидания" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(screen.getByText("Отправь без ожидания")).toBeInTheDocument();
+    expect(textarea).toHaveValue("");
+    expect(api.createProjectThread).toHaveBeenCalledOnce();
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({ input: "Отправь без ожидания" }),
+      ),
+    );
+    expect(api.createProjectThread).toHaveBeenCalledOnce();
+    expect(api.sendReliable).toHaveBeenCalledOnce();
+    expect(api.updateThreadDraft).not.toHaveBeenCalled();
+    expect(api.dispatch).toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.objectContaining({
+        threadId: "created",
+        text: "Отправь без ожидания",
+      }),
+    });
+  });
+
+  it("reapplies a newer draft when a stale transfer clear fails after early send", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const stalePut = deferred<ThreadDraft | null>();
+    const clearPut = deferred<ThreadDraft | null>();
+    const api = mockConnection(snapshot([baseThread]));
+    let putCount = 0;
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.updateThreadDraft.mockImplementation(
+      (_threadId: string, draft: UpdateThreadDraftRequest) => {
+        putCount += 1;
+        if (putCount === 1) return stalePut.promise;
+        if (putCount === 2) return clearPut.promise;
+        return Promise.resolve({ ...draft, updatedAt: Date.now() });
+      },
+    );
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    fireEvent.change(textarea, { target: { value: "Черновик A" } });
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenNthCalledWith(
+        1,
+        "created",
+        expect.objectContaining({ input: "Черновик A" }),
+        { retry: true },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(api.sendReliable).toHaveBeenCalledOnce());
+
+    stalePut.resolve({
+      input: "Черновик A",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    });
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenNthCalledWith(
+        2,
+        "created",
+        { input: "", images: [], goalMode: false, annotations: [] },
+        { retry: true },
+      ),
+    );
+
+    fireEvent.change(textarea, { target: { value: "Черновик B" } });
+    clearPut.reject(new Error("Clear failed"));
+
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenLastCalledWith(
+        "created",
+        expect.objectContaining({ input: "Черновик B" }),
+        { keepalive: false },
+      ),
+    );
+    expect(saveLocalDraft).toHaveBeenLastCalledWith(
+      api.settings,
+      "created",
+      expect.objectContaining({ input: "Черновик B" }),
+      expect.any(Number),
+    );
+    expect(api.sendReliable).toHaveBeenCalledOnce();
+    expect(api.updateThreadDraft).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries an empty clear when a stale transfer clear fails without a newer draft", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const stalePut = deferred<ThreadDraft | null>();
+    const clearPut = deferred<ThreadDraft | null>();
+    const api = mockConnection(snapshot([baseThread]));
+    let putCount = 0;
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.updateThreadDraft.mockImplementation(
+      (_threadId: string, draft: UpdateThreadDraftRequest) => {
+        putCount += 1;
+        if (putCount === 1) return stalePut.promise;
+        if (putCount === 2) return clearPut.promise;
+        return Promise.resolve({ ...draft, updatedAt: Date.now() });
+      },
+    );
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    fireEvent.change(textarea, { target: { value: "Черновик A" } });
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(api.sendReliable).toHaveBeenCalledOnce());
+    stalePut.resolve({
+      input: "Черновик A",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    });
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledTimes(2));
+    clearPut.reject(new Error("Clear failed"));
+
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenLastCalledWith(
+        "created",
+        { input: "", images: [], goalMode: false, annotations: [] },
+        { keepalive: false },
+      ),
+    );
+    expect(saveLocalDraft).toHaveBeenLastCalledWith(
+      api.settings,
+      "created",
+      { input: "", images: [], goalMode: false, annotations: [] },
+      expect.any(Number),
+    );
+    expect(textarea).toHaveValue("");
+    expect(api.sendReliable).toHaveBeenCalledOnce();
+    expect(api.updateThreadDraft).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits for an in-flight image read before sending an early submission", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const imageRead = deferred<string>();
+    class PendingFileReader {
+      result: string | ArrayBuffer | null = null;
+      error: DOMException | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        void imageRead.promise.then((result) => {
+          this.result = result;
+          this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal("FileReader", PendingFileReader);
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Проверь изображение" } });
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["image"], "screen.png", { type: "image/png" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    expect(api.sendReliable).not.toHaveBeenCalled();
+    imageRead.resolve("data:image/png;base64,aW1hZ2U=");
+
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({
+          input: "Проверь изображение",
+          images: ["data:image/png;base64,aW1hZ2U="],
+        }),
+      ),
+    );
+  });
+
+  it("merges concurrent delayed image reads into one early submission in selection order", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const reads = [deferred<string>(), deferred<string>()];
+    let readIndex = 0;
+    class PendingFileReader {
+      result: string | ArrayBuffer | null = null;
+      error: DOMException | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        const read = reads[readIndex++]!;
+        void read.promise.then((result) => {
+          this.result = result;
+          this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal("FileReader", PendingFileReader);
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    const fileInput = view.container.querySelector('input[type="file"]')!;
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Проверь оба изображения" } });
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["first"], "first.png", { type: "image/png" })] },
+    });
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["second"], "second.png", { type: "image/png" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    reads[1]!.resolve("data:image/png;base64,c2Vjb25k");
+    await act(async () => Promise.resolve());
+    expect(api.sendReliable).not.toHaveBeenCalled();
+    reads[0]!.resolve("data:image/png;base64,Zmlyc3Q=");
+
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({
+          images: ["data:image/png;base64,Zmlyc3Q=", "data:image/png;base64,c2Vjb25k"],
+        }),
+      ),
+    );
+  });
+
+  it("keeps a delayed next-draft image on the activated thread after early-submit success", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    const imageRead = deferred<string>();
+    class PendingFileReader {
+      result: string | ArrayBuffer | null = null;
+      error: DOMException | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        void imageRead.promise.then((result) => {
+          this.result = result;
+          this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal("FileReader", PendingFileReader);
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.sendReliable.mockReturnValue(delivery.promise);
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Отправь сообщение" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["next"], "next.png", { type: "image/png" })] },
+    });
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+    await waitFor(() => expect(api.sendReliable).toHaveBeenCalledOnce());
+    delivery.resolve("delivered");
+    await act(async () => Promise.resolve());
+    expect(api.updateThreadDraft).not.toHaveBeenCalledWith(
+      "",
+      expect.anything(),
+      expect.anything(),
+    );
+
+    imageRead.resolve("data:image/png;base64,bmV4dA==");
+
+    expect(await screen.findByAltText("next.png")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({
+          images: [
+            expect.objectContaining({
+              name: "next.png",
+              url: "data:image/png;base64,bmV4dA==",
+            }),
+          ],
+        }),
+        { keepalive: false },
+      ),
+    );
+    expect(api.updateThreadDraft.mock.calls.some(([id]) => id === "")).toBe(false);
+  });
+
+  it("keeps text and images added after early-submit success as the next draft", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.sendReliable.mockReturnValue(delivery.promise);
+
+    const view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Черновик A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    fireEvent.change(textarea, { target: { value: "Новый черновик B" } });
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["new"], "new.png", { type: "image/png" })] },
+    });
+    expect(await screen.findByAltText("new.png")).toBeInTheDocument();
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+    await waitFor(() => expect(api.sendReliable).toHaveBeenCalledOnce());
+    expect(api.sendReliable.mock.calls[0]?.[1]).not.toHaveProperty("images");
+    delivery.resolve("delivered");
+
+    await waitFor(() => expect(textarea).toHaveValue("Новый черновик B"));
+    expect(screen.getByAltText("new.png")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.updateThreadDraft).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({
+          input: "Новый черновик B",
+          images: [expect.objectContaining({ name: "new.png" })],
+        }),
+        { keepalive: false },
+      ),
+    );
+  });
+
+  it("merges the submitted draft with newer edits when early sending fails", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.sendReliable.mockReturnValue(delivery.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Черновик A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    fireEvent.change(textarea, { target: { value: "Новый черновик B" } });
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+    await waitFor(() => expect(api.sendReliable).toHaveBeenCalledOnce());
+    delivery.reject(new Error("Отправка недоступна"));
+
+    expect(await screen.findByText("Отправка недоступна")).toBeInTheDocument();
+    expect(textarea).toHaveValue("Черновик A\n\nНовый черновик B");
+  });
+
+  it("queues a recording stopped after activation on the real thread", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.readTranscriptionConfig.mockResolvedValue({
+      providers: ["local"],
+      provider: "local",
+      localUrl: "http://127.0.0.1:8178/inference",
+      openAiApiKeyConfigured: false,
+      openAiModel: "gpt-4o-transcribe",
+      language: "ru",
+      refineLocal: false,
+      refinementModel: "gpt-5.6-luna",
+      maxRecordingSeconds: 300,
+      maxUploadBytes: 24 * 1024 * 1024,
+      timingEstimate: {
+        sampleCount: 0,
+        estimatedFixedProcessingMs: null,
+        estimatedProcessingMsPerAudioSecond: null,
+      },
+    });
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+    await screen.findByRole("button", { name: "Остановить запись" });
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Остановить запись" }));
+
+    await waitFor(() =>
+      expect(api.queueVoiceRecording).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: "created",
+          audio: expect.any(Blob),
+        }),
+      ),
+    );
+    expect(
+      api.queueVoiceRecording.mock.calls.some(([recording]) => recording.threadId === ""),
+    ).toBe(false);
+    expect(api.updateThreadDraft.mock.calls.some(([id]) => id === "")).toBe(false);
+  });
+
+  it("restores an early draft after creation fails without replacing the editor", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Верни этот черновик" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    creation.reject(new Error("Создание недоступно"));
+
+    expect(await screen.findByText("Создание недоступно")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBe(textarea);
+    expect(textarea).toHaveValue("Верни этот черновик");
+    expect(screen.getByRole("button", { name: "Повторить" })).toBeEnabled();
+    expect(api.sendReliable).not.toHaveBeenCalled();
+  });
+
+  it("restores an early draft in the same editor when reliable sending fails", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.sendReliable.mockRejectedValue(new Error("Отправка недоступна"));
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Не потеряй после отправки" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    expect(await screen.findByText("Отправка недоступна")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBe(textarea);
+    expect(textarea).toHaveValue("Не потеряй после отправки");
+    expect(api.createProjectThread).toHaveBeenCalledOnce();
+    expect(api.sendReliable).toHaveBeenCalledOnce();
+  });
+
   it("opens global Codex settings and switches the saved server there", async () => {
     const api = mockConnection(snapshot([baseThread]));
     const onDisconnected = vi.fn();
@@ -1613,6 +2388,16 @@ function mockConnection(
     interrupt: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
     createProjectThread: vi.fn(),
+    updateThreadDraft: vi.fn().mockImplementation(async (_id, draft) => ({
+      ...draft,
+      updatedAt: Date.now(),
+    })),
+    updateThreadSettings: vi.fn().mockImplementation(async (id, patch) => ({
+      ...baseThread,
+      id,
+      settings: { ...baseThread.settings, ...patch },
+    })),
+    transcribe: vi.fn(),
     deleteProject: vi.fn(),
     moveProject: vi.fn(),
     dispatch: vi.fn(),
@@ -1666,6 +2451,8 @@ function mockConnection(
       message: null,
     }),
     updatePermissionSettings: vi.fn(),
+    sendReliable: vi.fn().mockResolvedValue("delivered"),
+    queueVoiceRecording: vi.fn().mockResolvedValue(undefined),
   };
   connection.mockReturnValue({
     api,
@@ -1689,6 +2476,10 @@ function mockConnection(
       queuedMessages: [],
       olderTurnsCursor: null,
     })),
+    forceRefreshDetail: vi.fn(),
+    loadOlderDetail: vi.fn(),
+    sendReliable: api.sendReliable,
+    queueVoiceRecording: api.queueVoiceRecording,
   });
   return api;
 }
@@ -1707,4 +2498,47 @@ function appUpdateStatus(overrides: Partial<AppUpdateStatus> = {}): AppUpdateSta
     updatedAt: null,
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
+  class FakeMediaRecorder extends EventTarget {
+    static isTypeSupported = vi.fn(() => true);
+    readonly mimeType: string;
+    state: RecordingState = "inactive";
+
+    constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+      super();
+      this.mimeType = options?.mimeType ?? "audio/webm";
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      if (this.state === "inactive") return;
+      this.state = "inactive";
+      const data = new Blob(["audio"], { type: this.mimeType });
+      const dataEvent = new Event("dataavailable") as BlobEvent;
+      Object.defineProperty(dataEvent, "data", { value: data });
+      this.dispatchEvent(dataEvent);
+      this.dispatchEvent(new Event("stop"));
+    }
+  }
+
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia: vi.fn(getUserMedia) },
+  });
 }

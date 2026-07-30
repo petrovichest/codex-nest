@@ -59,6 +59,7 @@ export function Composer({
   onInput,
   images,
   onImagesChange,
+  attachmentScope = 0,
   onPendingAttachmentsChange,
   onSubmit,
   busy,
@@ -92,14 +93,16 @@ export function Composer({
   transcriptionError = null,
   error,
   autoFocus = false,
+  sessionIdentity,
   hasSupplementalContent = false,
   children,
 }: {
   input: string;
   onInput(value: string): void;
   images: ComposerImage[];
-  onImagesChange(value: ComposerImage[]): void;
-  onPendingAttachmentsChange?(pending: boolean): void;
+  onImagesChange(value: ComposerImage[], attachmentScope?: number): void;
+  attachmentScope?: number;
+  onPendingAttachmentsChange?(pending: boolean, attachmentScope?: number): void;
   onSubmit(event: FormEvent): void;
   busy: boolean;
   running?: boolean;
@@ -132,6 +135,7 @@ export function Composer({
   transcriptionError?: string | null;
   error: string | null;
   autoFocus?: boolean;
+  sessionIdentity?: string;
   hasSupplementalContent?: boolean;
   children?: ReactNode;
 }) {
@@ -153,7 +157,40 @@ export function Composer({
   const transcriptionStartedAtRef = useRef(0);
   const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
-  const pendingAttachmentReadsRef = useRef(0);
+  const pendingAttachmentScopesRef = useRef(new Map<number, number>());
+  const attachmentBatchesRef = useRef(new Map<number, Promise<void>>());
+  const attachmentImagesRef = useRef(new Map<number, ComposerImage[]>());
+  const sessionIdentityRef = useRef(sessionIdentity);
+  const latestPropsRef = useRef({
+    attachmentScope,
+    goalMode,
+    images,
+    input,
+    language,
+    onImagesChange,
+    onInput,
+    onPendingAttachmentsChange,
+    onRecordingReady,
+    onTranscribe,
+    sessionIdentity,
+    t,
+    transcriptionConfig,
+  });
+  latestPropsRef.current = {
+    attachmentScope,
+    goalMode,
+    images,
+    input,
+    language,
+    onImagesChange,
+    onInput,
+    onPendingAttachmentsChange,
+    onRecordingReady,
+    onTranscribe,
+    sessionIdentity,
+    t,
+    transcriptionConfig,
+  };
   const [viewer, setViewer] = useState<{ index: number; opener: HTMLButtonElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -237,6 +274,10 @@ export function Composer({
     if (viewer && viewer.index >= images.length) setViewer(null);
   }, [images.length, viewer]);
 
+  useLayoutEffect(() => {
+    attachmentImagesRef.current.set(attachmentScope, images);
+  }, [attachmentScope, images]);
+
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -300,6 +341,33 @@ export function Composer({
     };
   }, []);
 
+  useEffect(() => {
+    if (sessionIdentityRef.current === sessionIdentity) return;
+    sessionIdentityRef.current = sessionIdentity;
+    clearRecordingTimers();
+    clearTranscriptionTimer();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      discardRecordingRef.current = true;
+      recordingStoppedRef.current = true;
+      recorder.stop();
+    }
+    stopMediaStream();
+    mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
+    audioBytesRef.current = 0;
+    insertionRef.current = null;
+    pendingAttachmentScopesRef.current.clear();
+    attachmentBatchesRef.current.clear();
+    attachmentImagesRef.current.clear();
+    setViewer(null);
+    setAttachmentError(null);
+    setSpeechError(null);
+    setSpeechState("idle");
+    setRecordingSeconds(0);
+    setTranscribingSeconds(0);
+  }, [sessionIdentity]);
+
   function keyboardSubmit(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -310,24 +378,57 @@ export function Composer({
   async function addImages(files: readonly File[]) {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     if (!imageFiles.length) return;
+    const operationIdentity = latestPropsRef.current.sessionIdentity;
+    const scope = latestPropsRef.current.attachmentScope;
+    if (!attachmentImagesRef.current.has(scope)) {
+      attachmentImagesRef.current.set(scope, latestPropsRef.current.images);
+    }
     setAttachmentError(null);
-    pendingAttachmentReadsRef.current += 1;
-    onPendingAttachmentsChange?.(true);
+    pendingAttachmentScopesRef.current.set(
+      scope,
+      (pendingAttachmentScopesRef.current.get(scope) ?? 0) + 1,
+    );
+    latestPropsRef.current.onPendingAttachmentsChange?.(true, scope);
+    const read = Promise.all(
+      imageFiles.map(async (file, index) => ({
+        id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        name: file.name.trim() || pastedImageName(file.type, index),
+        url: await readImage(file),
+      })),
+    );
+    const previousBatch = attachmentBatchesRef.current.get(scope) ?? Promise.resolve();
+    const batch = previousBatch
+      .catch(() => undefined)
+      .then(async () => {
+        const added = await read;
+        if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== operationIdentity) {
+          return;
+        }
+        const next = [...(attachmentImagesRef.current.get(scope) ?? []), ...added];
+        attachmentImagesRef.current.set(scope, next);
+        latestPropsRef.current.onImagesChange(next, scope);
+      });
+    attachmentBatchesRef.current.set(scope, batch);
     try {
-      const added = await Promise.all(
-        imageFiles.map(async (file, index) => ({
-          id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-          name: file.name.trim() || pastedImageName(file.type, index),
-          url: await readImage(file),
-        })),
-      );
-      onImagesChange([...images, ...added]);
+      await batch;
     } catch {
-      setAttachmentError(t("Не удалось прочитать выбранное изображение"));
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === operationIdentity) {
+        setAttachmentError(latestPropsRef.current.t("Не удалось прочитать выбранное изображение"));
+      }
     } finally {
+      if (attachmentBatchesRef.current.get(scope) === batch) {
+        attachmentBatchesRef.current.delete(scope);
+      }
       if (fileInputRef.current) fileInputRef.current.value = "";
-      pendingAttachmentReadsRef.current = Math.max(0, pendingAttachmentReadsRef.current - 1);
-      onPendingAttachmentsChange?.(pendingAttachmentReadsRef.current > 0);
+      const pendingInScope = Math.max(0, (pendingAttachmentScopesRef.current.get(scope) ?? 1) - 1);
+      if (pendingInScope) {
+        pendingAttachmentScopesRef.current.set(scope, pendingInScope);
+      } else {
+        pendingAttachmentScopesRef.current.delete(scope);
+      }
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === operationIdentity) {
+        latestPropsRef.current.onPendingAttachmentsChange?.(pendingInScope > 0, scope);
+      }
     }
   }
 
@@ -369,15 +470,17 @@ export function Composer({
       return;
     }
     if (!insertionRef.current) {
-      insertionRef.current = { start: input.length, end: input.length };
+      const latestInput = latestPropsRef.current.input;
+      insertionRef.current = { start: latestInput.length, end: latestInput.length };
     }
+    const recordingIdentity = latestPropsRef.current.sessionIdentity;
     setSpeechError(null);
     setSpeechState("requesting");
     discardRecordingRef.current = false;
     recordingStoppedRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (!aliveRef.current) {
+      if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== recordingIdentity) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -390,7 +493,10 @@ export function Composer({
         if (!event.data.size) return;
         audioChunksRef.current.push(event.data);
         audioBytesRef.current += event.data.size;
-        if (audioBytesRef.current >= (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
+        if (
+          audioBytesRef.current >=
+          (latestPropsRef.current.transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)
+        ) {
           stopRecording();
         }
       });
@@ -400,12 +506,12 @@ export function Composer({
         clearTranscriptionTimer();
         stopMediaStream();
         mediaRecorderRef.current = null;
-        if (aliveRef.current) {
+        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
           setSpeechState("idle");
-          setSpeechError(t("Не удалось записать аудио"));
+          setSpeechError(latestPropsRef.current.t("Не удалось записать аудио"));
         }
       });
-      recorder.addEventListener("stop", () => void finishRecording(mimeType));
+      recorder.addEventListener("stop", () => void finishRecording(mimeType, recordingIdentity));
       recorder.start(1_000);
       recordingStartedAtRef.current = Date.now();
       setRecordingSeconds(0);
@@ -417,13 +523,13 @@ export function Composer({
       }, 250);
       recordingLimitRef.current = window.setTimeout(
         stopRecording,
-        (transcriptionConfig?.maxRecordingSeconds ?? 300) * 1_000,
+        (latestPropsRef.current.transcriptionConfig?.maxRecordingSeconds ?? 300) * 1_000,
       );
     } catch (caught) {
       stopMediaStream();
-      if (aliveRef.current) {
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
         setSpeechState("idle");
-        setSpeechError(recordingErrorMessage(caught, t));
+        setSpeechError(recordingErrorMessage(caught, latestPropsRef.current.t));
       }
     }
   }
@@ -435,7 +541,7 @@ export function Composer({
     recordingStoppedRef.current = true;
     if (aliveRef.current) {
       startTranscriptionTimer();
-      if (onRecordingReady) {
+      if (latestPropsRef.current.onRecordingReady) {
         setSpeechState("uploading");
       } else {
         setSpeechState("transcribing");
@@ -455,7 +561,7 @@ export function Composer({
     stopMediaStream();
   }
 
-  async function finishRecording(mimeType: string) {
+  async function finishRecording(mimeType: string, recordingIdentity: string | undefined) {
     clearRecordingTimers();
     stopMediaStream();
     mediaRecorderRef.current = null;
@@ -463,6 +569,10 @@ export function Composer({
     const bytes = audioBytesRef.current;
     audioChunksRef.current = [];
     audioBytesRef.current = 0;
+    if (latestPropsRef.current.sessionIdentity !== recordingIdentity) {
+      clearTranscriptionTimer();
+      return;
+    }
     if (discardRecordingRef.current) {
       clearTranscriptionTimer();
       if (aliveRef.current) {
@@ -475,81 +585,98 @@ export function Composer({
       if (aliveRef.current) {
         clearTranscriptionTimer();
         setSpeechState("idle");
-        setSpeechError(t("Запись не содержит аудио"));
+        setSpeechError(latestPropsRef.current.t("Запись не содержит аудио"));
       }
       return;
     }
-    if (bytes > (transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
+    if (bytes > (latestPropsRef.current.transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
       if (aliveRef.current) {
         clearTranscriptionTimer();
         setSpeechState("idle");
-        setSpeechError(t("Запись слишком большая"));
+        setSpeechError(latestPropsRef.current.t("Запись слишком большая"));
       }
       return;
     }
+    const latestInput = latestPropsRef.current.input;
     const recording = {
       audio: new Blob(chunks, { type: mimeType }),
       durationMs: Math.max(1, Date.now() - recordingStartedAtRef.current),
-      selection: insertionRef.current ?? { start: input.length, end: input.length },
+      selection: insertionRef.current ?? { start: latestInput.length, end: latestInput.length },
     };
-    if (onRecordingReady) {
+    const onRecordingReadyLatest = latestPropsRef.current.onRecordingReady;
+    if (onRecordingReadyLatest) {
       try {
-        await onRecordingReady(recording);
-        if (aliveRef.current) setSpeechError(null);
+        await onRecordingReadyLatest(recording);
+        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+          setSpeechError(null);
+        }
       } catch (caught) {
-        if (aliveRef.current) {
+        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+          const latest = latestPropsRef.current;
           setSpeechError(
             caught instanceof Error
-              ? localizeKnownServerText(language, caught.message)
-              : t("Не удалось отправить запись на сервер"),
+              ? localizeKnownServerText(latest.language, caught.message)
+              : latest.t("Не удалось отправить запись на сервер"),
           );
         }
       } finally {
-        if (aliveRef.current) {
+        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
           clearTranscriptionTimer();
           setSpeechState("idle");
         }
       }
       return;
     }
-    if (!aliveRef.current || !onTranscribe) {
+    const onTranscribeLatest = latestPropsRef.current.onTranscribe;
+    if (!aliveRef.current || !onTranscribeLatest) {
       clearTranscriptionTimer();
       return;
     }
     try {
-      const transcript = await onTranscribe(recording.audio, recording.durationMs);
-      if (!aliveRef.current) return;
+      const transcript = await onTranscribeLatest(recording.audio, recording.durationMs);
+      if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== recordingIdentity) {
+        return;
+      }
       insertTranscript(transcript);
       setSpeechError(null);
     } catch (caught) {
-      if (aliveRef.current) {
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+        const latest = latestPropsRef.current;
         setSpeechError(
           caught instanceof Error
-            ? localizeKnownServerText(language, caught.message)
-            : t("Не удалось распознать запись"),
+            ? localizeKnownServerText(latest.language, caught.message)
+            : latest.t("Не удалось распознать запись"),
         );
       }
     } finally {
       clearTranscriptionTimer();
-      if (aliveRef.current) setSpeechState("idle");
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+        setSpeechState("idle");
+      }
     }
   }
 
   function insertTranscript(transcript: string) {
+    const latest = latestPropsRef.current;
     const clean = transcript.trim();
-    if (!clean) throw new Error(t("Распознавание не вернуло текст"));
-    const selection = insertionRef.current ?? { start: input.length, end: input.length };
-    const start = Math.min(selection.start, input.length);
-    const end = Math.max(start, Math.min(selection.end, input.length));
-    const before = input.slice(0, start);
-    const after = input.slice(end);
+    if (!clean) throw new Error(latest.t("Распознавание не вернуло текст"));
+    const selection = insertionRef.current ?? {
+      start: latest.input.length,
+      end: latest.input.length,
+    };
+    const start = Math.min(selection.start, latest.input.length);
+    const end = Math.max(start, Math.min(selection.end, latest.input.length));
+    const before = latest.input.slice(0, start);
+    const after = latest.input.slice(end);
     const leading = before && !/\s$/.test(before) ? " " : "";
     const trailing = after && !/^\s/.test(after) ? " " : "";
     const completeInsertion = `${leading}${clean}${trailing}`;
     let inserted = completeInsertion;
-    if (goalMode) inserted = inserted.slice(0, Math.max(0, 4_000 - before.length - after.length));
+    if (latest.goalMode) {
+      inserted = inserted.slice(0, Math.max(0, 4_000 - before.length - after.length));
+    }
     const next = `${before}${inserted}${after}`;
-    onInput(next);
+    latest.onInput(next);
     const caret =
       before.length + inserted.length - (inserted === completeInsertion ? trailing.length : 0);
     window.setTimeout(() => {
@@ -622,7 +749,11 @@ export function Composer({
                 type="button"
                 className="composer-attachment-remove"
                 aria-label={t("Удалить изображение {{name}}", { name: image.name })}
-                onClick={() => onImagesChange(images.filter((item) => item.id !== image.id))}
+                onClick={() => {
+                  const next = images.filter((item) => item.id !== image.id);
+                  attachmentImagesRef.current.set(attachmentScope, next);
+                  latestPropsRef.current.onImagesChange(next, attachmentScope);
+                }}
               >
                 <XIcon />
               </button>

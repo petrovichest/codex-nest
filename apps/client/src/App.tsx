@@ -51,7 +51,6 @@ import {
   type ProjectListDirection,
   type SidebarSide,
 } from "./components/SettingsPage";
-import { ThreadPage } from "./components/ThreadPage";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { useConnection } from "./connection";
 import { localizeKnownServerText, useI18n, type Translate } from "./i18n";
@@ -109,6 +108,16 @@ export function App({
   const { language, setLanguage, t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
+  const sessionWorkspace =
+    location.pathname === "/new" || /^\/threads\/[^/]+\/?$/.test(location.pathname);
+  const newSessionWorkspaceId = (location.state as { newSessionWorkspaceId?: unknown } | null)
+    ?.newSessionWorkspaceId;
+  const sessionWorkspaceKey =
+    typeof newSessionWorkspaceId === "string"
+      ? `new:${newSessionWorkspaceId}`
+      : location.pathname === "/new"
+        ? `new:direct:${location.search}`
+        : "threads";
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
@@ -328,6 +337,14 @@ export function App({
             <div className="spinner" />
             <p>{t("Получаем состояние Codex…")}</p>
           </div>
+        ) : sessionWorkspace ? (
+          <NewSession
+            key={sessionWorkspaceKey}
+            projects={snapshot?.projects ?? []}
+            transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
+            transcriptionConfig={transcriptionConfig}
+            onOpenNavigation={() => setDrawer(true)}
+          />
         ) : (
           <Routes>
             <Route
@@ -335,28 +352,6 @@ export function App({
               element={
                 <HomeRoute
                   threads={snapshot?.threads ?? []}
-                  onOpenNavigation={() => setDrawer(true)}
-                />
-              }
-            />
-            <Route
-              path="/new"
-              element={
-                <NewSession
-                  key={location.search}
-                  projects={snapshot?.projects ?? []}
-                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
-                  transcriptionConfig={transcriptionConfig}
-                  onOpenNavigation={() => setDrawer(true)}
-                />
-              }
-            />
-            <Route
-              path="/threads/:threadId"
-              element={
-                <ThreadPage
-                  transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
-                  transcriptionConfig={transcriptionConfig}
                   onOpenNavigation={() => setDrawer(true)}
                 />
               }
@@ -1015,7 +1010,11 @@ function Sidebar({
   function openNewSession(projectId: string) {
     onClose();
     navigate(`/new?${new URLSearchParams({ projectId })}`, {
-      state: { newSessionProjectId: projectId },
+      state: {
+        newSessionProjectId: projectId,
+        newSessionWorkspaceId:
+          globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      },
     });
   }
 
