@@ -5,6 +5,17 @@ import { type Dispatch, type SetStateAction, useEffect, useRef, useState } from 
 const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const DIRECTION_LOCK_DISTANCE = 10;
 const OPEN_PROGRESS = 0.3;
+const DRAWER_GESTURE_EXCLUDED_SELECTOR = [
+  "[data-project-drag-handle]",
+  ".markdown-table-scroll",
+  "a",
+  "button",
+  "input",
+  "textarea",
+  "select",
+  "summary",
+  '[contenteditable="true"]',
+].join(", ");
 
 type Gesture = {
   startX: number;
@@ -63,7 +74,7 @@ export function useDrawerNavigation({
       if (!mobile) return;
       if (
         event.target instanceof Element &&
-        event.target.closest("[data-project-drag-handle], .markdown-table-scroll")
+        event.target.closest(DRAWER_GESTURE_EXCLUDED_SELECTOR)
       ) {
         clearGesture();
         return;

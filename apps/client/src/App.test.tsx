@@ -2135,6 +2135,41 @@ describe("App routing and navigation", () => {
     expect(sidebar).not.toHaveClass("open");
   });
 
+  it("switches sessions after touch drift on a mobile drawer link", async () => {
+    const other = { ...baseThread, id: "other", title: "Другая задача", updatedAt: 10 };
+    mockConnection(snapshot([baseThread, other]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const context = connection.mock.results.at(-1)?.value;
+    context.forceRefreshDetail.mockRejectedValueOnce(new Error("Ошибка старой сессии"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Принудительно обновить сессию" }));
+    expect(await screen.findByText("Ошибка старой сессии")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
+
+    const otherLink = screen.getByRole("link", { name: "Другая задача" });
+    fireEvent.touchStart(otherLink, { touches: [{ clientX: 220, clientY: 200 }] });
+    const touchContinued = fireEvent.touchMove(frame, {
+      touches: [{ clientX: 205, clientY: 202 }],
+    });
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(touchContinued).toBe(true);
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).toHaveClass("open");
+
+    fireEvent.click(otherLink);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Другая задача" })).toBeVisible();
+    expect(screen.queryByText("Ошибка старой сессии")).not.toBeInTheDocument();
+    expect(sidebar).not.toHaveClass("open");
+    expect(view.container.querySelectorAll(".thread-link.active")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "Другая задача" })).toHaveClass("active");
+  });
+
   it("tracks a reverse swipe and closes the open session drawer after the threshold", () => {
     mockConnection(snapshot([baseThread]));
     mockMobileViewport();
