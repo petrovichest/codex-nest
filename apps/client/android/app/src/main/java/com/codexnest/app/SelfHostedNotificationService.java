@@ -41,6 +41,7 @@ public class SelfHostedNotificationService extends Service {
     private static final Object OBSERVED_FRAMES_LOCK = new Object();
     private static final Deque<String> pendingObservedFrames = new ArrayDeque<>();
     private static volatile boolean appVisible;
+    private static volatile String activeThreadId;
     private static volatile SelfHostedNotificationService instance;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -57,6 +58,19 @@ public class SelfHostedNotificationService extends Service {
         appVisible = visible;
         SelfHostedNotificationService current = instance;
         if (current != null) current.handler.post(current::handleVisibilityChange);
+    }
+
+    static void setActiveThread(Context context, String threadId) {
+        activeThreadId = threadId;
+        cancelEventNotifications(context, threadId);
+    }
+
+    static void releaseThread(String threadId) {
+        if (threadId.equals(activeThreadId)) activeThreadId = null;
+    }
+
+    static boolean shouldNotifyEvent(boolean visible, String activeId, String eventThreadId) {
+        return !visible || activeId == null || !activeId.equals(eventThreadId);
     }
 
     static void setUiLanguage(Context context, String language) {
@@ -85,6 +99,13 @@ public class SelfHostedNotificationService extends Service {
     static int eventNotificationId(CodexNotification.Kind kind, String threadId) {
         int requestCode = (kind.name() + ":" + threadId).hashCode();
         return 1_000 + Math.abs(requestCode % 1_000_000);
+    }
+
+    private static void cancelEventNotifications(Context context, String threadId) {
+        NotificationManagerCompat manager = NotificationManagerCompat.from(context);
+        for (CodexNotification.Kind kind : CodexNotification.Kind.values()) {
+            manager.cancel(eventNotificationId(kind, threadId));
+        }
     }
 
     @Override
@@ -176,6 +197,7 @@ public class SelfHostedNotificationService extends Service {
             WebSocket current = socket;
             socket = null;
             if (current != null) current.cancel();
+            if (activeThreadId != null) cancelEventNotifications(this, activeThreadId);
             updateStatus(R.string.notification_status_app_open);
         } else {
             connect();
@@ -274,6 +296,10 @@ public class SelfHostedNotificationService extends Service {
     }
 
     private void notifyEvent(CodexNotification event) {
+        if (!shouldNotifyEvent(appVisible, activeThreadId, event.threadId)) {
+            cancelEventNotifications(this, event.threadId);
+            return;
+        }
         String title;
         if (event.kind == CodexNotification.Kind.COMPLETED) {
             title = text(R.string.notification_task_completed);

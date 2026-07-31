@@ -16,6 +16,7 @@ interface SelfHostedNotificationsPlugin {
   checkPermissions(): Promise<{ receive: PermissionState }>;
   requestPermissions(): Promise<{ receive: PermissionState }>;
   acknowledgeThread(options: { threadId: string }): Promise<void>;
+  releaseThread(options: { threadId: string }): Promise<void>;
   observeFrame(options: { frame: string }): Promise<void>;
   setLanguage(options: { language: UiLanguage }): Promise<void>;
   start(): Promise<void>;
@@ -131,6 +132,11 @@ export async function acknowledgePendingThread(threadId: string): Promise<void> 
         : Promise.resolve(),
     ),
   ]);
+}
+
+export async function releaseActiveThread(threadId: string): Promise<void> {
+  if (!Capacitor.isNativePlatform() || !threadId) return;
+  await SelfHostedNotifications.releaseThread({ threadId }).catch(() => undefined);
 }
 
 export async function stopPushNotifications(): Promise<void> {

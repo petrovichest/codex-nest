@@ -3,7 +3,6 @@ package com.codexnest.app;
 import android.Manifest;
 import android.content.Intent;
 import android.os.Build;
-import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -118,11 +117,19 @@ public class SelfHostedNotificationsPlugin extends Plugin {
             call.reject("Thread id is required");
             return;
         }
-        NotificationManagerCompat manager = NotificationManagerCompat.from(getContext());
-        for (CodexNotification.Kind kind : CodexNotification.Kind.values()) {
-            manager.cancel(SelfHostedNotificationService.eventNotificationId(kind, threadId));
-        }
+        SelfHostedNotificationService.setActiveThread(getContext(), threadId);
         MainActivity.acknowledgePendingThread(getContext(), threadId);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void releaseThread(PluginCall call) {
+        String threadId = call.getString("threadId");
+        if (threadId == null || threadId.isBlank()) {
+            call.reject("Thread id is required");
+            return;
+        }
+        SelfHostedNotificationService.releaseThread(threadId);
         call.resolve();
     }
 

@@ -62,7 +62,7 @@ import {
   saveLocalDraft,
   saveNewSessionDraft,
 } from "../offline-store";
-import { acknowledgePendingThread } from "../push";
+import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
@@ -1351,6 +1351,9 @@ export function ThreadPage({
 
   useEffect(() => {
     void acknowledgePendingThread(threadId);
+    return () => {
+      void releaseActiveThread(threadId);
+    };
   }, [threadId]);
 
   useEffect(() => {

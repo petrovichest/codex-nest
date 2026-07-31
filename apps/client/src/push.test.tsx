@@ -9,6 +9,7 @@ const plugin = vi.hoisted(() => ({
   addListener: vi.fn(),
   checkPermissions: vi.fn(),
   observeFrame: vi.fn(),
+  releaseThread: vi.fn(),
   requestPermissions: vi.fn(),
   setLanguage: vi.fn(),
   start: vi.fn(),
@@ -30,6 +31,7 @@ import {
   acknowledgePendingThread,
   observeNativeNotificationEvent,
   observeNativeNotificationSnapshot,
+  releaseActiveThread,
   setNativeNotificationAppActive,
   usePushNotifications,
 } from "./push";
@@ -43,6 +45,7 @@ describe("native push navigation", () => {
     plugin.addListener.mockResolvedValue({ remove: vi.fn().mockResolvedValue(undefined) });
     plugin.checkPermissions.mockResolvedValue({ receive: "granted" });
     plugin.observeFrame.mockResolvedValue(undefined);
+    plugin.releaseThread.mockResolvedValue(undefined);
     plugin.requestPermissions.mockResolvedValue({ receive: "granted" });
     plugin.setLanguage.mockResolvedValue(undefined);
     plugin.start.mockResolvedValue(undefined);
@@ -90,6 +93,9 @@ describe("native push navigation", () => {
     expect(preferences.remove).toHaveBeenCalledWith({
       key: "codexnest.pendingThreadId",
     });
+
+    await releaseActiveThread("pending-thread");
+    expect(plugin.releaseThread).toHaveBeenCalledWith({ threadId: "pending-thread" });
   });
 
   it("seeds the native tracker with the current snapshot after the service starts", async () => {
