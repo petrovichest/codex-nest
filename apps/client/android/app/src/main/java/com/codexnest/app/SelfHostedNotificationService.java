@@ -17,6 +17,9 @@ import android.os.Looper;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import okhttp3.HttpUrl;
@@ -35,6 +38,8 @@ public class SelfHostedNotificationService extends Service {
     private static final String STATE_PREFERENCES = "CodexNestNotifications";
     private static final String LAST_OBSERVED_AT = "lastObservedAt";
     private static final String UI_LANGUAGE = "uiLanguage";
+    private static final Object OBSERVED_FRAMES_LOCK = new Object();
+    private static final Deque<String> pendingObservedFrames = new ArrayDeque<>();
     private static volatile boolean appVisible;
     private static volatile SelfHostedNotificationService instance;
 
@@ -65,6 +70,23 @@ public class SelfHostedNotificationService extends Service {
         if (current != null) current.handler.post(() -> current.applyUiLanguage(language));
     }
 
+    static boolean observeFrame(String serializedFrame) {
+        synchronized (OBSERVED_FRAMES_LOCK) {
+            SelfHostedNotificationService current = instance;
+            if (current != null && !current.stopping) {
+                current.handler.post(() -> current.acceptObservedFrame(serializedFrame));
+                return true;
+            }
+            pendingObservedFrames.addLast(serializedFrame);
+            return false;
+        }
+    }
+
+    static int eventNotificationId(CodexNotification.Kind kind, String threadId) {
+        int requestCode = (kind.name() + ":" + threadId).hashCode();
+        return 1_000 + Math.abs(requestCode % 1_000_000);
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -93,6 +115,7 @@ public class SelfHostedNotificationService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         stopping = false;
         handler.removeCallbacks(reconnect);
+        acceptPendingObservedFrames();
         handleVisibilityChange();
         return START_STICKY;
     }
@@ -195,19 +218,10 @@ public class SelfHostedNotificationService extends Service {
         public void onMessage(WebSocket webSocket, String text) {
             if (webSocket != socket) return;
             try {
-                JSONObject frame = new JSONObject(text);
-                applyFrameLanguage(frame);
+                JSONObject frame = acceptFrame(text);
                 if ("snapshot".equals(frame.optString("type"))) {
                     retry = 0;
                     updateStatus(R.string.notification_status_connected);
-                }
-                List<CodexNotification> notifications = tracker.accept(text);
-                getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
-                    .edit()
-                    .putLong(LAST_OBSERVED_AT, tracker.lastObservedAt())
-                    .apply();
-                if (!appVisible) {
-                    for (CodexNotification notification : notifications) notifyEvent(notification);
                 }
             } catch (Exception ignored) {
                 webSocket.close(1003, "Malformed frame");
@@ -227,6 +241,36 @@ public class SelfHostedNotificationService extends Service {
             socket = null;
             scheduleReconnect();
         }
+    }
+
+    private void acceptObservedFrame(String serializedFrame) {
+        try {
+            acceptFrame(serializedFrame);
+        } catch (Exception ignored) {
+            // The WebView validates server frames before forwarding them.
+        }
+    }
+
+    private void acceptPendingObservedFrames() {
+        List<String> frames = new ArrayList<>();
+        synchronized (OBSERVED_FRAMES_LOCK) {
+            while (!pendingObservedFrames.isEmpty()) {
+                frames.add(pendingObservedFrames.removeFirst());
+            }
+        }
+        for (String frame : frames) acceptObservedFrame(frame);
+    }
+
+    private JSONObject acceptFrame(String serializedFrame) throws Exception {
+        JSONObject frame = new JSONObject(serializedFrame);
+        applyFrameLanguage(frame);
+        List<CodexNotification> notifications = tracker.accept(serializedFrame);
+        getSharedPreferences(STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(LAST_OBSERVED_AT, tracker.lastObservedAt())
+            .apply();
+        for (CodexNotification notification : notifications) notifyEvent(notification);
+        return frame;
     }
 
     private void notifyEvent(CodexNotification event) {
@@ -257,8 +301,7 @@ public class SelfHostedNotificationService extends Service {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build();
-        int notificationId = 1_000 + Math.abs(requestCode % 1_000_000);
-        notifyIfAllowed(notificationId, notification);
+        notifyIfAllowed(eventNotificationId(event.kind, event.threadId), notification);
     }
 
     private Notification statusNotification(int status) {

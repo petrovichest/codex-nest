@@ -1,11 +1,14 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
+
 const native = vi.hoisted(() => ({ enabled: true }));
 const plugin = vi.hoisted(() => ({
   acknowledgeThread: vi.fn(),
   addListener: vi.fn(),
   checkPermissions: vi.fn(),
+  observeFrame: vi.fn(),
   requestPermissions: vi.fn(),
   setLanguage: vi.fn(),
   start: vi.fn(),
@@ -23,7 +26,12 @@ vi.mock("@capacitor/core", () => ({
 }));
 vi.mock("@capacitor/preferences", () => ({ Preferences: preferences }));
 
-import { acknowledgePendingThread, usePushNotifications } from "./push";
+import {
+  acknowledgePendingThread,
+  observeNativeNotificationEvent,
+  observeNativeNotificationSnapshot,
+  usePushNotifications,
+} from "./push";
 
 describe("native push navigation", () => {
   beforeEach(() => {
@@ -32,6 +40,7 @@ describe("native push navigation", () => {
     plugin.acknowledgeThread.mockResolvedValue(undefined);
     plugin.addListener.mockResolvedValue({ remove: vi.fn().mockResolvedValue(undefined) });
     plugin.checkPermissions.mockResolvedValue({ receive: "granted" });
+    plugin.observeFrame.mockResolvedValue(undefined);
     plugin.requestPermissions.mockResolvedValue({ receive: "granted" });
     plugin.setLanguage.mockResolvedValue(undefined);
     plugin.start.mockResolvedValue(undefined);
@@ -80,4 +89,82 @@ describe("native push navigation", () => {
       key: "codexnest.pendingThreadId",
     });
   });
+
+  it("seeds the native tracker with the current snapshot after the service starts", async () => {
+    const snapshot = notificationSnapshot();
+
+    renderHook(() => usePushNotifications(vi.fn(), "ru", snapshot));
+
+    await waitFor(() => expect(plugin.start).toHaveBeenCalledOnce());
+    expect(plugin.observeFrame).toHaveBeenCalledOnce();
+    expect(JSON.parse(plugin.observeFrame.mock.calls[0]![0].frame)).toEqual({
+      type: "snapshot",
+      snapshot,
+    });
+  });
+
+  it("forwards only notification-relevant frames on the native platform", () => {
+    const snapshot = notificationSnapshot();
+    observeNativeNotificationSnapshot(snapshot);
+    observeNativeNotificationEvent(2, { type: "thread.upserted", thread: snapshot.threads[0]! });
+    observeNativeNotificationEvent(3, {
+      type: "queue.changed",
+      threadId: "thread",
+      messages: [],
+    });
+
+    expect(plugin.observeFrame).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(plugin.observeFrame.mock.calls[0]![0].frame)).toEqual({
+      type: "snapshot",
+      snapshot,
+    });
+    expect(JSON.parse(plugin.observeFrame.mock.calls[1]![0].frame)).toEqual({
+      type: "event",
+      sequence: 2,
+      event: { type: "thread.upserted", thread: snapshot.threads[0] },
+    });
+  });
+
+  it("does not forward notification frames in the browser", () => {
+    native.enabled = false;
+
+    observeNativeNotificationSnapshot(notificationSnapshot());
+    observeNativeNotificationEvent(2, {
+      type: "attention.removed",
+      attentionId: "attention",
+    });
+
+    expect(plugin.observeFrame).not.toHaveBeenCalled();
+  });
 });
+
+function notificationSnapshot(): AppSnapshot {
+  const thread: ThreadSummary = {
+    id: "thread",
+    relation: { kind: "session", sessionId: "session" },
+    projectId: null,
+    title: "Task",
+    preview: "",
+    cwd: "/work",
+    state: "running",
+    unread: false,
+    unseen: false,
+    pinned: false,
+    archived: false,
+    createdAt: 1,
+    updatedAt: 2,
+    currentTurnId: "turn",
+    queuedMessageCount: 0,
+    settings: { collaborationMode: "default" },
+  };
+  return {
+    sequence: 1,
+    uiLanguage: "ru",
+    connection: { state: "ready", message: null, syncedAt: null },
+    projects: [],
+    threads: [thread],
+    attention: [],
+    models: [],
+    pushConfigured: false,
+  };
+}

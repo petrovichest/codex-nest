@@ -1,6 +1,7 @@
 package com.codexnest.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 
 import java.util.List;
 import org.junit.Test;
@@ -87,6 +88,58 @@ public class NotificationEventTrackerTest {
         );
         assertEquals(1, notifications.size());
         assertEquals(CodexNotification.Kind.ATTENTION, notifications.get(0).kind);
+    }
+
+    @Test
+    public void observedForegroundOutcomeDoesNotNotifyAgainAfterBackgroundReconnect()
+        throws Exception {
+        NotificationEventTracker foreground = new NotificationEventTracker(0);
+        foreground.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
+        );
+        List<CodexNotification> immediate = foreground.accept(
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200}}}"
+        );
+
+        NotificationEventTracker background = new NotificationEventTracker(
+            foreground.lastObservedAt()
+        );
+        List<CodexNotification> reconnect = background.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200}],\"attention\":[]}}"
+        );
+
+        assertEquals(1, immediate.size());
+        assertEquals(0, reconnect.size());
+    }
+
+    @Test
+    public void notificationIdsAreStableAndDistinctByKindAndThread() {
+        int completed = SelfHostedNotificationService.eventNotificationId(
+            CodexNotification.Kind.COMPLETED,
+            "one"
+        );
+
+        assertEquals(
+            completed,
+            SelfHostedNotificationService.eventNotificationId(
+                CodexNotification.Kind.COMPLETED,
+                "one"
+            )
+        );
+        assertNotEquals(
+            completed,
+            SelfHostedNotificationService.eventNotificationId(
+                CodexNotification.Kind.FAILED,
+                "one"
+            )
+        );
+        assertNotEquals(
+            completed,
+            SelfHostedNotificationService.eventNotificationId(
+                CodexNotification.Kind.COMPLETED,
+                "two"
+            )
+        );
     }
 
     @Test

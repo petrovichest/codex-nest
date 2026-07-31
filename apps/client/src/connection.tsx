@@ -24,6 +24,7 @@ import {
 import { ApiClient, isRetryableApiError } from "./api";
 import { BrowserNotificationTracker } from "./browser-notifications";
 import { translate, useI18n } from "./i18n";
+import { observeNativeNotificationEvent, observeNativeNotificationSnapshot } from "./push";
 import {
   loadCachedMeta,
   loadCachedThread,
@@ -217,6 +218,7 @@ export function ConnectionProvider({
         sequence: snapshot.sequence,
       };
       browserNotifications?.acceptSnapshot(snapshot);
+      observeNativeNotificationSnapshot(snapshot);
       dispatch({ type: "snapshot", snapshot });
     },
     [browserNotifications],
@@ -587,6 +589,7 @@ export function ConnectionProvider({
           if (floor?.generation === generation) syncedSnapshotFloor.current = null;
           appliedSequence.current = frame.snapshot.sequence;
           browserNotifications?.acceptSnapshot(frame.snapshot);
+          observeNativeNotificationSnapshot(frame.snapshot);
           dispatch({ type: "snapshot", snapshot: frame.snapshot });
           void drainReliableOutbox();
         } else if (frame.type === "event") {
@@ -607,6 +610,7 @@ export function ConnectionProvider({
             syncedSnapshotFloor.current = null;
           }
           browserNotifications?.acceptEvent(frame.event);
+          observeNativeNotificationEvent(frame.sequence, frame.event);
           dispatch({ type: "event", sequence: frame.sequence, event: frame.event });
         } else if (frame.type === "error") {
           dispatch({ type: "network", network: "offline", error: frame.error.message });

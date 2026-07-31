@@ -2,7 +2,7 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { useEffect, useRef } from "react";
 import type { NavigateFunction } from "react-router";
-import type { UiLanguage } from "@codexnest/protocol";
+import type { AppSnapshot, ServerEvent, UiLanguage } from "@codexnest/protocol";
 
 const PENDING_THREAD_KEY = "codexnest.pendingThreadId";
 
@@ -16,6 +16,7 @@ interface SelfHostedNotificationsPlugin {
   checkPermissions(): Promise<{ receive: PermissionState }>;
   requestPermissions(): Promise<{ receive: PermissionState }>;
   acknowledgeThread(options: { threadId: string }): Promise<void>;
+  observeFrame(options: { frame: string }): Promise<void>;
   setLanguage(options: { language: UiLanguage }): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -24,9 +25,37 @@ interface SelfHostedNotificationsPlugin {
 const SelfHostedNotifications =
   registerPlugin<SelfHostedNotificationsPlugin>("SelfHostedNotifications");
 
-export function usePushNotifications(navigate: NavigateFunction, language: UiLanguage): void {
+const NATIVE_NOTIFICATION_EVENT_TYPES = new Set<ServerEvent["type"]>([
+  "thread.upserted",
+  "thread.removed",
+  "attention.upserted",
+  "attention.removed",
+  "uiLanguage.changed",
+]);
+
+export function observeNativeNotificationSnapshot(snapshot: AppSnapshot): void {
+  if (!Capacitor.isNativePlatform()) return;
+  void SelfHostedNotifications.observeFrame({
+    frame: JSON.stringify({ type: "snapshot", snapshot }),
+  }).catch(() => undefined);
+}
+
+export function observeNativeNotificationEvent(sequence: number, event: ServerEvent): void {
+  if (!Capacitor.isNativePlatform() || !NATIVE_NOTIFICATION_EVENT_TYPES.has(event.type)) return;
+  void SelfHostedNotifications.observeFrame({
+    frame: JSON.stringify({ type: "event", sequence, event }),
+  }).catch(() => undefined);
+}
+
+export function usePushNotifications(
+  navigate: NavigateFunction,
+  language: UiLanguage,
+  snapshot: AppSnapshot | null = null,
+): void {
   const initialLanguage = useRef(language);
   const languageInitialized = useRef(false);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -67,7 +96,11 @@ export function usePushNotifications(navigate: NavigateFunction, language: UiLan
       const current = await SelfHostedNotifications.checkPermissions();
       const permission =
         current.receive === "prompt" ? await SelfHostedNotifications.requestPermissions() : current;
-      if (permission.receive === "granted") await SelfHostedNotifications.start();
+      if (permission.receive === "granted") {
+        await SelfHostedNotifications.start();
+        const currentSnapshot = snapshotRef.current;
+        if (currentSnapshot) observeNativeNotificationSnapshot(currentSnapshot);
+      }
     })().catch(() => undefined);
 
     return () => {

@@ -1350,8 +1350,8 @@ export function ThreadPage({
   }, [api.settings, refreshDetail, threadId, voiceRemoval]);
 
   useEffect(() => {
-    if (detail) void acknowledgePendingThread(threadId);
-  }, [detail, threadId]);
+    void acknowledgePendingThread(threadId);
+  }, [threadId]);
 
   useEffect(() => {
     if (goal) setGoalMode(false);
@@ -1465,7 +1465,6 @@ export function ThreadPage({
         if (caught instanceof ApiClientError && caught.status === 404) {
           dispatch({ type: "thread.remove", threadId });
           setThreadMissing(true);
-          void acknowledgePendingThread(threadId);
         }
       });
     }
@@ -2128,7 +2127,6 @@ export function ThreadPage({
       if (caught instanceof ApiClientError && caught.status === 404) {
         dispatch({ type: "thread.remove", threadId });
         setThreadMissing(true);
-        void acknowledgePendingThread(threadId);
       } else {
         setError(
           caught instanceof Error

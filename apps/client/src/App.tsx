@@ -157,7 +157,7 @@ export function App({
     side: sidebarSide,
     setOpen: setDrawer,
   });
-  usePushNotifications(navigate, language);
+  usePushNotifications(navigate, language, state.snapshot);
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
   const acceptAppUpdateStatus = useCallback((next: AppUpdateStatus) => {

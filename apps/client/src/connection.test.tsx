@@ -14,11 +14,17 @@ const listPendingVoiceRecordings = vi.hoisted(() =>
 const deletePendingVoiceRecording = vi.hoisted(() =>
   vi.fn<(id: string) => Promise<void>>(() => Promise.resolve()),
 );
+const observeNativeNotificationEvent = vi.hoisted(() => vi.fn());
+const observeNativeNotificationSnapshot = vi.hoisted(() => vi.fn());
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
 }));
 vi.mock("@capacitor/app", () => ({ App: { addListener: addAppListener } }));
+vi.mock("./push", () => ({
+  observeNativeNotificationEvent,
+  observeNativeNotificationSnapshot,
+}));
 vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listPendingVoiceRecordings,
@@ -52,6 +58,8 @@ describe("ConnectionProvider", () => {
     listPendingVoiceRecordings.mockResolvedValue([]);
     deletePendingVoiceRecording.mockReset();
     deletePendingVoiceRecording.mockResolvedValue();
+    observeNativeNotificationEvent.mockReset();
+    observeNativeNotificationSnapshot.mockReset();
     FakeWebSocket.instances = [];
   });
 
@@ -792,6 +800,44 @@ describe("ConnectionProvider", () => {
     expect(await screen.findByText("snapshot:1")).toBeInTheDocument();
     view.unmount();
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  });
+
+  it("forwards only accepted native stream frames to the notification bridge", () => {
+    capacitor.native = true;
+    addAppListener.mockResolvedValue({ remove: vi.fn().mockResolvedValue(undefined) });
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <SnapshotProbe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    const initial = snapshot(1);
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: initial });
+      socket.receive({
+        type: "event",
+        sequence: 2,
+        event: { type: "thread.upserted", thread: summary },
+      });
+      socket.receive({
+        type: "event",
+        sequence: 2,
+        event: { type: "attention.removed", attentionId: "late-duplicate" },
+      });
+    });
+
+    expect(observeNativeNotificationSnapshot).toHaveBeenCalledOnce();
+    expect(observeNativeNotificationSnapshot).toHaveBeenCalledWith(initial);
+    expect(observeNativeNotificationEvent).toHaveBeenCalledOnce();
+    expect(observeNativeNotificationEvent).toHaveBeenCalledWith(2, {
+      type: "thread.upserted",
+      thread: summary,
+    });
+    view.unmount();
   });
 
   it("closes an unresponsive socket after a heartbeat and isolates its late events", () => {

@@ -30,9 +30,11 @@ const openDownloadUrl = vi.hoisted(() => vi.fn());
 const deleteLocalDraft = vi.hoisted(() =>
   vi.fn<(settings: unknown, threadId: string) => Promise<void>>(() => Promise.resolve()),
 );
+const acknowledgePendingThread = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 
 vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../downloads", () => ({ openDownloadUrl }));
+vi.mock("../push", () => ({ acknowledgePendingThread }));
 vi.mock("../offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteLocalDraft,
@@ -920,6 +922,15 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
     expect(api.archive).toHaveBeenCalledWith("thread", true);
+  });
+
+  it("acknowledges the thread notification as soon as its route opens", async () => {
+    mockThreadConnection(threadApi(), summary);
+
+    renderThread();
+
+    await waitFor(() => expect(acknowledgePendingThread).toHaveBeenCalledWith("thread"));
+    expect(acknowledgePendingThread).toHaveBeenCalledOnce();
   });
 
   it("sends annotation-only drafts as a visible user message and clears them on success", async () => {

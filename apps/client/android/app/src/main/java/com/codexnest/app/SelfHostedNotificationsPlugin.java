@@ -3,6 +3,7 @@ package com.codexnest.app;
 import android.Manifest;
 import android.content.Intent;
 import android.os.Build;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -88,11 +89,38 @@ public class SelfHostedNotificationsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void observeFrame(PluginCall call) {
+        String frame = call.getString("frame");
+        if (frame == null || frame.isBlank()) {
+            call.reject("Frame is required");
+            return;
+        }
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            getPermissionState(NOTIFICATIONS) != PermissionState.GRANTED
+        ) {
+            call.resolve();
+            return;
+        }
+        if (!SelfHostedNotificationService.observeFrame(frame)) {
+            ContextCompat.startForegroundService(
+                getContext(),
+                new Intent(getContext(), SelfHostedNotificationService.class)
+            );
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
     public void acknowledgeThread(PluginCall call) {
         String threadId = call.getString("threadId");
         if (threadId == null || threadId.isBlank()) {
             call.reject("Thread id is required");
             return;
+        }
+        NotificationManagerCompat manager = NotificationManagerCompat.from(getContext());
+        for (CodexNotification.Kind kind : CodexNotification.Kind.values()) {
+            manager.cancel(SelfHostedNotificationService.eventNotificationId(kind, threadId));
         }
         MainActivity.acknowledgePendingThread(getContext(), threadId);
         call.resolve();
