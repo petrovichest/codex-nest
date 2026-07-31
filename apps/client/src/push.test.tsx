@@ -30,6 +30,7 @@ import {
   acknowledgePendingThread,
   observeNativeNotificationEvent,
   observeNativeNotificationSnapshot,
+  setNativeNotificationAppActive,
   usePushNotifications,
 } from "./push";
 
@@ -37,6 +38,7 @@ describe("native push navigation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     native.enabled = true;
+    setNativeNotificationAppActive(true);
     plugin.acknowledgeThread.mockResolvedValue(undefined);
     plugin.addListener.mockResolvedValue({ remove: vi.fn().mockResolvedValue(undefined) });
     plugin.checkPermissions.mockResolvedValue({ receive: "granted" });
@@ -123,6 +125,18 @@ describe("native push navigation", () => {
       sequence: 2,
       event: { type: "thread.upserted", thread: snapshot.threads[0] },
     });
+  });
+
+  it("does not forward notification frames while the native app is in the background", () => {
+    setNativeNotificationAppActive(false);
+
+    observeNativeNotificationSnapshot(notificationSnapshot());
+    observeNativeNotificationEvent(2, {
+      type: "thread.upserted",
+      thread: notificationSnapshot().threads[0]!,
+    });
+
+    expect(plugin.observeFrame).not.toHaveBeenCalled();
   });
 
   it("does not forward notification frames in the browser", () => {

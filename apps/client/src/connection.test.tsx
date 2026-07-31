@@ -16,6 +16,7 @@ const deletePendingVoiceRecording = vi.hoisted(() =>
 );
 const observeNativeNotificationEvent = vi.hoisted(() => vi.fn());
 const observeNativeNotificationSnapshot = vi.hoisted(() => vi.fn());
+const setNativeNotificationAppActive = vi.hoisted(() => vi.fn());
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
@@ -24,6 +25,7 @@ vi.mock("@capacitor/app", () => ({ App: { addListener: addAppListener } }));
 vi.mock("./push", () => ({
   observeNativeNotificationEvent,
   observeNativeNotificationSnapshot,
+  setNativeNotificationAppActive,
 }));
 vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -60,6 +62,7 @@ describe("ConnectionProvider", () => {
     deletePendingVoiceRecording.mockResolvedValue();
     observeNativeNotificationEvent.mockReset();
     observeNativeNotificationSnapshot.mockReset();
+    setNativeNotificationAppActive.mockReset();
     FakeWebSocket.instances = [];
   });
 
@@ -789,7 +792,10 @@ describe("ConnectionProvider", () => {
       expect(addAppListener).toHaveBeenCalledWith("appStateChange", expect.any(Function)),
     );
 
+    act(() => appStateListener?.({ isActive: false }));
+    expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(false);
     act(() => appStateListener?.({ isActive: true }));
+    expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(true);
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

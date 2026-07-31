@@ -53,6 +53,46 @@ public class NotificationEventTrackerTest {
     }
 
     @Test
+    public void outgoingQueuedMessageDoesNotLookLikeACompletedTurn() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(0);
+        tracker.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"sequence\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
+        );
+
+        List<CodexNotification> queued = tracker.accept(
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200,\"queuedMessageCount\":1}}}"
+        );
+        tracker.accept(
+            "{\"type\":\"event\",\"sequence\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":201,\"queuedMessageCount\":0}}}"
+        );
+        List<CodexNotification> completed = tracker.accept(
+            "{\"type\":\"event\",\"sequence\":4,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":300,\"queuedMessageCount\":0}}}"
+        );
+
+        assertEquals(0, queued.size());
+        assertEquals(1, completed.size());
+        assertEquals(CodexNotification.Kind.COMPLETED, completed.get(0).kind);
+    }
+
+    @Test
+    public void staleDuplicateStreamEventCannotRestoreATerminalState() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(0);
+        tracker.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"sequence\":10,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
+        );
+        tracker.accept(
+            "{\"type\":\"event\",\"sequence\":12,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":200,\"queuedMessageCount\":0}}}"
+        );
+
+        List<CodexNotification> stale = tracker.accept(
+            "{\"type\":\"event\",\"sequence\":11,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":150,\"queuedMessageCount\":0}}}"
+        );
+
+        assertEquals(0, stale.size());
+        assertEquals(200, tracker.lastObservedAt());
+    }
+
+    @Test
     public void explicitAttentionDoesNotDuplicateNeedsAttentionState() throws Exception {
         NotificationEventTracker tracker = new NotificationEventTracker(0);
         tracker.accept(

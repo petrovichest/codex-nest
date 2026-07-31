@@ -24,7 +24,11 @@ import {
 import { ApiClient, isRetryableApiError } from "./api";
 import { BrowserNotificationTracker } from "./browser-notifications";
 import { translate, useI18n } from "./i18n";
-import { observeNativeNotificationEvent, observeNativeNotificationSnapshot } from "./push";
+import {
+  observeNativeNotificationEvent,
+  observeNativeNotificationSnapshot,
+  setNativeNotificationAppActive,
+} from "./push";
 import {
   loadCachedMeta,
   loadCachedThread,
@@ -663,7 +667,9 @@ export function ConnectionProvider({
     };
     let removeNativeListener: (() => Promise<void>) | undefined;
     if (Capacitor.isNativePlatform()) {
+      setNativeNotificationAppActive(true);
       void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+        setNativeNotificationAppActive(isActive);
         if (isActive) refresh();
       }).then((handle) => {
         removeNativeListener = () => handle.remove();
@@ -673,6 +679,7 @@ export function ConnectionProvider({
     }
     return () => {
       document.removeEventListener("visibilitychange", foreground);
+      setNativeNotificationAppActive(true);
       void removeNativeListener?.();
     };
   }, [acceptSyncedSnapshot, api, drainReliableOutbox, reconnect]);

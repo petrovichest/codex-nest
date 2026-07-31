@@ -24,6 +24,7 @@ interface SelfHostedNotificationsPlugin {
 
 const SelfHostedNotifications =
   registerPlugin<SelfHostedNotificationsPlugin>("SelfHostedNotifications");
+let nativeNotificationAppActive = true;
 
 const NATIVE_NOTIFICATION_EVENT_TYPES = new Set<ServerEvent["type"]>([
   "thread.upserted",
@@ -34,17 +35,27 @@ const NATIVE_NOTIFICATION_EVENT_TYPES = new Set<ServerEvent["type"]>([
 ]);
 
 export function observeNativeNotificationSnapshot(snapshot: AppSnapshot): void {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!Capacitor.isNativePlatform() || !nativeNotificationAppActive) return;
   void SelfHostedNotifications.observeFrame({
     frame: JSON.stringify({ type: "snapshot", snapshot }),
   }).catch(() => undefined);
 }
 
 export function observeNativeNotificationEvent(sequence: number, event: ServerEvent): void {
-  if (!Capacitor.isNativePlatform() || !NATIVE_NOTIFICATION_EVENT_TYPES.has(event.type)) return;
+  if (
+    !Capacitor.isNativePlatform() ||
+    !nativeNotificationAppActive ||
+    !NATIVE_NOTIFICATION_EVENT_TYPES.has(event.type)
+  ) {
+    return;
+  }
   void SelfHostedNotifications.observeFrame({
     frame: JSON.stringify({ type: "event", sequence, event }),
   }).catch(() => undefined);
+}
+
+export function setNativeNotificationAppActive(active: boolean): void {
+  nativeNotificationAppActive = active;
 }
 
 export function usePushNotifications(

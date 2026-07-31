@@ -13,6 +13,7 @@ final class NotificationEventTracker {
     private final Map<String, String> threadTitles = new HashMap<>();
     private final Map<String, String> attentionThreads = new HashMap<>();
     private long lastObservedAt;
+    private long lastSequence = -1;
     private String defaultThreadTitle;
     private String detailsTitle;
     private String untitledThreadTitle;
@@ -48,9 +49,16 @@ final class NotificationEventTracker {
         JSONObject frame = new JSONObject(serializedFrame);
         String type = frame.optString("type");
         if ("snapshot".equals(type)) {
-            acceptSnapshot(frame.getJSONObject("snapshot"), notifications);
+            JSONObject snapshot = frame.getJSONObject("snapshot");
+            lastSequence = snapshot.optLong("sequence", -1);
+            acceptSnapshot(snapshot, notifications);
         } else if ("event".equals(type)) {
+            long sequence = frame.optLong("sequence", -1);
+            if (sequence >= 0 && lastSequence >= 0 && sequence <= lastSequence) {
+                return notifications;
+            }
             acceptEvent(frame.getJSONObject("event"), notifications);
+            if (sequence >= 0) lastSequence = sequence;
         }
         return notifications;
     }
@@ -117,7 +125,8 @@ final class NotificationEventTracker {
                 notifications,
                 thread.optString("state"),
                 thread.optString("id"),
-                thread.optString("title", defaultThreadTitle)
+                thread.optString("title", defaultThreadTitle),
+                thread.optInt("queuedMessageCount", 0)
             );
         }
         notifications.addAll(missedAttention);
@@ -134,7 +143,15 @@ final class NotificationEventTracker {
             String title = thread.optString("title", defaultThreadTitle);
             String previous = threadStates.put(id, state);
             threadTitles.put(id, title);
-            if (!state.equals(previous)) addStateNotification(notifications, state, id, title);
+            if (!state.equals(previous)) {
+                addStateNotification(
+                    notifications,
+                    state,
+                    id,
+                    title,
+                    thread.optInt("queuedMessageCount", 0)
+                );
+            }
             lastObservedAt = Math.max(lastObservedAt, thread.optLong("updatedAt", 0));
         } else if ("thread.removed".equals(type)) {
             String id = event.optString("threadId");
@@ -166,9 +183,10 @@ final class NotificationEventTracker {
         List<CodexNotification> notifications,
         String state,
         String threadId,
-        String title
+        String title,
+        int queuedMessageCount
     ) {
-        if ("completed".equals(state)) {
+        if ("completed".equals(state) && queuedMessageCount == 0) {
             notifications.add(
                 new CodexNotification(
                     CodexNotification.Kind.COMPLETED,
@@ -176,7 +194,7 @@ final class NotificationEventTracker {
                     displayTitle(title)
                 )
             );
-        } else if ("failed".equals(state)) {
+        } else if ("failed".equals(state) && queuedMessageCount == 0) {
             notifications.add(
                 new CodexNotification(CodexNotification.Kind.FAILED, threadId, displayTitle(title))
             );
