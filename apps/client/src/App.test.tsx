@@ -162,6 +162,21 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
+  it("isolates the workspace state when switching sessions from the sidebar", async () => {
+    const other = { ...baseThread, id: "other", title: "Другая задача", updatedAt: 10 };
+    mockConnection(snapshot([baseThread, other]));
+    renderApp("/threads/newer");
+    const context = connection.mock.results.at(-1)?.value;
+    context.forceRefreshDetail.mockRejectedValueOnce(new Error("Ошибка старой сессии"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Принудительно обновить сессию" }));
+    expect(await screen.findByText("Ошибка старой сессии")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Другая задача" }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Другая задача" })).toBeVisible();
+    expect(screen.queryByText("Ошибка старой сессии")).not.toBeInTheDocument();
+  });
+
   it("shows project-only session creation when only archived tasks exist", async () => {
     mockConnection(snapshot([{ ...baseThread, archived: true }]));
 

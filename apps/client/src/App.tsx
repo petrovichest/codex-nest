@@ -118,7 +118,7 @@ export function App({
       ? `new:${newSessionWorkspaceId}`
       : location.pathname === "/new"
         ? `new:direct:${location.search}`
-        : "threads";
+        : `thread:${location.pathname}`;
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
