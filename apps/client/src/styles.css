@@ -3801,6 +3801,16 @@ pre {
 }
 
 @media (max-width: 520px) {
+  .markdown-table-scroll table {
+    min-width: 640px;
+  }
+
+  .markdown-table-scroll th,
+  .markdown-table-scroll td {
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+
   .codex-status-grid {
     grid-template-columns: 1fr;
   }
