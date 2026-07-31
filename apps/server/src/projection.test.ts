@@ -10,7 +10,7 @@ import type { ActivityItem, ThreadGoal } from "@codexnest/protocol";
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
-import type { JsonlTransport } from "./codex/transport";
+import { RpcError, type JsonlTransport } from "./codex/transport";
 import type { Thread } from "./codex/generated/v2/index";
 import { AppProjection, diffStats } from "./projection";
 import { StateStore } from "./state/store";
@@ -1938,6 +1938,91 @@ describe("AppProjection", () => {
     expect(value.state).not.toBe("running");
   });
 
+  it("restores a newer active turn from an authoritative history page", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 3_000,
+      };
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return {
+          data: [{ ...testTurn("live", "inProgress"), startedAt: 3 }],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 3));
+
+    const detail = await projection.readThread("one");
+
+    expect(detail.summary).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      unread: false,
+    });
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+    });
+  });
+
+  it("does not restore an active history turn older than the terminal outcome", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 4_000,
+      };
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return {
+          data: [{ ...testTurn("stale", "inProgress"), startedAt: 3 }],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 4));
+
+    const detail = await projection.readThread("one");
+
+    expect(detail.summary).toMatchObject({
+      state: "completed",
+      currentTurnId: null,
+    });
+  });
+
   it("reads only turns after the cached history anchor", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -1999,6 +2084,55 @@ describe("AppProjection", () => {
       2,
       "thread/turns/list",
       expect.objectContaining({ threadId: "one", limit: 1, sortDirection: "desc" }),
+      30_000,
+    );
+  });
+
+  it("falls back to a full page when the incremental turn read returns an RPC error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const first = testTurn("first", "completed");
+    const second = testTurn("second", "completed");
+    let incremental = false;
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      if (params.sortDirection === "asc") {
+        incremental = true;
+        throw new RpcError(-32_000, "Rollout changed while reading turns");
+      }
+      return {
+        data: incremental ? [second, first] : [first],
+        nextCursor: null,
+        backwardsCursor: incremental ? "fresh-cursor" : "stale-cursor",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    const initial = await projection.readThread("one");
+    bridge.request.mockClear();
+
+    const changes = await projection.readThreadChanges("one", initial.syncPoint!);
+
+    expect(changes.resetLatest).toBe(true);
+    expect(changes.turns.map((turn) => turn.id)).toEqual(["first", "second"]);
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      1,
+      "thread/turns/list",
+      expect.objectContaining({ cursor: "stale-cursor", sortDirection: "asc" }),
+      30_000,
+    );
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      2,
+      "thread/turns/list",
+      expect.objectContaining({ cursor: null, sortDirection: "desc" }),
       30_000,
     );
   });

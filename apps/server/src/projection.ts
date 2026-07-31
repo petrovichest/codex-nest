@@ -213,6 +213,7 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
     const page = await this.readTurnsPage(id, subagent ? null : cursor, "desc", !subagent);
+    if (cursor === null) await this.restoreActiveTurnFromPage(cached, page.turns);
     const state = this.store.snapshot();
     const visibleTurns = subagent
       ? subagentTranscriptTurnViews(cached.thread, page.turns, meta)
@@ -246,7 +247,7 @@ export class AppProjection extends EventEmitter {
     try {
       page = await this.readTurnsPage(id, continuationCursor ?? syncPoint.cursor, "asc", false);
     } catch (error) {
-      if (!isInvalidCursorError(error)) throw error;
+      if (!(error instanceof RpcError)) throw error;
       return this.resetThreadChanges(id);
     }
 
@@ -260,6 +261,7 @@ export class AppProjection extends EventEmitter {
         turns = turns.slice(1);
       }
     }
+    await this.restoreActiveTurnFromPage(cached, turns);
 
     const state = this.store.snapshot();
     let nextSyncPoint: ThreadSyncPoint | null = null;
@@ -305,6 +307,20 @@ export class AppProjection extends EventEmitter {
       resetLatest: true,
       olderTurnsCursor: detail.olderTurnsCursor,
     };
+  }
+
+  private async restoreActiveTurnFromPage(cached: CachedThread, turns: TurnView[]): Promise<void> {
+    if (cached.currentTurnId) return;
+    const activeTurn = [...turns].reverse().find((turn) => turn.status === "inProgress");
+    if (!activeTurn) return;
+    const knownTurn = cached.thread.turns.find((turn) => turn.id === activeTurn.id);
+    if (knownTurn && knownTurn.status !== "inProgress") return;
+    const outcomeUpdatedAt = this.store.snapshot().threadMeta[cached.thread.id]?.outcomeUpdatedAt;
+    const startedAt = activeTurn.startedAt ?? activeTurn.progress.startedAt;
+    if (outcomeUpdatedAt !== undefined && (startedAt === null || startedAt < outcomeUpdatedAt)) {
+      return;
+    }
+    await this.setCurrentTurn(cached.thread.id, activeTurn.id);
   }
 
   private async readTurnsPage(
@@ -1738,10 +1754,6 @@ function syncPointForPage(cursor: string | null, turns: TurnView[]): ThreadSyncP
 
 function turnRevision(turn: TurnView): string {
   return createHash("sha256").update(JSON.stringify(turn)).digest("base64url");
-}
-
-function isInvalidCursorError(error: unknown): boolean {
-  return error instanceof RpcError && error.code === -32_602 && /cursor/iu.test(error.message);
 }
 
 function subagentTitleFromTurns(turns: Turn[]): string | null {

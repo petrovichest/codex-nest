@@ -447,6 +447,77 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("repairs a stale terminal snapshot from a newer authoritative running detail", async () => {
+    const staleCompleted = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 2_000,
+    };
+    const running = {
+      ...staleCompleted,
+      state: "running" as const,
+      unread: false,
+      updatedAt: 2_000,
+      currentTurnId: "live-turn",
+    };
+    const canonical: ThreadDetail = {
+      summary: running,
+      turns: [
+        {
+          id: "live-turn",
+          status: "inProgress",
+          startedAt: 2_000,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 2_000,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(canonical), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+
+    function Probe() {
+      const { refreshDetail, state } = useConnection();
+      refresh = () => refreshDetail("thread", { authoritative: true, force: true });
+      const current = state.snapshot?.threads.find((thread) => thread.id === "thread");
+      return <span>{`${current?.state ?? "none"}:${current?.currentTurnId ?? "none"}`}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [staleCompleted]) });
+    });
+    expect(screen.getByText("completed:none")).toBeInTheDocument();
+
+    await act(async () => {
+      await refresh?.();
+    });
+
+    expect(screen.getByText("running:live-turn")).toBeInTheDocument();
+    view.unmount();
+  });
+
   it("repairs a successful delta that is older than the completed thread summary", async () => {
     const completed = {
       ...summary,

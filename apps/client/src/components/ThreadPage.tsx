@@ -404,8 +404,10 @@ export function ThreadPage({
   const [pendingOptimisticMessage, setPendingOptimisticMessage] =
     useState<OptimisticMessage | null>(null);
   const detail = state.details?.[threadId];
-  const summary =
-    state.snapshot?.threads.find((thread) => thread.id === threadId) ?? detail?.summary;
+  const summary = reconcileVisibleThreadSummary(
+    state.snapshot?.threads.find((thread) => thread.id === threadId),
+    detail,
+  );
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
   const isSubagent = parentThreadId !== null;
@@ -4019,6 +4021,18 @@ function completedChatLooksIncomplete(
       item.phase === "final_answer" &&
       Boolean(item.text.trim() || item.images.length),
   );
+}
+
+function reconcileVisibleThreadSummary(
+  snapshotSummary: ThreadSummary | undefined,
+  detail: ThreadDetail | undefined,
+): ThreadSummary | undefined {
+  if (!snapshotSummary) return detail?.summary;
+  if (snapshotSummary.currentTurnId) return snapshotSummary;
+  if (detail?.summary.currentTurnId && detail.summary.updatedAt >= snapshotSummary.updatedAt) {
+    return detail.summary;
+  }
+  return snapshotSummary;
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {

@@ -269,6 +269,12 @@ export function ConnectionProvider({
         const authoritativeLatest = async (): Promise<ThreadDetail> => {
           const detail = await api.readThread(threadId, undefined, { fresh: true });
           if (detailRequestVersions.current.get(key) === version) {
+            const currentSummary = stateRef.current.snapshot?.threads.find(
+              (thread) => thread.id === threadId,
+            );
+            if (!currentSummary || detail.summary.updatedAt >= currentSummary.updatedAt) {
+              dispatch({ type: "thread", thread: detail.summary });
+            }
             dispatch({ type: "detail", detail, page: "reset" });
           }
           return detail;

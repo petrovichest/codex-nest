@@ -1131,6 +1131,41 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
   });
 
+  it("treats a newer in-progress detail turn as running when the snapshot is stale", () => {
+    const staleCompleted = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 2_000,
+    };
+    const context = mockThreadConnection(threadApi(), staleCompleted, {
+      turns: [
+        {
+          id: "new-turn",
+          status: "inProgress",
+          startedAt: 2_000,
+          completedAt: null,
+          durationMs: null,
+          progress: { ...progress(), startedAt: 2_000 },
+          items: [],
+        },
+      ],
+    });
+    context.state.details.thread.summary = {
+      ...staleCompleted,
+      state: "running",
+      unread: false,
+      updatedAt: 2_000,
+      currentTurnId: "new-turn",
+    };
+
+    renderThread();
+
+    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Направить текущую задачу" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Остановить задачу" })).toBeInTheDocument();
+  });
+
   it("keeps an interrupted session purple until the user finishes it", () => {
     const api = threadApi();
     const interrupted = {
