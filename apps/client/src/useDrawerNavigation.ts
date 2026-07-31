@@ -61,7 +61,10 @@ export function useDrawerNavigation({
 
     function touchStart(event: TouchEvent) {
       if (!mobile) return;
-      if (event.target instanceof Element && event.target.closest("[data-project-drag-handle]")) {
+      if (
+        event.target instanceof Element &&
+        event.target.closest("[data-project-drag-handle], .markdown-table-scroll")
+      ) {
         clearGesture();
         return;
       }

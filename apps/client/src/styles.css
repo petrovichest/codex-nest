@@ -3801,6 +3801,18 @@ pre {
 }
 
 @media (max-width: 520px) {
+  .conversation-scroll {
+    overflow-x: hidden;
+  }
+
+  .turn {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .turn > * {
+    min-width: 0;
+  }
+
   .markdown-table-scroll table {
     min-width: 640px;
   }

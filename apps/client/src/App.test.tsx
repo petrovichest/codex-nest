@@ -2100,6 +2100,25 @@ describe("App routing and navigation", () => {
     expect(sidebar).not.toHaveClass("open");
   });
 
+  it("does not treat horizontal table scrolling as a drawer swipe", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const tableScroll = document.createElement("div");
+    tableScroll.className = "markdown-table-scroll";
+    frame.append(tableScroll);
+
+    fireEvent.touchStart(tableScroll, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 200, clientY: 204 }] });
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).not.toHaveClass("open");
+  });
+
   it("tracks a reverse swipe and closes the open session drawer after the threshold", () => {
     mockConnection(snapshot([baseThread]));
     mockMobileViewport();
