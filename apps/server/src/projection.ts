@@ -1825,16 +1825,13 @@ function threadRelation(
 
 function sessionSettings(settings?: SessionSettings): SessionSettings {
   return {
-    ...DEFAULT_SESSION_SETTINGS,
+    collaborationMode: settings?.collaborationMode ?? "default",
     ...(settings?.model === undefined ? {} : { model: settings.model }),
     ...(settings?.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: settings.reasoningEffort }),
     ...(settings?.serviceTier === undefined ? {} : { serviceTier: settings.serviceTier }),
     ...(settings?.personality === undefined ? {} : { personality: settings.personality }),
-    ...(settings?.collaborationMode === undefined
-      ? {}
-      : { collaborationMode: settings.collaborationMode }),
   };
 }
 

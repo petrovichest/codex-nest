@@ -1250,6 +1250,7 @@ describe("AppProjection", () => {
       sourceKinds: ["cli", "vscode", "appServer", "subAgentThreadSpawn"],
     });
     expect(projection.summary("two")?.projectId).toBe("nested");
+    expect(projection.summary("two")?.settings).toEqual({ collaborationMode: "default" });
     expect(projection.summary("one")?.settings).toEqual({
       collaborationMode: "default",
     });

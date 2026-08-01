@@ -477,7 +477,7 @@ export type UpdateThreadGoalRequest = {
 };
 
 export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
-  collaborationMode: "default",
+  collaborationMode: "plan",
 };
 
 export type AttentionBase = {

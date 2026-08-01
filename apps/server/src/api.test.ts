@@ -1382,12 +1382,31 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
       threadStartsBeforeEmptyThread + 1,
     );
-    expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "default" });
+    expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "plan" });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
     ).toMatchObject({ cwd: "/work", dynamicTools: expect.any(Array) });
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
       turnsBeforeEmptyThread,
+    );
+    const disabledEmpty = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/created/settings",
+      headers,
+      payload: { collaborationMode: "default" },
+    });
+    expect(disabledEmpty.json().settings).toEqual({ collaborationMode: "default" });
+    const resetEmpty = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(resetEmpty.json().thread).toMatchObject({
+      id: "created",
+      settings: { collaborationMode: "plan" },
+    });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+      threadStartsBeforeEmptyThread + 1,
     );
     const emptyDetail = await app.inject({
       url: "/api/v1/threads/created",
@@ -1516,8 +1535,11 @@ describe("thread settings", () => {
     });
     expect(created.statusCode).toBe(201);
     expect(created.json().thread.settings).toEqual({
-      collaborationMode: "default",
+      collaborationMode: "plan",
     });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({ collaborationMode: { mode: "plan" } });
     await vi.waitFor(() =>
       expect(threadTitles.generate).toHaveBeenCalledWith("Начни работу", {
         cwd: "/work",
@@ -1556,7 +1578,7 @@ describe("thread settings", () => {
     });
     expect(inherited.statusCode).toBe(201);
     expect(inherited.json().thread.settings).toEqual({
-      collaborationMode: "default",
+      collaborationMode: "plan",
       reasoningEffort: "high",
     });
 

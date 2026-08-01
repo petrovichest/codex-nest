@@ -1411,7 +1411,7 @@ describe("App routing and navigation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
     expect(screen.getByRole("dialog", { name: "Настройки модели" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
 
     creation.resolve({
@@ -1420,7 +1420,7 @@ describe("App routing and navigation", () => {
         id: "created",
         title: "Новая задача",
         settings: {
-          collaborationMode: "default",
+          collaborationMode: "plan",
           reasoningEffort: "high",
           serviceTier: "fast",
           personality: "friendly",
@@ -1430,7 +1430,7 @@ describe("App routing and navigation", () => {
 
     await waitFor(() =>
       expect(api.updateThreadSettings).toHaveBeenCalledWith("created", {
-        collaborationMode: "plan",
+        collaborationMode: "default",
       }),
     );
     await waitFor(() =>
@@ -1466,7 +1466,7 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
 
     creation.resolve({
       thread: {
@@ -1474,7 +1474,7 @@ describe("App routing and navigation", () => {
         id: "created",
         title: "Новая задача",
         settings: {
-          collaborationMode: "default",
+          collaborationMode: "plan",
           reasoningEffort: "high",
           serviceTier: "fast",
           personality: "friendly",
@@ -1484,13 +1484,13 @@ describe("App routing and navigation", () => {
 
     await waitFor(() =>
       expect(api.updateThreadSettings).toHaveBeenCalledWith("created", {
-        collaborationMode: "plan",
+        collaborationMode: "default",
       }),
     );
     expect(api.updateThreadSettings).toHaveBeenCalledOnce();
   });
 
-  it("skips settings RPC when pending plan mode returns to the created default", async () => {
+  it("skips settings RPC when pending Plan mode returns to the created default", async () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const appSnapshot = snapshot([baseThread]);
     appSnapshot.models = [
@@ -1512,8 +1512,8 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
     fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
 
     creation.resolve({
       thread: {
@@ -1521,7 +1521,7 @@ describe("App routing and navigation", () => {
         id: "created",
         title: "Новая задача",
         settings: {
-          collaborationMode: "default",
+          collaborationMode: "plan",
           reasoningEffort: "high",
           serviceTier: "fast",
           personality: "friendly",

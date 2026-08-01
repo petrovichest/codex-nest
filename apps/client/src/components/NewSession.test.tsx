@@ -37,7 +37,7 @@ const thread = {
   id: "created",
   projectId: project.id,
   relation: { kind: "root" },
-  settings: { collaborationMode: "default" },
+  settings: { collaborationMode: "plan" },
 } as unknown as ThreadSummary;
 
 const connectionSettings = { baseUrl: "https://pi.local", token: "token" };
@@ -364,7 +364,7 @@ describe("NewSession", () => {
       target: { files: [new File(["image"], "saved.png", { type: "image/png" })] },
     });
     expect(await screen.findByAltText("saved.png")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
     expect(textbox).toHaveValue("");
 
@@ -379,7 +379,7 @@ describe("NewSession", () => {
         }),
       ]);
       expect(stored?.settings).toEqual({
-        collaborationMode: "plan",
+        collaborationMode: "default",
         serviceTier: "fast",
         personality: "friendly",
       });
@@ -396,9 +396,7 @@ describe("NewSession", () => {
 
     expect(await screen.findByDisplayValue("Сохрани после ухода")).toBeInTheDocument();
     expect(screen.getByAltText("saved.png")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Выключить режим планирования" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeInTheDocument();
     expect(createProjectThread).toHaveBeenCalledTimes(2);
     expect(sendReliable).not.toHaveBeenCalled();
   });

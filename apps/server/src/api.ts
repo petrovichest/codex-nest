@@ -533,7 +533,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (current) return current;
     const request = (async () => {
       const existing = await findReusableProjectThread(projectId);
-      if (existing) return existing;
+      if (existing) return projection.setSettings(existing.id, projection.newSessionSettings);
       codexManager?.assertTurnsAllowed();
       const project = store.snapshot().projects.find((candidate) => candidate.id === projectId);
       if (!project) throw new ProjectNotFoundError("Project not found");
