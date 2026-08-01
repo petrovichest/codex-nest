@@ -470,8 +470,8 @@ async function readOptionalFile(path: string): Promise<string> {
 }
 
 function defaultRefinementError(error: unknown): void {
-  const name = error instanceof Error ? error.name : "UnknownError";
-  process.stderr.write(`Transcript refinement failed (${name})\n`);
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  process.stderr.write(`Transcript refinement failed (${detail})\n`);
 }
 
 const defaultFetch: FetchLike = (input, init) =>

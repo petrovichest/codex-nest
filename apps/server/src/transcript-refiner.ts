@@ -2,7 +2,7 @@ import type { ServerNotification } from "./codex/generated/index";
 import type { CodexBridge } from "./codex/bridge";
 import { parseThreadStart, parseTurnStart } from "./codex/guards";
 
-const REFINEMENT_TIMEOUT_MS = 15_000;
+const REFINEMENT_TIMEOUT_MS = 60_000;
 const REFINEMENT_INPUT_LIMIT = 50_000;
 const REFINEMENT_INSTRUCTIONS = [
   "Improve speech-to-text transcripts without changing their meaning.",
