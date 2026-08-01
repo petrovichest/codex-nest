@@ -177,6 +177,91 @@ describe("HTTP authentication", () => {
     await lifecycle.close();
   });
 
+  it("releases mutation tracking after the handler settles despite a client disconnect", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-aborted-mutation-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const tokenPath = join(directory, "restart-token");
+    const lifecycle = new RuntimeLifecycle({
+      transport: "daemon",
+      tokenPath,
+      bridgeReady: () => true,
+      checkpoint: () => store.checkpoint(),
+      drainTimeoutMs: 500,
+    });
+    await lifecycle.initialize();
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        push: new PushNotifier(store),
+        lifecycle,
+      },
+    );
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    app.put("/api/v1/test/slow-mutation", async () => {
+      markStarted();
+      await handlerGate;
+      await store.update((state) => {
+        state.uiLanguage = "ru";
+      });
+      return { ok: true };
+    });
+    lifecycle.ready();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a TCP test server");
+    const controller = new AbortController();
+    const response = fetch(`http://127.0.0.1:${address.port}/api/v1/test/slow-mutation`, {
+      method: "PUT",
+      headers: { authorization: "Bearer correct" },
+      signal: controller.signal,
+    }).then(
+      () => "completed",
+      () => "aborted",
+    );
+    await started;
+    controller.abort();
+    await expect(response).resolves.toBe("aborted");
+
+    const token = (await readFile(tokenPath, "utf8")).trim();
+    let prepared = false;
+    const preparing = lifecycle.prepare(token).then(() => {
+      prepared = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(prepared).toBe(false);
+
+    releaseHandler();
+    await preparing;
+    expect(lifecycle.state).toBe("draining");
+    await lifecycle.resume(token);
+    expect(lifecycle.state).toBe("ready");
+    await app.close();
+    await lifecycle.close();
+  });
+
   it("keeps health public and rejects missing, query, and bad tokens", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-api-test-"));
     directories.push(directory);

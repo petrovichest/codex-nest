@@ -134,6 +134,38 @@ describe("RuntimeLifecycle", () => {
     await lifecycle.close();
   });
 
+  it("identifies tracked work that blocks restart preparation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-lifecycle-tracked-timeout-"));
+    directories.push(directory);
+    const tokenPath = join(directory, "restart-token");
+    let releaseWork!: () => void;
+    const work = new Promise<void>((resolve) => {
+      releaseWork = resolve;
+    });
+    const lifecycle = new RuntimeLifecycle({
+      transport: "daemon",
+      tokenPath,
+      bridgeReady: () => true,
+      checkpoint: async () => undefined,
+      drainTimeoutMs: 20,
+    });
+    await lifecycle.initialize();
+    lifecycle.ready();
+    lifecycle.track(work, "HTTP POST /api/v1/test-mutation");
+    const token = (await readFile(tokenPath, "utf8")).trim();
+
+    await expect(lifecycle.prepare(token)).rejects.toThrow(
+      /waiting for 1 tracked operation: HTTP POST \/api\/v1\/test-mutation \(\d+s\)/,
+    );
+    expect(lifecycle.state).toBe("ready");
+
+    releaseWork();
+    await work;
+    await lifecycle.prepare(token);
+    await lifecycle.resume(token);
+    await lifecycle.close();
+  });
+
   it("serializes concurrent prepare, resume, and duplicate prepare calls", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-lifecycle-race-"));
     directories.push(directory);

@@ -14,6 +14,7 @@ codexnest_update_status="$codexnest_state_root/update.json"
 codexnest_restart_token_default="$codexnest_state_root/restart-token"
 codexnest_service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 codexnest_rolling_manifest_url="https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.json"
+codexnest_preflight_error=""
 
 codexnest_die() {
   printf 'codexnest: %s\n' "$1" >&2
@@ -292,22 +293,31 @@ codexnest_resume_after_aborted_restart() {
 
 codexnest_prepare_restart() {
   local target="$1" target_protocol target_team_v1=false token_path token body node_bin
+  codexnest_preflight_error=""
   target_protocol="$(codexnest_release_recovery_protocol "$target")" || return 1
   if codexnest_release_supports_team_v1 "$target"; then target_team_v1=true; fi
   token_path="$(codexnest_restart_token_path)"
   [[ -f "$token_path" ]] || return 1
   token="$(tr -d '\r\n' < "$token_path")"
   [[ -n "$token" ]] || return 1
-  if ! body="$(curl --noproxy '*' --fail --silent --show-error \
+  node_bin="$codexnest_root/runtime/current/bin/node"
+  if ! body="$(curl --noproxy '*' --fail-with-body --silent --show-error \
     --connect-timeout 5 \
     --max-time 75 \
     -X POST \
     -H "X-CodexNest-Restart-Token: $token" \
     http://127.0.0.1:4310/api/v1/internal/restart/prepare)"; then
+    codexnest_preflight_error="$(printf '%s' "$body" | "$node_bin" -e '
+      const fs = require("node:fs");
+      try {
+        const value = JSON.parse(fs.readFileSync(0, "utf8"));
+        const message = typeof value?.error?.message === "string" ? value.error.message.trim() : "";
+        if (message) process.stdout.write(message.slice(0, 500));
+      } catch {}
+    ' 2>/dev/null || true)"
     codexnest_resume_after_aborted_restart
     return 1
   fi
-  node_bin="$codexnest_root/runtime/current/bin/node"
   if ! printf '%s' "$body" | "$node_bin" -e '
     const fs = require("node:fs");
     const value = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -320,6 +330,7 @@ codexnest_prepare_restart() {
       (!value.hasManagedWork || targetTeamV1);
     process.exit(compatible || value.quiescent === true ? 0 : 1);
   ' "$target_protocol" "$target_team_v1"; then
+    codexnest_preflight_error="The target release cannot safely recover the current CodexNest work"
     codexnest_resume_after_aborted_restart
     return 2
   fi
@@ -408,7 +419,7 @@ codexnest_update_worker() {
     "Preparing CodexNest $latest_version to restart" "$latest_version" true
   if ! codexnest_prepare_restart "$target"; then
     codexnest_write_status idle failed \
-      "CodexNest restart preflight failed or the target cannot recover current work" \
+      "${codexnest_preflight_error:-CodexNest restart preflight failed or the target cannot recover current work}" \
       "$latest_version" true
     return 1
   fi

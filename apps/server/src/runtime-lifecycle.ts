@@ -23,14 +23,33 @@ export interface RuntimeLifecycleOptions {
 
 export class RestartTokenError extends Error {}
 
+export class RestartPreparationTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RestartPreparationTimeoutError";
+  }
+}
+
+type DrainPhase = "participants" | "tracked-work" | "checkpoint";
+
+type DrainAttempt = {
+  phase: DrainPhase;
+};
+
+type TrackedWork = {
+  label: string;
+  startedAt: number;
+};
+
 export class RuntimeLifecycle {
   private recoveryState: RecoveryState = "starting";
   private readonly participants = new Set<RuntimeLifecycleParticipant>();
-  private readonly inFlight = new Set<Promise<unknown>>();
+  private readonly inFlight = new Map<Promise<unknown>, TrackedWork>();
   private readonly restartToken = randomBytes(32).toString("hex");
   private leaseTimer?: NodeJS.Timeout;
   private pauseController?: AbortController;
   private pausePromise?: Promise<void>;
+  private activeDrain?: DrainAttempt;
   private transitionQueue = Promise.resolve();
   private shuttingDown = false;
 
@@ -59,8 +78,8 @@ export class RuntimeLifecycle {
     return () => this.participants.delete(participant);
   }
 
-  track<T>(promise: Promise<T>): Promise<T> {
-    this.inFlight.add(promise);
+  track<T>(promise: Promise<T>, label = "runtime work"): Promise<T> {
+    this.inFlight.set(promise, { label, startedAt: Date.now() });
     const cleanup = () => this.inFlight.delete(promise);
     void promise.then(cleanup, cleanup);
     return promise;
@@ -95,13 +114,19 @@ export class RuntimeLifecycle {
       if (!this.pausePromise) {
         this.recoveryState = "draining";
         this.pauseController = new AbortController();
-        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal);
+        const attempt: DrainAttempt = { phase: "participants" };
+        this.activeDrain = attempt;
+        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal, attempt).finally(
+          () => {
+            if (this.activeDrain === attempt) this.activeDrain = undefined;
+          },
+        );
       }
       try {
         await within(
           this.pausePromise,
           this.options.drainTimeoutMs ?? 60_000,
-          "CodexNest restart preparation timed out",
+          () => new RestartPreparationTimeoutError(this.restartTimeoutMessage()),
         );
       } catch (error) {
         this.pauseController?.abort();
@@ -112,6 +137,7 @@ export class RuntimeLifecycle {
         );
         this.pauseController = undefined;
         this.pausePromise = undefined;
+        this.activeDrain = undefined;
         this.recoveryState = this.options.bridgeReady() ? "ready" : "unavailable";
         throw error;
       }
@@ -150,7 +176,13 @@ export class RuntimeLifecycle {
       this.recoveryState = "draining";
       if (!this.pausePromise) {
         this.pauseController = new AbortController();
-        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal);
+        const attempt: DrainAttempt = { phase: "participants" };
+        this.activeDrain = attempt;
+        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal, attempt).finally(
+          () => {
+            if (this.activeDrain === attempt) this.activeDrain = undefined;
+          },
+        );
       }
       await this.pausePromise;
     });
@@ -162,13 +194,39 @@ export class RuntimeLifecycle {
     await unlink(this.options.tokenPath).catch(() => undefined);
   }
 
-  private async pauseAndCheckpoint(signal: AbortSignal): Promise<void> {
+  private async pauseAndCheckpoint(signal: AbortSignal, attempt: DrainAttempt): Promise<void> {
     await Promise.all([...this.participants].map((participant) => participant.pause()));
+    attempt.phase = "tracked-work";
     while (!signal.aborted && this.inFlight.size) {
-      await Promise.all([...this.inFlight].map((pending) => pending.catch(() => undefined)));
+      await Promise.all([...this.inFlight.keys()].map((pending) => pending.catch(() => undefined)));
     }
     if (signal.aborted) return;
+    attempt.phase = "checkpoint";
     await this.options.checkpoint();
+  }
+
+  private restartTimeoutMessage(): string {
+    if (this.activeDrain?.phase === "participants") {
+      return "CodexNest restart preparation timed out while pausing runtime participants";
+    }
+    if (this.activeDrain?.phase === "checkpoint") {
+      return "CodexNest restart preparation timed out while checkpointing durable state";
+    }
+    const pending = [...this.inFlight.values()].sort(
+      (left, right) => left.startedAt - right.startedAt,
+    );
+    if (!pending.length) {
+      return "CodexNest restart preparation timed out while waiting for tracked work";
+    }
+    const details = pending
+      .slice(0, 3)
+      .map(
+        (work) =>
+          `${work.label} (${Math.max(0, Math.round((Date.now() - work.startedAt) / 1_000))}s)`,
+      )
+      .join(", ");
+    const remainder = pending.length > 3 ? `, and ${pending.length - 3} more` : "";
+    return `CodexNest restart preparation timed out while waiting for ${pending.length} tracked operation${pending.length === 1 ? "" : "s"}: ${details}${remainder}`;
   }
 
   private transition<T>(operation: () => Promise<T>): Promise<T> {
@@ -202,9 +260,9 @@ export class RuntimeLifecycle {
   }
 }
 
-function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+function within<T>(promise: Promise<T>, timeoutMs: number, timeoutError: () => Error): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    const timer = setTimeout(() => reject(timeoutError()), timeoutMs);
     timer.unref();
     promise.then(
       (value) => {

@@ -96,6 +96,7 @@ import type { AppProjection } from "./projection";
 import type { PushNotifier } from "./push";
 import {
   RESTART_RECOVERY_PROTOCOL_VERSION,
+  RestartPreparationTimeoutError,
   RestartTokenError,
   type RuntimeLifecycle,
 } from "./runtime-lifecycle";
@@ -326,7 +327,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .catch((error: unknown) => {
         app.log.warn({ err: safeError(error), threadId }, "Failed to generate thread title");
       });
-    void (lifecycle?.track(pending) ?? pending);
+    void (lifecycle?.track(pending, "thread title generation") ?? pending);
   };
   const startTurnUnlocked = async (
     threadId: string,
@@ -721,7 +722,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     teamBackgroundRuns.add(promise);
     const cleanup = () => teamBackgroundRuns.delete(promise);
     void promise.then(cleanup, cleanup);
-    return lifecycle?.track(promise) ?? promise;
+    return lifecycle?.track(promise, "Team background run") ?? promise;
   };
   const scheduleTeamContinuation = (threadId: string): void => {
     if (
@@ -877,7 +878,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const pending = withKeyLock(teamToolOperationLocks, operationKey, () =>
         parent ? withKeyLock(teamParentLocks, parent, operation) : operation(),
       );
-      void (lifecycle?.track(pending) ?? pending)
+      void (lifecycle?.track(pending, "Team tool operation") ?? pending)
         .then(async (response) => {
           try {
             transport.respond(request.id, response);
@@ -1025,7 +1026,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .finally(() => {
         recoveryPromise = undefined;
       });
-    recoveryPromise = lifecycle?.track(pending) ?? pending;
+    recoveryPromise = lifecycle?.track(pending, "durable runtime recovery") ?? pending;
     return recoveryPromise;
   };
 
@@ -1077,25 +1078,31 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     unregisterLifecycleParticipant?.();
   });
 
-  const activeMutationRequests = new Map<string, () => void>();
-  const finishMutationRequest = (requestId: string): void => {
-    activeMutationRequests.get(requestId)?.();
-    activeMutationRequests.delete(requestId);
-  };
+  if (lifecycle) {
+    app.addHook("onRoute", (routeOptions) => {
+      const methods = Array.isArray(routeOptions.method)
+        ? routeOptions.method
+        : [routeOptions.method];
+      if (
+        !routeOptions.url.startsWith("/api/v1/") ||
+        !methods.some((method) => isTrackedMutation(method, routeOptions.url))
+      ) {
+        return;
+      }
+      const handler = routeOptions.handler;
+      routeOptions.handler = function trackedMutationHandler(request, reply) {
+        if (!isTrackedMutation(request.method, routeOptions.url)) {
+          return handler.call(this, request, reply);
+        }
+        const pending = (async () => handler.call(this, request, reply))();
+        return lifecycle.track(pending, `HTTP ${request.method} ${routeOptions.url}`);
+      };
+    });
+  }
   app.addHook("onRequest", async (request, reply) => {
     if (!lifecycle || !request.url.startsWith("/api/v1/")) return;
     const pathname = new URL(request.url, "http://localhost").pathname;
-    const emergencyRestart =
-      pathname === "/api/v1/settings/app/force-restart" ||
-      pathname === "/api/v1/settings/codex/force-restart";
-    if (
-      request.method === "OPTIONS" ||
-      !["POST", "PUT", "PATCH", "DELETE"].includes(request.method) ||
-      pathname.startsWith("/api/v1/internal/restart/") ||
-      emergencyRestart
-    ) {
-      return;
-    }
+    if (!isTrackedMutation(request.method, pathname)) return;
     if (!lifecycle.acceptsMutations) {
       reply.header("Retry-After", "2");
       return apiError(
@@ -1105,21 +1112,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         `CodexNest is ${lifecycle.state}; retry after recovery`,
       );
     }
-    let resolveRequest!: () => void;
-    const pending = new Promise<void>((resolve) => {
-      resolveRequest = resolve;
-    });
-    activeMutationRequests.set(request.id, resolveRequest);
-    lifecycle.track(pending);
-  });
-  app.addHook("onResponse", async (request) => {
-    finishMutationRequest(request.id);
-  });
-  app.addHook("onError", async (request) => {
-    finishMutationRequest(request.id);
-  });
-  app.addHook("onRequestAbort", async (request) => {
-    finishMutationRequest(request.id);
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -1173,6 +1165,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     } catch (error) {
       if (error instanceof RestartTokenError) {
         return apiError(reply, 403, "forbidden", error.message);
+      }
+      if (error instanceof RestartPreparationTimeoutError) {
+        return apiError(reply, 503, "app_server_unavailable", error.message);
       }
       throw error;
     }
@@ -4657,6 +4652,15 @@ function attachmentDisposition(fileName: string): string {
 
 function downloadNotFound(reply: FastifyReply): FastifyReply {
   return reply.code(404).send({ error: { code: "not_found", message: "Download not found" } });
+}
+
+function isTrackedMutation(method: string, pathname: string): boolean {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) return false;
+  if (pathname.startsWith("/api/v1/internal/restart/")) return false;
+  return (
+    pathname !== "/api/v1/settings/app/force-restart" &&
+    pathname !== "/api/v1/settings/codex/force-restart"
+  );
 }
 
 function apiError(
