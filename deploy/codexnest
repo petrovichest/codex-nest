@@ -282,6 +282,8 @@ codexnest_resume_after_aborted_restart() {
   token="$(tr -d '\r\n' < "$token_path")"
   [[ -n "$token" ]] || return
   curl --noproxy '*' --fail --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 10 \
     -X POST \
     -H "X-CodexNest-Restart-Token: $token" \
     http://127.0.0.1:4310/api/v1/internal/restart/resume \
@@ -296,10 +298,15 @@ codexnest_prepare_restart() {
   [[ -f "$token_path" ]] || return 1
   token="$(tr -d '\r\n' < "$token_path")"
   [[ -n "$token" ]] || return 1
-  body="$(curl --noproxy '*' --fail --silent --show-error \
+  if ! body="$(curl --noproxy '*' --fail --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 75 \
     -X POST \
     -H "X-CodexNest-Restart-Token: $token" \
-    http://127.0.0.1:4310/api/v1/internal/restart/prepare)" || return 1
+    http://127.0.0.1:4310/api/v1/internal/restart/prepare)"; then
+    codexnest_resume_after_aborted_restart
+    return 1
+  fi
   node_bin="$codexnest_root/runtime/current/bin/node"
   if ! printf '%s' "$body" | "$node_bin" -e '
     const fs = require("node:fs");
@@ -397,6 +404,8 @@ codexnest_update_worker() {
     codexnest_write_status idle failed "Failed to build CodexNest $latest_version" "$latest_version" true
     return 1
   }
+  codexnest_write_status preparing none \
+    "Preparing CodexNest $latest_version to restart" "$latest_version" true
   if ! codexnest_prepare_restart "$target"; then
     codexnest_write_status idle failed \
       "CodexNest restart preflight failed or the target cannot recover current work" \

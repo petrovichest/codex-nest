@@ -17,6 +17,7 @@ export interface RuntimeLifecycleOptions {
   tokenPath: string;
   bridgeReady(): boolean;
   checkpoint(): Promise<void>;
+  drainTimeoutMs?: number;
   drainLeaseMs?: number;
 }
 
@@ -28,6 +29,7 @@ export class RuntimeLifecycle {
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly restartToken = randomBytes(32).toString("hex");
   private leaseTimer?: NodeJS.Timeout;
+  private pauseController?: AbortController;
   private pausePromise?: Promise<void>;
   private transitionQueue = Promise.resolve();
   private shuttingDown = false;
@@ -92,16 +94,23 @@ export class RuntimeLifecycle {
       if (this.shuttingDown) throw new Error("CodexNest shutdown is already in progress");
       if (!this.pausePromise) {
         this.recoveryState = "draining";
-        this.pausePromise = this.pauseAndCheckpoint();
+        this.pauseController = new AbortController();
+        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal);
       }
       try {
-        await this.pausePromise;
+        await within(
+          this.pausePromise,
+          this.options.drainTimeoutMs ?? 60_000,
+          "CodexNest restart preparation timed out",
+        );
       } catch (error) {
+        this.pauseController?.abort();
         await Promise.all(
           [...this.participants].map((participant) =>
             Promise.resolve(participant.resume()).catch(() => undefined),
           ),
         );
+        this.pauseController = undefined;
         this.pausePromise = undefined;
         this.recoveryState = this.options.bridgeReady() ? "ready" : "unavailable";
         throw error;
@@ -115,6 +124,7 @@ export class RuntimeLifecycle {
     await this.transition(async () => {
       if (this.shuttingDown || !this.pausePromise) return;
       this.clearLease();
+      this.pauseController?.abort();
       let failed = false;
       try {
         await Promise.all([...this.participants].map((participant) => participant.resume()));
@@ -122,6 +132,7 @@ export class RuntimeLifecycle {
         failed = true;
         throw error;
       } finally {
+        this.pauseController = undefined;
         this.pausePromise = undefined;
         this.recoveryState = failed
           ? "failed"
@@ -137,21 +148,26 @@ export class RuntimeLifecycle {
     await this.transition(async () => {
       this.clearLease();
       this.recoveryState = "draining";
-      if (!this.pausePromise) this.pausePromise = this.pauseAndCheckpoint();
+      if (!this.pausePromise) {
+        this.pauseController = new AbortController();
+        this.pausePromise = this.pauseAndCheckpoint(this.pauseController.signal);
+      }
       await this.pausePromise;
     });
   }
 
   async close(): Promise<void> {
     this.clearLease();
+    this.pauseController?.abort();
     await unlink(this.options.tokenPath).catch(() => undefined);
   }
 
-  private async pauseAndCheckpoint(): Promise<void> {
+  private async pauseAndCheckpoint(signal: AbortSignal): Promise<void> {
     await Promise.all([...this.participants].map((participant) => participant.pause()));
-    while (this.inFlight.size) {
+    while (!signal.aborted && this.inFlight.size) {
       await Promise.all([...this.inFlight].map((pending) => pending.catch(() => undefined)));
     }
+    if (signal.aborted) return;
     await this.options.checkpoint();
   }
 
@@ -184,4 +200,21 @@ export class RuntimeLifecycle {
       throw new RestartTokenError("Invalid restart token");
     }
   }
+}
+
+function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

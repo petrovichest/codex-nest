@@ -95,6 +95,45 @@ describe("RuntimeLifecycle", () => {
     await lifecycle.close();
   });
 
+  it("times out an abandoned drain and allows a clean retry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-lifecycle-timeout-"));
+    directories.push(directory);
+    const tokenPath = join(directory, "restart-token");
+    let releasePause!: () => void;
+    const pauseGate = new Promise<void>((resolve) => {
+      releasePause = resolve;
+    });
+    const checkpoint = vi.fn(async () => undefined);
+    const pause = vi.fn(async () => pauseGate);
+    const resume = vi.fn(async () => undefined);
+    const lifecycle = new RuntimeLifecycle({
+      transport: "daemon",
+      tokenPath,
+      bridgeReady: () => true,
+      checkpoint,
+      drainTimeoutMs: 20,
+    });
+    lifecycle.register({ pause, resume });
+    await lifecycle.initialize();
+    lifecycle.ready();
+    const token = (await readFile(tokenPath, "utf8")).trim();
+
+    await expect(lifecycle.prepare(token)).rejects.toThrow(
+      "CodexNest restart preparation timed out",
+    );
+    expect(resume).toHaveBeenCalledOnce();
+    expect(lifecycle.state).toBe("ready");
+
+    releasePause();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(checkpoint).not.toHaveBeenCalled();
+    await lifecycle.prepare(token);
+    expect(pause).toHaveBeenCalledTimes(2);
+    expect(checkpoint).toHaveBeenCalledOnce();
+    await lifecycle.resume(token);
+    await lifecycle.close();
+  });
+
   it("serializes concurrent prepare, resume, and duplicate prepare calls", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-lifecycle-race-"));
     directories.push(directory);
