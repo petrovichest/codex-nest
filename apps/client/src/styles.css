@@ -1481,8 +1481,10 @@ pre {
 .markdown-table-scroll td {
   padding: 8px 10px;
   border: 1px solid var(--line-strong);
+  overflow-wrap: normal;
   text-align: left;
   vertical-align: top;
+  word-break: normal;
 }
 
 .markdown-table-scroll th {
@@ -3815,12 +3817,6 @@ pre {
 
   .markdown-table-scroll table {
     min-width: 640px;
-  }
-
-  .markdown-table-scroll th,
-  .markdown-table-scroll td {
-    overflow-wrap: normal;
-    word-break: normal;
   }
 
   .codex-status-grid {
