@@ -2137,7 +2137,8 @@ describe("App routing and navigation", () => {
 
   it("switches sessions after touch drift on a mobile drawer link", async () => {
     const other = { ...baseThread, id: "other", title: "Другая задача", updatedAt: 10 };
-    mockConnection(snapshot([baseThread, other]));
+    const running = { ...baseThread, state: "running" as const, currentTurnId: "turn" };
+    mockConnection(snapshot([running, other]));
     mockMobileViewport();
 
     const view = renderApp("/threads/newer");
@@ -2159,6 +2160,13 @@ describe("App routing and navigation", () => {
 
     expect(touchContinued).toBe(true);
     expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).toHaveClass("open");
+
+    otherLink.addEventListener("click", (event) => event.preventDefault(), { once: true });
+    fireEvent.click(otherLink);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Новая задача в истории" })).toBeVisible();
+    expect(screen.getByText("Ошибка старой сессии")).toBeInTheDocument();
     expect(sidebar).toHaveClass("open");
 
     fireEvent.click(otherLink);

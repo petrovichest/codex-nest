@@ -1402,7 +1402,9 @@ function ThreadBranch({
 
 function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
   const { language } = useI18n();
+  const location = useLocation();
   const title = localizeKnownServerText(language, thread.title) ?? thread.title;
+  const target = `/threads/${encodeURIComponent(thread.id)}`;
   const agentName =
     thread.relation.kind === "subagent"
       ? thread.relation.nickname?.trim() || thread.relation.role?.trim() || null
@@ -1410,8 +1412,20 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
-      to={`/threads/${encodeURIComponent(thread.id)}`}
-      onClick={onNavigate}
+      to={target}
+      onClick={(event) => {
+        if (
+          location.pathname === target &&
+          !event.defaultPrevented &&
+          event.button === 0 &&
+          !event.metaKey &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.shiftKey
+        ) {
+          onNavigate();
+        }
+      }}
     >
       <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
       <span className={threadStatusClasses(thread)} title={thread.state} />

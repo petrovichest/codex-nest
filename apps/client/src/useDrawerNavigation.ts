@@ -171,9 +171,10 @@ export function useDrawerNavigation({
   useEffect(() => {
     gestureRef.current = null;
     setDragging(false);
+    setOpen(false);
     frameRef.current?.style.removeProperty("--drawer-drag-translate");
     frameRef.current?.style.removeProperty("--drawer-drag-progress");
-  }, [routeKey]);
+  }, [routeKey, setOpen]);
 
   useEffect(() => {
     if (!open) return;
