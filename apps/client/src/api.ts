@@ -30,6 +30,7 @@ import type {
   ThreadGoal,
   ThreadSummary,
   ThreadSyncPoint,
+  TurnItemsResponse,
   TranscriptionConfigResponse,
   TranscriptionResponse,
   UpdateTranscriptionSettingsRequest,
@@ -254,6 +255,13 @@ export class ApiClient {
       method: "POST",
       retry: true,
     });
+  }
+
+  readTurnItems(threadId: string, turnId: string): Promise<TurnItemsResponse> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/items`,
+      { retry: true },
+    );
   }
 
   readThreadChanges(

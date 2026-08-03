@@ -15,16 +15,19 @@ const LATEST_ANDROID_APK_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk";
 
 export function ApplicationSettingsCard({
+  initialStatus,
   onStatusChange,
 }: {
+  initialStatus?: AppUpdateStatus | null;
   onStatusChange?(status: AppUpdateStatus): void;
 }) {
   const { api, state } = useConnection();
   const { language, t } = useI18n();
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
-  const [status, setStatus] = useState<AppUpdateStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<AppUpdateStatus | null>(initialStatus ?? null);
+  const hasStatus = useRef(initialStatus !== null && initialStatus !== undefined);
+  const [loading, setLoading] = useState(initialStatus === null || initialStatus === undefined);
   const [action, setAction] = useState<Action>(null);
   const [error, setError] = useState<string | null>(null);
   const [apkVersion, setApkVersion] = useState<string | null>(null);
@@ -34,10 +37,18 @@ export function ApplicationSettingsCard({
     ? (apkVersion ?? (apkVersionFailed ? t("Не удалось определить") : t("Определяем…")))
     : t("Только в Android");
 
+  useEffect(() => {
+    if (!initialStatus) return;
+    hasStatus.current = true;
+    setStatus(initialStatus);
+    setLoading(false);
+  }, [initialStatus]);
+
   const load = useCallback(async () => {
-    setLoading(true);
+    setLoading(!hasStatus.current);
     try {
       const next = await api.readAppSettings();
+      hasStatus.current = true;
       setStatus(next);
       onStatusChange?.(next);
       setError(null);

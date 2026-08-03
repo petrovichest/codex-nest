@@ -44,8 +44,14 @@ export type ClientAction =
   | { type: "hydrate.detail"; detail: ThreadDetail }
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "event"; sequence: number; event: ServerEvent }
-  | { type: "detail"; detail: ThreadDetail; page: "latest" | "older" | "reset" }
-  | { type: "changes"; threadId: string; changes: ThreadChanges }
+  | {
+      type: "detail";
+      detail: ThreadDetail;
+      page: "latest" | "older" | "reset";
+      preserveLive?: boolean;
+    }
+  | { type: "turn.items"; threadId: string; turnId: string; items: ActivityItem[] }
+  | { type: "changes"; threadId: string; changes: ThreadChanges; preserveLive?: boolean }
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
@@ -86,15 +92,26 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "snapshot":
       return {
         ...state,
-        snapshot: action.snapshot,
+        snapshot:
+          action.snapshot.connection.syncedAt === null && state.snapshot
+            ? {
+                ...action.snapshot,
+                threads: state.snapshot.threads,
+                models: state.snapshot.models,
+                defaultReasoningEffort: state.snapshot.defaultReasoningEffort,
+                taskDefaults: state.snapshot.taskDefaults,
+              }
+            : action.snapshot,
         network: "connected",
         error: null,
         snapshotEpoch: state.snapshotEpoch + 1,
       };
     case "detail":
-      return applyDetail(state, action.detail, action.page);
+      return applyDetail(state, action.detail, action.page, action.preserveLive);
+    case "turn.items":
+      return applyTurnItems(state, action.threadId, action.turnId, action.items);
     case "changes":
-      return applyChanges(state, action.threadId, action.changes);
+      return applyChanges(state, action.threadId, action.changes, action.preserveLive);
     case "draft": {
       const detail = state.details[action.threadId];
       if (!detail) return state;
@@ -165,7 +182,12 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
   }
 }
 
-function applyChanges(state: ClientState, threadId: string, changes: ThreadChanges): ClientState {
+function applyChanges(
+  state: ClientState,
+  threadId: string,
+  changes: ThreadChanges,
+  preserveLive = false,
+): ClientState {
   const current = state.details[threadId];
   if (!current) {
     return applyDetail(
@@ -179,10 +201,11 @@ function applyChanges(state: ClientState, threadId: string, changes: ThreadChang
         syncPoint: changes.syncPoint,
       },
       "latest",
+      preserveLive,
     );
   }
   const merged = mergeThreadDetailChanges(current, changes);
-  return applyDetail(state, merged, changes.resetLatest ? "reset" : "latest");
+  return applyDetail(state, merged, changes.resetLatest ? "reset" : "latest", preserveLive);
 }
 
 export function mergeThreadDetailChanges(
@@ -287,6 +310,8 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         event.threadId,
         event.item.id,
       );
+    case "activity.delta":
+      return applyActivityDelta({ ...state, snapshot }, event);
     case "turn.progressed":
       return applyProgress({ ...state, snapshot }, event.threadId, event.turnId, event.progress);
     case "queue.changed":
@@ -327,23 +352,35 @@ function applyDetail(
   state: ClientState,
   detail: ThreadDetail,
   page: "latest" | "older" | "reset",
+  preserveLive = false,
 ): ClientState {
   const threadId = detail.summary.id;
   const current = state.details[threadId];
+  const liveSummary = preserveLive
+    ? state.snapshot?.threads.find((thread) => thread.id === threadId)
+    : undefined;
   const expanded = state.expandedHistory[threadId] ?? false;
   const subagent = detail.summary.relation.kind === "subagent";
   const merged = current
     ? page === "reset"
-      ? detail
+      ? {
+          ...detail,
+          summary: liveSummary ?? detail.summary,
+          turns: detail.turns.map((turn) => {
+            const existing = current.turns.find((candidate) => candidate.id === turn.id);
+            return existing ? mergeTurn(existing, turn, preserveLive) : turn;
+          }),
+        }
       : {
           ...detail,
+          summary: liveSummary ?? detail.summary,
           turns: subagent
             ? page === "older"
               ? current.turns
               : detail.turns
             : page === "older"
-              ? mergeTurns(detail.turns, current.turns)
-              : mergeTurns(current.turns, detail.turns),
+              ? mergeTurns(detail.turns, current.turns, preserveLive)
+              : mergeTurns(current.turns, detail.turns, preserveLive),
           olderTurnsCursor: subagent
             ? null
             : page === "latest" && expanded
@@ -353,6 +390,12 @@ function applyDetail(
     : subagent
       ? { ...detail, olderTurnsCursor: null }
       : detail;
+  if (current && preserveLive && liveSummary?.currentTurnId) {
+    const currentTurn = current.turns.find((turn) => turn.id === liveSummary.currentTurnId);
+    if (currentTurn && !merged.turns.some((turn) => turn.id === currentTurn.id)) {
+      merged.turns.push(currentTurn);
+    }
+  }
   const confirmedUserIds = userMessageIds(merged);
   const reconciled = {
     ...merged,
@@ -395,6 +438,44 @@ function applyThreadSummary(state: ClientState, thread: ThreadSummary): ClientSt
   };
 }
 
+function applyTurnItems(
+  state: ClientState,
+  threadId: string,
+  turnId: string,
+  items: ActivityItem[],
+): ClientState {
+  const detail = state.details[threadId];
+  if (!detail) return state;
+  const turnIndex = detail.turns.findIndex((turn) => turn.id === turnId);
+  if (turnIndex < 0) return state;
+  const turns = [...detail.turns];
+  const current = turns[turnIndex]!;
+  const timestamped = items.map((item): ActivityItem => {
+    switch (item.type) {
+      case "userMessage":
+      case "agentMessage":
+      case "reasoning":
+      case "plan":
+        if (item.timestamp !== null) return item;
+        return {
+          ...item,
+          timestamp:
+            item.type === "userMessage"
+              ? current.startedAt
+              : (current.completedAt ?? current.startedAt),
+        };
+      default:
+        return item;
+    }
+  });
+  turns[turnIndex] = mergeTurn(
+    current,
+    { ...current, items: timestamped, itemsLoaded: true },
+    true,
+  );
+  return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
 function applyActivity(
   state: ClientState,
   threadId: string,
@@ -414,6 +495,7 @@ function applyActivity(
       durationMs: null,
       progress: emptyProgress(),
       items: [item],
+      itemsLoaded: false,
     });
   } else {
     const turn = turns[index];
@@ -427,6 +509,63 @@ function applyActivity(
     ...state,
     details: { ...state.details, [threadId]: { ...detail, turns, queuedMessages } },
   };
+}
+
+function applyActivityDelta(
+  state: ClientState,
+  event: Extract<ServerEvent, { type: "activity.delta" }>,
+): ClientState {
+  const detail = detailForEvent(state, event.threadId);
+  if (!detail) return state;
+  const turns = [...detail.turns];
+  let turnIndex = turns.findIndex((turn) => turn.id === event.turnId);
+  if (turnIndex < 0) {
+    turns.push({
+      id: event.turnId,
+      status: "inProgress",
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+      progress: emptyProgress(),
+      items: [],
+      itemsLoaded: false,
+    });
+    turnIndex = turns.length - 1;
+  }
+  const turn = turns[turnIndex]!;
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((item) => item.id === event.itemId);
+  if (itemIndex >= 0) {
+    const current = items[itemIndex]!;
+    if (event.activityType === "command" && current.type === "command") {
+      items[itemIndex] = { ...current, output: current.output + event.delta };
+    } else if ("text" in current) {
+      items[itemIndex] = { ...current, text: current.text + event.delta } as ActivityItem;
+    }
+  } else if (event.activityType === "command") {
+    items.push({
+      type: "command",
+      id: event.itemId,
+      status: "inProgress",
+      kind: "command",
+      command: "",
+      cwd: null,
+      output: event.delta,
+      exitCode: null,
+    });
+  } else {
+    items.push({
+      type: event.activityType,
+      id: event.itemId,
+      status: "inProgress",
+      text: event.delta,
+      images: [],
+      timestamp: turn.startedAt ?? turn.progress.startedAt,
+      phase: null,
+    });
+  }
+  turns[turnIndex] = { ...turn, items };
+  return { ...state, details: { ...state.details, [event.threadId]: { ...detail, turns } } };
 }
 
 function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem[] {
@@ -515,6 +654,7 @@ function applyProgress(
       durationMs: null,
       progress,
       items: [],
+      itemsLoaded: false,
     });
   } else {
     turns[index] = { ...turns[index], progress };
@@ -552,12 +692,13 @@ function detailForEvent(state: ClientState, threadId: string): ThreadDetail | un
 function mergeTurns(
   first: ThreadDetail["turns"],
   second: ThreadDetail["turns"],
+  preserveLive = false,
 ): ThreadDetail["turns"] {
   const result = [...first];
   for (const turn of second) {
     const index = result.findIndex((candidate) => candidate.id === turn.id);
     if (index < 0) result.push(turn);
-    else result[index] = mergeTurn(result[index]!, turn);
+    else result[index] = mergeTurn(result[index]!, turn, preserveLive);
   }
   return result;
 }
@@ -565,6 +706,7 @@ function mergeTurns(
 function mergeTurn(
   current: ThreadDetail["turns"][number],
   incoming: ThreadDetail["turns"][number],
+  preserveLive = false,
 ): ThreadDetail["turns"][number] {
   const preserveTerminal = current.status !== "inProgress" && incoming.status === "inProgress";
   return {
@@ -576,6 +718,8 @@ function mergeTurn(
           durationMs: current.durationMs,
         }
       : {}),
+    ...(preserveLive ? { progress: current.progress } : {}),
+    itemsLoaded: current.itemsLoaded !== false || incoming.itemsLoaded !== false,
     items: mergeActivityItems(current.items, incoming.items),
   };
 }
@@ -678,7 +822,7 @@ function fresherActivity(current: ActivityItem, incoming: ActivityItem): Activit
     current.text.startsWith(incoming.text) &&
     current.text.length > incoming.text.length
   ) {
-    return { ...incoming, text: current.text } as ActivityItem;
+    return withPreservedTimestamp(current, { ...incoming, text: current.text } as ActivityItem);
   }
   if (
     current.type === "command" &&
@@ -687,6 +831,18 @@ function fresherActivity(current: ActivityItem, incoming: ActivityItem): Activit
     current.output.length > incoming.output.length
   ) {
     return { ...incoming, output: current.output };
+  }
+  return withPreservedTimestamp(current, incoming);
+}
+
+function withPreservedTimestamp(current: ActivityItem, incoming: ActivityItem): ActivityItem {
+  if (
+    "timestamp" in current &&
+    "timestamp" in incoming &&
+    current.timestamp !== null &&
+    incoming.timestamp === null
+  ) {
+    return { ...incoming, timestamp: current.timestamp } as ActivityItem;
   }
   return incoming;
 }

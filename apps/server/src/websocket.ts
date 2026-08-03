@@ -16,11 +16,47 @@ export function registerEventsWebSocket(
   authTimeoutMs = 5_000,
 ): void {
   const sockets = new Set<WebSocket>();
+  const authenticatedSockets = new Set<WebSocket>();
+  const alive = new WeakMap<WebSocket, boolean>();
+  const eventListener = (sequence: number, event: unknown) => {
+    const frame: ServerFrame = isResyncRequired(event)
+      ? { type: "snapshot", snapshot: projection.snapshot() }
+      : ({ type: "event", sequence, event } as ServerFrame);
+    broadcast(frame);
+  };
+  const broadcast = (frame: ServerFrame) => {
+    const payload = JSON.stringify(frame);
+    for (const socket of authenticatedSockets) {
+      if (socket.bufferedAmount > 2 * 1024 * 1024) {
+        app.log.warn({ bufferedBytes: socket.bufferedAmount }, "terminating slow websocket client");
+        socket.terminate();
+        continue;
+      }
+      sendSerialized(socket, payload);
+    }
+  };
+  projection.on("event", eventListener);
+  const heartbeat = setInterval(() => {
+    for (const socket of sockets) {
+      if (alive.get(socket) === false) {
+        socket.terminate();
+        continue;
+      }
+      alive.set(socket, false);
+      if (socket.readyState === 1) socket.ping();
+    }
+  }, 30_000);
+  heartbeat.unref();
+  app.addHook("onClose", async () => {
+    clearInterval(heartbeat);
+    projection.off("event", eventListener);
+  });
   store.on("authRotated", () => {
     for (const socket of sockets) socket.close(1008, "Token rotated");
   });
   app.get("/api/v1/events", { websocket: true }, (socket, request) => {
     sockets.add(socket);
+    alive.set(socket, true);
     if (!allowedOrigin(request, allowedOrigins)) {
       socket.close(1008, "Origin not allowed");
       return;
@@ -33,14 +69,7 @@ export function registerEventsWebSocket(
     let authenticated = false;
     const timeout = setTimeout(() => socket.close(1008, "Authentication timeout"), authTimeoutMs);
     timeout.unref();
-    const eventListener = (sequence: number, event: unknown) => {
-      if (!authenticated) return;
-      if (isResyncRequired(event)) {
-        send(socket, { type: "snapshot", snapshot: projection.snapshot() });
-        return;
-      }
-      send(socket, { type: "event", sequence, event } as ServerFrame);
-    };
+    socket.on("pong", () => alive.set(socket, true));
 
     socket.on("message", (data) => {
       let frame: unknown;
@@ -64,7 +93,7 @@ export function registerEventsWebSocket(
         }
         authenticated = true;
         clearTimeout(timeout);
-        projection.on("event", eventListener);
+        authenticatedSockets.add(socket);
         send(socket, { type: "snapshot", snapshot: projection.snapshot() });
         return;
       }
@@ -72,7 +101,7 @@ export function registerEventsWebSocket(
     });
     socket.on("close", () => {
       clearTimeout(timeout);
-      projection.off("event", eventListener);
+      authenticatedSockets.delete(socket);
       sockets.delete(socket);
     });
   });
@@ -83,7 +112,11 @@ function allowedOrigin(request: FastifyRequest, allowedOrigins: Set<string>): bo
 }
 
 function send(socket: WebSocket, frame: ServerFrame): void {
-  if (socket.readyState === 1) socket.send(JSON.stringify(frame));
+  sendSerialized(socket, JSON.stringify(frame));
+}
+
+function sendSerialized(socket: WebSocket, payload: string): void {
+  if (socket.readyState === 1) socket.send(payload);
 }
 
 function isResyncRequired(event: unknown): event is { type: "resync.required" } {

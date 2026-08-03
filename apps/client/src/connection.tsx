@@ -82,6 +82,7 @@ interface ConnectionContextValue {
   refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
   forceRefreshDetail(threadId: string): Promise<ThreadDetail>;
   loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
+  loadTurnItems(threadId: string, turnId: string): Promise<void>;
   sendReliable(
     threadId: string,
     body: QueueMessageRequest & { clientMessageId: string },
@@ -108,6 +109,7 @@ export function ConnectionProvider({
   const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
   const detailRequestVersions = useRef(new Map<string, number>());
+  const turnItemRequests = useRef(new Map<string, Promise<void>>());
   const detailReader = useRef<DetailReader | null>(null);
   const detailRetryAttempts = useRef(new Map<string, number>());
   const detailRetryTimers = useRef(new Map<string, number>());
@@ -271,17 +273,31 @@ export function ConnectionProvider({
       if (current) return current;
       const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
       detailRequestVersions.current.set(key, version);
+      const targetGeneration = generationRef.current;
+      const targetSequence = appliedSequence.current;
+      const canApply = () =>
+        detailRequestVersions.current.get(key) === version &&
+        generationRef.current === targetGeneration;
+      const liveAdvanced = () => appliedSequence.current !== targetSequence;
       const request = (async () => {
         const authoritativeLatest = async (): Promise<ThreadDetail> => {
           const detail = await api.readThread(threadId, undefined, { fresh: true });
-          if (detailRequestVersions.current.get(key) === version) {
+          if (canApply()) {
             const currentSummary = stateRef.current.snapshot?.threads.find(
               (thread) => thread.id === threadId,
             );
-            if (!currentSummary || detail.summary.updatedAt >= currentSummary.updatedAt) {
+            if (
+              !liveAdvanced() &&
+              (!currentSummary || detail.summary.updatedAt >= currentSummary.updatedAt)
+            ) {
               dispatch({ type: "thread", thread: detail.summary });
             }
-            dispatch({ type: "detail", detail, page: "reset" });
+            dispatch({
+              type: "detail",
+              detail,
+              page: "reset",
+              preserveLive: liveAdvanced(),
+            });
           }
           return detail;
         };
@@ -290,7 +306,7 @@ export function ConnectionProvider({
           let baseline = stateRef.current.details[threadId];
           if (!cursor && !baseline) {
             const cached = await loadCachedThread(settings, threadId);
-            if (cached && detailRequestVersions.current.get(key) === version) {
+            if (cached && canApply()) {
               baseline = cached;
               dispatch({ type: "hydrate.detail", detail: cached });
             }
@@ -306,8 +322,13 @@ export function ConnectionProvider({
                   continuationCursor,
                 );
                 merged = mergeThreadDetailChanges(merged, changes);
-                if (detailRequestVersions.current.get(key) === version) {
-                  dispatch({ type: "changes", threadId, changes });
+                if (canApply()) {
+                  dispatch({
+                    type: "changes",
+                    threadId,
+                    changes,
+                    preserveLive: liveAdvanced(),
+                  });
                 }
                 continuationCursor = changes.continuationCursor ?? undefined;
               } while (continuationCursor);
@@ -324,20 +345,26 @@ export function ConnectionProvider({
             detail = await authoritativeLatest();
           } else {
             detail = await api.readThread(threadId, cursor, { fresh: options.force });
-            if (detailRequestVersions.current.get(key) === version) {
-              dispatch({ type: "detail", detail, page: cursor ? "older" : "latest" });
+            if (canApply()) {
+              dispatch({
+                type: "detail",
+                detail,
+                page: cursor ? "older" : "latest",
+                preserveLive: liveAdvanced(),
+              });
             }
           }
-          if (!cursor) {
+          if (!cursor && canApply()) {
             const summary =
               stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
               detail.summary;
-            if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
+            if (liveAdvanced()) clearDetailRetry(threadId);
+            else if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
             else clearDetailRetry(threadId);
           }
           return detail;
         } catch (error) {
-          if (!cursor && isRetryableApiError(error)) scheduleDetailRetry(threadId);
+          if (!cursor && canApply() && isRetryableApiError(error)) scheduleDetailRetry(threadId);
           throw error;
         }
       })().finally(() => {
@@ -357,9 +384,18 @@ export function ConnectionProvider({
   const forceRefreshDetail = useCallback(
     async (threadId: string): Promise<ThreadDetail> => {
       const targetGeneration = generationRef.current;
+      const targetSequence = appliedSequence.current;
       const { snapshot, detail } = await api.refreshThread(threadId);
+      const liveAdvanced = appliedSequence.current !== targetSequence;
       acceptSyncedSnapshot(snapshot, targetGeneration);
-      dispatch({ type: "detail", detail, page: "reset" });
+      if (generationRef.current === targetGeneration) {
+        dispatch({
+          type: "detail",
+          detail,
+          page: "reset",
+          preserveLive: liveAdvanced,
+        });
+      }
       return detail;
     },
     [acceptSyncedSnapshot, api],
@@ -367,6 +403,26 @@ export function ConnectionProvider({
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
     [readDetail],
+  );
+  const loadTurnItems = useCallback(
+    (threadId: string, turnId: string): Promise<void> => {
+      const key = `${threadId}:${turnId}`;
+      const current = turnItemRequests.current.get(key);
+      if (current) return current;
+      const targetGeneration = generationRef.current;
+      const request = api
+        .readTurnItems(threadId, turnId)
+        .then((response) => {
+          if (generationRef.current !== targetGeneration) return;
+          dispatch({ type: "turn.items", threadId, turnId, items: response.items });
+        })
+        .finally(() => {
+          if (turnItemRequests.current.get(key) === request) turnItemRequests.current.delete(key);
+        });
+      turnItemRequests.current.set(key, request);
+      return request;
+    },
+    [api],
   );
 
   useEffect(() => {
@@ -651,11 +707,8 @@ export function ConnectionProvider({
   useEffect(() => {
     const refresh = () => {
       if (foregroundRefresh.current) return;
-      const targetGeneration = reconnect();
-      void drainReliableOutbox();
-      const request = api
-        .sync()
-        .then((snapshot) => acceptSyncedSnapshot(snapshot, targetGeneration))
+      reconnect();
+      const request = drainReliableOutbox()
         .catch(() => undefined)
         .finally(() => {
           if (foregroundRefresh.current === request) foregroundRefresh.current = null;
@@ -682,7 +735,7 @@ export function ConnectionProvider({
       setNativeNotificationAppActive(true);
       void removeNativeListener?.();
     };
-  }, [acceptSyncedSnapshot, api, drainReliableOutbox, reconnect]);
+  }, [drainReliableOutbox, reconnect]);
 
   const value = useMemo(
     () => ({
@@ -692,6 +745,7 @@ export function ConnectionProvider({
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
+      loadTurnItems,
       sendReliable,
       queueVoiceRecording,
       reconnect,
@@ -702,6 +756,7 @@ export function ConnectionProvider({
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
+      loadTurnItems,
       sendReliable,
       queueVoiceRecording,
       reconnect,

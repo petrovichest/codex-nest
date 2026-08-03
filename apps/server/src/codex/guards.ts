@@ -3,6 +3,7 @@ import type {
   Model,
   ModelListResponse,
   Thread,
+  ThreadItemsListResponse,
   ThreadListResponse,
   ThreadLoadedListResponse,
   ThreadReadResponse,
@@ -54,6 +55,14 @@ export function parseTurnsList(value: unknown): ThreadTurnsListResponse {
   const page = pageShape(value, "thread/turns/list");
   if (!page.data.every(isTurn)) throw new ProtocolShapeError("thread/turns/list data");
   return page as unknown as ThreadTurnsListResponse;
+}
+
+export function parseItemsList(value: unknown): ThreadItemsListResponse {
+  const page = pageShape(value, "thread/items/list");
+  if (!page.data.every((item) => isRecord(item) && typeof item.type === "string")) {
+    throw new ProtocolShapeError("thread/items/list data");
+  }
+  return page as unknown as ThreadItemsListResponse;
 }
 
 export function parseThreadRead(value: unknown): ThreadReadResponse {

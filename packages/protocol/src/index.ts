@@ -350,6 +350,14 @@ export type TurnView = {
   durationMs: number | null;
   progress: TurnProgress;
   items: ActivityItem[];
+  /** False when only summary and live items are present. Missing means legacy full data. */
+  itemsLoaded?: boolean;
+};
+
+export type TurnItemsResponse = {
+  threadId: string;
+  turnId: string;
+  items: ActivityItem[];
 };
 
 export type ThreadDraftImage = {
@@ -643,6 +651,14 @@ export type ServerEvent =
   | { type: "thread.upserted"; thread: ThreadSummary }
   | { type: "thread.removed"; threadId: string }
   | { type: "activity.upserted"; threadId: string; turnId: string; item: ActivityItem }
+  | {
+      type: "activity.delta";
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      activityType: "agentMessage" | "plan" | "reasoning" | "command";
+      delta: string;
+    }
   | { type: "turn.progressed"; threadId: string; turnId: string; progress: TurnProgress }
   | { type: "queue.changed"; threadId: string; messages: QueuedMessage[] }
   | { type: "attention.upserted"; attention: AttentionRequest }

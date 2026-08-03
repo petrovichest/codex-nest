@@ -48,6 +48,172 @@ describe("clientReducer", () => {
     expect(next.details.old).toBeDefined();
   });
 
+  it("keeps cached sessions until the first authoritative server snapshot", () => {
+    const cached = { ...snapshot, sequence: 40, threads: [baseThread] };
+    let state = clientReducer(initialState, { type: "hydrate", snapshot: cached, goals: {} });
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: { ...snapshot, sequence: 1, threads: [] },
+    });
+    expect(state.snapshot?.threads).toEqual([baseThread]);
+    expect(state.snapshot?.sequence).toBe(1);
+
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: {
+        ...snapshot,
+        sequence: 2,
+        connection: { ...snapshot.connection, syncedAt: "2026-08-03T00:00:00.000Z" },
+        threads: [],
+      },
+    });
+    expect(state.snapshot?.threads).toEqual([]);
+  });
+
+  it("appends compact activity deltas without replacing the whole item", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            itemsLoaded: false,
+            items: [
+              {
+                type: "agentMessage",
+                id: "answer",
+                status: "inProgress",
+                text: "Начало",
+                images: [],
+                timestamp: 1,
+                phase: "commentary",
+              },
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.delta",
+        threadId: "one",
+        turnId: "turn",
+        itemId: "answer",
+        activityType: "agentMessage",
+        delta: " ответа",
+      },
+    });
+    expect(state.details.one?.turns[0]?.items[0]).toMatchObject({ text: "Начало ответа" });
+  });
+
+  it("does not let a stale reset roll back live progress", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            itemsLoaded: false,
+            progress: {
+              startedAt: 1,
+              explanation: "Актуальный шаг",
+              steps: [{ step: "Готово", status: "completed" }],
+              filesChanged: 1,
+              additions: 2,
+              deletions: 0,
+            },
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "reset",
+      preserveLive: true,
+      detail: {
+        summary: { ...baseThread, currentTurnId: null, state: "idle" },
+        turns: [{ ...turn("turn"), status: "inProgress", itemsLoaded: false }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    expect(state.details.one?.summary.currentTurnId).toBe("turn");
+    expect(state.details.one?.turns[0]?.progress).toMatchObject({
+      explanation: "Актуальный шаг",
+      steps: [{ status: "completed" }],
+    });
+  });
+
+  it("merges lazily loaded turn items in canonical order", () => {
+    const user = {
+      type: "userMessage" as const,
+      id: "user",
+      status: "completed" as const,
+      text: "Запрос",
+      images: [],
+      timestamp: 1,
+      phase: null,
+    };
+    const answer = {
+      type: "agentMessage" as const,
+      id: "answer",
+      status: "completed" as const,
+      text: "Ответ",
+      images: [],
+      timestamp: 2,
+      phase: "final_answer" as const,
+    };
+    let state = clientReducer(initialState, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), itemsLoaded: false, items: [user, answer] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "turn.items",
+      threadId: "one",
+      turnId: "turn",
+      items: [
+        { ...user, timestamp: null },
+        {
+          type: "command",
+          id: "command",
+          status: "completed",
+          kind: "command",
+          command: "pwd",
+          cwd: "/work",
+          output: "/work",
+          exitCode: 0,
+        },
+        { ...answer, timestamp: null },
+      ],
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "user",
+      "command",
+      "answer",
+    ]);
+    expect(state.details.one?.turns[0]?.itemsLoaded).toBe(true);
+  });
+
   it("tracks the reasoning effort used for new sessions", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {

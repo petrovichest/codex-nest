@@ -35,6 +35,7 @@ type CachedThread = {
   detail: ThreadDetail;
   accessedAt: number;
   bytes: number;
+  formatVersion?: number;
 };
 
 export type LocalDraft = {
@@ -118,7 +119,10 @@ export async function loadCachedThread(
   const cached = await readValue<CachedThread>(THREAD_STORE, key);
   if (!cached) return null;
   void writeValue(THREAD_STORE, { ...cached, accessedAt: Date.now() });
-  return cached.detail;
+  if (cached.formatVersion === 2) return cached.detail;
+  const detail = lightweightCachedDetail(cached.detail);
+  void saveCachedThread(settings, detail);
+  return detail;
 }
 
 export async function saveCachedThread(
@@ -134,8 +138,26 @@ export async function saveCachedThread(
     detail,
     accessedAt: Date.now(),
     bytes: new Blob([serialized]).size,
+    formatVersion: 2,
   } satisfies CachedThread);
   void cleanupThreadCache();
+}
+
+function lightweightCachedDetail(detail: ThreadDetail): ThreadDetail {
+  return {
+    ...detail,
+    turns: detail.turns.map((turn) => ({
+      ...turn,
+      itemsLoaded: false,
+      items: turn.items.filter(
+        (item) =>
+          item.type !== "reasoning" &&
+          item.type !== "command" &&
+          item.type !== "fileChange" &&
+          item.type !== "tool",
+      ),
+    })),
+  };
 }
 
 export async function deleteCachedThread(

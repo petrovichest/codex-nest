@@ -144,7 +144,6 @@ export function App({
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [installedApkVersion, setInstalledApkVersion] = useState<string | null>(null);
   const appUpdateCheckAttemptedRef = useRef(false);
-  const previousNetworkRef = useRef<typeof state.network | null>(null);
   const {
     dragging: drawerDragging,
     frameRef,
@@ -171,35 +170,39 @@ export function App({
   }, [setLanguage, state.snapshot?.uiLanguage]);
 
   useEffect(() => {
-    const previous = previousNetworkRef.current;
-    previousNetworkRef.current = state.network;
-    if (state.network !== "connected" || previous === "connected") return;
+    if (state.network !== "connected" || !state.snapshot?.connection.syncedAt) {
+      return;
+    }
 
     let active = true;
     const accept = (status: AppUpdateStatus) => {
       if (active) acceptAppUpdateStatus(status);
     };
-    if (!appUpdateCheckAttemptedRef.current) {
-      appUpdateCheckAttemptedRef.current = true;
-      void api
-        .checkAppUpdate()
-        .then(accept)
-        .catch(() =>
-          api
-            .readAppSettings()
-            .then(accept)
-            .catch(() => undefined),
-        );
-    } else {
-      void api
-        .readAppSettings()
-        .then(accept)
-        .catch(() => undefined);
-    }
+    const timer = window.setTimeout(() => {
+      if (!active) return;
+      if (!appUpdateCheckAttemptedRef.current) {
+        appUpdateCheckAttemptedRef.current = true;
+        void api
+          .checkAppUpdate()
+          .then(accept)
+          .catch(() =>
+            api
+              .readAppSettings()
+              .then(accept)
+              .catch(() => undefined),
+          );
+      } else {
+        void api
+          .readAppSettings()
+          .then(accept)
+          .catch(() => undefined);
+      }
+    }, 500);
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
-  }, [acceptAppUpdateStatus, api, state.network]);
+  }, [acceptAppUpdateStatus, api, state.network, state.snapshot?.connection.syncedAt]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -382,6 +385,7 @@ export function App({
                   transcriptionConfig={transcriptionConfig}
                   transcriptionConfigError={transcriptionConfigError}
                   onTranscriptionConfigChange={setTranscriptionConfig}
+                  initialAppUpdateStatus={appUpdateStatus}
                   onAppUpdateStatusChange={acceptAppUpdateStatus}
                 />
               }

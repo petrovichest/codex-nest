@@ -22,6 +22,7 @@ import type {
   ThreadState,
   ThreadSummary,
   ThreadSyncPoint,
+  TurnItemsResponse,
   TurnProgress,
   TurnView,
   UiLanguage,
@@ -33,6 +34,7 @@ import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
 import {
+  parseItemsList,
   parseModelList,
   parseThreadList,
   parseThreadLoadedList,
@@ -350,6 +352,7 @@ export class AppProjection extends EventEmitter {
       }
     }
 
+    const startedAt = Date.now();
     const response = parseTurnsList(
       await this.bridge.request<unknown>(
         "thread/turns/list",
@@ -358,11 +361,17 @@ export class AppProjection extends EventEmitter {
           cursor,
           limit,
           sortDirection: direction,
-          itemsView: "full",
+          itemsView: "summary",
         },
         30_000,
       ),
     );
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 500) {
+      process.stderr.write(
+        `CodexNest thread history read slow (${durationMs}ms, ${response.data.length} turns)\n`,
+      );
+    }
     const state = this.store.snapshot();
     const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
     const ordered = direction === "desc" ? response.data.slice().reverse() : response.data;
@@ -378,6 +387,7 @@ export class AppProjection extends EventEmitter {
           this.progress.get(turnKey(id, turn.id)),
           this.liveActivities(id, turn.id),
           artifacts[turn.id] ?? [],
+          false,
         ),
       ),
       nextCursor: response.nextCursor,
@@ -560,6 +570,61 @@ export class AppProjection extends EventEmitter {
     this.threads.set(thread.id, cached);
     this.publishThread(thread.id);
     return this.toSummary(cached);
+  }
+
+  async refreshThread(threadId: string): Promise<ThreadSummary | undefined> {
+    const baselineRevision = this.historyRevision(threadId);
+    let response;
+    try {
+      response = parseThreadRead(
+        await this.bridge.request<unknown>(
+          "thread/read",
+          { threadId, includeTurns: false },
+          30_000,
+        ),
+      );
+    } catch (error) {
+      if (
+        error instanceof RpcError &&
+        /not found|unknown thread|does not exist/i.test(error.message)
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (this.historyRevision(threadId) !== baselineRevision) return this.summary(threadId);
+    const archived = this.threads.get(threadId)?.archived ?? false;
+    return this.upsertThread(response.thread, archived);
+  }
+
+  async readTurnItems(threadId: string, turnId: string): Promise<TurnItemsResponse> {
+    const startedAt = Date.now();
+    let cursor: string | null = null;
+    const items: ActivityItem[] = [];
+    let pages = 0;
+    do {
+      const page = parseItemsList(
+        await this.bridge.request<unknown>(
+          "thread/items/list",
+          { threadId, turnId, cursor, limit: 100, sortDirection: "asc" },
+          30_000,
+        ),
+      );
+      items.push(
+        ...page.data
+          .filter((item) => !isInternalTeamContinuationItem(item))
+          .map((item) => normalizeActivity(item, null)),
+      );
+      pages += 1;
+      cursor = page.nextCursor;
+    } while (cursor);
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 500) {
+      process.stderr.write(
+        `CodexNest turn items read slow (${durationMs}ms, ${pages} pages, ${items.length} items)\n`,
+      );
+    }
+    return { threadId, turnId, items };
   }
 
   async markUnmaterialized(threadId: string): Promise<void> {
@@ -768,6 +833,10 @@ export class AppProjection extends EventEmitter {
   }
 
   private async performSync(): Promise<void> {
+    const startedAt = Date.now();
+    const revisionBaseline = new Map(this.historyRevisions);
+    const changedDuringSync = (threadId: string) =>
+      this.historyRevision(threadId) !== (revisionBaseline.get(threadId) ?? 0);
     const shouldRecoverLoaded = this.recoverLoadedThreads;
     const [listedActive, archived, models, loadedThreadIds] = await Promise.all([
       this.listAllThreads(false),
@@ -802,6 +871,7 @@ export class AppProjection extends EventEmitter {
     const incoming = new Set<string>();
     for (const { thread, restoredGoalStatus } of active) {
       incoming.add(thread.id);
+      if (changedDuringSync(thread.id)) continue;
       const liveCached = this.threads.get(thread.id);
       const liveGoalStatus = liveCached?.goalStatus;
       const resumedTurnId = activeTurnId(thread);
@@ -817,6 +887,7 @@ export class AppProjection extends EventEmitter {
     }
     for (const thread of archived) {
       incoming.add(thread.id);
+      if (changedDuringSync(thread.id)) continue;
       this.threads.set(thread.id, {
         thread,
         archived: true,
@@ -828,6 +899,7 @@ export class AppProjection extends EventEmitter {
       const cached = this.threads.get(id);
       if (
         !incoming.has(id) &&
+        !changedDuringSync(id) &&
         !this.unmaterializedThreads.has(id) &&
         (!cached ||
           !isSpawnedSubagent(cached.thread) ||
@@ -852,6 +924,12 @@ export class AppProjection extends EventEmitter {
     this.publish({ type: "models.changed", models });
     this.publish({ type: "resync.required" });
     this.backfillSubagentTitles();
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 1_000) {
+      process.stderr.write(
+        `CodexNest projection sync slow (${durationMs}ms, ${listedActive.length} active, ${archived.length} archived)\n`,
+      );
+    }
   }
 
   private backfillSubagentTitles(): void {
@@ -1434,12 +1512,23 @@ export class AppProjection extends EventEmitter {
                 exitCode: null,
               };
         this.activity.set(key, item);
-        this.publish({
-          type: "activity.upserted",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turnId,
-          item,
-        });
+        this.publish(
+          previous?.type === "command"
+            ? {
+                type: "activity.delta",
+                threadId: notification.params.threadId,
+                turnId: notification.params.turnId,
+                itemId: notification.params.itemId,
+                activityType: "command",
+                delta: notification.params.delta,
+              }
+            : {
+                type: "activity.upserted",
+                threadId: notification.params.threadId,
+                turnId: notification.params.turnId,
+                item,
+              },
+        );
         break;
       }
       case "serverRequest/resolved":
@@ -1541,7 +1630,11 @@ export class AppProjection extends EventEmitter {
       phase: previous && "phase" in previous ? previous.phase : null,
     };
     this.activity.set(key, item);
-    this.publish({ type: "activity.upserted", threadId, turnId, item });
+    this.publish(
+      previous && "text" in previous && previous.type === type
+        ? { type: "activity.delta", threadId, turnId, itemId, activityType: type, delta }
+        : { type: "activity.upserted", threadId, turnId, item },
+    );
   }
 
   private streamingActivityAlias(
@@ -1856,6 +1949,7 @@ function normalizeTurn(
   liveProgress?: TurnProgress,
   liveActivities: ActivityItem[] = [],
   artifacts: TimelineArtifact[] = [],
+  itemsLoaded = true,
 ): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
@@ -1888,6 +1982,7 @@ function normalizeTurn(
     durationMs: turn.durationMs,
     progress: liveProgress ?? emptyProgress(turn.startedAt),
     items,
+    itemsLoaded,
   };
 }
 

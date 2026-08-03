@@ -37,6 +37,7 @@ import type {
   ThreadSummary,
   TranscriptionConfigResponse,
   TranscriptionResponse,
+  TurnItemsResponse,
   TurnStartResult,
   UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
@@ -1770,8 +1771,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     async (request, reply) => {
       let observed = projection.summary(request.params.id);
       if (!observed) {
-        await projection.sync();
-        observed = projection.summary(request.params.id);
+        observed = await projection.refreshThread(request.params.id);
       }
       if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
       const cursor =
@@ -1791,8 +1791,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.post<{ Params: { id: string } }>("/api/v1/threads/:id/refresh", async (request, reply) => {
-    await projection.sync();
-    const observed = projection.summary(request.params.id);
+    const observed = await projection.refreshThread(request.params.id);
     if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
     await projection.invalidateHistory(request.params.id);
     const detail = await projection.readThread(request.params.id);
@@ -1808,6 +1807,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     } satisfies RefreshThreadResponse;
   });
 
+  app.get<{ Params: { id: string; turnId: string } }>(
+    "/api/v1/threads/:id/turns/:turnId/items",
+    async (request, reply): Promise<TurnItemsResponse | undefined> => {
+      let observed = projection.summary(request.params.id);
+      if (!observed) observed = await projection.refreshThread(request.params.id);
+      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+      return projection.readTurnItems(request.params.id, request.params.turnId);
+    },
+  );
+
   app.get<{
     Params: { id: string };
     Querystring: {
@@ -1819,8 +1828,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   }>("/api/v1/threads/:id/changes", async (request, reply): Promise<ThreadChanges | undefined> => {
     let observed = projection.summary(request.params.id);
     if (!observed) {
-      await projection.sync();
-      observed = projection.summary(request.params.id);
+      observed = await projection.refreshThread(request.params.id);
     }
     if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
     const { cursor, anchorTurnId, anchorRevision, continuationCursor } = request.query;
@@ -1985,8 +1993,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           }
           let existing = projection.summary(receipt.threadId);
           if (!existing) {
-            await projection.sync();
-            existing = projection.summary(receipt.threadId);
+            existing = await projection.refreshThread(receipt.threadId);
           }
           if (!existing) {
             throw new MessageQueueConflictError("The original thread is temporarily unavailable");
@@ -2433,7 +2440,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 
   app.setErrorHandler((error: Error, request, reply) => {
-    request.log.error({ errorName: error.name }, "request failed");
+    request.log.error(
+      {
+        err: safeError(error),
+        rpcCode: error instanceof RpcError ? error.code : undefined,
+        method: request.method,
+        route: request.routeOptions.url,
+      },
+      "request failed",
+    );
     if (error instanceof BridgeUnavailableError) {
       return apiError(reply, 503, "app_server_unavailable", error.message);
     }

@@ -248,6 +248,38 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("deduplicates concurrent technical item reads", async () => {
+    const response = { threadId: "thread", turnId: "turn", items: [] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(response), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const requests: Array<Promise<void>> = [];
+
+    function Probe() {
+      const { loadTurnItems } = useConnection();
+      useEffect(() => {
+        requests.push(loadTurnItems("thread", "turn"), loadTurnItems("thread", "turn"));
+      }, [loadTurnItems]);
+      return null;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await expect(Promise.all(requests)).resolves.toEqual([undefined, undefined]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread/turns/turn/items"),
+      expect.objectContaining({ method: "GET" }),
+    );
+    view.unmount();
+  });
+
   it("applies the authoritative snapshot and replaces the full detail on a manual refresh", async () => {
     const refreshedSummary = {
       ...summary,
@@ -328,6 +360,125 @@ describe("ConnectionProvider", () => {
       new URL("https://codexnest.example/api/v1/threads/thread/refresh"),
       expect.objectContaining({ method: "POST" }),
     );
+    view.unmount();
+  });
+
+  it("preserves live activity that arrives while a manual refresh is pending", async () => {
+    const running = {
+      ...summary,
+      state: "running" as const,
+      currentTurnId: "turn",
+      updatedAt: 3,
+    };
+    const staleDetail: ThreadDetail = {
+      summary: running,
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 3,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 3,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "inProgress",
+              text: "Начало",
+              images: [],
+              timestamp: 3,
+              phase: "commentary",
+            },
+          ],
+          itemsLoaded: false,
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    let resolveRefresh!: (response: Response) => void;
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const fetchMock = vi.fn().mockReturnValue(refreshResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, forceRefreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: staleDetail, page: "latest" });
+      }, [dispatch]);
+      refresh = () => forceRefreshDetail("thread");
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : ""}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [running]) });
+    });
+    expect(await screen.findByText("Начало")).toBeInTheDocument();
+
+    let pendingRefresh!: Promise<ThreadDetail>;
+    act(() => {
+      pendingRefresh = refresh!();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    act(() => {
+      socket.receive({
+        type: "event",
+        sequence: 2,
+        event: {
+          type: "activity.upserted",
+          threadId: "thread",
+          turnId: "turn",
+          item: {
+            type: "agentMessage",
+            id: "answer",
+            status: "inProgress",
+            text: "Начало live-обновления",
+            images: [],
+            timestamp: 3,
+            phase: "commentary",
+          },
+        },
+      });
+    });
+    expect(screen.getByText("Начало live-обновления")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRefresh(
+        new Response(
+          JSON.stringify({
+            snapshot: snapshot(1, [running]),
+            detail: staleDetail,
+          }),
+          { status: 200 },
+        ),
+      );
+      await pendingRefresh;
+    });
+
+    expect(screen.getByText("Начало live-обновления")).toBeInTheDocument();
     view.unmount();
   });
 
@@ -769,16 +920,14 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("refreshes a native app on resume even before WebView visibility catches up", async () => {
+  it("reconnects a native app on resume without starting a global sync", async () => {
     capacitor.native = true;
     let appStateListener: ((state: { isActive: boolean }) => void) | undefined;
     addAppListener.mockImplementation((_event, listener) => {
       appStateListener = listener;
       return Promise.resolve({ remove: vi.fn().mockResolvedValue(undefined) });
     });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response(JSON.stringify(snapshot(1, [])), { status: 200 }));
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
@@ -797,13 +946,17 @@ describe("ConnectionProvider", () => {
     act(() => appStateListener?.({ isActive: true }));
     expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(true);
 
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        new URL("https://codexnest.example/api/v1/sync"),
-        expect.objectContaining({ method: "POST" }),
-      ),
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const resumed = FakeWebSocket.instances[1]!;
+    act(() => {
+      resumed.open();
+      resumed.receive({ type: "snapshot", snapshot: snapshot(2, []) });
+    });
+    expect(await screen.findByText("snapshot:2")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/sync"),
+      expect.anything(),
     );
-    expect(await screen.findByText("snapshot:1")).toBeInTheDocument();
     view.unmount();
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
@@ -881,24 +1034,15 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("keeps a synced snapshot ahead of buffered events from the current stream", async () => {
+  it("ignores late events from the socket replaced on resume", async () => {
     capacitor.native = true;
     let appStateListener: ((state: { isActive: boolean }) => void) | undefined;
-    let resolveSync: ((response: Response) => void) | undefined;
     addAppListener.mockImplementation((_event, listener) => {
       appStateListener = listener;
       return Promise.resolve({ remove: vi.fn().mockResolvedValue(undefined) });
     });
     const synced = { ...summary, title: "Синхронизировано" };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveSync = resolve;
-          }),
-      ),
-    );
+    vi.stubGlobal("fetch", vi.fn());
     vi.stubGlobal("WebSocket", FakeWebSocket);
     const view = render(
       <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
@@ -918,13 +1062,12 @@ describe("ConnectionProvider", () => {
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
     const resumedSocket = FakeWebSocket.instances[1]!;
     act(() => {
-      resolveSync?.(new Response(JSON.stringify(snapshot(3, [synced])), { status: 200 }));
+      resumedSocket.open();
+      resumedSocket.receive({ type: "snapshot", snapshot: snapshot(3, [synced]) });
     });
     expect(await screen.findByText("Синхронизировано")).toBeInTheDocument();
     act(() => {
-      resumedSocket.open();
-      resumedSocket.receive({ type: "snapshot", snapshot: snapshot(1) });
-      resumedSocket.receive({
+      socket.receive({
         type: "event",
         sequence: 2,
         event: { type: "thread.upserted", thread: { ...summary, title: "Устарело" } },
@@ -941,7 +1084,7 @@ function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSn
   return {
     sequence,
     uiLanguage: "ru",
-    connection: { state: "ready", message: null, syncedAt: null },
+    connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects: [],
     threads,
     attention: [],

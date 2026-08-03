@@ -245,6 +245,8 @@ const ENGLISH: Record<string, string> = {
   "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.":
     "The server and APK update from the same verified CI build with automatic rollback.",
   "Получаем версию CodexNest…": "Loading CodexNest version…",
+  "Технические детали": "Technical details",
+  "Повторить загрузку технических деталей": "Retry loading technical details",
   "Установлено на сервере": "Installed on server",
   "Актуальная версия в GitHub": "Latest version on GitHub",
   "Не проверялась": "Not checked",

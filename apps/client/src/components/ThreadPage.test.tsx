@@ -369,7 +369,10 @@ describe("Activity", () => {
         }}
       />,
     );
-    expect(screen.getByText("npm test").closest("details")).toHaveClass("activity-card");
+    const commandDetails = screen.getByText("npm test").closest("details")!;
+    expect(commandDetails).toHaveClass("activity-card");
+    fireEvent.click(within(commandDetails).getByText("npm test"));
+    fireEvent(commandDetails, new Event("toggle"));
     expect(screen.getByText("5 tests passed")).toBeInTheDocument();
 
     rerender(
@@ -384,6 +387,9 @@ describe("Activity", () => {
       />,
     );
     expect(screen.getByText("Изменён src/App.tsx")).toBeInTheDocument();
+    const fileDetails = screen.getByText("Изменён src/App.tsx").closest("details")!;
+    fileDetails.open = true;
+    fireEvent(fileDetails, new Event("toggle"));
     expect(screen.getByText("+new line")).toBeInTheDocument();
   });
 
@@ -415,16 +421,49 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const groupSummary = screen.getByText("Выполнены команды").closest("summary")!;
+    const groupSummary = screen.getByText("Технические детали").closest("summary")!;
     const group = groupSummary.closest("details")!;
-    const failedStatus = within(group).getByText("ошибка");
 
     expect(groupSummary).not.toHaveTextContent("Ошибка");
-    expect(failedStatus).not.toBeVisible();
+    expect(within(group).queryByText("ошибка")).toBeNull();
 
     fireEvent.click(groupSummary);
+    fireEvent(group, new Event("toggle"));
 
-    expect(failedStatus).toBeVisible();
+    expect(within(group).getByText("ошибка")).toBeVisible();
+  });
+
+  it("loads technical turn items only when their details are expanded", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          itemsLoaded: false,
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "completed",
+              text: "Готово",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    expect(context.loadTurnItems).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Технические детали"));
+    await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledWith("thread", "turn"));
   });
 
   it("copies message text and formats timestamps for today and older days", async () => {
@@ -2500,7 +2539,7 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
   });
 
-  it("reloads the open chat for a reconnect snapshot epoch", async () => {
+  it("does not reload the open chat for a reconnect snapshot epoch", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary);
     const view = renderThread();
@@ -2509,7 +2548,7 @@ describe("Activity", () => {
     context.state.snapshotEpoch += 1;
     view.rerender(threadRoute());
 
-    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
+    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
   });
 
   it("retries one completed chat read when only a plan is available", () => {
@@ -3225,6 +3264,7 @@ function mockThreadConnection(
       durationMs: number | null;
       progress: ReturnType<typeof progress>;
       items: Array<Parameters<typeof Activity>[0]["item"]>;
+      itemsLoaded?: boolean;
     }>;
     queuedMessages: Array<{
       id: string;
@@ -3288,6 +3328,7 @@ function mockThreadConnection(
     refreshDetail: vi.fn().mockResolvedValue(detail),
     forceRefreshDetail: vi.fn().mockResolvedValue(detail),
     loadOlderDetail: vi.fn().mockResolvedValue(detail),
+    loadTurnItems: vi.fn().mockResolvedValue(undefined),
     sendReliable: vi
       .fn()
       .mockImplementation((threadId, body) =>

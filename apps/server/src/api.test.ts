@@ -1335,8 +1335,15 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
+    bridge.rejectFullTurnReads = true;
     const threadListsBeforeRefresh = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/list",
+    ).length;
+    const modelListsBeforeRefresh = bridge.request.mock.calls.filter(
+      ([method]) => method === "model/list",
+    ).length;
+    const threadReadsBeforeRefresh = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/read",
     ).length;
     const refreshed = await app.inject({
       method: "POST",
@@ -1353,9 +1360,42 @@ describe("thread settings", () => {
         turns: [],
       },
     });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/list").length).toBe(
+      threadListsBeforeRefresh,
+    );
     expect(
-      bridge.request.mock.calls.filter(([method]) => method === "thread/list").length,
-    ).toBeGreaterThan(threadListsBeforeRefresh);
+      bridge.request.mock.calls.filter(([method]) => method === "thread/read").length,
+    ).toBeGreaterThan(threadReadsBeforeRefresh);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "model/list").length).toBe(
+      modelListsBeforeRefresh,
+    );
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/turns/list")?.[1],
+    ).toMatchObject({ threadId: "thread", itemsView: "summary" });
+
+    const requestLogger = vi.spyOn(app.log, "child").mockReturnValue(app.log);
+    const errorLog = vi.spyOn(app.log, "error");
+    bridge.nextTurnListError = new RpcError(-32_000, "Rollout changed while reading turns");
+    const failedRefresh = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/refresh",
+      headers,
+    });
+    expect(failedRefresh.statusCode).toBe(500);
+    expect(failedRefresh.json()).toEqual({
+      error: { code: "internal_error", message: "Internal server error" },
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      {
+        err: { name: "RpcError", message: "Rollout changed while reading turns" },
+        rpcCode: -32_000,
+        method: "POST",
+        route: "/api/v1/threads/:id/refresh",
+      },
+      "request failed",
+    );
+    errorLog.mockRestore();
+    requestLogger.mockRestore();
 
     await store.update((state) => {
       state.threadMeta.viewed = {
@@ -3227,6 +3267,8 @@ class SettingsBridge extends EventEmitter {
   } | null = null;
   failNextTurnStart = false;
   failNextGoalActivation = false;
+  rejectFullTurnReads = false;
+  nextTurnListError: RpcError | null = null;
   missingRolloutThreadIds = new Set<string>();
   managedThreadSequence = 0;
   managedThreads: Thread[] = [];
@@ -3274,6 +3316,14 @@ class SettingsBridge extends EventEmitter {
     if (method === "thread/name/set") return {};
     if (method === "thread/delete") return {};
     if (method === "thread/turns/list") {
+      if (this.rejectFullTurnReads && params.itemsView === "full") {
+        throw new RpcError(-32_000, "Rollout changed while reading turns");
+      }
+      if (this.nextTurnListError) {
+        const error = this.nextTurnListError;
+        this.nextTurnListError = null;
+        throw error;
+      }
       return {
         data: [...(this.threadTurns.get(String(params.threadId)) ?? [])].reverse(),
         nextCursor: null,

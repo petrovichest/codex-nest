@@ -64,6 +64,7 @@ export function SettingsPage({
   transcriptionConfig = null,
   transcriptionConfigError = null,
   onTranscriptionConfigChange = () => undefined,
+  initialAppUpdateStatus = null,
   onAppUpdateStatusChange,
 }: {
   onOpenNavigation(): void;
@@ -77,6 +78,7 @@ export function SettingsPage({
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionConfigError?: string | null;
   onTranscriptionConfigChange?(config: TranscriptionConfigResponse): void;
+  initialAppUpdateStatus?: AppUpdateStatus | null;
   onAppUpdateStatusChange?(status: AppUpdateStatus): void;
 }) {
   const { api, state } = useConnection();
@@ -99,12 +101,18 @@ export function SettingsPage({
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [languageSaving, setLanguageSaving] = useState(false);
   const [languageError, setLanguageError] = useState<string | null>(null);
-  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(
+    initialAppUpdateStatus,
+  );
   const [codexManagementStatus, setCodexManagementStatus] = useState<CodexManagementStatus | null>(
     null,
   );
   const defaultModel =
     state?.snapshot?.models.find((model) => model.isDefault) ?? state?.snapshot?.models[0];
+
+  useEffect(() => {
+    if (initialAppUpdateStatus) setAppUpdateStatus(initialAppUpdateStatus);
+  }, [initialAppUpdateStatus]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -233,7 +241,10 @@ export function SettingsPage({
       <main className="settings-scroll">
         <CodexSettingsProvider onStatusChange={setCodexManagementStatus}>
           <div className="settings-stack">
-            <ApplicationSettingsCard onStatusChange={acceptAppUpdateStatus} />
+            <ApplicationSettingsCard
+              initialStatus={initialAppUpdateStatus}
+              onStatusChange={acceptAppUpdateStatus}
+            />
 
             <CodexSettingsCard />
 

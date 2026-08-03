@@ -339,6 +339,7 @@ export function ThreadPage({
     refreshDetail,
     forceRefreshDetail,
     loadOlderDetail,
+    loadTurnItems,
     sendReliable,
     queueVoiceRecording,
   } = useConnection();
@@ -533,7 +534,23 @@ export function ThreadPage({
       new Map(
         (detail?.turns ?? []).map(
           (turn) =>
-            [turn.id, groupActivities(activitiesForThreadDisplay(turn.items, isSubagent))] as const,
+            [
+              turn.id,
+              groupActivities(
+                activitiesForThreadDisplay(turn.items, isSubagent).filter(
+                  (item) => !isTechnicalActivity(item),
+                ),
+              ),
+            ] as const,
+        ),
+      ),
+    [detail?.turns, isSubagent],
+  );
+  const technicalTurnActivities = useMemo(
+    () =>
+      new Map(
+        (detail?.turns ?? []).map(
+          (turn) => [turn.id, isSubagent ? [] : turn.items.filter(isTechnicalActivity)] as const,
         ),
       ),
     [detail?.turns, isSubagent],
@@ -1471,7 +1488,24 @@ export function ThreadPage({
         }
       });
     }
-  }, [threadId, refreshDetail, state.snapshotEpoch]);
+  }, [threadId, refreshDetail]);
+
+  useEffect(() => {
+    const latestTurn = detail?.turns.at(-1);
+    if (
+      !threadId ||
+      !summary ||
+      summary.currentTurnId ||
+      summary.state !== "needsAttention" ||
+      summary.settings.collaborationMode !== "plan" ||
+      !latestTurn ||
+      latestTurn.status === "inProgress" ||
+      latestTurn.itemsLoaded !== false
+    ) {
+      return;
+    }
+    void loadTurnItems(threadId, latestTurn.id).catch(() => undefined);
+  }, [detail?.turns, loadTurnItems, summary, threadId]);
 
   useEffect(
     () => () => {
@@ -1737,24 +1771,30 @@ export function ThreadPage({
       await submitPreparingSession(newSessionProject);
       return;
     }
-    const submittedComposerInput = input;
-    const submittedAnnotations = annotations;
+    const targetThreadId = activeThreadIdRef.current;
+    if (!targetThreadId) {
+      setError(t("Не удалось отправить сообщение"));
+      return;
+    }
+    const submittedDraft = structuredClone(currentComposerDraft(targetThreadId));
     const submittedInput = formatAnnotatedMessage(
-      submittedComposerInput,
-      submittedAnnotations,
+      submittedDraft.input,
+      submittedDraft.annotations,
       language,
     );
-    if ((!submittedInput.trim() && !images.length) || (goalMode && !input.trim())) return;
-    const submittedImages = images;
-    const submittedGoalMode = goalMode;
-    const submittedDraft = structuredClone(activeComposerDraft);
+    if (
+      (!submittedInput.trim() && !submittedDraft.images.length) ||
+      (submittedDraft.goalMode && !submittedDraft.input.trim())
+    ) {
+      return;
+    }
     const submittedEditRevision = composerEditRevisionRef.current;
     const clientMessageId = createClientMessageId();
     const optimisticMessage: OptimisticMessage = {
       id: clientMessageId,
-      threadId,
+      threadId: targetThreadId,
       text: submittedInput.trim(),
-      images: submittedImages.map((image) => image.url),
+      images: submittedDraft.images.map((image) => image.url),
       createdAt: Date.now(),
       destination: "queue",
       turnId: null,
@@ -1764,20 +1804,22 @@ export function ThreadPage({
     scrollTargetMessageId.current = clientMessageId;
     dispatch({ type: "optimistic.add", message: optimisticMessage });
     replaceComposerDraft(emptyComposerDraft(), false);
-    await flushDraft();
+    await flushDraft(targetThreadId);
     try {
-      await sendReliable(threadId, {
+      await sendReliable(targetThreadId, {
         input: submittedInput,
-        ...(submittedImages.length ? { images: submittedImages.map((image) => image.url) } : {}),
-        ...(submittedGoalMode ? { goal: true } : {}),
+        ...(submittedDraft.images.length
+          ? { images: submittedDraft.images.map((image) => image.url) }
+          : {}),
+        ...(submittedDraft.goalMode ? { goal: true } : {}),
         clientMessageId,
       });
     } catch (caught) {
-      dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
+      dispatch({ type: "optimistic.remove", threadId: targetThreadId, messageId: clientMessageId });
       const restore =
         composerEditRevisionRef.current === submittedEditRevision
           ? submittedDraft
-          : mergeComposerDrafts(submittedDraft, currentComposerDraft());
+          : mergeComposerDrafts(submittedDraft, currentComposerDraft(targetThreadId));
       replaceComposerDraft(restore, "immediate");
       setError(
         caught instanceof Error
@@ -1788,7 +1830,7 @@ export function ThreadPage({
       return;
     }
     try {
-      await cleanupAcceptedDraft(threadId, submittedEditRevision);
+      await cleanupAcceptedDraft(targetThreadId, submittedEditRevision);
     } finally {
       setBusy(false);
     }
@@ -2424,6 +2466,7 @@ export function ThreadPage({
                   )}
                 {detail?.turns.map((turn) => {
                   const entries = groupedTurnActivities.get(turn.id)!;
+                  const technicalItems = technicalTurnActivities.get(turn.id)!;
                   const turnOptimisticMessages = optimisticTurnMessages.filter(
                     (message) =>
                       message.turnId === turn.id ||
@@ -2433,6 +2476,7 @@ export function ThreadPage({
                   if (
                     isSubagent &&
                     entries.length === 0 &&
+                    technicalItems.length === 0 &&
                     turnOptimisticMessages.length === 0 &&
                     !active
                   ) {
@@ -2504,6 +2548,15 @@ export function ThreadPage({
                             )}
                           </div>
                         ),
+                      )}
+                      {!isSubagent && (
+                        <LazyTechnicalDetails
+                          items={technicalItems}
+                          loaded={turn.itemsLoaded !== false}
+                          onLoad={() => loadTurnItems(threadId, turn.id)}
+                          cwd={workspaceSummary.cwd}
+                          onDownload={downloadFile}
+                        />
                       )}
                       {isSubagent ? (
                         active && (
@@ -3643,6 +3696,7 @@ function ActivityGroup({
   onDownload(path: string): Promise<void>;
 }) {
   const { t } = useI18n();
+  const [open, setOpen] = useState(false);
   const inProgress = items.some((item) => item.status === "inProgress");
   const labels: string[] = [];
   if (items.some((item) => item.type === "command" && item.kind === "read")) {
@@ -3657,7 +3711,7 @@ function ActivityGroup({
   if (items.some((item) => item.type === "fileChange")) labels.push(t("Отредактированы файлы"));
   if (items.some((item) => item.type === "tool")) labels.push(t("Использованы инструменты"));
   return (
-    <details className="activity-group">
+    <details className="activity-group" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         <span className="activity-group-icon">
           <ToolIcon />
@@ -3665,16 +3719,79 @@ function ActivityGroup({
         <span>{labels.join(" · ") || t("Выполнены действия")}</span>
         {inProgress && <span className="spinner small" />}
       </summary>
-      <div className="activity-group-content">
-        {items.map((item) => (
-          <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
-        ))}
-      </div>
+      {open && (
+        <div className="activity-group-content">
+          {items.map((item) => (
+            <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
+          ))}
+        </div>
+      )}
     </details>
   );
 }
 
 const MemoizedActivityGroup = memo(ActivityGroup);
+
+function LazyTechnicalDetails({
+  items,
+  loaded,
+  onLoad,
+  cwd,
+  onDownload,
+}: {
+  items: ActivityItem[];
+  loaded: boolean;
+  onLoad(): Promise<void>;
+  cwd: string;
+  onDownload(path: string): Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  const load = useCallback(() => {
+    if (loading || loaded) return;
+    setLoading(true);
+    setError(false);
+    void onLoad()
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  }, [loaded, loading, onLoad]);
+
+  if (loaded && items.length === 0) return null;
+  return (
+    <details
+      className="activity-group technical-details"
+      onToggle={(event) => {
+        const nextOpen = event.currentTarget.open;
+        setOpen(nextOpen);
+        if (nextOpen) load();
+      }}
+    >
+      <summary>
+        <span className="activity-group-icon">
+          <ToolIcon />
+        </span>
+        <span>{t("Технические детали")}</span>
+        {loading && <span className="spinner small" />}
+      </summary>
+      {open && (
+        <div className="activity-group-content">
+          {error && (
+            <button type="button" className="history-retry" onClick={load}>
+              {t("Повторить загрузку технических деталей")}
+            </button>
+          )}
+          {loaded &&
+            items.map((item) => (
+              <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
+            ))}
+        </div>
+      )}
+    </details>
+  );
+}
 
 function QueuedMessages({
   messages,
@@ -3988,6 +4105,10 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
   return result;
 }
 
+function isTechnicalActivity(item: ActivityItem): boolean {
+  return ["reasoning", "command", "fileChange", "tool"].includes(item.type);
+}
+
 function activitiesForThreadDisplay(items: ActivityItem[], isSubagent: boolean): ActivityItem[] {
   if (!isSubagent) return items;
   return items.filter((item) => item.type === "userMessage" || item.type === "agentMessage");
@@ -4100,8 +4221,9 @@ function ActivityDetails({
   children: React.ReactNode;
 }) {
   const { t } = useI18n();
+  const [open, setOpen] = useState(false);
   return (
-    <details className="activity-card">
+    <details className="activity-card" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         <span className="activity-icon">{icon}</span>
         <span className="activity-title">{title}</span>
@@ -4109,7 +4231,7 @@ function ActivityDetails({
           {statusLabel(status, t)}
         </span>
       </summary>
-      <div className="activity-content">{children}</div>
+      {open && <div className="activity-content">{children}</div>}
     </details>
   );
 }

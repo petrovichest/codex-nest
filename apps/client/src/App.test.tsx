@@ -1729,6 +1729,44 @@ describe("App routing and navigation", () => {
     });
   });
 
+  it("uses the activated thread when sending before the handoff rerenders", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockReturnValue(creation.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: "Отправь на границе создания" } });
+
+    let submittedDuringHandoff = false;
+    api.dispatch.mockImplementation((action: { type: string; thread?: ThreadSummary }) => {
+      if (!submittedDuringHandoff && action.type === "thread" && action.thread?.id === "created") {
+        submittedDuringHandoff = true;
+        fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+      }
+    });
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({ input: "Отправь на границе создания" }),
+      ),
+    );
+    expect(submittedDuringHandoff).toBe(true);
+    expect(api.sendReliable.mock.calls.some(([id]) => id === "")).toBe(false);
+    expect(api.dispatch).toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.objectContaining({
+        threadId: "created",
+        text: "Отправь на границе создания",
+      }),
+    });
+  });
+
   it("reapplies a newer draft when a stale transfer clear fails after early send", async () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const stalePut = deferred<ThreadDraft | null>();
@@ -2624,7 +2662,7 @@ function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProjec
   return {
     sequence: 1,
     uiLanguage: "ru",
-    connection: { state: "ready", message: null, syncedAt: null },
+    connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects,
     threads,
     attention: [],
