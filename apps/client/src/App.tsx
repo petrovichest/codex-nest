@@ -58,7 +58,7 @@ import { localizeKnownServerText, useI18n, type Translate } from "./i18n";
 import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
 import { clearConnectionSettings } from "./storage";
-import { threadStatusClasses } from "./thread-status";
+import { hasAlwaysVisibleThreadStatus, threadStatusClasses } from "./thread-status";
 import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
@@ -76,7 +76,6 @@ type ListExpansion = number | "all";
 
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
-  projectListExpansions: Map<string, ListExpansion>;
 };
 
 type ProjectDragGesture = {
@@ -475,7 +474,6 @@ function readLayoutPreferences(): {
 function emptySidebarTreeState(): SidebarTreeState {
   return {
     collapsedProjectIds: new Set(),
-    projectListExpansions: new Map(),
   };
 }
 
@@ -495,20 +493,7 @@ function readSidebarTreeState(serverBaseUrl: string): SidebarTreeState {
     const record = parsed as Record<string, unknown>;
     if (record.version !== 1) return emptySidebarTreeState();
     const collapsedProjectIds = readStringSet(record.collapsedProjectIds);
-    let projectListExpansions: Map<string, ListExpansion> | null;
-    if (record.projectListExpansions === undefined) {
-      const expandedProjectListIds = readStringSet(record.expandedProjectListIds);
-      projectListExpansions = expandedProjectListIds
-        ? new Map([...expandedProjectListIds].map((id) => [id, "all" as const]))
-        : null;
-    } else {
-      projectListExpansions = readListExpansions(record.projectListExpansions);
-    }
-    if (!collapsedProjectIds || !projectListExpansions) return emptySidebarTreeState();
-    return {
-      collapsedProjectIds,
-      projectListExpansions,
-    };
+    return collapsedProjectIds ? { collapsedProjectIds } : emptySidebarTreeState();
   } catch {
     return emptySidebarTreeState();
   }
@@ -519,25 +504,6 @@ function readStringSet(value: unknown): Set<string> | null {
   return new Set(value);
 }
 
-function readListExpansions(value: unknown): Map<string, ListExpansion> | null {
-  if (
-    !Array.isArray(value) ||
-    value.some(
-      (item) =>
-        !Array.isArray(item) ||
-        item.length !== 2 ||
-        typeof item[0] !== "string" ||
-        (item[1] !== "all" &&
-          (typeof item[1] !== "number" ||
-            !Number.isInteger(item[1]) ||
-            item[1] <= THREAD_PREVIEW_LIMIT)),
-    )
-  ) {
-    return null;
-  }
-  return new Map(value as Array<[string, ListExpansion]>);
-}
-
 function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): void {
   try {
     localStorage.setItem(
@@ -545,9 +511,6 @@ function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): 
       JSON.stringify({
         version: 1,
         collapsedProjectIds: [...state.collapsedProjectIds].sort(),
-        projectListExpansions: [...state.projectListExpansions].sort(([left], [right]) =>
-          left.localeCompare(right),
-        ),
       }),
     );
   } catch {
@@ -569,17 +532,9 @@ function toggleSidebarTreeEntry(
 function pruneSidebarTreeState(state: SidebarTreeState, projectIds: Set<string>): SidebarTreeState {
   projectIds.add("ungrouped");
   const collapsedProjectIds = retainSidebarTreeEntries(state.collapsedProjectIds, projectIds);
-  const projectListExpansions = retainSidebarTreeMap(state.projectListExpansions, projectIds);
-  if (
-    collapsedProjectIds.size === state.collapsedProjectIds.size &&
-    projectListExpansions.size === state.projectListExpansions.size
-  ) {
-    return state;
-  }
-  return {
-    collapsedProjectIds,
-    projectListExpansions,
-  };
+  return collapsedProjectIds.size === state.collapsedProjectIds.size
+    ? state
+    : { collapsedProjectIds };
 }
 
 function retainSidebarTreeEntries(values: Set<string>, validIds: Set<string>): Set<string> {
@@ -602,7 +557,7 @@ function toggleListExpansion(
 ): Map<string, ListExpansion> {
   const next = new Map(values);
   const expansion = next.get(id);
-  const visible = expansion === "all" ? total : (expansion ?? initial);
+  const visible = expansion === "all" ? total : Math.max(expansion ?? initial, initial);
   if (expansion === "all" || visible >= total) {
     next.delete(id);
   } else if (visible + THREAD_PREVIEW_LIMIT >= total) {
@@ -668,6 +623,9 @@ function Sidebar({
   const [sidebarTree, setSidebarTree] = useState<SidebarTreeState>(() =>
     readSidebarTreeState(serverBaseUrl),
   );
+  const [projectListExpansions, setProjectListExpansions] = useState<Map<string, ListExpansion>>(
+    () => new Map(),
+  );
   const [branchHistoryExpansions, setBranchHistoryExpansions] = useState<
     Map<string, ListExpansion>
   >(() => new Map());
@@ -708,9 +666,37 @@ function Sidebar({
     setSidebarTree((current) =>
       pruneSidebarTreeState(current, new Set(snapshot.projects.map((project) => project.id))),
     );
+    const projectIds = new Set(snapshot.projects.map((project) => project.id));
+    projectIds.add("ungrouped");
+    setProjectListExpansions((current) => retainSidebarTreeMap(current, projectIds));
     const threadIds = new Set(snapshot.threads.map((thread) => thread.id));
     setBranchHistoryExpansions((current) => retainSidebarTreeMap(current, threadIds));
   }, [snapshot]);
+
+  useEffect(() => {
+    const resetProjectLists = () =>
+      setProjectListExpansions((current) => (current.size ? new Map() : current));
+    const foreground = () => {
+      if (document.visibilityState === "visible") resetProjectLists();
+    };
+    let disposed = false;
+    let removeNativeListener: (() => Promise<void>) | undefined;
+    if (Capacitor.isNativePlatform()) {
+      void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive) resetProjectLists();
+      }).then((handle) => {
+        if (disposed) void handle.remove();
+        else removeNativeListener = () => handle.remove();
+      });
+    } else {
+      document.addEventListener("visibilitychange", foreground);
+    }
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", foreground);
+      void removeNativeListener?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!snapshotReady) return;
@@ -763,16 +749,8 @@ function Sidebar({
     setSidebarTree((current) => toggleSidebarTreeEntry(current, "collapsedProjectIds", key));
   }
 
-  function toggleProjectList(key: string, total: number) {
-    setSidebarTree((current) => ({
-      ...current,
-      projectListExpansions: toggleListExpansion(
-        current.projectListExpansions,
-        key,
-        total,
-        THREAD_PREVIEW_LIMIT,
-      ),
-    }));
+  function toggleProjectList(key: string, total: number, initial: number) {
+    setProjectListExpansions((current) => toggleListExpansion(current, key, total, initial));
   }
 
   function toggleBranchHistory(threadId: string, total: number) {
@@ -1127,16 +1105,31 @@ function Sidebar({
           {orderedGroups.map((group) => {
             const key = group.project?.id ?? "ungrouped";
             const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
-            const projectListExpansion = sidebarTree.projectListExpansions.get(key);
-            const projectListLimit =
+            const alwaysVisibleThreads = group.threads.filter(hasAlwaysVisibleThreadStatus);
+            const collapsibleThreads = group.threads.filter(
+              (thread) => !hasAlwaysVisibleThreadStatus(thread),
+            );
+            const initialCollapsibleLimit = Math.max(
+              0,
+              THREAD_PREVIEW_LIMIT - alwaysVisibleThreads.length,
+            );
+            const projectListExpansion = projectListExpansions.get(key);
+            const requestedCollapsibleLimit =
               projectListExpansion === "all"
-                ? group.threads.length
-                : (projectListExpansion ?? THREAD_PREVIEW_LIMIT);
+                ? collapsibleThreads.length
+                : (projectListExpansion ?? initialCollapsibleLimit);
+            const collapsibleLimit = Math.max(initialCollapsibleLimit, requestedCollapsibleLimit);
             const groupShowsAll =
-              group.threads.length > THREAD_PREVIEW_LIMIT &&
-              projectListLimit >= group.threads.length;
+              collapsibleThreads.length > initialCollapsibleLimit &&
+              collapsibleLimit >= collapsibleThreads.length;
             const isBottomUp = projectListDirection === "bottom-up";
-            const visible = group.threads.slice(0, projectListLimit);
+            const visibleCollapsibleIds = new Set(
+              collapsibleThreads.slice(0, collapsibleLimit).map((thread) => thread.id),
+            );
+            const visible = group.threads.filter(
+              (thread) =>
+                hasAlwaysVisibleThreadStatus(thread) || visibleCollapsibleIds.has(thread.id),
+            );
             const projectThreads = group.project
               ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ?? [])
               : [];
@@ -1293,17 +1286,19 @@ function Sidebar({
                     onToggleHistory={toggleBranchHistory}
                   />
                 ))}
-                {group.threads.length > THREAD_PREVIEW_LIMIT && (
+                {collapsibleThreads.length > initialCollapsibleLimit && (
                   <button
                     className="show-more"
-                    onClick={() => toggleProjectList(key, group.threads.length)}
+                    onClick={() =>
+                      toggleProjectList(key, collapsibleThreads.length, initialCollapsibleLimit)
+                    }
                   >
                     {groupShowsAll
                       ? t("Показать меньше")
                       : t("Показать ещё {{count}}", {
                           count: Math.min(
                             THREAD_PREVIEW_LIMIT,
-                            group.threads.length - visible.length,
+                            collapsibleThreads.length - collapsibleLimit,
                           ),
                         })}
                   </button>

@@ -33,6 +33,7 @@ const saveLocalDraft = vi.hoisted(() =>
 );
 const capacitor = vi.hoisted(() => ({
   addListener: vi.fn(),
+  appStateHandler: null as ((state: { isActive: boolean }) => void) | null,
   backHandler: null as (() => void) | null,
   getInfo: vi.fn(),
   getPlatform: vi.fn(() => "web"),
@@ -88,6 +89,7 @@ beforeEach(() => {
       .fn()
       .mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
   );
+  capacitor.appStateHandler = null;
   capacitor.backHandler = null;
   capacitor.getPlatform.mockReturnValue("web");
   capacitor.isNativePlatform.mockReturnValue(false);
@@ -98,10 +100,15 @@ beforeEach(() => {
     build: "2",
   });
   capacitor.removeListener.mockResolvedValue(undefined);
-  capacitor.addListener.mockImplementation(async (_event: string, listener: () => void) => {
-    capacitor.backHandler = listener;
+  capacitor.addListener.mockImplementation(async (event: string, listener: () => void) => {
+    if (event === "appStateChange") {
+      capacitor.appStateHandler = listener as unknown as (state: { isActive: boolean }) => void;
+    } else if (event === "backButton") {
+      capacitor.backHandler = listener;
+    }
     return { remove: capacitor.removeListener };
   });
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
@@ -668,6 +675,104 @@ describe("App routing and navigation", () => {
     expect(directBranches()).toHaveLength(5);
   });
 
+  it("always shows every non-gray and queued project session", () => {
+    const gray = Array.from({ length: 5 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `gray-${index + 1}`,
+      title: `Серая ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `gray-session-${index + 1}` },
+    }));
+    const highlighted = (
+      [
+        { ...baseThread, id: "running-1", title: "Выполняется 1", state: "running" },
+        { ...baseThread, id: "queued-1", title: "В очереди 1", state: "queued" },
+        { ...baseThread, id: "attention-1", title: "Нужно решение", state: "needsAttention" },
+        {
+          ...baseThread,
+          id: "completed-unread",
+          title: "Непрочитанная завершённая",
+          state: "completed",
+          unread: true,
+        },
+        { ...baseThread, id: "failed-1", title: "Ошибка", state: "failed" },
+        {
+          ...baseThread,
+          id: "interrupted-unread",
+          title: "Непрочитанная прерванная",
+          state: "interrupted",
+          unread: true,
+        },
+        { ...baseThread, id: "running-2", title: "Выполняется 2", state: "running" },
+        { ...baseThread, id: "queued-2", title: "В очереди 2", state: "queued" },
+      ] satisfies ThreadSummary[]
+    ).map((thread, index): ThreadSummary => ({
+      ...thread,
+      updatedAt: 90 - index,
+      relation: { kind: "session", sessionId: `highlighted-session-${index + 1}` },
+    }));
+    mockConnection(snapshot([...gray, ...highlighted]));
+
+    const view = renderApp("/threads/running-1");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const directBranches = () => sessions.querySelectorAll(":scope > .thread-branch");
+
+    expect(directBranches()).toHaveLength(8);
+    highlighted.forEach((thread) =>
+      expect(screen.getByRole("link", { name: thread.title })).toBeInTheDocument(),
+    );
+    gray.forEach((thread) =>
+      expect(screen.queryByRole("link", { name: thread.title })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 5" }));
+    expect(directBranches()).toHaveLength(13);
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать меньше" }));
+    expect(directBranches()).toHaveLength(8);
+  });
+
+  it("counts always-visible sessions toward the five-session preview", () => {
+    const gray = Array.from({ length: 5 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `preview-gray-${index + 1}`,
+      title: `Обычная ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `preview-gray-session-${index + 1}` },
+    }));
+    const highlighted = (
+      [
+        { ...baseThread, id: "preview-running", title: "Старая выполняющаяся", state: "running" },
+        { ...baseThread, id: "preview-queued", title: "Старая в очереди", state: "queued" },
+        {
+          ...baseThread,
+          id: "preview-unread",
+          title: "Старая непрочитанная",
+          state: "completed",
+          unread: true,
+        },
+      ] satisfies ThreadSummary[]
+    ).map((thread, index): ThreadSummary => ({
+      ...thread,
+      updatedAt: 50 - index,
+      relation: { kind: "session", sessionId: `preview-highlighted-session-${index + 1}` },
+    }));
+    mockConnection(snapshot([...gray, ...highlighted]));
+
+    const view = renderApp("/threads/preview-running");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const titles = () =>
+      Array.from(sessions.querySelectorAll(".thread-link-title")).map((item) => item.textContent);
+
+    expect(titles()).toEqual([
+      "Обычная 1",
+      "Обычная 2",
+      "Старая выполняющаяся",
+      "Старая в очереди",
+      "Старая непрочитанная",
+    ]);
+    expect(within(sessions).getByRole("button", { name: "Показать ещё 3" })).toBeInTheDocument();
+  });
+
   it("always shows running children and keeps history behind the button", () => {
     const running: ThreadSummary = {
       ...baseThread,
@@ -799,7 +904,7 @@ describe("App routing and navigation", () => {
     expect(nestedBranches()).toHaveLength(5);
   });
 
-  it("restores project tree state and resets branch history", () => {
+  it("restores collapsed projects and resets expanded project and branch lists", () => {
     const rootSiblings = Array.from({ length: 5 }, (_, index): ThreadSummary => ({
       ...baseThread,
       id: `root-${index + 1}`,
@@ -846,7 +951,10 @@ describe("App routing and navigation", () => {
     const restoredProjectSessions = secondView.container.querySelector(
       ".project-sessions",
     ) as HTMLElement;
-    expect(restoredProjectSessions.querySelectorAll(":scope > .thread-branch")).toHaveLength(6);
+    expect(restoredProjectSessions.querySelectorAll(":scope > .thread-branch")).toHaveLength(5);
+    expect(
+      within(restoredProjectSessions).getByRole("button", { name: "Показать ещё 1" }),
+    ).toBeInTheDocument();
     const restoredRootBranch = screen
       .getByRole("link", { name: "Новая задача в истории" })
       .closest(".thread-branch") as HTMLElement;
@@ -876,16 +984,14 @@ describe("App routing and navigation", () => {
     );
   });
 
-  it("migrates legacy fully expanded project state", async () => {
+  it("ignores previously persisted project list expansion", async () => {
     const storageKey = "codexnest.sidebarTree.v1:https%3A%2F%2Fpi.local";
     localStorage.setItem(
       storageKey,
       JSON.stringify({
         version: 1,
         collapsedProjectIds: [],
-        expandedProjectListIds: ["project"],
-        openBranchIds: [],
-        expandedBranchListIds: [],
+        projectListExpansions: [["project", "all"]],
       }),
     );
     const threads = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
@@ -898,12 +1004,11 @@ describe("App routing and navigation", () => {
     mockConnection(snapshot(threads));
 
     const view = renderApp("/threads/legacy-root-1");
-    expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(6);
+    expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(5);
     await waitFor(() =>
       expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
         version: 1,
         collapsedProjectIds: [],
-        projectListExpansions: [["project", "all"]],
       }),
     );
   });
@@ -933,9 +1038,59 @@ describe("App routing and navigation", () => {
       expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
         version: 1,
         collapsedProjectIds: [],
-        projectListExpansions: [],
       }),
     );
+  });
+
+  it("resets expanded project lists when the Android app returns to the foreground", async () => {
+    capacitor.isNativePlatform.mockReturnValue(true);
+    const threads = Array.from({ length: 12 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `native-root-${index + 1}`,
+      title: `Android сессия ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `native-session-${index + 1}` },
+    }));
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/native-root-1");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const directBranches = () => sessions.querySelectorAll(":scope > .thread-branch");
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 5" }));
+    expect(directBranches()).toHaveLength(10);
+    await waitFor(() => expect(capacitor.appStateHandler).not.toBeNull());
+
+    act(() => capacitor.appStateHandler?.({ isActive: false }));
+    expect(directBranches()).toHaveLength(10);
+    act(() => capacitor.appStateHandler?.({ isActive: true }));
+    expect(directBranches()).toHaveLength(5);
+
+    view.unmount();
+    await waitFor(() => expect(capacitor.removeListener).toHaveBeenCalledOnce());
+  });
+
+  it("resets expanded project lists when the browser becomes visible", () => {
+    const threads = Array.from({ length: 12 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `browser-root-${index + 1}`,
+      title: `Браузерная сессия ${index + 1}`,
+      updatedAt: 100 - index,
+      relation: { kind: "session", sessionId: `browser-session-${index + 1}` },
+    }));
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/browser-root-1");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const directBranches = () => sessions.querySelectorAll(":scope > .thread-branch");
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 5" }));
+    expect(directBranches()).toHaveLength(10);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    fireEvent(document, new Event("visibilitychange"));
+    expect(directBranches()).toHaveLength(10);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    fireEvent(document, new Event("visibilitychange"));
+    expect(directBranches()).toHaveLength(5);
   });
 
   it("keeps a selected non-running child behind the history button", () => {
