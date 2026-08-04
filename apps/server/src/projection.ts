@@ -858,10 +858,8 @@ export class AppProjection extends EventEmitter {
         : Promise.resolve([]),
     ]);
     const listedIds = new Set([...listedActive, ...archived].map((thread) => thread.id));
-    const recoveredSubagents = shouldRecoverLoaded
-      ? await this.readLoadedSubagentsOmittedFromList(loadedThreadIds, listedIds)
-      : [];
-    const activeCandidates = [...listedActive, ...recoveredSubagents];
+    const recoveredThreads = await this.readThreadsOmittedFromList(loadedThreadIds, listedIds);
+    const activeCandidates = [...listedActive, ...recoveredThreads];
     const active = await Promise.all(
       activeCandidates.map(async (thread) => {
         const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
@@ -1004,7 +1002,10 @@ export class AppProjection extends EventEmitter {
         await this.bridge.request<unknown>("thread/resume", { threadId: thread.id }, 30_000),
       );
       this.subscribedThreads.add(thread.id);
-      return resumed.thread;
+      return {
+        ...resumed.thread,
+        updatedAt: Math.max(thread.updatedAt, resumed.thread.updatedAt),
+      };
     } catch (error) {
       this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
       return thread;
@@ -1080,17 +1081,27 @@ export class AppProjection extends EventEmitter {
     return threadIds;
   }
 
-  private async readLoadedSubagentsOmittedFromList(
+  private async readThreadsOmittedFromList(
     loadedThreadIds: string[],
     listedIds: Set<string>,
   ): Promise<Thread[]> {
-    const candidates = loadedThreadIds.filter((threadId) => {
-      if (listedIds.has(threadId)) return false;
+    const state = this.store.snapshot();
+    const managedParentIds = new Set(
+      Object.entries(state.threadMeta)
+        .filter(([, meta]) => meta.teamOrchestration !== undefined)
+        .map(([threadId]) => threadId),
+    );
+    const candidates = new Set<string>();
+    for (const threadId of loadedThreadIds) {
+      if (listedIds.has(threadId)) continue;
       const cached = this.threads.get(threadId);
-      return !cached || isSpawnedSubagent(cached.thread);
-    });
+      if (!cached || isSpawnedSubagent(cached.thread)) candidates.add(threadId);
+    }
+    for (const threadId of managedParentIds) {
+      if (!listedIds.has(threadId)) candidates.add(threadId);
+    }
     const recovered = await Promise.all(
-      candidates.map(async (threadId): Promise<Thread | null> => {
+      [...candidates].map(async (threadId): Promise<Thread | null> => {
         try {
           const response = parseThreadRead(
             await this.bridge.request<unknown>(
@@ -1099,7 +1110,9 @@ export class AppProjection extends EventEmitter {
               30_000,
             ),
           );
-          return isSpawnedSubagent(response.thread) ? response.thread : null;
+          return isSpawnedSubagent(response.thread) || managedParentIds.has(threadId)
+            ? response.thread
+            : null;
         } catch (error) {
           this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
           return null;

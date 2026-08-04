@@ -20,6 +20,7 @@ class FakeBridge extends EventEmitter {
   constructor(
     private readonly active = false,
     private readonly activeGoal = false,
+    private readonly resumedUpdatedAt = 5,
   ) {
     super();
   }
@@ -41,7 +42,7 @@ class FakeBridge extends EventEmitter {
         };
       return { data: [thread("two", "/work/nested", 4)], nextCursor: null, backwardsCursor: null };
     }
-    if (method === "thread/resume") return { thread: liveThread() };
+    if (method === "thread/resume") return { thread: liveThread(this.resumedUpdatedAt) };
     if (method === "thread/read") return { thread: liveThread() };
     if (method === "thread/name/set") return {};
     if (method === "thread/goal/get") {
@@ -793,6 +794,54 @@ describe("AppProjection", () => {
     expect(
       bridge.request.mock.calls.filter(
         ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("recovers a managed parent omitted from thread/list while its orchestration exists", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamOrchestration: { tasks: {} },
+      };
+    });
+    const bridge = new FakeBridge();
+    const parent = thread("parent", "/work", 7, { type: "notLoaded" });
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/read" && params.threadId === "parent") return { thread: parent };
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("parent")).toMatchObject({
+      id: "parent",
+      updatedAt: 7_000,
+      relation: { kind: "session", sessionId: "parent" },
+    });
+
+    await projection.sync();
+
+    expect(projection.summary("parent")?.id).toBe("parent");
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "parent",
       ),
     ).toHaveLength(2);
   });
@@ -2736,6 +2785,28 @@ describe("AppProjection", () => {
     ).toHaveLength(2);
   });
 
+  it("does not replace fresh list timestamps with stale resume metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge(true, false, 1);
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      updatedAt: 5_000,
+    });
+  });
+
   it("restores an active goal after restart before the resumed turn completes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -2811,8 +2882,8 @@ function thread(
   };
 }
 
-function liveThread(): Thread {
-  return thread("one", "/work", 5, { type: "active", activeFlags: [] }, [
+function liveThread(updatedAt = 5): Thread {
+  return thread("one", "/work", updatedAt, { type: "active", activeFlags: [] }, [
     {
       id: "live",
       items: [
