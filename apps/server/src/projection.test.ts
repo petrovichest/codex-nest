@@ -798,7 +798,7 @@ describe("AppProjection", () => {
     ).toHaveLength(2);
   });
 
-  it("recovers a managed parent omitted from thread/list while its orchestration exists", async () => {
+  it("recovers a referenced managed parent until its own metadata is removed", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -807,7 +807,11 @@ describe("AppProjection", () => {
       state.threadMeta.parent = {
         pinned: false,
         lastReadUpdatedAt: 0,
-        teamOrchestration: { tasks: {} },
+      };
+      state.threadMeta.child = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "parent", taskId: "task" },
       };
     });
     const bridge = new FakeBridge();
@@ -839,6 +843,18 @@ describe("AppProjection", () => {
     await projection.sync();
 
     expect(projection.summary("parent")?.id).toBe("parent");
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "parent",
+      ),
+    ).toHaveLength(2);
+
+    await store.update((state) => {
+      delete state.threadMeta.parent;
+    });
+    await projection.sync();
+
+    expect(projection.summary("parent")).toBeUndefined();
     expect(
       bridge.request.mock.calls.filter(
         ([method, params]) => method === "thread/read" && params.threadId === "parent",

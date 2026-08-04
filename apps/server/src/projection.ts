@@ -1086,11 +1086,14 @@ export class AppProjection extends EventEmitter {
     listedIds: Set<string>,
   ): Promise<Thread[]> {
     const state = this.store.snapshot();
-    const managedParentIds = new Set(
-      Object.entries(state.threadMeta)
-        .filter(([, meta]) => meta.teamOrchestration !== undefined)
-        .map(([threadId]) => threadId),
-    );
+    const managedParentIds = new Set<string>();
+    for (const [threadId, meta] of Object.entries(state.threadMeta)) {
+      if (meta.teamOrchestration !== undefined) managedParentIds.add(threadId);
+      const parentThreadId = meta.managedParent?.parentThreadId;
+      if (parentThreadId && state.threadMeta[parentThreadId] !== undefined) {
+        managedParentIds.add(parentThreadId);
+      }
+    }
     const candidates = new Set<string>();
     for (const threadId of loadedThreadIds) {
       if (listedIds.has(threadId)) continue;
