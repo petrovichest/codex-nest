@@ -37,6 +37,8 @@ implemented the fixes, and retained responsibility for verification and Git.
   `0600`; permission-only changes and conflicts are detected.
 - Worktree discard removes only the task's own registration. Failed cleanup after
   successful integration remains `integrated` and is retried during recovery.
+- Managed restart preflight reports the exact active Team tool versions and
+  rejects an update or rollback target that cannot recover every active version.
 - Team v1 remains compatible with its original tools and four-child limit.
 
 ## Verification

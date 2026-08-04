@@ -25,6 +25,7 @@ describe("RuntimeLifecycle", () => {
     ) as { recoveryProtocolVersion: number; supportedTeamToolsVersions: number[] };
     expect(marker.recoveryProtocolVersion).toBe(RESTART_RECOVERY_PROTOCOL_VERSION);
     expect(marker.supportedTeamToolsVersions).toContain(1);
+    expect(marker.supportedTeamToolsVersions).toContain(2);
   });
 
   it("drains tracked work, checkpoints, and resumes with a protected token", async () => {

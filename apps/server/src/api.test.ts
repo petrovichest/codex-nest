@@ -132,6 +132,26 @@ describe("HTTP authentication", () => {
       ).statusCode,
     ).toBe(200);
     const token = (await readFile(tokenPath, "utf8")).trim();
+    await store.update((state) => {
+      state.threadMeta["managed-parent"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamToolsVersion: 2,
+        teamOrchestration: {
+          tasks: {
+            managed: {
+              id: "managed",
+              childThreadId: "managed-child",
+              title: "Managed recovery",
+              prompt: "Remain recoverable across restart.",
+              status: "running",
+              createdAt: 1,
+              lastActivityAt: 1,
+            },
+          },
+        },
+      };
+    });
     const prepared = await app.inject({
       method: "POST",
       url: "/api/v1/internal/restart/prepare",
@@ -141,7 +161,9 @@ describe("HTTP authentication", () => {
     expect(prepared.json()).toMatchObject({
       recoveryState: "draining",
       transport: "daemon",
-      quiescent: true,
+      hasManagedWork: true,
+      managedTeamToolsVersions: [2],
+      quiescent: false,
     });
     expect(
       (

@@ -105,6 +105,11 @@ if [[ "$*" == *api.github.com* ]]; then
   exit 0
 fi
 if [[ "$*" == *'/api/v1/internal/restart/prepare'* ]]; then
+  if [[ -f "$HOME/managed-team-v2" ]]; then
+    printf '%s\n' \
+      '{"restartProtocolVersion":1,"transport":"daemon","appServerReady":true,"hasManagedWork":true,"managedTeamToolsVersions":[2],"quiescent":false}'
+    exit 0
+  fi
   printf '%s\n' \
     '{"restartProtocolVersion":1,"transport":"daemon","appServerReady":true,"hasManagedWork":false,"quiescent":true}'
   exit 0
@@ -168,6 +173,14 @@ test "$(cat "$case_home/.local/share/codexnest/current/.codexnest-built")" = "$s
 grep -q '^KillMode=process$' "$case_home/.config/systemd/user/codexnest.service"
 grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
 run_cli check-update | grep -q '"updateAvailable":false'
+touch "$case_home/managed-team-v2"
+run_cli restart >/dev/null
+sed -i 's/"supportedTeamToolsVersions": \[1, 2\]/"supportedTeamToolsVersions": [1]/' \
+  "$case_home/.local/share/codexnest/current/deploy/restart-protocol.json"
+if run_cli restart >/dev/null 2>&1; then
+  printf '%s\n' 'Expected restart to reject a target without Team v2 recovery' >&2
+  exit 1
+fi
 
 prepare_case stable_channel
 run_adoption >/dev/null

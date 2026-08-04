@@ -1365,9 +1365,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const activeTurnCount = projection
       .snapshot()
       .threads.filter((thread) => thread.currentTurnId !== null).length;
-    const hasManagedWork = Object.values(snapshot.threadMeta).some((meta) =>
-      Boolean(meta.teamOrchestration && Object.keys(meta.teamOrchestration.tasks).length),
-    );
+    const managedTeamToolsVersions = [
+      ...new Set(
+        Object.values(snapshot.threadMeta).flatMap((meta) =>
+          meta.teamOrchestration && Object.keys(meta.teamOrchestration.tasks).length
+            ? [meta.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION]
+            : [],
+        ),
+      ),
+    ].sort();
+    const hasManagedWork = managedTeamToolsVersions.length > 0;
     const hasDispatchingMessages = Object.values(snapshot.messageQueues ?? {}).some((messages) =>
       messages.some((message) => message.status === "dispatching"),
     );
@@ -1388,6 +1395,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       recoveryState: lifecycle.state,
       activeTurnCount,
       hasManagedWork,
+      managedTeamToolsVersions,
       pendingToolOperationCount,
       pendingAttentionCount,
       hasDispatchingMessages,
