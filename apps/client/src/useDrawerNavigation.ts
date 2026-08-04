@@ -13,7 +13,6 @@ const DRAWER_GESTURE_EXCLUDED_SELECTOR = [
   "input",
   "textarea",
   "select",
-  "summary",
   '[contenteditable="true"]',
 ].join(", ");
 

@@ -2288,6 +2288,31 @@ describe("App routing and navigation", () => {
     expect(sidebar).toHaveClass("open");
   });
 
+  it("opens the session drawer from a swipe starting on a summary element", () => {
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const summary = document.createElement("summary");
+    frame.append(summary);
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      ...sidebar.getBoundingClientRect(),
+      width: 300,
+    });
+
+    fireEvent.touchStart(summary, { touches: [{ clientX: 80, clientY: 200 }] });
+    fireEvent.touchMove(frame, { touches: [{ clientX: 180, clientY: 204 }] });
+
+    expect(frame).toHaveClass("drawer-dragging");
+
+    fireEvent.touchEnd(frame, { touches: [] });
+
+    expect(frame).not.toHaveClass("drawer-dragging");
+    expect(sidebar).toHaveClass("open");
+  });
+
   it("does not treat a touch on the project drag handle as a drawer swipe", () => {
     mockConnection(snapshot([baseThread]));
     mockMobileViewport();
