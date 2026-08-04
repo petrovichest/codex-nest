@@ -276,6 +276,10 @@ export function Composer({
     textarea.style.overflowY = textarea.scrollHeight > 190 ? "auto" : "hidden";
   }, [input]);
 
+  useLayoutEffect(() => {
+    if (autoFocus) textareaRef.current?.focus();
+  }, [autoFocus, sessionIdentity]);
+
   useEffect(() => {
     if (viewer && viewer.index >= images.length) setViewer(null);
   }, [images.length, viewer]);

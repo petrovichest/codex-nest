@@ -48,6 +48,7 @@ const ENGLISH: Record<string, string> = {
   "Не удалось изменить порядок проектов": "Failed to reorder projects",
   "Не удалось удалить проект": "Failed to remove project",
   "Не удалось создать сессию": "Failed to create session",
+  "Не удалось создать ответвление сессии": "Failed to fork session",
   "Не удалось создать Team-сессию": "Failed to create Team session",
   "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди":
     "A project cannot be removed while its sessions are running, awaiting a decision, or have queued messages",
@@ -506,6 +507,7 @@ const ENGLISH: Record<string, string> = {
   Копировать: "Copy",
   "Копировать блок": "Copy block",
   "Копировать сообщение": "Copy message",
+  "Создать ответвление отсюда": "Fork from here",
   "Микрофон занят другим приложением": "The microphone is in use by another app",
   "Микрофон не найден": "Microphone not found",
   Название: "Name",

@@ -9,6 +9,8 @@ import type {
   ApiErrorCode,
   AppUpdateStatus,
   ForceRestartAccepted,
+  ForkThreadRequest,
+  ForkThreadResponse,
   AttentionResponse,
   CodexManagementStatus,
   CodexRateLimitsResponse,
@@ -69,6 +71,7 @@ import type {
 } from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
+  parseItemsList,
   parseThreadList,
   parseThreadRead,
   parseThreadStart,
@@ -2042,6 +2045,76 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         thread: projection.summary(started.thread.id),
         ...result,
       });
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: ForkThreadRequest }>(
+    "/api/v1/threads/:id/forks",
+    async (request, reply) => {
+      codexManager?.assertTurnsAllowed();
+      const body = validateForkThreadBody(request.body);
+      let source = projection.summary(request.params.id);
+      if (!source) source = await projection.refreshThread(request.params.id);
+      if (!source) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(source);
+
+      const turn = await readForkTurn(bridge, source.id, body.lastTurnId);
+      if (!turn) {
+        return apiError(reply, 400, "validation_failed", "Fork turn was not found");
+      }
+      if (turn.status !== "completed") {
+        return apiError(reply, 409, "conflict", "Only completed turns can be forked");
+      }
+      const items = await readNativeTurnItems(bridge, source.id, turn.id);
+      const agentMessage = [...items]
+        .reverse()
+        .find(
+          (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+            item.type === "agentMessage" && Boolean(item.text.trim()),
+        );
+      if (!agentMessage || agentMessage.id !== body.agentMessageId) {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "agentMessageId must select the last non-empty agent message of the turn",
+        );
+      }
+      if (!threadTitles) throw new Error("Thread title generation is unavailable");
+      const model = effectiveModel(source.settings, projection.availableModels);
+      const title = await threadTitles.generate(agentMessage.text, {
+        cwd: source.cwd,
+        model: model?.id,
+        effort: model?.reasoningEfforts[0]?.value,
+      });
+      const forked = parseThreadStart(
+        await bridge.request<unknown>("thread/fork", {
+          threadId: source.id,
+          lastTurnId: turn.id,
+          excludeTurns: true,
+        }),
+      ).thread;
+      await bridge.request("thread/goal/clear", { threadId: forked.id });
+      await bridge.request("thread/name/set", { threadId: forked.id, name: title });
+
+      const sourceMeta = store.snapshot().threadMeta[source.id];
+      await store.update((state) => {
+        state.threadMeta[forked.id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: forked.updatedAt * 1_000,
+          settings: structuredClone(source.settings),
+          ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION
+            ? { teamToolsVersion: TEAM_TOOLS_VERSION }
+            : {}),
+        };
+        if (state.messageQueues) delete state.messageQueues[forked.id];
+      });
+      projection.upsertThread({ ...forked, name: title });
+      return reply.code(201).send({
+        thread: projection.summary(forked.id)!,
+      } satisfies ForkThreadResponse);
     },
   );
 
@@ -4140,6 +4213,72 @@ function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadReq
     return undefined;
   }
   return { ...value, images, settings: validateSettings(value.settings) };
+}
+
+function validateForkThreadBody(value: unknown): ForkThreadRequest {
+  const body = requireRecord<ForkThreadRequest>(value);
+  if (Object.keys(body).some((key) => !["lastTurnId", "agentMessageId"].includes(key))) {
+    throw new ProjectValidationError("Unknown fork field");
+  }
+  if (
+    typeof body.lastTurnId !== "string" ||
+    !body.lastTurnId ||
+    body.lastTurnId.trim() !== body.lastTurnId ||
+    typeof body.agentMessageId !== "string" ||
+    !body.agentMessageId ||
+    body.agentMessageId.trim() !== body.agentMessageId
+  ) {
+    throw new ProjectValidationError("lastTurnId and agentMessageId are required");
+  }
+  return body;
+}
+
+async function readForkTurn(
+  bridge: CodexBridge,
+  threadId: string,
+  turnId: string,
+): Promise<Turn | undefined> {
+  let cursor: string | null = null;
+  do {
+    const page = parseTurnsList(
+      await bridge.request<unknown>(
+        "thread/turns/list",
+        {
+          threadId,
+          cursor,
+          limit: 100,
+          sortDirection: "desc",
+          itemsView: "notLoaded",
+        },
+        30_000,
+      ),
+    );
+    const turn = page.data.find((candidate) => candidate.id === turnId);
+    if (turn) return turn;
+    cursor = page.nextCursor;
+  } while (cursor);
+  return undefined;
+}
+
+async function readNativeTurnItems(
+  bridge: CodexBridge,
+  threadId: string,
+  turnId: string,
+): Promise<ThreadItem[]> {
+  const items: ThreadItem[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = parseItemsList(
+      await bridge.request<unknown>(
+        "thread/items/list",
+        { threadId, turnId, cursor, limit: 100, sortDirection: "asc" },
+        30_000,
+      ),
+    );
+    items.push(...page.data);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return items;
 }
 
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {

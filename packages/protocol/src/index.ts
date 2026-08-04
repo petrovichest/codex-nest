@@ -711,6 +711,15 @@ export type CreateThreadRequest = {
   clientMessageId?: string;
 };
 
+export type ForkThreadRequest = {
+  lastTurnId: string;
+  agentMessageId: string;
+};
+
+export type ForkThreadResponse = {
+  thread: ThreadSummary;
+};
+
 export type CreateProjectThreadResponse = {
   thread: ThreadSummary;
 };

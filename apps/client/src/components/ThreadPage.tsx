@@ -72,6 +72,7 @@ import {
   CheckIcon,
   CopyIcon,
   FileIcon,
+  GitBranchIcon,
   MoreIcon,
   MicrophoneIcon,
   NewTaskIcon,
@@ -436,6 +437,7 @@ export function ThreadPage({
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [forking, setForking] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -2161,6 +2163,27 @@ export function ThreadPage({
     }
   }
 
+  async function forkFromTurn(lastTurnId: string, agentMessageId: string) {
+    if (forking) return;
+    setForking(true);
+    setError(null);
+    try {
+      const result = await api.forkThread(threadId, { lastTurnId, agentMessageId });
+      dispatch({ type: "thread", thread: result.thread });
+      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
+        state: { focusComposer: true },
+      });
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось создать ответвление сессии"),
+      );
+    } finally {
+      setForking(false);
+    }
+  }
+
   async function forceRefreshSession() {
     if (refreshing) return;
     setRefreshing(true);
@@ -2467,6 +2490,7 @@ export function ThreadPage({
                 {detail?.turns.map((turn) => {
                   const entries = groupedTurnActivities.get(turn.id)!;
                   const technicalItems = technicalTurnActivities.get(turn.id)!;
+                  const forkAgentMessageId = findForkAgentMessageId(turn);
                   const turnOptimisticMessages = optimisticTurnMessages.filter(
                     (message) =>
                       message.turnId === turn.id ||
@@ -2506,6 +2530,14 @@ export function ThreadPage({
                               item={entry}
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
+                              forkAction={
+                                !isSubagent && entry.id === forkAgentMessageId
+                                  ? {
+                                      disabled: forking,
+                                      onFork: () => void forkFromTurn(turn.id, entry.id),
+                                    }
+                                  : undefined
+                              }
                               annotations={annotations}
                               annotationEnabled={
                                 !isSubagent && !busy && entry.id === latestAnnotatableId
@@ -3097,6 +3129,7 @@ export function Activity({
   item,
   cwd,
   onDownload,
+  forkAction,
   annotations = [],
   annotationEnabled = false,
   annotationBusy = false,
@@ -3107,6 +3140,7 @@ export function Activity({
   item: ActivityItem;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  forkAction?: { disabled: boolean; onFork(): void };
   annotations?: PendingAnnotation[];
   annotationEnabled?: boolean;
   annotationBusy?: boolean;
@@ -3144,7 +3178,11 @@ export function Activity({
             ))}
           {item.images.length > 0 && <MessageImages images={item.images} />}
         </div>
-        <MessageFooter text={item.text} timestamp={item.timestamp} />
+        <MessageFooter
+          text={item.text}
+          timestamp={item.timestamp}
+          forkAction={item.type === "agentMessage" ? forkAction : undefined}
+        />
       </article>
     );
   }
@@ -3969,7 +4007,15 @@ function MessageImages({ images }: { images: string[] }) {
   );
 }
 
-function MessageFooter({ text, timestamp }: { text: string; timestamp: number | null }) {
+function MessageFooter({
+  text,
+  timestamp,
+  forkAction,
+}: {
+  text: string;
+  timestamp: number | null;
+  forkAction?: { disabled: boolean; onFork(): void };
+}) {
   const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const timerRef = useRef<number | null>(null);
@@ -4005,6 +4051,18 @@ function MessageFooter({ text, timestamp }: { text: string; timestamp: number | 
       {canCopy && (
         <button type="button" aria-label={t("Копировать сообщение")} onClick={() => void copy()}>
           <CopyIcon />
+        </button>
+      )}
+      {forkAction && (
+        <button
+          type="button"
+          aria-busy={forkAction.disabled}
+          aria-label={t("Создать ответвление отсюда")}
+          disabled={forkAction.disabled}
+          title={t("Создать ответвление отсюда")}
+          onClick={forkAction.onFork}
+        >
+          <GitBranchIcon />
         </button>
       )}
     </footer>
@@ -4160,6 +4218,18 @@ function reconcileVisibleThreadSummary(
 function hasVisibleActivity(item: ActivityItem): boolean {
   if ("text" in item) return Boolean(item.text.trim() || item.images.length);
   return true;
+}
+
+function findForkAgentMessageId(turn: TurnView): string | null {
+  if (turn.status !== "completed") return null;
+  return (
+    [...turn.items]
+      .reverse()
+      .find(
+        (item) =>
+          item.type === "agentMessage" && item.status === "completed" && Boolean(item.text.trim()),
+      )?.id ?? null
+  );
 }
 
 function orchestrationOutcomeLabel(

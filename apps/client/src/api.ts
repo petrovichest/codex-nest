@@ -12,6 +12,8 @@ import type {
   DeviceRegistrationRequest,
   DirectoryListing,
   ForceRestartAccepted,
+  ForkThreadRequest,
+  ForkThreadResponse,
   GitChangesSummary,
   GlobalPermissionSettings,
   HealthResponse,
@@ -317,6 +319,14 @@ export class ApiClient {
       body,
       timeoutMs: null,
       retry: Boolean(body.clientMessageId),
+    });
+  }
+
+  forkThread(id: string, body: ForkThreadRequest): Promise<ForkThreadResponse> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/forks`, {
+      method: "POST",
+      body,
+      timeoutMs: null,
     });
   }
 

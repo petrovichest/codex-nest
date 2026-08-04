@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Link, MemoryRouter, Route, Routes } from "react-router";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
@@ -1183,6 +1183,127 @@ describe("Activity", () => {
     context.state.details.thread.summary = finished;
     view.rerender(threadRoute());
     expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+  });
+
+  it("offers a fork only on the last non-empty completed agent reply of each completed turn", () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, {
+      turns: [
+        {
+          ...completedAgentTurn(),
+          id: "eligible-turn",
+          items: [
+            { ...completedAgentTurn().items[0]!, id: "earlier", text: "Ранний ответ" },
+            { ...completedAgentTurn().items[0]!, id: "last", text: "Последний ответ" },
+            { ...completedAgentTurn().items[0]!, id: "empty", text: "  " },
+          ],
+        },
+        {
+          ...completedAgentTurn(),
+          id: "failed-turn",
+          status: "failed",
+          items: [{ ...completedAgentTurn().items[0]!, id: "failed", text: "Ошибка" }],
+        },
+        {
+          ...completedAgentTurn(),
+          id: "active-turn",
+          status: "inProgress",
+          completedAt: null,
+          items: [{ ...completedAgentTurn().items[0]!, id: "active", text: "Работаю" }],
+        },
+      ],
+    });
+    const view = renderThread();
+
+    const fork = screen.getByRole("button", { name: "Создать ответвление отсюда" });
+    expect(fork.closest("article")).toHaveTextContent("Последний ответ");
+    expect(fork.closest("article")).not.toHaveTextContent("Ранний ответ");
+    expect(fork.querySelector("svg")).not.toBeNull();
+
+    const child = {
+      ...summary,
+      relation: {
+        kind: "subagent" as const,
+        sessionId: "child",
+        parentThreadId: "parent",
+        nickname: null,
+        role: null,
+      },
+    };
+    context.state.snapshot.threads = [child];
+    context.state.details.thread.summary = child;
+    view.rerender(threadRoute());
+    expect(screen.queryByRole("button", { name: "Создать ответвление отсюда" })).toBeNull();
+  });
+
+  it("disables all fork actions, dispatches the result, navigates, and focuses the composer", async () => {
+    let resolveFork: ((value: { thread: ThreadSummary }) => void) | undefined;
+    const api = threadApi();
+    api.forkThread.mockReturnValue(
+      new Promise<{ thread: ThreadSummary }>((resolve) => {
+        resolveFork = resolve;
+      }),
+    );
+    const context = mockThreadConnection(api, summary, {
+      turns: [
+        { ...completedAgentTurn(), id: "first-turn" },
+        {
+          ...completedAgentTurn(),
+          id: "second-turn",
+          items: [{ ...completedAgentTurn().items[0]!, id: "second-answer" }],
+        },
+      ],
+    });
+    const forked = {
+      ...summary,
+      id: "fork",
+      title: "Ответвление",
+      state: "completed" as const,
+      unread: true,
+      unseen: true,
+      updatedAt: 3,
+    };
+    context.dispatch.mockImplementation((action) => {
+      if (action.type !== "thread") return;
+      context.state.snapshot.threads = [...context.state.snapshot.threads, action.thread];
+      (context.state.details as Record<string, ThreadDetail>).fork = {
+        summary: action.thread,
+        turns: [],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+        draft: null,
+      };
+    });
+    render(forkThreadRoute());
+
+    const buttons = screen.getAllByRole("button", { name: "Создать ответвление отсюда" });
+    fireEvent.click(buttons[1]!);
+    expect(api.forkThread).toHaveBeenCalledWith("thread", {
+      lastTurnId: "second-turn",
+      agentMessageId: "second-answer",
+    });
+    expect(buttons.every((button) => button.hasAttribute("disabled"))).toBe(true);
+
+    await act(async () => resolveFork?.({ thread: forked }));
+
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: forked });
+    await waitFor(() =>
+      expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/fork:true"),
+    );
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveFocus();
+  });
+
+  it("surfaces fork errors without navigating and restores the action", async () => {
+    const api = threadApi();
+    api.forkThread.mockRejectedValue(new Error("Не удалось создать fork"));
+    mockThreadConnection(api, summary, { turns: [completedAgentTurn()] });
+    render(forkThreadRoute());
+
+    fireEvent.click(screen.getByRole("button", { name: "Создать ответвление отсюда" }));
+
+    expect(await screen.findByText("Не удалось создать fork")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Создать ответвление отсюда" })).toBeEnabled();
+    expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/thread:false");
   });
 
   it("treats a newer in-progress detail turn as running when the snapshot is stale", () => {
@@ -3092,6 +3213,34 @@ function threadRoute(state?: Record<string, unknown>) {
   );
 }
 
+function forkThreadRoute() {
+  return (
+    <MemoryRouter initialEntries={["/threads/thread"]}>
+      <Routes>
+        <Route
+          path="/threads/:threadId"
+          element={
+            <>
+              <ThreadPage onOpenNavigation={() => undefined} />
+              <ForkLocation />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function ForkLocation() {
+  const location = useLocation();
+  return (
+    <output data-testid="fork-location">
+      {location.pathname}:
+      {String((location.state as { focusComposer?: unknown } | null)?.focusComposer === true)}
+    </output>
+  );
+}
+
 function voiceThreadRoute() {
   return (
     <MemoryRouter initialEntries={["/threads/thread"]}>
@@ -3197,6 +3346,7 @@ function threadApi() {
       downloadUrl: "/downloads/ticket/file.bin",
       expiresAt: Date.now() + 60_000,
     }),
+    forkThread: vi.fn().mockResolvedValue({ thread: summary }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
     updateThreadDraft: vi
       .fn()

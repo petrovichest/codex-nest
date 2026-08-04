@@ -31,6 +31,8 @@ describe("ThreadTitleGenerator", () => {
         baseInstructions: expect.stringContaining("same language"),
       }),
     ]);
+    expect(bridge.request.mock.calls[0]?.[1].baseInstructions).toContain("source text");
+    expect(bridge.request.mock.calls[0]?.[1].baseInstructions).not.toContain("user message");
     expect(bridge.request.mock.calls[1]).toEqual([
       "turn/start",
       expect.objectContaining({

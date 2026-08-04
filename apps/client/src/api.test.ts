@@ -46,6 +46,30 @@ describe("ApiClient", () => {
     );
   });
 
+  it("posts an inclusive fork point to the encoded thread endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ thread: { id: "fork" } }), {
+        headers: { "Content-Type": "application/json" },
+        status: 201,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await api.forkThread("thread/id", {
+      lastTurnId: "turn",
+      agentMessageId: "answer",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/forks"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ lastTurnId: "turn", agentMessageId: "answer" }),
+      }),
+    );
+  });
+
   it("targets the separate force-restart endpoints", async () => {
     const fetchMock = vi
       .fn()

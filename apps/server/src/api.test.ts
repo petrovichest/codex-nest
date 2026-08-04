@@ -1289,6 +1289,156 @@ describe("file downloads", () => {
   });
 });
 
+describe("session forks", () => {
+  it("forks through the selected completed reply with a generated title and fresh state", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [
+          agentMessage("empty-before", "  "),
+          agentMessage("selected-answer", "Готовая реализация с проверками"),
+          agentMessage("empty-after", "\n"),
+        ],
+      },
+    ]);
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/forks",
+      headers: harness.headers,
+      payload: { lastTurnId: "selected-turn", agentMessageId: "selected-answer" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().thread).toMatchObject({
+      id: "fork",
+      title: "Готовая реализация",
+      state: "completed",
+      unread: true,
+      unseen: true,
+      pinned: false,
+      currentTurnId: null,
+      queuedMessageCount: 0,
+      settings: {
+        collaborationMode: "default",
+        model: "gpt-b",
+        reasoningEffort: "low",
+      },
+      relation: { kind: "session", sessionId: "fork" },
+    });
+    expect(response.json().thread.relation).not.toHaveProperty("parentThreadId");
+    expect(harness.threadTitles.generate).toHaveBeenCalledWith("Готовая реализация с проверками", {
+      cwd: "/work",
+      model: "gpt-b",
+      effort: "low",
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith("thread/fork", {
+      threadId: "thread",
+      lastTurnId: "selected-turn",
+      excludeTurns: true,
+    });
+    expect(harness.threadTitles.generate.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.bridge.request.mock.invocationCallOrder[
+        harness.bridge.request.mock.calls.findIndex(([method]) => method === "thread/fork")
+      ]!,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith("thread/goal/clear", {
+      threadId: "fork",
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith("thread/name/set", {
+      threadId: "fork",
+      name: "Готовая реализация",
+    });
+    expect(harness.store.snapshot().threadMeta.fork).toEqual({
+      pinned: false,
+      lastReadUpdatedAt: 0,
+      lastOutcome: "completed",
+      outcomeUpdatedAt: 4_000,
+      settings: {
+        collaborationMode: "default",
+        model: "gpt-b",
+        reasoningEffort: "low",
+      },
+      teamToolsVersion: 1,
+    });
+    expect(harness.store.snapshot().messageQueues?.fork).toBeUndefined();
+    expect(harness.projection.summary("fork")).toEqual(response.json().thread);
+    await harness.app.close();
+  });
+
+  it("rejects missing, subagent, unfinished, missing, and mismatched fork points", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.missingThreadIds.add("missing");
+    harness.projection.upsertThread({
+      ...testThread("child"),
+      parentThreadId: "thread",
+      ephemeral: true,
+    });
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("running-turn", "inProgress"),
+        itemsView: "full",
+        items: [agentMessage("running-answer", "Ещё работаю")],
+      },
+      {
+        ...testTurn("completed-turn", "completed"),
+        itemsView: "full",
+        items: [
+          agentMessage("earlier-answer", "Первый ответ"),
+          agentMessage("last-answer", "Последний ответ"),
+        ],
+      },
+    ]);
+
+    const issue = (id: string, lastTurnId: string, agentMessageId: string) =>
+      harness.app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${id}/forks`,
+        headers: harness.headers,
+        payload: { lastTurnId, agentMessageId },
+      });
+
+    expect((await issue("missing", "completed-turn", "last-answer")).statusCode).toBe(404);
+    expect((await issue("child", "completed-turn", "last-answer")).statusCode).toBe(409);
+    expect((await issue("thread", "running-turn", "running-answer")).statusCode).toBe(409);
+    expect((await issue("thread", "unknown-turn", "last-answer")).statusCode).toBe(400);
+    const mismatched = await issue("thread", "completed-turn", "earlier-answer");
+    expect(mismatched.statusCode).toBe(400);
+    expect(mismatched.json()).toMatchObject({
+      error: { message: expect.stringContaining("last non-empty agent message") },
+    });
+    expect(harness.threadTitles.generate).not.toHaveBeenCalled();
+    expect(harness.bridge.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
+    await harness.app.close();
+  });
+
+  it("does not create a native fork when synchronous title generation fails", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("completed-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("answer", "Готовый ответ")],
+      },
+    ]);
+    harness.threadTitles.generate.mockRejectedValueOnce(new Error("title failed"));
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/forks",
+      headers: harness.headers,
+      payload: { lastTurnId: "completed-turn", agentMessageId: "answer" },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(harness.bridge.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
+    expect(harness.projection.summary("fork")).toBeUndefined();
+    await harness.app.close();
+  });
+});
+
 describe("thread settings", () => {
   it("persists settings on the server and maps plan mode into turn/start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-api-test-"));
@@ -3270,6 +3420,7 @@ class SettingsBridge extends EventEmitter {
   rejectFullTurnReads = false;
   nextTurnListError: RpcError | null = null;
   missingRolloutThreadIds = new Set<string>();
+  missingThreadIds = new Set<string>();
   managedThreadSequence = 0;
   managedThreads: Thread[] = [];
   threadTurns = new Map<string, Turn[]>();
@@ -3303,6 +3454,19 @@ class SettingsBridge extends EventEmitter {
       }
       return { thread: testThread("created") };
     }
+    if (method === "thread/fork") {
+      const thread = {
+        ...testThread("fork"),
+        sessionId: "fork",
+        forkedFromId: String(params.threadId),
+        createdAt: 3,
+        updatedAt: 4,
+        recencyAt: 4,
+        status: { type: "idle" as const },
+      };
+      this.managedThreads.push(thread);
+      return { thread };
+    }
     if (method === "thread/resume") {
       const threadId = String(params.threadId);
       if (this.missingRolloutThreadIds.delete(threadId)) {
@@ -3330,8 +3494,21 @@ class SettingsBridge extends EventEmitter {
         backwardsCursor: null,
       };
     }
+    if (method === "thread/items/list") {
+      const turn = (this.threadTurns.get(String(params.threadId)) ?? []).find(
+        (candidate) => candidate.id === params.turnId,
+      );
+      return {
+        data: turn?.items ?? [],
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    }
     if (method === "thread/read") {
       const threadId = String(params.threadId);
+      if (this.missingThreadIds.has(threadId)) {
+        throw new RpcError(-32_600, `thread ${threadId} not found`);
+      }
       const thread =
         threadId === "thread"
           ? testThread()
@@ -3476,6 +3653,71 @@ class SettingsBridge extends EventEmitter {
     }
     throw new Error(`Unexpected ${method}`);
   });
+}
+
+async function createForkHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-fork-api-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  await store.update((state) => {
+    state.auth.tokenSha256 = hashToken("correct");
+    state.projects.push({
+      id: "project",
+      displayName: "Project",
+      path: "/work",
+      createdAt: "2026-01-01",
+      updatedAt: "2026-01-01",
+    });
+  });
+  const bridge = new SettingsBridge();
+  const attention = new AttentionManager();
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  await projection.sync();
+  await projection.setSettings("thread", {
+    collaborationMode: "default",
+    model: "gpt-b",
+    reasoningEffort: "low",
+  });
+  await store.update((state) => {
+    const meta = state.threadMeta.thread!;
+    meta.pinned = true;
+    meta.teamToolsVersion = 1;
+    meta.draft = {
+      input: "source draft",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    };
+    meta.teamOrchestration = { tasks: {} };
+  });
+  const threadTitles = {
+    generate: vi.fn(async () => "Готовая реализация"),
+  };
+  const app = await buildApp(
+    loadConfig({
+      statePath: store.path,
+      clientDist: join(directory, "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+    }),
+    {
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      push: new PushNotifier(store),
+      threadTitles,
+    },
+  );
+  return {
+    app,
+    bridge,
+    headers: { authorization: "Bearer correct" },
+    projection,
+    store,
+    threadTitles,
+  };
 }
 
 async function createTeamHarness(options: { lifecycle?: boolean } = {}) {
@@ -3656,4 +3898,8 @@ function testTurn(id: string, status: Turn["status"]): Turn {
     completedAt: null,
     durationMs: null,
   };
+}
+
+function agentMessage(id: string, text: string): ThreadItem {
+  return { type: "agentMessage", id, text, phase: null, memoryCitation: null };
 }
