@@ -34,7 +34,6 @@ import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
 import {
-  parseItemsList,
   parseModelList,
   parseThreadList,
   parseThreadLoadedList,
@@ -600,22 +599,31 @@ export class AppProjection extends EventEmitter {
   async readTurnItems(threadId: string, turnId: string): Promise<TurnItemsResponse> {
     const startedAt = Date.now();
     let cursor: string | null = null;
-    const items: ActivityItem[] = [];
+    let items: ActivityItem[] = [];
     let pages = 0;
     do {
-      const page = parseItemsList(
+      const page = parseTurnsList(
         await this.bridge.request<unknown>(
-          "thread/items/list",
-          { threadId, turnId, cursor, limit: 100, sortDirection: "asc" },
+          "thread/turns/list",
+          { threadId, cursor, limit: 100, sortDirection: "desc", itemsView: "full" },
           30_000,
         ),
       );
-      items.push(
-        ...page.data
-          .filter((item) => !isInternalTeamContinuationItem(item))
-          .map((item) => normalizeActivity(item, null)),
-      );
       pages += 1;
+      const turn = page.data.find((candidate) => candidate.id === turnId);
+      if (turn) {
+        const turnStartedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
+        const turnCompletedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
+        items = turn.items
+          .filter((item) => !isInternalTeamContinuationItem(item))
+          .map((item) =>
+            normalizeActivity(
+              item,
+              item.type === "userMessage" ? turnStartedAt : (turnCompletedAt ?? turnStartedAt),
+            ),
+          );
+        break;
+      }
       cursor = page.nextCursor;
     } while (cursor);
     const durationMs = Date.now() - startedAt;

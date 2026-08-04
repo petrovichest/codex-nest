@@ -2339,31 +2339,46 @@ describe("AppProjection", () => {
     ]);
   });
 
-  it("loads one turn's canonical items through bounded item pages", async () => {
+  it("loads one turn's canonical items through bounded full-turn pages", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
     await store.load();
     const bridge = new FakeBridge();
     bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method !== "thread/items/list") throw new Error(`Unexpected ${method}`);
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
       if (!params.cursor) {
         return {
-          data: [
-            {
-              type: "userMessage",
-              id: "user",
-              clientId: null,
-              content: [{ type: "text", text: "Запрос", textElements: [] }],
-            },
-          ],
+          data: [{ ...testTurn("newer", "completed"), itemsView: "full" }],
           nextCursor: "next",
           backwardsCursor: null,
         };
       }
       return {
-        data: [{ type: "plan", id: "plan", text: "План" }],
-        nextCursor: null,
+        data: [
+          {
+            ...testTurn("turn", "completed"),
+            startedAt: 10,
+            completedAt: 12,
+            itemsView: "full",
+            items: [
+              {
+                type: "userMessage",
+                id: "user",
+                clientId: null,
+                content: [{ type: "text", text: "Запрос", text_elements: [] }],
+              },
+              {
+                type: "userMessage",
+                id: "internal",
+                clientId: "codexnest-team-claim:task",
+                content: [{ type: "text", text: "Продолжить задачу", text_elements: [] }],
+              },
+              { type: "plan", id: "plan", text: "План" },
+            ],
+          },
+        ],
+        nextCursor: "unused",
         backwardsCursor: null,
       };
     });
@@ -2376,17 +2391,92 @@ describe("AppProjection", () => {
 
     const response = await projection.readTurnItems("one", "turn");
 
-    expect(response.items.map((item) => item.id)).toEqual(["user", "plan"]);
+    expect(response).toEqual({
+      threadId: "one",
+      turnId: "turn",
+      items: [
+        {
+          type: "userMessage",
+          id: "user",
+          status: "completed",
+          text: "Запрос",
+          images: [],
+          timestamp: 10_000,
+          phase: null,
+        },
+        {
+          type: "plan",
+          id: "plan",
+          status: "completed",
+          text: "План",
+          images: [],
+          timestamp: 12_000,
+          phase: null,
+        },
+      ],
+    });
     expect(bridge.request).toHaveBeenNthCalledWith(
       1,
-      "thread/items/list",
-      { threadId: "one", turnId: "turn", cursor: null, limit: 100, sortDirection: "asc" },
+      "thread/turns/list",
+      {
+        threadId: "one",
+        cursor: null,
+        limit: 100,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
       30_000,
     );
     expect(bridge.request).toHaveBeenNthCalledWith(
       2,
-      "thread/items/list",
-      { threadId: "one", turnId: "turn", cursor: "next", limit: 100, sortDirection: "asc" },
+      "thread/turns/list",
+      {
+        threadId: "one",
+        cursor: "next",
+        limit: 100,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+      30_000,
+    );
+    expect(bridge.request).toHaveBeenCalledTimes(2);
+    expect(bridge.request.mock.calls.some(([method]) => method === "thread/items/list")).toBe(
+      false,
+    );
+  });
+
+  it("returns an empty item list when the requested turn is absent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    bridge.request.mockResolvedValue({
+      data: [{ ...testTurn("other", "completed"), itemsView: "full" }],
+      nextCursor: null,
+      backwardsCursor: null,
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await expect(projection.readTurnItems("one", "missing")).resolves.toEqual({
+      threadId: "one",
+      turnId: "missing",
+      items: [],
+    });
+    expect(bridge.request).toHaveBeenCalledWith(
+      "thread/turns/list",
+      {
+        threadId: "one",
+        cursor: null,
+        limit: 100,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
       30_000,
     );
   });

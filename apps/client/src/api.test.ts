@@ -122,4 +122,60 @@ describe("ApiClient", () => {
     await expect(creation).resolves.toMatchObject({ thread: { id: "thread" } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ["successful", 200],
+    ["error", 500],
+  ])("keeps the default timeout active while consuming a %s JSON body", async (_label, status) => {
+    vi.useFakeTimers();
+    const jsonMock = vi.fn();
+    const fetchMock = vi.fn().mockImplementation((_url: URL, init: RequestInit) => {
+      jsonMock.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("The operation was aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      );
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: jsonMock,
+      } as unknown as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    const request = api.summary();
+    const rejection = expect(request).rejects.toMatchObject(
+      status === 200 ? { name: "AbortError" } : { code: "http_error", status: 500 },
+    );
+    await vi.advanceTimersByTimeAsync(29_999);
+
+    expect(jsonMock).toHaveBeenCalledOnce();
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    await rejection;
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not automatically retry turn item reads", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockRejectedValue(new Error("connection lost"));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    const request = api.readTurnItems("thread/id", "turn/id");
+    const rejection = expect(request).rejects.toMatchObject({ code: "connection_failed" });
+    await vi.runAllTimersAsync();
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 });

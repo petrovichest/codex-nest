@@ -262,7 +262,6 @@ export class ApiClient {
   readTurnItems(threadId: string, turnId: string): Promise<TurnItemsResponse> {
     return this.request(
       `/api/v1/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/items`,
-      { retry: true },
     );
   }
 
@@ -504,41 +503,43 @@ export class ApiClient {
     } else if (options.body !== undefined) {
       headers.set("Content-Type", "application/json");
     }
-    let response: Response;
     const controller = new AbortController();
     const timeout =
       options.timeoutMs === null
         ? null
         : window.setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
     try {
-      response = await fetch(new URL(path, `${this.settings.baseUrl}/`), {
-        method: options.method ?? "GET",
-        headers,
-        body:
-          options.rawBody ??
-          (options.body === undefined ? undefined : JSON.stringify(options.body)),
-        signal: controller.signal,
-        keepalive: options.keepalive,
-        cache: options.cache,
-      });
-    } catch {
-      throw new ApiClientError(
-        "connection_failed",
-        translate(readInitialLanguage(), "Не удалось подключиться к серверу"),
-      );
+      let response: Response;
+      try {
+        response = await fetch(new URL(path, `${this.settings.baseUrl}/`), {
+          method: options.method ?? "GET",
+          headers,
+          body:
+            options.rawBody ??
+            (options.body === undefined ? undefined : JSON.stringify(options.body)),
+          signal: controller.signal,
+          keepalive: options.keepalive,
+          cache: options.cache,
+        });
+      } catch {
+        throw new ApiClientError(
+          "connection_failed",
+          translate(readInitialLanguage(), "Не удалось подключиться к серверу"),
+        );
+      }
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as ApiError | null;
+        throw new ApiClientError(
+          payload?.error.code ?? "http_error",
+          payload?.error.message ?? `HTTP ${response.status}`,
+          response.status,
+        );
+      }
+      if (response.status === 204) return undefined as T;
+      return (await response.json()) as T;
     } finally {
       if (timeout !== null) window.clearTimeout(timeout);
     }
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as ApiError | null;
-      throw new ApiClientError(
-        payload?.error.code ?? "http_error",
-        payload?.error.message ?? `HTTP ${response.status}`,
-        response.status,
-      );
-    }
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
   }
 }
 
