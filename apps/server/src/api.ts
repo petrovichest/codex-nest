@@ -71,7 +71,6 @@ import type {
 } from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
-  parseItemsList,
   parseThreadList,
   parseThreadRead,
   parseThreadStart,
@@ -2066,8 +2065,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (turn.status !== "completed") {
         return apiError(reply, 409, "conflict", "Only completed turns can be forked");
       }
-      const items = await readNativeTurnItems(bridge, source.id, turn.id);
-      const agentMessage = [...items]
+      const agentMessage = [...turn.items]
         .reverse()
         .find(
           (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
@@ -4250,7 +4248,7 @@ async function readForkTurn(
           cursor,
           limit: 100,
           sortDirection: "desc",
-          itemsView: "notLoaded",
+          itemsView: "full",
         },
         30_000,
       ),
@@ -4260,27 +4258,6 @@ async function readForkTurn(
     cursor = page.nextCursor;
   } while (cursor);
   return undefined;
-}
-
-async function readNativeTurnItems(
-  bridge: CodexBridge,
-  threadId: string,
-  turnId: string,
-): Promise<ThreadItem[]> {
-  const items: ThreadItem[] = [];
-  let cursor: string | null = null;
-  do {
-    const page = parseItemsList(
-      await bridge.request<unknown>(
-        "thread/items/list",
-        { threadId, turnId, cursor, limit: 100, sortDirection: "asc" },
-        30_000,
-      ),
-    );
-    items.push(...page.data);
-    cursor = page.nextCursor;
-  } while (cursor);
-  return items;
 }
 
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {

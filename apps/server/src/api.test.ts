@@ -1334,6 +1334,20 @@ describe("session forks", () => {
       model: "gpt-b",
       effort: "low",
     });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/turns/list",
+      {
+        threadId: "thread",
+        cursor: null,
+        limit: 100,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+      30_000,
+    );
+    expect(
+      harness.bridge.request.mock.calls.some(([method]) => method === "thread/items/list"),
+    ).toBe(false);
     expect(harness.bridge.request).toHaveBeenCalledWith("thread/fork", {
       threadId: "thread",
       lastTurnId: "selected-turn",
