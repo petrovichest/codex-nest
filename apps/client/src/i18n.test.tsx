@@ -1,7 +1,13 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { I18nProvider, readInitialLanguage, translate, useI18n } from "./i18n";
+import {
+  I18nProvider,
+  localizeKnownServerText,
+  readInitialLanguage,
+  translate,
+  useI18n,
+} from "./i18n";
 
 beforeEach(() => {
   localStorage.clear();
@@ -34,6 +40,17 @@ describe("interface localization", () => {
     expect(screen.getByText("Настройки")).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("ru");
     expect(localStorage.getItem("codexnest.uiLanguage")).toBe("ru");
+  });
+
+  it("localizes the Team shutdown conflict", () => {
+    expect(
+      localizeKnownServerText(
+        "en",
+        "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
+      ),
+    ).toBe(
+      "Team mode cannot be disabled while subagents are running or their results are still pending. Ask the root agent to finish or cancel them.",
+    );
   });
 });
 

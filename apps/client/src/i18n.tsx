@@ -71,6 +71,8 @@ const ENGLISH: Record<string, string> = {
   "Создать новую Team-сессию": "Create a new Team session",
   "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.":
     "This session predates managed Team tools. Create a new Team session.",
+  "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.":
+    "Team mode cannot be disabled while subagents are running or their results are still pending. Ask the root agent to finish or cancel them.",
   "Показать меньше": "Show less",
   "Показать ещё {{count}}": "Show {{count}} more",
   "Пока нет задач": "No tasks yet",

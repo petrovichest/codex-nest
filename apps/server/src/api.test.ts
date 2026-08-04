@@ -2047,7 +2047,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /codexnest managed-task tools.*Never use native subagent tools.*smallest sufficient solution.*concrete, confirmed risk.*Before calling codexnest\.spawn_task.*necessary to achieve the user's original goal.*necessary executable step.*codexnest\.spawn_task.*self-contained prompt.*Do not create managed tasks for optional improvements.*checks without a concrete target.*After every meaningful stage.*reassess the remaining plan.*only with steps that are still necessary.*Every test, command run, and checklist item.*specific product risk or an observed defect.*Omit it otherwise.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Do not execute a delegated plan step.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
+            /may perform any part.*inspecting.*analyzing.*editing.*testing.*Delegate only.*materially useful.*codexnest managed-task tools.*never use native subagent tools.*smallest sufficient solution.*concrete, confirmed risk.*Before calling codexnest\.spawn_task.*necessary to achieve the user's original goal.*Honor an explicit user request.*main session.*Do not create managed tasks for optional improvements.*checks without a concrete target.*asks to stop or cancel subagents.*codexnest\.list_tasks.*codexnest\.cancel_task.*queued, starting, or running.*Do not create replacement tasks.*After every meaningful stage.*reassess the remaining plan.*only with steps that are still necessary.*Every test, command run, and checklist item.*specific product risk or an observed defect.*Omit it otherwise.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Once work is delegated.*do not duplicate the same scope.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
           ),
         },
       },
@@ -3253,6 +3253,94 @@ describe("Team orchestration", () => {
       state: "interrupted",
       currentTurnId: null,
     });
+    await app.close();
+    await store.flushed();
+  });
+
+  it("keeps Team enabled until the root agent cancels and processes running subagents", async () => {
+    const { app, bridge, headers, projection, store } = await createTeamHarness();
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Остановить по запросу",
+        prompt: "Жди команды главного агента.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    await projection.setCurrentTurn("thread", "parent-running");
+
+    const stopped = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers,
+      payload: { turnId: "parent-running" },
+    });
+    expect(stopped.statusCode).toBe(204);
+    expect(
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]?.status,
+    ).toBe("running");
+    expect(
+      bridge.request.mock.calls.some(
+        ([method, params]) =>
+          method === "turn/interrupt" &&
+          (params as Record<string, unknown>).threadId === spawned.threadId,
+      ),
+    ).toBe(false);
+
+    const blocked = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { collaborationMode: "default" },
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message:
+          "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
+      },
+    });
+    expect(projection.summary("thread")?.settings.collaborationMode).toBe("team");
+
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "cancel_task", {
+          taskId: spawned.taskId,
+          reason: "Пользователь попросил остановить субагентов",
+        })
+      ).success,
+    ).toBe(true);
+    const processed = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "Останови субагентов" },
+    });
+    expect(processed.statusCode).toBe(201);
+    expect(store.snapshot().threadMeta.thread?.teamOrchestration).toBeUndefined();
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread",
+        turn: testTurn(String(processed.json().turnId), "completed"),
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("thread")?.currentTurnId).toBeNull());
+
+    const disabled = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
+      headers,
+      payload: { collaborationMode: "default" },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json().settings.collaborationMode).toBe("default");
     await app.close();
     await store.flushed();
   });

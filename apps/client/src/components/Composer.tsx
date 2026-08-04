@@ -831,6 +831,12 @@ export function Composer({
             )}
             <SettingsPicker
               disabled={running || busy || settingsBusy || speechBusy}
+              teamToggleDisabled={
+                busy ||
+                settingsBusy ||
+                speechBusy ||
+                (running && settings.collaborationMode !== "team")
+              }
               models={models}
               value={settings}
               onChange={onSettingsChange}

@@ -1806,6 +1806,7 @@ describe("Activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
     expect(api.interrupt).toHaveBeenCalledWith("thread", "turn");
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Включить командный режим" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
   });
 
@@ -1822,6 +1823,35 @@ describe("Activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
 
     await waitFor(() => expect(api.interrupt).toHaveBeenCalledWith("thread", undefined));
+  });
+
+  it("explains why a running Team orchestration cannot be disabled", async () => {
+    const api = threadApi();
+    const warning =
+      "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.";
+    api.updateThreadSettings.mockRejectedValueOnce(new Error(warning));
+    mockThreadConnection(api, {
+      ...summary,
+      state: "running",
+      currentTurnId: null,
+      settings: { ...summary.settings, collaborationMode: "team" },
+    });
+    renderThread();
+
+    const team = screen.getByRole("button", { name: "Выключить командный режим" });
+    expect(team).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
+
+    fireEvent.click(team);
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
+        collaborationMode: "default",
+      }),
+    );
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(team).toHaveAttribute("aria-pressed", "true");
   });
 
   it("restores the complete server draft and debounces text autosave", async () => {

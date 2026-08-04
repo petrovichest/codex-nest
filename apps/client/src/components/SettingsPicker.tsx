@@ -16,6 +16,7 @@ export function SettingsPicker({
   models,
   value,
   disabled,
+  teamToggleDisabled = disabled,
   onChange,
   goalMode,
   goal,
@@ -27,6 +28,7 @@ export function SettingsPicker({
   models: ModelOption[];
   value: SessionSettings;
   disabled: boolean;
+  teamToggleDisabled?: boolean;
   onChange(value: UpdateThreadSettingsRequest): void;
   goalMode: boolean;
   goal?: ThreadGoal | null;
@@ -105,7 +107,7 @@ export function SettingsPicker({
         }
         aria-pressed={value.collaborationMode === "team"}
         className={`setting-control team-toggle${value.collaborationMode === "team" ? " active" : ""}`}
-        disabled={disabled || !model || Boolean(goal)}
+        disabled={teamToggleDisabled || !model || Boolean(goal)}
         type="button"
         onClick={() => {
           onGoalModeChange?.(false);

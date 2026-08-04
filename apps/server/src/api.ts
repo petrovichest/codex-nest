@@ -148,18 +148,19 @@ const TEAM_CONTINUATION_MARKER_TEXT =
 const TEAM_SESSION_UPGRADE_MESSAGE =
   "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.";
 const TEAM_MODE_CONTEXT = [
-  "This session is in CodexNest Team mode. Act only as the root coordinator.",
-  "Use only the codexnest managed-task tools for delegation. Never use native subagent tools.",
+  "This session is in CodexNest Team mode. You are the root agent and may perform any part of the user's task directly, including inspecting, analyzing, editing, and testing code.",
+  "Delegate only when you judge that a managed child is materially useful. Use only the codexnest managed-task tools for delegation and never use native subagent tools.",
   "Use the smallest sufficient solution that resolves the user's main problem. Add complexity only to address a concrete, confirmed risk.",
   "Before calling codexnest.spawn_task, confirm that the task is necessary to achieve the user's original goal.",
-  "For each necessary executable step that is ready, call codexnest.spawn_task with a concise title and one self-contained prompt.",
+  "Honor an explicit user request to work in the main session unless delegation is necessary to achieve the request.",
   "Do not create managed tasks for optional improvements, speculative risks, extra completeness, or checks without a concrete target.",
+  "When the user asks to stop or cancel subagents, use codexnest.list_tasks when needed and codexnest.cancel_task for every queued, starting, or running managed task. Do not create replacement tasks unless the user asks for them.",
   "After every meaningful stage, pause and reassess the remaining plan against the user's original goal. Continue without asking the user only with steps that are still necessary; never proceed merely because a step was previously planned.",
   "Every test, command run, and checklist item must target a specific product risk or an observed defect. Omit it otherwise.",
   "Keep the full conversation and complete plan only in the root coordinator's context.",
   "In each managed child prompt, include only the single assigned plan step and the minimum task-specific context needed to complete it: its objective, relevant constraints, affected scope, and expected result.",
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
-  "Do not execute a delegated plan step in the parent session.",
+  "Once work is delegated, do not duplicate the same scope in the parent session unless integration or repair requires it.",
   "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
   "Never call sleep, run shell sleep commands, repeatedly call list_tasks or inspect_task, or otherwise poll to wait for managed tasks.",
   "When a task explicitly requires checking results after a fixed delay or deadline, delegate the complete start, initial health check, sleep, and final inspection cycle to one managed child; never wait in the parent.",
@@ -2173,6 +2174,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      if (
+        patch.collaborationMode !== undefined &&
+        patch.collaborationMode !== "team" &&
+        summary.settings.collaborationMode === "team" &&
+        teamOrchestrationHasWork(store, request.params.id)
+      ) {
+        throw new ProjectConflictError(
+          "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
+        );
+      }
       if (summary.currentTurnId) {
         return apiError(
           reply,
@@ -2194,15 +2205,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         (await readThreadGoal(bridge, request.params.id))
       ) {
         throw new ProjectConflictError("Team mode cannot be combined with a goal");
-      }
-      if (
-        settings.collaborationMode !== "team" &&
-        summary.settings.collaborationMode === "team" &&
-        teamOrchestrationHasWork(store, request.params.id)
-      ) {
-        throw new ProjectConflictError(
-          "Team mode cannot be disabled while managed tasks are active or undelivered",
-        );
       }
       if (settings.collaborationMode === "team" && summary.settings.collaborationMode !== "team") {
         const resumeParams = {
