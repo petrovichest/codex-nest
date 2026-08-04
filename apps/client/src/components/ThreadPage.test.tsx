@@ -4,8 +4,9 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
-  ModelOption,
+  ActivityItem,
   AttentionRequest,
+  ModelOption,
   ThreadDetail,
   ThreadDraft,
   ThreadSummary,
@@ -254,6 +255,90 @@ describe("Activity", () => {
       "/threads/child",
     );
     expect(screen.getByText("Завершена")).toBeInTheDocument();
+  });
+
+  it("renders rich subagent results compactly with an accessible status and child link", () => {
+    render(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "orchestrationNotice",
+            id: "orchestration-v2",
+            status: "completed",
+            agents: [
+              {
+                threadId: "child/v2",
+                taskId: "task-v2",
+                title: "Проверить интерфейс",
+                nickname: "reviewer",
+                outcome: "completed",
+                result: {
+                  outcome: "partial",
+                  summary: "Карточка обновлена без отдельной панели.",
+                  checks: [
+                    { name: "Тесты клиента", outcome: "passed", details: "12 тестов" },
+                    { name: "Снимок экрана", outcome: "notRun" },
+                  ],
+                },
+                budgetReason: "tokenBudget",
+                failureReason: "Визуальная проверка недоступна.",
+                changedPaths: ["apps/client/src/components/ThreadPage.tsx"],
+                changedPathCount: 24,
+                workspaceIntegrationStatus: "integrated",
+              },
+            ],
+            timestamp: Date.now(),
+            afterItemId: null,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("link", { name: "reviewer · Проверить интерфейс" })).toHaveAttribute(
+      "href",
+      "/threads/child%2Fv2",
+    );
+    expect(screen.getByLabelText("Статус результата: Частично")).toHaveTextContent("Частично");
+    expect(screen.getByText("Карточка обновлена без отдельной панели.")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Проверки результата" })).toHaveTextContent(
+      "Тесты клиентаПройдена12 тестовСнимок экранаНе запускалась",
+    );
+    expect(screen.getByText("Лимит").closest("div")).toHaveTextContent("Исчерпан бюджет токенов");
+    expect(screen.getByText("Визуальная проверка недоступна.")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Изменённые файлы" })).toHaveTextContent(
+      "apps/client/src/components/ThreadPage.tsx",
+    );
+    expect(screen.getByText("Показано 1 из 24")).toBeInTheDocument();
+    expect(screen.getByText("Изменения интегрированы")).toBeInTheDocument();
+  });
+
+  it("falls back to the v1 outcome for a malformed partial rich result", () => {
+    render(
+      <MemoryRouter>
+        <Activity
+          item={
+            {
+              type: "orchestrationNotice",
+              id: "orchestration-partial-result",
+              status: "completed",
+              agents: [
+                {
+                  threadId: "child",
+                  title: "Legacy-compatible result",
+                  nickname: null,
+                  outcome: "completed",
+                  result: { summary: "Outcome was omitted." },
+                },
+              ],
+              timestamp: Date.now(),
+              afterItemId: null,
+            } as ActivityItem
+          }
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText("Статус результата: Завершена")).toHaveTextContent("Завершена");
   });
 
   it("renders a successful subagent launch as a linked orchestration card", () => {

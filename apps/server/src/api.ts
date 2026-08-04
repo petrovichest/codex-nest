@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 
@@ -113,12 +113,24 @@ import {
 } from "./message-queue";
 import type {
   CodexNestState,
+  ManagedTeamTaskAccessState,
+  ManagedTeamTaskResultArtifact,
+  ManagedTeamTaskResultCheck,
   ManagedTeamTaskResult,
   ManagedTeamTaskState,
   StateStore,
   TeamToolOperationState,
 } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
+import {
+  computeTeamWorkspaceDelta,
+  createTeamWorkspace,
+  discardTeamWorkspace,
+  integrateTeamWorkspace,
+  TeamWorkspaceConflictError,
+  TeamWorkspaceError,
+  TeamWorkspacePathError,
+} from "./team-workspace";
 import {
   appendTranscriptionTimingSample,
   MAX_TRANSCRIPTION_BYTES,
@@ -138,8 +150,12 @@ import {
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
-const TEAM_TOOLS_VERSION = 1;
-const TEAM_MAX_ACTIVE_TASKS = 4;
+const TEAM_TOOLS_VERSION = 2;
+const TEAM_LEGACY_TOOLS_VERSION = 1;
+const TEAM_MAX_ACTIVE_TASKS = 3;
+const TEAM_LEGACY_MAX_ACTIVE_TASKS = 4;
+const TEAM_TASK_HISTORY_LIMIT = 50;
+const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
 const TEAM_ACTIVITY_PERSIST_MS = 60_000;
 const TEAM_CONTINUATION_MARKER_TEXT =
@@ -174,7 +190,7 @@ const TEAM_MODE_CONTEXT = [
   "When the required results are ready, return one consolidated result to the user.",
   "The user should not need to coordinate subagents directly.",
 ].join(" ");
-const TEAM_CHILD_INSTRUCTIONS = [
+const TEAM_CHILD_INSTRUCTIONS_V1 = [
   "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
   "Do not create or delegate to subagents.",
   "When the task explicitly requires checking results after a fixed delay or deadline, start the workload asynchronously so it continues independently.",
@@ -182,6 +198,15 @@ const TEAM_CHILD_INSTRUCTIONS = [
   "Then use the built-in sleep tool once for only the time remaining until the requested check, without shell sleep commands, loops, or periodic polling.",
   "After waking, inspect the result and complete the task normally; do not introduce a delay when the task did not explicitly request one.",
   "Before finishing, call codexnest.submit_result with a concise summary and optional Markdown details.",
+  "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
+].join(" ");
+const TEAM_CHILD_INSTRUCTIONS = [
+  "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
+  "Do not create or delegate to subagents.",
+  "Honor the enforced workspace, writable-path, and network limits. Never attempt to escape them or request broader approval.",
+  "Do not commit, push, deploy, or change Git refs; the root agent alone integrates and publishes changes.",
+  "When the task explicitly requires checking results after a fixed delay or deadline, start the workload asynchronously, perform one brief startup check, and use the built-in sleep tool once for only the remaining time.",
+  "Before finishing, call codexnest.submit_result with outcome, a concise summary, optional details, checks, risks, and artifacts.",
   "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
 ].join(" ");
 
@@ -211,19 +236,107 @@ interface TeamResultClaim {
   }>;
 }
 
+interface ManagedTaskOptions {
+  dependsOn: string[];
+  access: ManagedTeamTaskAccessState;
+  model: string;
+  reasoningEffort: string | null;
+  serviceTier: string | null;
+  timeoutMinutes?: number;
+  tokenBudget?: number;
+}
+
+interface ManagedChildRuntime {
+  cwd: string;
+  runtimeWorkspaceRoots?: string[];
+  sandboxPolicy?:
+    | { type: "readOnly"; networkAccess: boolean }
+    | {
+        type: "workspaceWrite";
+        writableRoots: string[];
+        networkAccess: boolean;
+        excludeTmpdirEnvVar: boolean;
+        excludeSlashTmp: boolean;
+      };
+}
+
+const TEAM_CHILD_DYNAMIC_TOOLS_V1 = [
+  {
+    type: "namespace",
+    name: "codexnest",
+    description: "Return the result of the current CodexNest managed task.",
+    tools: [
+      dynamicTool("submit_result", "Submit the result candidate for this managed task.", {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "Concise non-empty result summary." },
+          details: { type: "string", description: "Optional Markdown details." },
+        },
+        required: ["summary"],
+        additionalProperties: false,
+      }),
+    ],
+  },
+] as const;
+
+const TEAM_ACCESS_SCHEMA = {
+  type: "object",
+  properties: {
+    mode: {
+      type: "string",
+      enum: ["readOnly", "isolatedWrite", "sharedWrite"],
+      description: "Workspace access mode. Defaults to readOnly.",
+    },
+    writePaths: {
+      type: "array",
+      items: { type: "string" },
+      description: "Repository-relative writable paths. Required for write modes.",
+    },
+    network: { type: "boolean", description: "Allow network access. Defaults to false." },
+  },
+  additionalProperties: false,
+} as const;
+
+const TEAM_TASK_OPTIONS_SCHEMA = {
+  dependsOn: { type: "array", items: { type: "string" }, maxItems: 50 },
+  access: TEAM_ACCESS_SCHEMA,
+  model: { type: "string" },
+  reasoningEffort: { type: "string" },
+  serviceTier: { type: "string" },
+  timeoutMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
+  tokenBudget: { type: "integer", minimum: 1, maximum: 10_000_000 },
+} as const;
+
 const TEAM_ROOT_DYNAMIC_TOOLS = [
   {
     type: "namespace",
     name: "codexnest",
-    description: "Create and manage CodexNest child tasks for Team mode.",
+    description: "Create and manage isolated CodexNest child tasks for Team mode.",
     tools: [
       dynamicTool("spawn_task", "Create one managed child task.", {
         type: "object",
         properties: {
           title: { type: "string", description: "Concise task-specific title." },
           prompt: { type: "string", description: "Self-contained task instructions." },
+          ...TEAM_TASK_OPTIONS_SCHEMA,
         },
         required: ["title", "prompt"],
+        additionalProperties: false,
+      }),
+      dynamicTool("followup_task", "Continue a delivered managed task in the same child thread.", {
+        type: "object",
+        properties: {
+          taskId: { type: "string" },
+          title: { type: "string" },
+          prompt: { type: "string", description: "Self-contained follow-up instructions." },
+          access: TEAM_ACCESS_SCHEMA,
+          model: { type: "string" },
+          reasoningEffort: { type: "string" },
+          serviceTier: { type: "string" },
+          timeoutMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
+          tokenBudget: { type: "integer", minimum: 1, maximum: 10_000_000 },
+        },
+        required: ["taskId", "prompt"],
         additionalProperties: false,
       }),
       dynamicTool("list_tasks", "List this parent's managed tasks.", {
@@ -239,19 +352,25 @@ const TEAM_ROOT_DYNAMIC_TOOLS = [
       }),
       dynamicTool("steer_task", "Send corrective guidance to a running managed task.", {
         type: "object",
-        properties: {
-          taskId: { type: "string" },
-          message: { type: "string" },
-        },
+        properties: { taskId: { type: "string" }, message: { type: "string" } },
         required: ["taskId", "message"],
         additionalProperties: false,
       }),
       dynamicTool("cancel_task", "Cancel a queued or running managed task.", {
         type: "object",
-        properties: {
-          taskId: { type: "string" },
-          reason: { type: "string" },
-        },
+        properties: { taskId: { type: "string" }, reason: { type: "string" } },
+        required: ["taskId"],
+        additionalProperties: false,
+      }),
+      dynamicTool("integrate_task", "Apply an isolated task's verified changes to the parent.", {
+        type: "object",
+        properties: { taskId: { type: "string" } },
+        required: ["taskId"],
+        additionalProperties: false,
+      }),
+      dynamicTool("discard_task_changes", "Discard an isolated task's unapplied changes.", {
+        type: "object",
+        properties: { taskId: { type: "string" } },
         required: ["taskId"],
         additionalProperties: false,
       }),
@@ -263,15 +382,45 @@ const TEAM_CHILD_DYNAMIC_TOOLS = [
   {
     type: "namespace",
     name: "codexnest",
-    description: "Return the result of the current CodexNest managed task.",
+    description: "Return the structured result of the current CodexNest managed task.",
     tools: [
       dynamicTool("submit_result", "Submit the result candidate for this managed task.", {
         type: "object",
         properties: {
+          outcome: { type: "string", enum: ["success", "partial", "blocked", "failed"] },
           summary: { type: "string", description: "Concise non-empty result summary." },
           details: { type: "string", description: "Optional Markdown details." },
+          checks: {
+            type: "array",
+            maxItems: 100,
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                outcome: { type: "string", enum: ["passed", "failed", "notRun"] },
+                details: { type: "string" },
+              },
+              required: ["name", "outcome"],
+              additionalProperties: false,
+            },
+          },
+          risks: { type: "array", maxItems: 100, items: { type: "string" } },
+          artifacts: {
+            type: "array",
+            maxItems: 100,
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                path: { type: "string" },
+                url: { type: "string" },
+              },
+              required: ["label"],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ["summary"],
+        required: ["outcome", "summary"],
         additionalProperties: false,
       }),
     ],
@@ -366,7 +515,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (
       summary.settings.collaborationMode === "team" &&
-      store.snapshot().threadMeta[threadId]?.teamToolsVersion !== TEAM_TOOLS_VERSION
+      ![TEAM_LEGACY_TOOLS_VERSION, TEAM_TOOLS_VERSION].includes(
+        store.snapshot().threadMeta[threadId]?.teamToolsVersion as 1 | 2,
+      )
     ) {
       throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
     }
@@ -389,8 +540,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const teamMarkerId = teamClaim
       ? (clientMessageId ?? teamContinuationMarkerId(teamClaim.claimId))
       : null;
-    const effectiveInput =
-      teamClaim && !input.trim() && !images.length ? TEAM_CONTINUATION_MARKER_TEXT : input;
+    const automaticTeamContinuation = Boolean(teamClaim && !input.trim() && !images.length);
     if (teamClaim && teamMarkerId) {
       await markTeamClaimDispatch(
         store,
@@ -417,18 +567,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           30_000,
         );
       }
-      const turn = parseTurnStart(
-        await bridge.request<unknown>("turn/start", {
-          threadId,
-          clientUserMessageId: teamMarkerId ?? clientMessageId,
-          input: messageInput(effectiveInput, images),
-          ...turnSettings(
-            summary.settings,
-            projection.availableModels,
-            teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
-          ),
-        }),
-      );
+      const startParams = {
+        threadId,
+        clientUserMessageId: teamMarkerId ?? clientMessageId,
+        input: messageInput(input, images),
+        ...turnSettings(
+          summary.settings,
+          projection.availableModels,
+          teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
+        ),
+      };
+      let started: unknown;
+      try {
+        started = await bridge.request<unknown>("turn/start", startParams);
+      } catch (error) {
+        if (!(automaticTeamContinuation && error instanceof RpcError && error.code === -32_602)) {
+          throw error;
+        }
+        started = await bridge.request<unknown>("turn/start", {
+          ...startParams,
+          input: messageInput(TEAM_CONTINUATION_MARKER_TEXT, []),
+        });
+      }
+      const turn = parseTurnStart(started);
       turnId = turn.turn.id;
     } catch (error) {
       if (teamClaim && teamMarkerId) {
@@ -469,21 +630,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     if (teamClaim) {
       await deliverTeamClaim(store, threadId, teamClaim.claimId, turnId);
-      await projection.recordOrchestrationNotice(
+      await recordTeamNotice(
+        store,
+        projection,
         threadId,
         turnId,
-        teamClaim.results.map((result) => {
-          const child = projection.summary(result.childThreadId);
-          return {
-            threadId: result.childThreadId,
-            title: result.title,
-            nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
-            outcome: result.outcome,
-          };
-        }),
+        teamClaim.results,
         clientMessageId,
       );
       projection.publishThreadState(threadId);
+      scheduleTeamTasks(threadId);
     }
     if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
     if (!goal) return { turnId };
@@ -663,6 +819,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (teamClaim) {
       await deliverTeamClaim(store, threadId, teamClaim.claimId, resultTurnId);
       await recordTeamNotice(
+        store,
         projection,
         threadId,
         resultTurnId,
@@ -670,6 +827,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         clientMessageId,
       );
       projection.publishThreadState(threadId);
+      scheduleTeamTasks(threadId);
     }
     return resultTurnId;
   };
@@ -716,6 +874,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const teamContinuationImmediates = new Map<string, NodeJS.Immediate>();
   const teamTaskStartImmediates = new Map<string, NodeJS.Immediate>();
   const managedActivity = new Map<string, number>();
+  const managedTokenUsage = new Map<string, { tokens: number; persistedAt: number }>();
   const teamBackgroundRuns = new Set<Promise<unknown>>();
   const deferredServerRequests = new Map<string, [ServerRequest, JsonlTransport]>();
   let teamNotificationQueue = Promise.resolve();
@@ -747,7 +906,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               const tasks = Object.values(
                 store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
               );
-              if (tasks.length && tasks.every(isTerminalTask)) {
+              const version = store.snapshot().threadMeta[threadId]?.teamToolsVersion;
+              const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
+              if (
+                tasks.length &&
+                tasks.every(isTerminalTask) &&
+                (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
+              ) {
                 await store.update((state) => {
                   const meta = state.threadMeta[threadId];
                   if (meta) delete meta.teamOrchestration;
@@ -839,7 +1004,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     const childThreadId = notificationThreadId(notification);
     const managed = childThreadId
-      ? managedTaskForChild(store.snapshot(), childThreadId)
+      ? managedTaskForNotification(store.snapshot(), notification)
       : undefined;
     if (childThreadId && managed) {
       managedActivity.set(childThreadId, Date.now());
@@ -849,7 +1014,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .catch(() => undefined)
       .then(async () => {
         const run = () =>
-          handleManagedTeamNotification(notification, bridge, store, projection, managedActivity);
+          handleManagedTeamNotification(
+            notification,
+            bridge,
+            store,
+            projection,
+            managedActivity,
+            managedTokenUsage,
+          );
         const affected = managed
           ? await withKeyLock(teamParentLocks, managed.parentThreadId, run)
           : await run();
@@ -921,7 +1093,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     teamNotificationQueue = teamNotificationQueue
       .catch(() => undefined)
       .then(async () => {
-        const affected = await triggerTeamWatchdogs(store, managedActivity, Date.now());
+        const now = Date.now();
+        const affected = await enforceTeamTimeBudgets(bridge, store, now);
+        for (const threadId of await triggerTeamWatchdogs(store, managedActivity, now)) {
+          affected.add(threadId);
+        }
         for (const parentThreadId of affected) {
           projection.publishThreadState(parentThreadId);
           scheduleTeamContinuation(parentThreadId);
@@ -947,6 +1123,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     teamContinuationImmediates.clear();
     teamTaskStartImmediates.clear();
     deferredServerRequests.clear();
+    managedTokenUsage.clear();
     scheduledTeamContinuations.clear();
     scheduledTeamTaskStarts.clear();
     bridge.off("state", bridgeTeamStateHandler);
@@ -994,7 +1171,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         }
         await queue.recover();
         await pruneCompletedTeamToolOperations(bridge, store);
-        const threadIds = await reconcileTeamOrchestration(bridge, store, projection);
+        const threadIds = new Set<string>();
+        const parentThreadIds = Object.entries(store.snapshot().threadMeta)
+          .filter(([, meta]) => Boolean(meta.teamOrchestration))
+          .map(([threadId]) => threadId);
+        for (const parentThreadId of parentThreadIds) {
+          const reconciled = await withKeyLock(teamParentLocks, parentThreadId, () =>
+            reconcileTeamOrchestration(bridge, store, projection, parentThreadId),
+          );
+          for (const threadId of reconciled) threadIds.add(threadId);
+        }
         if (
           Object.values(store.snapshot().threadMeta).some((meta) =>
             Object.values(meta.teamOrchestration?.tasks ?? {}).some(
@@ -2104,8 +2290,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           lastOutcome: "completed",
           outcomeUpdatedAt: forked.updatedAt * 1_000,
           settings: structuredClone(source.settings),
-          ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION
-            ? { teamToolsVersion: TEAM_TOOLS_VERSION }
+          ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION ||
+          sourceMeta?.teamToolsVersion === TEAM_LEGACY_TOOLS_VERSION
+            ? { teamToolsVersion: sourceMeta.teamToolsVersion }
             : {}),
         };
         if (state.messageQueues) delete state.messageQueues[forked.id];
@@ -2193,6 +2380,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const settings = mergeSettings(summary.settings, patch, projection.availableModels);
       if (
         settings.collaborationMode === "team" &&
+        summary.settings.collaborationMode !== "team" &&
         store.snapshot().threadMeta[request.params.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION
       ) {
         throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
@@ -2419,7 +2607,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const tasks = Object.values(
           store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
         );
-        if (tasks.length && tasks.every(isTerminalTask)) {
+        const version = store.snapshot().threadMeta[request.params.id]?.teamToolsVersion;
+        const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
+        if (
+          tasks.length &&
+          tasks.every(isTerminalTask) &&
+          (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
+        ) {
           await store.update((state) => {
             const meta = state.threadMeta[request.params.id];
             if (meta) delete meta.teamOrchestration;
@@ -2605,6 +2799,17 @@ async function handleManagedTeamToolCall(
     if (!managed) return finish(dynamicToolError("This thread is not a managed Team task"));
     const summary = requiredToolString(args, "summary");
     const details = optionalToolString(args, "details");
+    const fields = managedResultFields(args);
+    await validateManagedResultArtifacts(
+      fields.artifacts,
+      managed.task.workspace?.worktreePath ?? projection.summary(managed.parentThreadId)?.cwd,
+    );
+    const parentVersion =
+      store.snapshot().threadMeta[managed.parentThreadId]?.teamToolsVersion ??
+      TEAM_LEGACY_TOOLS_VERSION;
+    if (parentVersion === TEAM_TOOLS_VERSION && !fields.outcome) {
+      throw new ProjectValidationError("outcome is required for Team v2 results");
+    }
     let accepted = false;
     await store.update((state) => {
       const task =
@@ -2618,6 +2823,7 @@ async function handleManagedTeamToolCall(
       task.resultCandidate = {
         summary,
         ...(details ? { details } : {}),
+        ...fields,
         submittedAt: Date.now(),
         callId,
       };
@@ -2646,6 +2852,21 @@ async function handleManagedTeamToolCall(
   if (tool === "spawn_task") {
     const title = requiredToolString(args, "title");
     const prompt = requiredToolString(args, "prompt");
+    const parentVersion =
+      store.snapshot().threadMeta[threadId]?.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION;
+    const options =
+      parentVersion === TEAM_TOOLS_VERSION
+        ? managedTaskOptions(args, parent.settings, projection.availableModels)
+        : undefined;
+    if (options) {
+      const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+      const missing = options.dependsOn.filter((dependency) => !tasks[dependency]);
+      if (missing.length) {
+        return finish(
+          dynamicToolError(`Managed task dependencies not found: ${missing.join(", ")}`),
+        );
+      }
+    }
     const operation = prepared!.operation;
     const taskId = operation.taskId!;
     const childThreadSource = operation.childThreadSource!;
@@ -2672,6 +2893,7 @@ async function handleManagedTeamToolCall(
           taskId,
           childThreadSource,
           recoveredThread,
+          options,
         );
       } catch (error) {
         const recoveredAfterError = await findManagedThreadBySource(bridge, childThreadSource);
@@ -2690,6 +2912,7 @@ async function handleManagedTeamToolCall(
           taskId,
           childThreadSource,
           recoveredAfterError,
+          options,
         );
       }
     }
@@ -2703,17 +2926,255 @@ async function handleManagedTeamToolCall(
   }
 
   if (tool === "list_tasks") {
-    const tasks = Object.values(
-      store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
-    )
+    const taskMap = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const tasks = Object.values(taskMap)
       .sort((left, right) => left.createdAt - right.createdAt)
-      .map(publicManagedTask);
+      .map((task) => publicManagedTask(task, taskMap));
     return dynamicToolSuccess({ tasks });
   }
 
   const taskId = requiredToolString(args, "taskId");
   const task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
   if (!task) return finish(dynamicToolError("Managed task not found"));
+
+  if (tool === "followup_task") {
+    if (!isTerminalTask(task) || task.delivery?.status !== "delivered") {
+      return finish(dynamicToolError("Only a delivered terminal task can be continued"));
+    }
+    const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const existingFollowup = tasks[prepared!.operation.taskId!];
+    if (existingFollowup) {
+      return finish(
+        dynamicToolSuccess({
+          taskId: existingFollowup.id,
+          threadId: existingFollowup.childThreadId,
+          status: existingFollowup.status,
+        }),
+      );
+    }
+    if (Object.values(tasks).some((candidate) => candidate.predecessorTaskId === task.id)) {
+      return finish(dynamicToolError("This managed task already has a follow-up"));
+    }
+    const prompt = requiredToolString(args, "prompt");
+    const title = optionalToolString(args, "title") ?? task.title;
+    const options = managedTaskOptions(args, parent.settings, projection.availableModels, task);
+    const reusesWorkspace = Boolean(
+      task.workspace && !["integrated", "discarded"].includes(task.workspace.lifecycle),
+    );
+    if (
+      reusesWorkspace &&
+      (options.access.mode !== "isolatedWrite" ||
+        canonicalJson(options.access.writePaths ?? []) !==
+          canonicalJson(task.access?.writePaths ?? []))
+    ) {
+      return finish(
+        dynamicToolError(
+          "A follow-up with pending isolated changes must keep the same workspace write paths",
+        ),
+      );
+    }
+    const nextTaskId = prepared!.operation.taskId!;
+    const now = Date.now();
+    const next: ManagedTeamTaskState = {
+      id: nextTaskId,
+      childThreadId: task.childThreadId,
+      childThreadSource: task.childThreadSource,
+      startMessageId: teamTaskStartMarkerId(nextTaskId),
+      title,
+      prompt,
+      status: "queued",
+      predecessorTaskId: task.id,
+      access: options.access,
+      resolvedModel: options.model,
+      resolvedReasoningEffort: options.reasoningEffort,
+      resolvedServiceTier: options.serviceTier,
+      ...(options.timeoutMinutes ? { timeoutMinutes: options.timeoutMinutes } : {}),
+      ...(options.tokenBudget ? { tokenBudget: options.tokenBudget } : {}),
+      ...(reusesWorkspace && task.workspace ? { workspace: structuredClone(task.workspace) } : {}),
+      createdAt: now,
+      lastActivityAt: now,
+    };
+    await store.update((state) => {
+      const orchestration = state.threadMeta[threadId]?.teamOrchestration;
+      if (!orchestration || orchestration.tasks[nextTaskId]) return;
+      orchestration.tasks[nextTaskId] = next;
+      const childMeta = state.threadMeta[next.childThreadId] ?? {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      childMeta.managedParent = { parentThreadId: threadId, taskId: nextTaskId };
+      state.threadMeta[next.childThreadId] = childMeta;
+    });
+    await bridge
+      .request("thread/name/set", { threadId: next.childThreadId, name: title })
+      .catch(() => undefined);
+    projection.publishThreadState(next.childThreadId);
+    return finish(
+      dynamicToolSuccess({ taskId: next.id, threadId: next.childThreadId, status: next.status }),
+    );
+  }
+
+  if (tool === "integrate_task") {
+    if (!isTerminalTask(task)) {
+      return finish(dynamicToolError("Only a terminal managed task can be integrated"));
+    }
+    if (!task.workspace) {
+      return finish(dynamicToolError("This managed task has no isolated workspace"));
+    }
+    if (task.workspace.lifecycle === "integrated") {
+      return finish(
+        dynamicToolSuccess({
+          integrated: true,
+          changedPaths: task.workspace.changedPaths ?? [],
+          alreadyIntegrated: true,
+        }),
+      );
+    }
+    if (task.workspace.lifecycle === "discarded") {
+      return finish(dynamicToolError("This managed task's changes were discarded"));
+    }
+    if (
+      Object.values(store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
+        (candidate) => candidate.predecessorTaskId === task.id,
+      )
+    ) {
+      return finish(dynamicToolError("Integrate the latest follow-up task instead"));
+    }
+    const activeSharedWriter = activeSharedWriteTask(store, threadId, task.id);
+    if (activeSharedWriter) {
+      return finish(
+        dynamicToolError(
+          `Wait for shared-write task ${activeSharedWriter.title} [${activeSharedWriter.id}] before integrating isolated changes`,
+        ),
+      );
+    }
+    try {
+      await store.update((state) => {
+        const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+        if (current?.workspace) {
+          current.workspace.lifecycle = "integrating";
+          current.workspace.updatedAt = Date.now();
+        }
+      });
+      const integration = await integrateTeamWorkspace(
+        task.workspace,
+        task.access?.writePaths ?? [],
+      );
+      const integratedAt = Date.now();
+      await store.update((state) => {
+        const orchestration = state.threadMeta[threadId]?.teamOrchestration;
+        const current = orchestration?.tasks[taskId];
+        if (!current?.workspace) return;
+        for (const candidate of Object.values(orchestration?.tasks ?? {})) {
+          if (candidate.workspace?.worktreePath !== current.workspace.worktreePath) continue;
+          candidate.workspace = {
+            ...candidate.workspace,
+            lifecycle: "integrated",
+            changedPaths: integration.changedPaths,
+            conflictPaths: undefined,
+            error: undefined,
+            updatedAt: integratedAt,
+          };
+        }
+      });
+      let cleanupError: string | undefined;
+      try {
+        await discardTeamWorkspace(task.workspace);
+      } catch (error) {
+        cleanupError = safeError(error).message;
+        await store.update((state) => {
+          const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+          if (current?.workspace?.lifecycle === "integrated") {
+            current.workspace.error = cleanupError;
+            current.workspace.updatedAt = Date.now();
+          }
+        });
+      }
+      return finish(dynamicToolSuccess({ integrated: true, ...integration, cleanupError }));
+    } catch (error) {
+      if (error instanceof TeamWorkspaceConflictError || error instanceof TeamWorkspacePathError) {
+        const conflictPaths =
+          error instanceof TeamWorkspaceConflictError
+            ? error.conflicts.map((conflict) => conflict.path)
+            : error.paths;
+        await store.update((state) => {
+          const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+          if (!current?.workspace) return;
+          current.workspace.lifecycle = "conflicted";
+          current.workspace.conflictPaths = conflictPaths;
+          current.workspace.error = error.message;
+          current.workspace.updatedAt = Date.now();
+        });
+        return finish(dynamicToolError(`${error.message}: ${conflictPaths.join(", ")}`));
+      }
+      if (error instanceof TeamWorkspaceError) {
+        await store.update((state) => {
+          const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+          if (current?.workspace) {
+            current.workspace.lifecycle = "recoveryRequired";
+            current.workspace.error = error.message;
+            current.workspace.updatedAt = Date.now();
+          }
+        });
+      }
+      throw error;
+    }
+  }
+
+  if (tool === "discard_task_changes") {
+    if (!isTerminalTask(task)) {
+      return finish(dynamicToolError("Only a terminal managed task can be discarded"));
+    }
+    if (!task.workspace) {
+      return finish(dynamicToolError("This managed task has no isolated workspace"));
+    }
+    if (task.workspace.lifecycle === "discarded") {
+      return finish(dynamicToolSuccess({ discarded: true, alreadyDiscarded: true }));
+    }
+    if (task.workspace.lifecycle === "integrated") {
+      return finish(dynamicToolError("This managed task was already integrated"));
+    }
+    if (
+      Object.values(store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
+        (candidate) => candidate.predecessorTaskId === task.id,
+      )
+    ) {
+      return finish(dynamicToolError("Discard the latest follow-up task instead"));
+    }
+    await store.update((state) => {
+      const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+      if (current?.workspace) {
+        current.workspace.lifecycle = "discarding";
+        current.workspace.updatedAt = Date.now();
+      }
+    });
+    try {
+      await discardTeamWorkspace(task.workspace);
+      await store.update((state) => {
+        const orchestration = state.threadMeta[threadId]?.teamOrchestration;
+        const current = orchestration?.tasks[taskId];
+        if (current?.workspace) {
+          for (const candidate of Object.values(orchestration?.tasks ?? {})) {
+            if (candidate.workspace?.worktreePath !== current.workspace.worktreePath) continue;
+            candidate.workspace.lifecycle = "discarded";
+            candidate.workspace.updatedAt = Date.now();
+            delete candidate.workspace.error;
+          }
+        }
+      });
+      return finish(dynamicToolSuccess({ discarded: true }));
+    } catch (error) {
+      await store.update((state) => {
+        const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+        if (current?.workspace) {
+          current.workspace.lifecycle = "recoveryRequired";
+          current.workspace.error = safeError(error).message;
+          current.workspace.updatedAt = Date.now();
+        }
+      });
+      throw error;
+    }
+  }
 
   if (tool === "inspect_task") {
     let recentMessages: string[] = [];
@@ -2741,7 +3202,10 @@ async function handleManagedTeamToolCall(
     } catch {
       // The persisted coordinator state is still useful when detailed history is unavailable.
     }
-    return dynamicToolSuccess({ ...publicManagedTask(task), recentMessages });
+    return dynamicToolSuccess({
+      ...publicManagedTask(task, store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks),
+      recentMessages,
+    });
   }
 
   if (tool === "steer_task") {
@@ -2808,10 +3272,17 @@ async function handleManagedTeamToolCall(
       });
     }
     const reason = optionalToolString(args, "reason");
-    await finalizeManagedTask(store, task.childThreadId, `cancelled:${Date.now()}`, "interrupted", {
-      summary: reason ? `Task cancelled: ${reason}` : "Task cancelled by the parent agent.",
-      source: "status",
-    });
+    await finalizeManagedTask(
+      store,
+      task.childThreadId,
+      `cancelled:${Date.now()}`,
+      "interrupted",
+      {
+        summary: reason ? `Task cancelled: ${reason}` : "Task cancelled by the parent agent.",
+        source: "status",
+      },
+      task.id,
+    );
     return finish(dynamicToolSuccess({ accepted: true, status: "interrupted" }));
   }
 
@@ -2828,8 +3299,10 @@ async function createManagedTeamTask(
   taskId: string,
   childThreadSource: string,
   recoveredThread: Thread | null,
+  options?: ManagedTaskOptions,
 ): Promise<ManagedTeamTaskState> {
-  if (store.snapshot().threadMeta[parent.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION) {
+  const teamToolsVersion = store.snapshot().threadMeta[parent.id]?.teamToolsVersion;
+  if (teamToolsVersion !== TEAM_TOOLS_VERSION && teamToolsVersion !== TEAM_LEGACY_TOOLS_VERSION) {
     throw new ProjectConflictError("This Team session does not have managed tools");
   }
   const started = recoveredThread
@@ -2839,8 +3312,14 @@ async function createManagedTeamTask(
           cwd: parent.cwd,
           ...threadSettings(parent.settings),
           config: teamRuntimeConfig(),
-          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
-          dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
+          developerInstructions:
+            teamToolsVersion === TEAM_TOOLS_VERSION
+              ? TEAM_CHILD_INSTRUCTIONS
+              : TEAM_CHILD_INSTRUCTIONS_V1,
+          dynamicTools:
+            teamToolsVersion === TEAM_TOOLS_VERSION
+              ? TEAM_CHILD_DYNAMIC_TOOLS
+              : TEAM_CHILD_DYNAMIC_TOOLS_V1,
           threadSource: childThreadSource,
         }),
       );
@@ -2858,6 +3337,17 @@ async function createManagedTeamTask(
     title,
     prompt,
     status: "queued",
+    ...(options?.dependsOn.length ? { dependsOn: options.dependsOn } : {}),
+    ...(options
+      ? {
+          access: options.access,
+          resolvedModel: options.model,
+          resolvedReasoningEffort: options.reasoningEffort,
+          resolvedServiceTier: options.serviceTier,
+        }
+      : {}),
+    ...(options?.timeoutMinutes ? { timeoutMinutes: options.timeoutMinutes } : {}),
+    ...(options?.tokenBudget ? { tokenBudget: options.tokenBudget } : {}),
     createdAt: now,
     lastActivityAt: now,
   };
@@ -2880,6 +3370,158 @@ async function createManagedTeamTask(
   return task;
 }
 
+function managedTaskDependencyFailure(
+  task: ManagedTeamTaskState,
+  tasks: Record<string, ManagedTeamTaskState>,
+): string | null {
+  for (const dependencyId of task.dependsOn ?? []) {
+    const dependency = tasks[dependencyId];
+    if (!dependency) return `Dependency ${dependencyId} is unavailable.`;
+    if (!isTerminalTask(dependency)) continue;
+    if (
+      dependency.status !== "completed" ||
+      (dependency.result?.outcome !== undefined && dependency.result.outcome !== "success") ||
+      (dependency.workspace?.lifecycle === "discarded" &&
+        Boolean(dependency.workspace.changedPaths?.length))
+    ) {
+      return `Dependency ${dependency.title} [${dependency.id}] did not complete successfully.`;
+    }
+  }
+  return null;
+}
+
+function managedTaskDependenciesReady(
+  task: ManagedTeamTaskState,
+  tasks: Record<string, ManagedTeamTaskState>,
+): boolean {
+  return (task.dependsOn ?? []).every((dependencyId) => {
+    const dependency = tasks[dependencyId];
+    if (!dependency || !isTerminalTask(dependency) || dependency.delivery?.status !== "delivered") {
+      return false;
+    }
+    if (dependency.status !== "completed") return false;
+    if (dependency.result?.outcome !== undefined && dependency.result.outcome !== "success") {
+      return false;
+    }
+    return (
+      !dependency.workspace ||
+      dependency.workspace.lifecycle === "integrated" ||
+      (dependency.workspace.lifecycle === "discarded" && !dependency.workspace.changedPaths?.length)
+    );
+  });
+}
+
+async function prepareManagedTaskWorkspace(
+  store: StateStore,
+  parentThreadId: string,
+  task: ManagedTeamTaskState,
+  parentCwd: string,
+): Promise<ManagedTeamTaskState["workspace"] | null> {
+  if (task.access?.mode !== "isolatedWrite") return null;
+  if (task.workspace) {
+    const reused = { ...task.workspace, lifecycle: "ready" as const, updatedAt: Date.now() };
+    await store.update((state) => {
+      const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+      if (current?.status === "starting") current.workspace = reused;
+    });
+    return reused;
+  }
+  const metadata = await createTeamWorkspace(parentCwd, task.id);
+  const now = Date.now();
+  const workspace: NonNullable<ManagedTeamTaskState["workspace"]> = {
+    lifecycle: "ready",
+    ...metadata,
+    createdAt: now,
+    updatedAt: now,
+  };
+  try {
+    await store.update((state) => {
+      const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+      if (!current || current.status !== "starting") {
+        throw new ProjectConflictError("Managed task is no longer starting");
+      }
+      current.workspace = workspace;
+    });
+  } catch (error) {
+    await discardTeamWorkspace(metadata).catch(() => undefined);
+    throw error;
+  }
+  return workspace;
+}
+
+async function managedChildRuntime(
+  task: ManagedTeamTaskState,
+  parentCwd: string,
+  workspace: ManagedTeamTaskState["workspace"] | null,
+): Promise<ManagedChildRuntime> {
+  if (!task.access) return { cwd: parentCwd };
+  const networkAccess = task.access.network ?? false;
+  if (task.access.mode === "readOnly") {
+    return {
+      cwd: parentCwd,
+      runtimeWorkspaceRoots: [parentCwd],
+      sandboxPolicy: { type: "readOnly", networkAccess },
+    };
+  }
+  const root = task.access.mode === "isolatedWrite" ? workspace?.worktreePath : parentCwd;
+  if (!root) throw new ProjectConflictError("The isolated Team workspace is unavailable");
+  const cwd =
+    workspace && task.access.mode === "isolatedWrite"
+      ? isolatedTaskCwd(parentCwd, workspace)
+      : parentCwd;
+  const writableRoots = await Promise.all(
+    (task.access.writePaths ?? []).map((path) => safeManagedWritableRoot(root, path)),
+  );
+  return {
+    cwd,
+    runtimeWorkspaceRoots:
+      workspace && task.access.mode === "isolatedWrite"
+        ? [workspace.worktreePath, workspace.repositoryRoot]
+        : [parentCwd],
+    sandboxPolicy: {
+      type: "workspaceWrite",
+      writableRoots,
+      networkAccess,
+      excludeTmpdirEnvVar: true,
+      excludeSlashTmp: true,
+    },
+  };
+}
+
+async function safeManagedWritableRoot(root: string, path: string): Promise<string> {
+  const canonicalRoot = await realpath(root);
+  const candidate = resolve(canonicalRoot, path);
+  let existing = candidate;
+  while (true) {
+    try {
+      const canonicalExisting = await realpath(existing);
+      if (!pathContains(canonicalRoot, canonicalExisting)) {
+        throw new ProjectValidationError(`Writable path escapes the managed workspace: ${path}`);
+      }
+      return candidate;
+    } catch (error) {
+      if (error instanceof ProjectValidationError) throw error;
+      const parent = dirname(existing);
+      if (parent === existing) {
+        throw new ProjectValidationError(`Writable path is unavailable: ${path}`);
+      }
+      existing = parent;
+    }
+  }
+}
+
+function isolatedTaskCwd(
+  parentCwd: string,
+  workspace: NonNullable<ManagedTeamTaskState["workspace"]>,
+): string {
+  const child = relative(workspace.repositoryRoot, resolve(parentCwd));
+  if (!child) return workspace.worktreePath;
+  if (child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    return workspace.worktreePath;
+  }
+  return resolve(workspace.worktreePath, child);
+}
+
 async function startQueuedTeamTasks(
   bridge: CodexBridge,
   store: StateStore,
@@ -2892,10 +3534,35 @@ async function startQueuedTeamTasks(
     const active = Object.values(orchestration.tasks).filter(
       (task) => task.status === "starting" || task.status === "running",
     ).length;
-    if (active >= TEAM_MAX_ACTIVE_TASKS) return;
-    const queued = Object.values(orchestration.tasks)
+    const maxActiveTasks =
+      store.snapshot().threadMeta[parentThreadId]?.teamToolsVersion === TEAM_TOOLS_VERSION
+        ? TEAM_MAX_ACTIVE_TASKS
+        : TEAM_LEGACY_MAX_ACTIVE_TASKS;
+    if (active >= maxActiveTasks) return;
+    const queuedTasks = Object.values(orchestration.tasks)
       .filter((task) => task.status === "queued")
-      .sort((left, right) => left.createdAt - right.createdAt)[0];
+      .sort((left, right) => left.createdAt - right.createdAt);
+    const dependencyFailure = queuedTasks
+      .map((task) => ({ task, reason: managedTaskDependencyFailure(task, orchestration.tasks) }))
+      .find((candidate) => candidate.reason);
+    if (dependencyFailure) {
+      await finalizeManagedTask(
+        store,
+        dependencyFailure.task.childThreadId,
+        `dependency-failed:${Date.now()}`,
+        "failed",
+        {
+          outcome: "failed",
+          summary: dependencyFailure.reason!,
+          source: "status",
+        },
+        dependencyFailure.task.id,
+      );
+      continue;
+    }
+    const queued = queuedTasks.find((task) =>
+      managedTaskDependenciesReady(task, orchestration.tasks),
+    );
     if (!queued) return;
 
     await store.update((state) => {
@@ -2910,15 +3577,31 @@ async function startQueuedTeamTasks(
     try {
       const parent = projection.summary(parentThreadId);
       if (!parent) throw new Error("Managed task parent is unavailable");
+      const teamToolsVersion =
+        store.snapshot().threadMeta[parentThreadId]?.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION;
+      const workspace =
+        teamToolsVersion === TEAM_TOOLS_VERSION
+          ? await prepareManagedTaskWorkspace(store, parentThreadId, queued, parent.cwd)
+          : null;
+      const runtime = await managedChildRuntime(queued, parent.cwd, workspace);
       await bridge.request<ThreadResumeResponse>(
         "thread/resume",
         {
           threadId: queued.childThreadId,
-          cwd: parent.cwd,
+          cwd: runtime.cwd,
+          ...(runtime.runtimeWorkspaceRoots
+            ? { runtimeWorkspaceRoots: runtime.runtimeWorkspaceRoots }
+            : {}),
+          ...(teamToolsVersion === TEAM_TOOLS_VERSION ? { approvalPolicy: "never" as const } : {}),
           excludeTurns: true,
-          ...threadSettings(parent.settings),
+          ...(teamToolsVersion === TEAM_TOOLS_VERSION
+            ? managedChildResumeSettings(parent.settings, queued)
+            : threadSettings(parent.settings)),
           config: teamRuntimeConfig(),
-          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+          developerInstructions:
+            teamToolsVersion === TEAM_TOOLS_VERSION
+              ? TEAM_CHILD_INSTRUCTIONS
+              : TEAM_CHILD_INSTRUCTIONS_V1,
         },
         30_000,
       );
@@ -2927,7 +3610,12 @@ async function startQueuedTeamTasks(
           threadId: queued.childThreadId,
           clientUserMessageId: queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
           input: messageInput(queued.prompt, []),
-          ...managedChildTurnSettings(parent.settings, projection.availableModels),
+          ...managedChildTurnSettings(
+            parent.settings,
+            projection.availableModels,
+            teamToolsVersion === TEAM_TOOLS_VERSION ? queued : undefined,
+            runtime,
+          ),
         }),
       );
       await projection.markMaterialized(queued.childThreadId);
@@ -2977,6 +3665,7 @@ async function startQueuedTeamTasks(
             summary: `Managed task failed to start: ${safeError(error).message}`,
             source: "status",
           },
+          queued.id,
         );
       }
     }
@@ -2990,16 +3679,56 @@ async function handleManagedTeamNotification(
   store: StateStore,
   projection: AppProjection,
   activity: Map<string, number>,
+  tokenUsage: Map<string, { tokens: number; persistedAt: number }>,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
   const childThreadId = notificationThreadId(notification);
   if (!childThreadId) return affected;
-  const managed = managedTaskForChild(store.snapshot(), childThreadId);
-  if (!managed) return affected;
+  const managed = managedTaskForNotification(store.snapshot(), notification);
+  if (!managed || isTerminalTask(managed.task)) return affected;
   const now = activity.get(childThreadId) ?? Date.now();
   const expectedWakeAt = managedSleepExpectedWakeAt(notification);
   const sleepCompleted =
     notification.method === "item/completed" && notification.params.item.type === "sleep";
+  if (notification.method === "thread/tokenUsage/updated") {
+    const tokensUsed = Math.max(0, Math.floor(notification.params.tokenUsage.last.totalTokens));
+    const previousUsage = tokenUsage.get(childThreadId);
+    const shouldPersist =
+      !previousUsage || now - previousUsage.persistedAt >= TEAM_ACTIVITY_PERSIST_MS;
+    tokenUsage.set(childThreadId, {
+      tokens: tokensUsed,
+      persistedAt: shouldPersist ? now : previousUsage.persistedAt,
+    });
+    let exceeded = false;
+    if (
+      shouldPersist ||
+      (managed.task.tokenBudget !== undefined &&
+        tokensUsed >= managed.task.tokenBudget &&
+        !managed.task.budgetReason)
+    ) {
+      await store.update((state) => {
+        const task =
+          state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+        if (!task || isTerminalTask(task)) return;
+        task.tokensUsed = tokensUsed;
+        task.lastActivityAt = now;
+        if (
+          task.tokenBudget !== undefined &&
+          tokensUsed >= task.tokenBudget &&
+          !task.budgetReason
+        ) {
+          task.budgetReason = "tokenBudget";
+          exceeded = true;
+        }
+      });
+    }
+    if (exceeded && managed.task.childTurnId) {
+      await interruptTurnIfRunning(bridge, childThreadId, managed.task.childTurnId).catch(
+        () => undefined,
+      );
+      affected.add(managed.parentThreadId);
+    }
+  }
   if (
     expectedWakeAt !== null ||
     sleepCompleted ||
@@ -3020,6 +3749,15 @@ async function handleManagedTeamNotification(
   }
 
   if (notification.method === "turn/completed") {
+    const finalUsage = tokenUsage.get(childThreadId);
+    if (finalUsage) {
+      await store.update((state) => {
+        const task =
+          state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+        if (task && !isTerminalTask(task)) task.tokensUsed = finalUsage.tokens;
+      });
+      tokenUsage.delete(childThreadId);
+    }
     let turn = notification.params.turn;
     if (!managed.task.resultCandidate && turn.itemsView !== "full") {
       const page = parseTurnsList(
@@ -3040,7 +3778,16 @@ async function handleManagedTeamNotification(
       managed.task.resultCandidate !== undefined
         ? submittedManagedResult(managed.task)
         : managedResultFromTurn(turn, turnOutcome(turn));
-    if (await finalizeManagedTask(store, childThreadId, turn.id, turnOutcome(turn), result)) {
+    if (
+      await finalizeManagedTask(
+        store,
+        childThreadId,
+        turn.id,
+        turnOutcome(turn),
+        result,
+        managed.task.id,
+      )
+    ) {
       affected.add(managed.parentThreadId);
     }
     return affected;
@@ -3051,10 +3798,17 @@ async function handleManagedTeamNotification(
     notification.params.status.type === "systemError"
   ) {
     if (
-      await finalizeManagedTask(store, childThreadId, `system-error:${Date.now()}`, "failed", {
-        summary: "Managed task stopped because the Codex thread entered a system error state.",
-        source: "status",
-      })
+      await finalizeManagedTask(
+        store,
+        childThreadId,
+        `system-error:${Date.now()}`,
+        "failed",
+        {
+          summary: "Managed task stopped because the Codex thread entered a system error state.",
+          source: "status",
+        },
+        managed.task.id,
+      )
     ) {
       affected.add(managed.parentThreadId);
     }
@@ -3073,6 +3827,7 @@ async function handleManagedTeamNotification(
               : "Managed task thread was closed.",
           source: "status",
         },
+        managed.task.id,
       )
     ) {
       affected.add(managed.parentThreadId);
@@ -3087,9 +3842,46 @@ async function finalizeManagedTask(
   terminalTurnId: string,
   outcome: ThreadOutcome,
   result: ManagedTeamTaskResult,
+  expectedTaskId?: string,
 ): Promise<boolean> {
-  const managed = managedTaskForChild(store.snapshot(), childThreadId);
+  const managed = managedTaskForChild(store.snapshot(), childThreadId, expectedTaskId);
   if (!managed || isTerminalTask(managed.task)) return false;
+  let workspaceUpdate: ManagedTeamTaskState["workspace"] | undefined;
+  let changedPathCount = managed.task.workspace?.changedPaths?.length ?? 0;
+  if (
+    managed.task.workspace &&
+    !["integrated", "discarded"].includes(managed.task.workspace.lifecycle)
+  ) {
+    try {
+      const delta = await computeTeamWorkspaceDelta(managed.task.workspace);
+      changedPathCount = delta.changedPaths.length;
+      if (!delta.changedPaths.length) {
+        await discardTeamWorkspace(managed.task.workspace);
+        workspaceUpdate = {
+          ...managed.task.workspace,
+          lifecycle: "discarded",
+          changedPaths: [],
+          updatedAt: Date.now(),
+        };
+      } else {
+        workspaceUpdate = {
+          ...managed.task.workspace,
+          lifecycle: "ready",
+          changedPaths: delta.changedPaths,
+          conflictPaths: undefined,
+          error: undefined,
+          updatedAt: Date.now(),
+        };
+      }
+    } catch (error) {
+      workspaceUpdate = {
+        ...managed.task.workspace,
+        lifecycle: "recoveryRequired",
+        error: safeError(error).message,
+        updatedAt: Date.now(),
+      };
+    }
+  }
   let recorded = false;
   await store.update((state) => {
     const task =
@@ -3097,7 +3889,22 @@ async function finalizeManagedTask(
     if (!task || isTerminalTask(task)) return;
     task.status = outcome;
     task.terminalTurnId = terminalTurnId;
-    task.result = result;
+    if (workspaceUpdate) task.workspace = workspaceUpdate;
+    const normalizedResult =
+      state.threadMeta[managed.parentThreadId]?.teamToolsVersion === TEAM_TOOLS_VERSION &&
+      !result.outcome
+        ? {
+            ...result,
+            outcome: outcome === "completed" ? ("success" as const) : ("failed" as const),
+          }
+        : result;
+    task.result = task.budgetReason
+      ? {
+          ...normalizedResult,
+          outcome: changedPathCount > 0 ? "partial" : "failed",
+        }
+      : normalizedResult;
+    if (task.startedAt) task.timeUsedSeconds = Math.max(0, (Date.now() - task.startedAt) / 1_000);
     task.lastActivityAt = Date.now();
     delete task.watchdog;
     delete task.delivery;
@@ -3228,6 +4035,39 @@ function cleanupTeamOrchestration(state: CodexNestState, parentThreadId: string)
   const meta = state.threadMeta[parentThreadId];
   const orchestration = meta?.teamOrchestration;
   if (!orchestration) return;
+  if (meta?.teamToolsVersion === TEAM_TOOLS_VERSION) {
+    const terminal = Object.values(orchestration.tasks)
+      .filter(
+        (task) => isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog,
+      )
+      .sort((left, right) => right.createdAt - left.createdAt);
+    const retained = new Set(terminal.slice(0, TEAM_TASK_HISTORY_LIMIT).map((task) => task.id));
+    for (const task of terminal.slice(TEAM_TASK_HISTORY_LIMIT).reverse()) {
+      const requiredByActiveTask = Object.values(orchestration.tasks).some(
+        (candidate) =>
+          !isTerminalTask(candidate) &&
+          (candidate.predecessorTaskId === task.id || candidate.dependsOn?.includes(task.id)),
+      );
+      if (requiredByActiveTask) continue;
+      const successor = Object.values(orchestration.tasks).find(
+        (candidate) => candidate.predecessorTaskId === task.id,
+      );
+      const workspaceResolved =
+        !task.workspace ||
+        !managedTaskHasPendingWorkspace(task) ||
+        Boolean(successor?.workspace?.worktreePath === task.workspace.worktreePath);
+      if (!workspaceResolved || retained.has(task.id)) continue;
+      for (const candidate of Object.values(orchestration.tasks)) {
+        if (candidate.predecessorTaskId === task.id) delete candidate.predecessorTaskId;
+        if (candidate.dependsOn?.includes(task.id)) {
+          candidate.dependsOn = candidate.dependsOn.filter((dependency) => dependency !== task.id);
+          if (!candidate.dependsOn.length) delete candidate.dependsOn;
+        }
+      }
+      delete orchestration.tasks[task.id];
+    }
+    return;
+  }
   for (const [taskId, task] of Object.entries(orchestration.tasks)) {
     if (isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog) {
       delete orchestration.tasks[taskId];
@@ -3280,15 +4120,41 @@ function teamContinuationContext(
   const queued = Object.values(state.threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {})
     .filter((task) => task.status === "queued")
     .map((task) => `${task.title} [${task.id}]`);
-  const resultSections = claim.results.map((item) =>
-    [
+  const resultSections = claim.results.map((item) => {
+    const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[item.taskId];
+    return [
       `Task: ${item.title} [${item.taskId}]`,
       `Outcome: ${item.outcome}`,
       `Source: ${item.result.source}`,
+      ...(item.result.outcome ? [`Result outcome: ${item.result.outcome}`] : []),
       `Summary: ${item.result.summary}`,
       ...(item.result.details ? [`Details:\n${item.result.details}`] : []),
-    ].join("\n"),
-  );
+      ...(item.result.checks?.length
+        ? [
+            `Checks:\n${item.result.checks
+              .map(
+                (check) =>
+                  `- ${check.name}: ${check.outcome}${check.details ? ` — ${check.details}` : ""}`,
+              )
+              .join("\n")}`,
+          ]
+        : []),
+      ...(item.result.risks?.length ? [`Risks:\n- ${item.result.risks.join("\n- ")}`] : []),
+      ...(item.result.artifacts?.length
+        ? [
+            `Artifacts:\n${item.result.artifacts
+              .map((artifact) => `- ${artifact.label}: ${artifact.path ?? artifact.url}`)
+              .join("\n")}`,
+          ]
+        : []),
+      ...(task?.budgetReason ? [`Budget limit: ${task.budgetReason}`] : []),
+      ...(task?.workspace
+        ? [
+            `Workspace: ${task.workspace.lifecycle}${task.workspace.changedPaths?.length ? `; changed paths: ${task.workspace.changedPaths.join(", ")}` : ""}`,
+          ]
+        : []),
+    ].join("\n");
+  });
   const watchdogSections = claim.watchdogs.map(
     (item) =>
       `Silent task: ${item.title} [${item.taskId}], status=${item.status}, last activity=${new Date(item.lastActivityAt).toISOString()}. Inspect it, steer it, cancel it, or end the turn and let CodexNest continue automatically after its next event.`,
@@ -3307,14 +4173,142 @@ function teamContinuationContext(
   ].join(" ");
 }
 
+async function reconcileManagedTaskWorkspace(
+  store: StateStore,
+  parentThreadId: string,
+  task: ManagedTeamTaskState,
+): Promise<void> {
+  const workspace = task.workspace;
+  if (!workspace) return;
+  try {
+    if (workspace.lifecycle === "discarding") {
+      await discardTeamWorkspace(workspace);
+      await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+        lifecycle: "discarded",
+        error: undefined,
+      });
+      return;
+    }
+    if (workspace.lifecycle === "integrating") {
+      const activeSharedWriter = activeSharedWriteTask(store, parentThreadId, task.id);
+      if (activeSharedWriter) {
+        await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+          lifecycle: "recoveryRequired",
+          error: `Wait for shared-write task ${activeSharedWriter.title} [${activeSharedWriter.id}] before recovering integration`,
+        });
+        return;
+      }
+      const integration = await integrateTeamWorkspace(workspace, task.access?.writePaths ?? []);
+      await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+        lifecycle: "integrated",
+        changedPaths: integration.changedPaths,
+        conflictPaths: undefined,
+        error: undefined,
+      });
+      try {
+        await discardTeamWorkspace(workspace);
+      } catch (error) {
+        await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+          lifecycle: "integrated",
+          error: safeError(error).message,
+        });
+      }
+      return;
+    }
+    if (workspace.lifecycle === "integrated") {
+      if (workspace.error) {
+        try {
+          await discardTeamWorkspace(workspace);
+          await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+            lifecycle: "integrated",
+            error: undefined,
+          });
+        } catch (error) {
+          await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+            lifecycle: "integrated",
+            error: safeError(error).message,
+          });
+        }
+      }
+      return;
+    }
+    if (workspace.lifecycle === "discarded") return;
+    const delta = await computeTeamWorkspaceDelta(workspace);
+    if (!delta.changedPaths.length && isTerminalTask(task)) {
+      await discardTeamWorkspace(workspace);
+      await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+        lifecycle: "discarded",
+        changedPaths: [],
+        conflictPaths: undefined,
+        error: undefined,
+      });
+      return;
+    }
+    await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+      lifecycle: workspace.lifecycle === "conflicted" ? "conflicted" : "ready",
+      changedPaths: delta.changedPaths,
+      error: workspace.lifecycle === "conflicted" ? workspace.error : undefined,
+    });
+  } catch (error) {
+    if (error instanceof TeamWorkspaceConflictError) {
+      await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+        lifecycle: "conflicted",
+        conflictPaths: error.conflicts.map((conflict) => conflict.path),
+        error: error.message,
+      });
+      return;
+    }
+    await updateManagedWorkspaceFamily(store, parentThreadId, workspace.worktreePath, {
+      lifecycle: "recoveryRequired",
+      error: safeError(error).message,
+    });
+  }
+}
+
+function activeSharedWriteTask(
+  store: StateStore,
+  parentThreadId: string,
+  excludedTaskId: string,
+): ManagedTeamTaskState | undefined {
+  return Object.values(
+    store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {},
+  ).find(
+    (candidate) =>
+      candidate.id !== excludedTaskId &&
+      (candidate.status === "starting" || candidate.status === "running") &&
+      candidate.access?.mode === "sharedWrite",
+  );
+}
+
+async function updateManagedWorkspaceFamily(
+  store: StateStore,
+  parentThreadId: string,
+  worktreePath: string,
+  patch: Partial<NonNullable<ManagedTeamTaskState["workspace"]>>,
+): Promise<void> {
+  await store.update((state) => {
+    const tasks = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {};
+    for (const candidate of Object.values(tasks)) {
+      if (candidate.workspace?.worktreePath !== worktreePath) continue;
+      candidate.workspace = {
+        ...candidate.workspace,
+        ...patch,
+        updatedAt: Date.now(),
+      };
+    }
+  });
+}
+
 async function reconcileTeamOrchestration(
   bridge: CodexBridge,
   store: StateStore,
   projection: AppProjection,
+  onlyParentThreadId?: string,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
   const state = store.snapshot();
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+    if (onlyParentThreadId && parentThreadId !== onlyParentThreadId) continue;
     const orchestration = meta.teamOrchestration;
     if (!orchestration) continue;
     const parent = projection.summary(parentThreadId);
@@ -3323,6 +4317,14 @@ async function reconcileTeamOrchestration(
       { results: TeamResultClaim["results"]; markerId: string | null }
     >();
     for (const task of Object.values(orchestration.tasks)) {
+      if (task.workspace) {
+        await reconcileManagedTaskWorkspace(store, parentThreadId, task).catch((error) => {
+          projection.emit(
+            "projectionError",
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        });
+      }
       if (task.delivery?.status === "claimed") {
         const claim = claimedById.get(task.delivery.claimId) ?? {
           results: [],
@@ -3350,8 +4352,34 @@ async function reconcileTeamOrchestration(
         claimedById.set(task.watchdog.claimId, claim);
       }
       if (task.status !== "running" && task.status !== "starting") continue;
+      let expectedTurnId = task.childTurnId;
+      if (task.status === "starting" && !expectedTurnId) {
+        try {
+          expectedTurnId =
+            (await deliveredClientMessageTurnId(
+              bridge,
+              task.childThreadId,
+              task.startMessageId ?? teamTaskStartMarkerId(task.id),
+            )) ?? undefined;
+        } catch (error) {
+          projection.emit(
+            "projectionError",
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          continue;
+        }
+        if (!expectedTurnId) {
+          await store.update((draft) => {
+            const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
+            if (current?.status === "starting" && !current.childTurnId) {
+              current.status = "queued";
+            }
+          });
+          continue;
+        }
+      }
       const summary = projection.summary(task.childThreadId);
-      if (summary?.currentTurnId) {
+      if (summary?.currentTurnId && (!expectedTurnId || summary.currentTurnId === expectedTurnId)) {
         await store.update((draft) => {
           const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
           if (!current || isTerminalTask(current)) return;
@@ -3369,46 +4397,49 @@ async function reconcileTeamOrchestration(
             "thread/turns/list",
             {
               threadId: task.childThreadId,
-              limit: 1,
+              limit: expectedTurnId ? TEAM_TASK_HISTORY_LIMIT : 1,
               sortDirection: "desc",
               itemsView: "full",
             },
             30_000,
           ),
         );
-        const latest = page.data[0];
-        if (latest && latest.status !== "inProgress") {
+        const recoveredTurn = expectedTurnId
+          ? page.data.find((turn) => turn.id === expectedTurnId)
+          : page.data[0];
+        if (recoveredTurn && recoveredTurn.status !== "inProgress") {
           const result = task.resultCandidate
             ? submittedManagedResult(task)
-            : managedResultFromTurn(latest, turnOutcome(latest));
+            : managedResultFromTurn(recoveredTurn, turnOutcome(recoveredTurn));
           if (
             await finalizeManagedTask(
               store,
               task.childThreadId,
-              latest.id,
-              turnOutcome(latest),
+              recoveredTurn.id,
+              turnOutcome(recoveredTurn),
               result,
+              task.id,
             )
           ) {
             affected.add(parentThreadId);
           }
-        } else if (latest?.status === "inProgress") {
-          await projection.setCurrentTurn(task.childThreadId, latest.id);
+        } else if (recoveredTurn?.status === "inProgress") {
+          await projection.setCurrentTurn(task.childThreadId, recoveredTurn.id);
           await store.update((draft) => {
             const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
             if (!current || isTerminalTask(current)) return;
             current.status = "running";
-            current.childTurnId = latest.id;
+            current.childTurnId = recoveredTurn.id;
             current.startedAt ??= Date.now();
             current.lastActivityAt = Date.now();
             delete current.recoveryMisses;
           });
-        } else if (!latest && task.status === "starting") {
+        } else if (!recoveredTurn && task.status === "starting") {
           await store.update((draft) => {
             const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
             if (current?.status === "starting") current.status = "queued";
           });
-        } else if (!latest && task.status === "running") {
+        } else if (!recoveredTurn && task.status === "running") {
           const misses = task.recoveryMisses ?? 0;
           if (misses < 1) {
             await store.update((draft) => {
@@ -3426,6 +4457,7 @@ async function reconcileTeamOrchestration(
                   summary: "Managed task had no recoverable turn after CodexNest restarted.",
                   source: "status",
                 },
+                task.id,
               )
             ) {
               affected.add(parentThreadId);
@@ -3444,6 +4476,7 @@ async function reconcileTeamOrchestration(
               summary: "Managed task thread is no longer available in Codex.",
               source: "status",
             },
+            task.id,
           ))
         ) {
           affected.add(parentThreadId);
@@ -3470,6 +4503,7 @@ async function reconcileTeamOrchestration(
         if (deliveredTurnId) {
           await deliverTeamClaim(store, parentThreadId, claimId, deliveredTurnId);
           await recordTeamNotice(
+            store,
             projection,
             parentThreadId,
             deliveredTurnId,
@@ -3493,6 +4527,7 @@ async function reconcileTeamOrchestration(
 }
 
 async function recordTeamNotice(
+  store: StateStore,
   projection: AppProjection,
   parentThreadId: string,
   parentTurnId: string,
@@ -3505,11 +4540,32 @@ async function recordTeamNotice(
     parentTurnId,
     results.map((result) => {
       const child = projection.summary(result.childThreadId);
+      const task =
+        store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.tasks[result.taskId];
       return {
         threadId: result.childThreadId,
         title: result.title,
         nickname: child?.relation.kind === "subagent" ? child.relation.nickname : null,
         outcome: result.outcome,
+        taskId: result.taskId,
+        ...(result.result.outcome
+          ? {
+              result: {
+                outcome: result.result.outcome,
+                summary: result.result.summary,
+                ...(result.result.checks ? { checks: result.result.checks } : {}),
+              },
+            }
+          : {}),
+        ...(task?.budgetReason ? { budgetReason: task.budgetReason } : {}),
+        ...(task?.failureReason ? { failureReason: task.failureReason } : {}),
+        ...(task?.workspace?.changedPaths?.length
+          ? {
+              changedPaths: task.workspace.changedPaths.slice(0, TEAM_NOTICE_CHANGED_PATH_LIMIT),
+              changedPathCount: task.workspace.changedPaths.length,
+            }
+          : {}),
+        ...(task?.workspace ? { workspaceIntegrationStatus: task.workspace.lifecycle } : {}),
       };
     }),
     afterItemId,
@@ -3523,8 +4579,7 @@ function turnOutcome(turn: Turn): ThreadOutcome {
 }
 
 function isManagedTeamNotification(notification: ServerNotification, store: StateStore): boolean {
-  const threadId = notificationThreadId(notification);
-  return Boolean(threadId && managedTaskForChild(store.snapshot(), threadId));
+  return Boolean(managedTaskForNotification(store.snapshot(), notification));
 }
 
 export async function triggerTeamWatchdogs(
@@ -3565,6 +4620,59 @@ export async function triggerTeamWatchdogs(
   return affected;
 }
 
+export async function enforceTeamTimeBudgets(
+  bridge: CodexBridge,
+  store: StateStore,
+  now: number,
+): Promise<Set<string>> {
+  const due: Array<{
+    parentThreadId: string;
+    taskId: string;
+    childThreadId: string;
+    childTurnId: string;
+  }> = [];
+  for (const [parentThreadId, meta] of Object.entries(store.snapshot().threadMeta)) {
+    for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
+      if (
+        task.status !== "running" ||
+        !task.childTurnId ||
+        (!task.budgetReason &&
+          (!task.startedAt ||
+            task.timeoutMinutes === undefined ||
+            now - task.startedAt < task.timeoutMinutes * 60_000))
+      ) {
+        continue;
+      }
+      due.push({
+        parentThreadId,
+        taskId: task.id,
+        childThreadId: task.childThreadId,
+        childTurnId: task.childTurnId,
+      });
+    }
+  }
+  if (!due.length) return new Set();
+  const accepted = new Set<string>();
+  await store.update((state) => {
+    for (const item of due) {
+      const task = state.threadMeta[item.parentThreadId]?.teamOrchestration?.tasks[item.taskId];
+      if (!task || task.status !== "running") continue;
+      task.budgetReason ??= "timeout";
+      task.timeUsedSeconds = Math.max(0, (now - (task.startedAt ?? now)) / 1_000);
+      accepted.add(item.taskId);
+    }
+  });
+  const affected = new Set<string>();
+  for (const item of due) {
+    if (!accepted.has(item.taskId)) continue;
+    await interruptTurnIfRunning(bridge, item.childThreadId, item.childTurnId).catch(
+      () => undefined,
+    );
+    affected.add(item.parentThreadId);
+  }
+  return affected;
+}
+
 function managedSleepExpectedWakeAt(notification: ServerNotification): number | null {
   if (notification.method !== "item/started" || notification.params.item.type !== "sleep") {
     return null;
@@ -3581,7 +4689,15 @@ function teamWatchdogIsPaused(task: ManagedTeamTaskState, now: number): boolean 
 function managedTaskForChild(
   state: CodexNestState,
   childThreadId: string,
+  expectedTaskId?: string,
 ): { parentThreadId: string; task: ManagedTeamTaskState } | null {
+  if (expectedTaskId) {
+    for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+      const task = meta.teamOrchestration?.tasks[expectedTaskId];
+      if (task?.childThreadId === childThreadId) return { parentThreadId, task };
+    }
+    return null;
+  }
   const relation = state.threadMeta[childThreadId]?.managedParent;
   if (relation) {
     const task =
@@ -3599,6 +4715,23 @@ function managedTaskForChild(
   return null;
 }
 
+function managedTaskForNotification(
+  state: CodexNestState,
+  notification: ServerNotification,
+): { parentThreadId: string; task: ManagedTeamTaskState } | null {
+  const childThreadId = notificationThreadId(notification);
+  if (!childThreadId) return null;
+  const turnId = notificationTurnId(notification);
+  if (!turnId) return managedTaskForChild(state, childThreadId);
+  for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
+    const task = Object.values(meta.teamOrchestration?.tasks ?? {}).find(
+      (candidate) => candidate.childThreadId === childThreadId && candidate.childTurnId === turnId,
+    );
+    if (task) return { parentThreadId, task };
+  }
+  return null;
+}
+
 function notificationThreadId(notification: ServerNotification): string | null {
   if (notification.method === "thread/started") return notification.params.thread.id;
   const params = notification.params as unknown;
@@ -3606,14 +4739,31 @@ function notificationThreadId(notification: ServerNotification): string | null {
   return typeof params.threadId === "string" ? params.threadId : null;
 }
 
+function notificationTurnId(notification: ServerNotification): string | null {
+  if (notification.method === "turn/completed" || notification.method === "turn/started") {
+    return notification.params.turn.id;
+  }
+  const params = notification.params as unknown;
+  if (!isObjectRecord(params)) return null;
+  return typeof params.turnId === "string" ? params.turnId : null;
+}
+
 function submittedManagedResult(task: ManagedTeamTaskState): ManagedTeamTaskResult {
   const candidate = task.resultCandidate;
   if (!candidate) {
-    return { summary: "Managed task completed without a submitted result.", source: "status" };
+    return {
+      outcome: task.status === "completed" ? "success" : "failed",
+      summary: "Managed task completed without a submitted result.",
+      source: "status",
+    };
   }
   return {
     summary: candidate.summary,
     ...(candidate.details ? { details: candidate.details } : {}),
+    ...(candidate.outcome ? { outcome: candidate.outcome } : {}),
+    ...(candidate.checks ? { checks: candidate.checks } : {}),
+    ...(candidate.risks ? { risks: candidate.risks } : {}),
+    ...(candidate.artifacts ? { artifacts: candidate.artifacts } : {}),
     source: "submitted",
   };
 }
@@ -3629,12 +4779,14 @@ function managedResultFromTurn(turn: Turn, outcome: ThreadOutcome): ManagedTeamT
     const text = selected.text.trim();
     const summary = firstResultParagraph(text);
     return {
+      outcome: outcome === "completed" ? "success" : "failed",
       summary,
       ...(text !== summary ? { details: text } : {}),
       source: final ? "final_answer" : "agent_message",
     };
   }
   return {
+    outcome: outcome === "completed" ? "success" : "failed",
     summary:
       outcome === "completed"
         ? "Managed task completed without an agent message."
@@ -3660,15 +4812,64 @@ function isTerminalTask(
   return task.status === "completed" || task.status === "failed" || task.status === "interrupted";
 }
 
-function publicManagedTask(task: ManagedTeamTaskState): Record<string, unknown> {
+function publicManagedTask(
+  task: ManagedTeamTaskState,
+  tasks?: Record<string, ManagedTeamTaskState>,
+): Record<string, unknown> {
+  const dependencies = (task.dependsOn ?? []).map((dependency) => tasks?.[dependency]);
+  const queueReason =
+    task.status !== "queued" || !dependencies.length
+      ? null
+      : dependencies.some(
+            (dependency) =>
+              !dependency ||
+              !isTerminalTask(dependency) ||
+              dependency.delivery?.status !== "delivered",
+          )
+        ? "waitingForDependencies"
+        : dependencies.some(
+              (dependency) =>
+                dependency?.workspace &&
+                dependency.workspace.lifecycle !== "integrated" &&
+                !(
+                  dependency.workspace.lifecycle === "discarded" &&
+                  !dependency.workspace.changedPaths?.length
+                ),
+            )
+          ? "waitingForIntegration"
+          : null;
   return {
     taskId: task.id,
     threadId: task.childThreadId,
     title: task.title,
     status: task.status,
+    queueReason,
     createdAt: task.createdAt,
     startedAt: task.startedAt ?? null,
     lastActivityAt: task.lastActivityAt,
+    dependsOn: task.dependsOn ?? [],
+    predecessorTaskId: task.predecessorTaskId ?? null,
+    access: task.access ?? null,
+    model: task.resolvedModel ?? null,
+    reasoningEffort: task.resolvedReasoningEffort ?? null,
+    serviceTier: task.resolvedServiceTier ?? null,
+    timeoutMinutes: task.timeoutMinutes ?? null,
+    tokenBudget: task.tokenBudget ?? null,
+    tokensUsed: task.tokensUsed ?? 0,
+    timeUsedSeconds:
+      task.status === "running" && task.startedAt
+        ? Math.max(task.timeUsedSeconds ?? 0, (Date.now() - task.startedAt) / 1_000)
+        : (task.timeUsedSeconds ?? 0),
+    budgetReason: task.budgetReason ?? null,
+    failureReason: task.failureReason ?? null,
+    workspace: task.workspace
+      ? {
+          lifecycle: task.workspace.lifecycle,
+          changedPaths: task.workspace.changedPaths ?? [],
+          conflictPaths: task.workspace.conflictPaths ?? [],
+          error: task.workspace.error ?? null,
+        }
+      : null,
     result: task.result ?? null,
   };
 }
@@ -3681,7 +4882,15 @@ function dynamicToolArguments(value: unknown): Record<string, unknown> {
 type MutatingTeamTool = TeamToolOperationState["tool"];
 
 function isMutatingTeamTool(value: string): value is MutatingTeamTool {
-  return ["spawn_task", "steer_task", "cancel_task", "submit_result"].includes(value);
+  return [
+    "spawn_task",
+    "followup_task",
+    "steer_task",
+    "cancel_task",
+    "submit_result",
+    "integrate_task",
+    "discard_task_changes",
+  ].includes(value);
 }
 
 function teamToolOperationKey(
@@ -3724,10 +4933,12 @@ async function prepareTeamToolOperation(
       status: "prepared",
       createdAt: now,
       updatedAt: now,
-      ...(request.params.tool === "spawn_task"
+      ...(request.params.tool === "spawn_task" || request.params.tool === "followup_task"
         ? {
             taskId: randomUUID(),
-            childThreadSource: `codexnest-managed:${key.slice(0, 32)}`,
+            ...(request.params.tool === "spawn_task"
+              ? { childThreadSource: `codexnest-managed:${key.slice(0, 32)}` }
+              : {}),
           }
         : {}),
     };
@@ -3871,7 +5082,9 @@ function teamContinuationMarkerId(claimId: string): string {
 }
 
 function isTeamContinuationMarkerId(value: string): boolean {
-  return value.startsWith("codexnest-team-claim:");
+  return (
+    value.startsWith("codexnest-team-claim:") || value.startsWith("codexnest-team-continuation:")
+  );
 }
 
 function sha256(value: string): string {
@@ -3902,6 +5115,248 @@ function optionalToolString(args: Record<string, unknown>, key: string): string 
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new ProjectValidationError(`${key} must be a string`);
   return value.trim() || undefined;
+}
+
+function optionalToolStringArray(
+  args: Record<string, unknown>,
+  key: string,
+  maximum = 100,
+): string[] | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new ProjectValidationError(`${key} must be an array with at most ${maximum} items`);
+  }
+  const result = value.map((item) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new ProjectValidationError(`${key} must contain non-empty strings`);
+    }
+    return item.trim();
+  });
+  if (new Set(result).size !== result.length) {
+    throw new ProjectValidationError(`${key} must not contain duplicates`);
+  }
+  return result;
+}
+
+function optionalToolInteger(
+  args: Record<string, unknown>,
+  key: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    throw new ProjectValidationError(`${key} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return Number(value);
+}
+
+function managedTaskAccess(
+  args: Record<string, unknown>,
+  inherited?: ManagedTeamTaskAccessState,
+): ManagedTeamTaskAccessState {
+  const raw = args.access;
+  if (raw === undefined) return structuredClone(inherited ?? { mode: "readOnly", network: false });
+  if (!isObjectRecord(raw)) throw new ProjectValidationError("access must be an object");
+  const mode = raw.mode === undefined ? "readOnly" : raw.mode;
+  if (!(["readOnly", "isolatedWrite", "sharedWrite"] as const).includes(mode as never)) {
+    throw new ProjectValidationError("access.mode is invalid");
+  }
+  const writePaths = optionalToolStringArray(raw, "writePaths") ?? [];
+  for (const path of writePaths) {
+    if (!isManagedRelativePath(path)) {
+      throw new ProjectValidationError(`Unsafe repository-relative write path: ${path}`);
+    }
+  }
+  if (mode === "readOnly" && writePaths.length) {
+    throw new ProjectValidationError("readOnly tasks cannot declare writePaths");
+  }
+  if (mode !== "readOnly" && !writePaths.length) {
+    throw new ProjectValidationError("Write modes require at least one writePaths entry");
+  }
+  if (raw.network !== undefined && typeof raw.network !== "boolean") {
+    throw new ProjectValidationError("access.network must be a boolean");
+  }
+  return {
+    mode: mode as ManagedTeamTaskAccessState["mode"],
+    ...(writePaths.length ? { writePaths } : {}),
+    network: raw.network ?? false,
+  };
+}
+
+function managedTaskOptions(
+  args: Record<string, unknown>,
+  settings: SessionSettings,
+  models: ModelOption[],
+  inherited?: ManagedTeamTaskState,
+): ManagedTaskOptions {
+  const requestedModel = optionalToolString(args, "model");
+  const modelId =
+    requestedModel ?? inherited?.resolvedModel ?? effectiveModel(settings, models)?.id;
+  const model = models.find((candidate) => candidate.id === modelId);
+  if (!model) throw new ProjectValidationError("The requested managed-task model is unavailable");
+  const requestedEffort = optionalToolString(args, "reasoningEffort");
+  const reasoningEffort =
+    requestedEffort ??
+    inherited?.resolvedReasoningEffort ??
+    settings.reasoningEffort ??
+    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
+    null;
+  if (
+    reasoningEffort !== null &&
+    !model.reasoningEfforts.some((option) => option.value === reasoningEffort)
+  ) {
+    throw new ProjectValidationError("The requested reasoning effort is unavailable");
+  }
+  const requestedTier = optionalToolString(args, "serviceTier");
+  const serviceTier =
+    requestedTier ?? inherited?.resolvedServiceTier ?? settings.serviceTier ?? null;
+  if (serviceTier && !model.serviceTiers.some((tier) => tier.id === serviceTier)) {
+    throw new ProjectValidationError("The requested service tier is unavailable");
+  }
+  return {
+    dependsOn: optionalToolStringArray(args, "dependsOn", 50) ?? [],
+    access: managedTaskAccess(args, inherited?.access),
+    model: model.id,
+    reasoningEffort,
+    serviceTier,
+    timeoutMinutes:
+      optionalToolInteger(args, "timeoutMinutes", 1, 1_440) ?? inherited?.timeoutMinutes,
+    tokenBudget: optionalToolInteger(args, "tokenBudget", 1, 10_000_000) ?? inherited?.tokenBudget,
+  };
+}
+
+function isManagedRelativePath(value: string): boolean {
+  return (
+    value.length <= 4_096 &&
+    !value.includes("\0") &&
+    !value.includes("\\") &&
+    !isAbsolute(value) &&
+    value
+      .split("/")
+      .every(
+        (segment) =>
+          Boolean(segment) &&
+          segment !== "." &&
+          segment !== ".." &&
+          segment.toLowerCase() !== ".git",
+      )
+  );
+}
+
+function managedResultFields(args: Record<string, unknown>): {
+  outcome?: "success" | "partial" | "blocked" | "failed";
+  checks?: ManagedTeamTaskResultCheck[];
+  risks?: string[];
+  artifacts?: ManagedTeamTaskResultArtifact[];
+} {
+  const outcomeValue = args.outcome;
+  let outcome: "success" | "partial" | "blocked" | "failed" | undefined;
+  if (outcomeValue !== undefined) {
+    if (!(["success", "partial", "blocked", "failed"] as const).includes(outcomeValue as never)) {
+      throw new ProjectValidationError("outcome is invalid");
+    }
+    outcome = outcomeValue as typeof outcome;
+  }
+  const risks = optionalToolStringArray(args, "risks");
+  const checksValue = args.checks;
+  const checks =
+    checksValue === undefined
+      ? undefined
+      : parseManagedResultObjects<ManagedTeamTaskResultCheck>(checksValue, "checks", (entry) => {
+          const name = requiredToolString(entry, "name");
+          const checkOutcome = entry.outcome;
+          if (!(["passed", "failed", "notRun"] as const).includes(checkOutcome as never)) {
+            throw new ProjectValidationError("checks[].outcome is invalid");
+          }
+          return {
+            name,
+            outcome: checkOutcome as ManagedTeamTaskResultCheck["outcome"],
+            ...(optionalToolString(entry, "details")
+              ? { details: optionalToolString(entry, "details") }
+              : {}),
+          };
+        });
+  const artifactsValue = args.artifacts;
+  const artifacts =
+    artifactsValue === undefined
+      ? undefined
+      : parseManagedResultObjects<ManagedTeamTaskResultArtifact>(
+          artifactsValue,
+          "artifacts",
+          (entry) => {
+            const label = requiredToolString(entry, "label");
+            const path = optionalToolString(entry, "path");
+            const url = optionalToolString(entry, "url");
+            if (path && !isManagedRelativePath(path)) {
+              throw new ProjectValidationError("artifacts[].path must be repository-relative");
+            }
+            if (!path && !url) {
+              throw new ProjectValidationError("Each artifact requires path or url");
+            }
+            if (url) {
+              let parsed: URL;
+              try {
+                parsed = new URL(url);
+              } catch {
+                throw new ProjectValidationError("artifacts[].url is invalid");
+              }
+              if (
+                !["http:", "https:"].includes(parsed.protocol) ||
+                parsed.username ||
+                parsed.password
+              ) {
+                throw new ProjectValidationError(
+                  "artifacts[].url must be an HTTP(S) URL without credentials",
+                );
+              }
+            }
+            return { label, ...(path ? { path } : {}), ...(url ? { url } : {}) };
+          },
+        );
+  return {
+    ...(outcome ? { outcome } : {}),
+    ...(checks ? { checks } : {}),
+    ...(risks ? { risks } : {}),
+    ...(artifacts ? { artifacts } : {}),
+  };
+}
+
+function parseManagedResultObjects<T>(
+  value: unknown,
+  key: string,
+  parse: (entry: Record<string, unknown>) => T,
+): T[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new ProjectValidationError(`${key} must be an array with at most 100 items`);
+  }
+  return value.map((entry) => {
+    if (!isObjectRecord(entry)) throw new ProjectValidationError(`${key} entries must be objects`);
+    return parse(entry);
+  });
+}
+
+async function validateManagedResultArtifacts(
+  artifacts: ManagedTeamTaskResultArtifact[] | undefined,
+  root: string | undefined,
+): Promise<void> {
+  const paths = artifacts?.flatMap((artifact) => (artifact.path ? [artifact.path] : [])) ?? [];
+  if (!paths.length) return;
+  if (!root) throw new ProjectValidationError("The managed task workspace is unavailable");
+  const canonicalRoot = await realpath(root);
+  for (const path of paths) {
+    let canonicalArtifact: string;
+    try {
+      canonicalArtifact = await realpath(resolve(canonicalRoot, path));
+    } catch {
+      throw new ProjectValidationError(`Managed task artifact does not exist: ${path}`);
+    }
+    if (!pathContains(canonicalRoot, canonicalArtifact)) {
+      throw new ProjectValidationError(`Managed task artifact escapes its workspace: ${path}`);
+    }
+  }
 }
 
 function dynamicToolSuccess(value: unknown): DynamicToolCallResponse {
@@ -3939,18 +5394,31 @@ function teamRuntimeConfig(): Record<string, unknown> {
 function managedChildTurnSettings(
   settings: SessionSettings,
   models: ModelOption[],
+  task?: ManagedTeamTaskState,
+  runtime?: ManagedChildRuntime,
 ): Record<string, unknown> {
-  const model = effectiveModel(settings, models);
+  const model = task?.resolvedModel
+    ? models.find((candidate) => candidate.id === task.resolvedModel)
+    : effectiveModel(settings, models);
   if (!model) throw new ProjectValidationError("No model is available for managed task");
   const effort =
+    task?.resolvedReasoningEffort ??
     settings.reasoningEffort ??
     model.reasoningEfforts.find((option) => option.isDefault)?.value ??
     null;
   return compact({
     model: model.id,
-    serviceTier: settings.serviceTier,
+    serviceTier: task?.resolvedServiceTier ?? settings.serviceTier,
     effort,
     personality: settings.personality,
+    ...(task && runtime
+      ? {
+          cwd: runtime.cwd,
+          runtimeWorkspaceRoots: runtime.runtimeWorkspaceRoots,
+          approvalPolicy: "never",
+          sandboxPolicy: runtime.sandboxPolicy,
+        }
+      : {}),
     collaborationMode: {
       mode: "default",
       settings: {
@@ -3959,6 +5427,17 @@ function managedChildTurnSettings(
         developer_instructions: null,
       },
     },
+  });
+}
+
+function managedChildResumeSettings(
+  settings: SessionSettings,
+  task: ManagedTeamTaskState,
+): Record<string, unknown> {
+  return compact({
+    model: task.resolvedModel ?? settings.model,
+    serviceTier: task.resolvedServiceTier ?? settings.serviceTier,
+    personality: settings.personality,
   });
 }
 
@@ -3975,8 +5454,21 @@ function teamOrchestrationHasWork(store: StateStore, parentThreadId: string): bo
   return Boolean(
     orchestration &&
     Object.values(orchestration.tasks).some(
-      (task) => !isTerminalTask(task) || task.delivery?.status !== "delivered" || task.watchdog,
+      (task) =>
+        !isTerminalTask(task) ||
+        task.delivery?.status !== "delivered" ||
+        task.watchdog ||
+        managedTaskHasPendingWorkspace(task),
     ),
+  );
+}
+
+function managedTaskHasPendingWorkspace(task: ManagedTeamTaskState): boolean {
+  const workspace = task.workspace;
+  return Boolean(
+    workspace &&
+    (!["integrated", "discarded"].includes(workspace.lifecycle) ||
+      (workspace.lifecycle === "integrated" && workspace.error)),
   );
 }
 

@@ -260,6 +260,42 @@ export type TurnProgress = {
   deletions: number;
 };
 
+export type OrchestrationResultCheck = {
+  name: string;
+  outcome: "passed" | "failed" | "notRun";
+  details?: string;
+};
+
+export type OrchestrationResult = {
+  outcome: "success" | "partial" | "blocked" | "failed";
+  summary: string;
+  checks?: OrchestrationResultCheck[];
+};
+
+export type OrchestrationWorkspaceIntegrationStatus =
+  | "creating"
+  | "ready"
+  | "integrating"
+  | "integrated"
+  | "discarding"
+  | "discarded"
+  | "conflicted"
+  | "recoveryRequired";
+
+export type OrchestrationNoticeAgent = {
+  threadId: string;
+  title: string;
+  nickname: string | null;
+  outcome: ThreadOutcome;
+  taskId?: string;
+  result?: OrchestrationResult;
+  budgetReason?: "timeout" | "tokenBudget";
+  failureReason?: string;
+  changedPaths?: string[];
+  changedPathCount?: number;
+  workspaceIntegrationStatus?: OrchestrationWorkspaceIntegrationStatus;
+};
+
 export type ActivityItem =
   | {
       type: "userMessage" | "agentMessage" | "reasoning" | "plan";
@@ -319,12 +355,7 @@ export type ActivityItem =
       type: "orchestrationNotice";
       id: string;
       status: "completed";
-      agents: Array<{
-        threadId: string;
-        title: string;
-        nickname: string | null;
-        outcome: ThreadOutcome;
-      }>;
+      agents: OrchestrationNoticeAgent[];
       timestamp: number;
       afterItemId: string | null;
     }

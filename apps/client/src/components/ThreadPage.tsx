@@ -95,6 +95,8 @@ type ComposerDraftState = {
   value: UpdateThreadDraftRequest;
 };
 
+const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
+
 type NewSessionPreparation = {
   active: boolean;
   projectId: string;
@@ -3302,14 +3304,109 @@ export function Activity({
             : t("Получены результаты субагентов")}
         </div>
         <ul>
-          {item.agents.map((agent) => (
-            <li key={agent.threadId}>
-              <Link to={`/threads/${encodeURIComponent(agent.threadId)}`}>
-                {agent.nickname ? `${agent.nickname} · ${agent.title}` : agent.title}
-              </Link>
-              <span>{orchestrationOutcomeLabel(agent.outcome, t)}</span>
-            </li>
-          ))}
+          {item.agents.map((agent) => {
+            const resultStatus = agent.result?.outcome
+              ? orchestrationResultOutcomeLabel(agent.result.outcome, t)
+              : orchestrationOutcomeLabel(agent.outcome, t);
+            const visibleChangedPaths = agent.changedPaths?.slice(
+              0,
+              ORCHESTRATION_CHANGED_PATH_LIMIT,
+            );
+            const changedPathCount = Math.max(
+              visibleChangedPaths?.length ?? 0,
+              agent.changedPathCount ?? agent.changedPaths?.length ?? 0,
+            );
+            return (
+              <li className="orchestration-result" key={agent.taskId ?? agent.threadId}>
+                <div className="orchestration-result-heading">
+                  <Link to={`/threads/${encodeURIComponent(agent.threadId)}`}>
+                    {agent.nickname ? `${agent.nickname} · ${agent.title}` : agent.title}
+                  </Link>
+                  <span
+                    aria-label={t("Статус результата: {{status}}", { status: resultStatus })}
+                    className="orchestration-result-status"
+                  >
+                    {resultStatus}
+                  </span>
+                </div>
+                {(agent.result ||
+                  agent.budgetReason ||
+                  agent.failureReason ||
+                  agent.changedPaths?.length ||
+                  agent.workspaceIntegrationStatus) && (
+                  <div className="orchestration-result-details">
+                    {agent.result?.summary && <p>{agent.result.summary}</p>}
+                    {agent.result?.checks?.length ? (
+                      <ul
+                        aria-label={t("Проверки результата")}
+                        className="orchestration-result-checks"
+                      >
+                        {agent.result.checks.map((check, index) => (
+                          <li key={`${index}:${check.name}`}>
+                            <span>{check.name}</span>
+                            <span className="orchestration-result-check-status">
+                              {orchestrationCheckStatusLabel(check.outcome, t)}
+                            </span>
+                            {check.details && <small>{check.details}</small>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {agent.budgetReason && (
+                      <div className="orchestration-result-meta">
+                        <strong>{t("Лимит")}</strong>
+                        <span>
+                          {agent.budgetReason === "timeout"
+                            ? t("Истекло время")
+                            : t("Исчерпан бюджет токенов")}
+                        </span>
+                      </div>
+                    )}
+                    {agent.failureReason && (
+                      <div className="orchestration-result-meta">
+                        <strong>{t("Причина")}</strong>
+                        <span>{agent.failureReason}</span>
+                      </div>
+                    )}
+                    {visibleChangedPaths?.length ? (
+                      <div className="orchestration-result-meta">
+                        <strong>{t("Изменения")}</strong>
+                        <ul
+                          aria-label={t("Изменённые файлы")}
+                          className="orchestration-result-paths"
+                        >
+                          {visibleChangedPaths.map((path) => (
+                            <li key={path}>
+                              <code>{path}</code>
+                            </li>
+                          ))}
+                        </ul>
+                        {changedPathCount > visibleChangedPaths.length && (
+                          <small>
+                            {t("Показано {{shown}} из {{total}}", {
+                              shown: visibleChangedPaths.length,
+                              total: changedPathCount,
+                            })}
+                          </small>
+                        )}
+                      </div>
+                    ) : null}
+                    {agent.workspaceIntegrationStatus && (
+                      <div className="orchestration-result-meta">
+                        <strong>{t("Рабочая папка")}</strong>
+                        <span>
+                          {orchestrationWorkspaceIntegrationLabel(
+                            agent.workspaceIntegrationStatus,
+                            t,
+                          )}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       </article>
     );
@@ -4239,6 +4336,55 @@ function orchestrationOutcomeLabel(
   if (outcome === "failed") return t("Ошибка");
   if (outcome === "interrupted") return t("Прервана");
   return t("Завершена");
+}
+
+function orchestrationResultOutcomeLabel(outcome: string, t: Translate): string {
+  switch (outcome) {
+    case "success":
+      return t("Успешно");
+    case "partial":
+      return t("Частично");
+    case "failed":
+      return t("Ошибка");
+    case "blocked":
+      return t("Заблокировано");
+    default:
+      return outcome;
+  }
+}
+
+function orchestrationCheckStatusLabel(status: string, t: Translate): string {
+  switch (status) {
+    case "passed":
+      return t("Пройдена");
+    case "failed":
+      return t("Ошибка");
+    case "notRun":
+      return t("Не запускалась");
+    default:
+      return status;
+  }
+}
+
+function orchestrationWorkspaceIntegrationLabel(status: string, t: Translate): string {
+  switch (status) {
+    case "integrated":
+      return t("Изменения интегрированы");
+    case "ready":
+      return t("Изолированная рабочая папка готова");
+    case "creating":
+    case "integrating":
+      return t("Интегрируем изменения");
+    case "conflicted":
+      return t("Конфликт интеграции");
+    case "discarding":
+    case "discarded":
+      return t("Интеграция не требуется");
+    case "recoveryRequired":
+      return t("Интеграция требует восстановления");
+    default:
+      return status;
+  }
 }
 
 function findLatestCompletedPlan(detail?: ThreadDetail): string | null {

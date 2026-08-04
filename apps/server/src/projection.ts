@@ -2101,7 +2101,8 @@ function isInternalTeamContinuationItem(item: Turn["items"][number]): boolean {
   return (
     item.type === "userMessage" &&
     typeof item.clientId === "string" &&
-    item.clientId.startsWith("codexnest-team-claim:")
+    (item.clientId.startsWith("codexnest-team-claim:") ||
+      item.clientId.startsWith("codexnest-team-continuation:"))
   );
 }
 

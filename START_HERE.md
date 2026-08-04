@@ -219,12 +219,31 @@ References:
 - <https://developer.android.com/privacy-and-security/security-config>
 - <https://capacitorjs.com/docs>
 
+## Team mode
+
+CodexNest Team mode is an application-owned managed orchestration layer. The
+root session keeps responsibility for the final result and may run up to three
+Team v2 child tasks alongside itself. Child sessions cannot delegate further.
+
+Team v2 tasks are read-only and offline by default. A root may explicitly grant
+network access or repository-relative write paths. Writable tasks normally run
+in detached Git worktrees that reproduce the current tracked and non-ignored
+working-tree contents without commits, stash, or index changes. Child changes
+remain isolated until the root calls the managed integration tool; conflicts
+leave the parent checkout untouched. Commit, push, and deployment remain root
+operations.
+
+Tasks may declare dependencies, model/reasoning settings, and hard time or token
+budgets. Results are structured and retained as bounded history, and a delivered
+task can be continued in the same child thread. Existing Team v1 sessions keep
+their original tools and four-child scheduling limit; v2 is attached only to new
+sessions.
+
 ## Explicit non-goals for the first release
 
 - Public hosted relay or cloud account service
 - Multi-user organizations and permissions
 - Full terminal emulator or source-code editor
-- Git worktree orchestration
 - Voice transcription beyond the Android keyboard
 - iOS packaging
 - Reimplementation of Codex authentication

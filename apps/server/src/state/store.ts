@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, normalize, relative } from "node:path";
 
 import type {
   ActivityItem,
@@ -23,10 +23,83 @@ export type TimelineArtifact = Extract<
 
 export type ManagedTeamTaskStatus = "queued" | "starting" | "running" | ThreadOutcome;
 
-export interface ManagedTeamTaskResult {
+export type ManagedTeamTaskAccessMode = "readOnly" | "isolatedWrite" | "sharedWrite";
+
+export interface ManagedTeamTaskAccessState {
+  mode: ManagedTeamTaskAccessMode;
+  writePaths?: string[];
+  network?: boolean;
+}
+
+export type ManagedTeamTaskResultOutcome = "success" | "partial" | "blocked" | "failed";
+
+export interface ManagedTeamTaskResultCheck {
+  name: string;
+  outcome: "passed" | "failed" | "notRun";
+  details?: string;
+}
+
+export interface ManagedTeamTaskResultArtifact {
+  label: string;
+  path?: string;
+  url?: string;
+}
+
+export type ManagedTeamTaskBudgetReason = "timeout" | "tokenBudget";
+
+export type ManagedTeamTaskWorkspaceLifecycle =
+  | "creating"
+  | "ready"
+  | "integrating"
+  | "integrated"
+  | "discarding"
+  | "discarded"
+  | "conflicted"
+  | "recoveryRequired";
+
+export type ManagedTeamTaskWorkspaceFileState =
+  | {
+      type: "file";
+      mode: number;
+      digest: string;
+    }
+  | {
+      type: "symlink";
+      target: string;
+    };
+
+export interface ManagedTeamTaskWorkspaceState {
+  lifecycle: ManagedTeamTaskWorkspaceLifecycle;
+  repositoryRoot: string;
+  gitCommonDir: string;
+  worktreePath: string;
+  head: string;
+  baseline: Record<string, ManagedTeamTaskWorkspaceFileState>;
+  createdAt: number;
+  updatedAt: number;
+  changedPaths?: string[];
+  conflictPaths?: string[];
+  error?: string;
+}
+
+export interface ManagedTeamTaskResultFields {
+  outcome?: ManagedTeamTaskResultOutcome;
+  checks?: ManagedTeamTaskResultCheck[];
+  risks?: string[];
+  artifacts?: ManagedTeamTaskResultArtifact[];
+}
+
+export interface ManagedTeamTaskResult extends ManagedTeamTaskResultFields {
   summary: string;
   details?: string;
   source: "submitted" | "final_answer" | "agent_message" | "status";
+}
+
+export interface ManagedTeamTaskResultCandidate extends ManagedTeamTaskResultFields {
+  summary: string;
+  details?: string;
+  submittedAt: number;
+  callId: string;
 }
 
 export interface ManagedTeamTaskState {
@@ -38,6 +111,19 @@ export interface ManagedTeamTaskState {
   title: string;
   prompt: string;
   status: ManagedTeamTaskStatus;
+  dependsOn?: string[];
+  predecessorTaskId?: string;
+  access?: ManagedTeamTaskAccessState;
+  resolvedModel?: string;
+  resolvedReasoningEffort?: string | null;
+  resolvedServiceTier?: string | null;
+  timeoutMinutes?: number;
+  tokenBudget?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  failureReason?: string;
+  budgetReason?: ManagedTeamTaskBudgetReason;
+  workspace?: ManagedTeamTaskWorkspaceState;
   createdAt: number;
   startedAt?: number;
   lastActivityAt: number;
@@ -53,12 +139,7 @@ export interface ManagedTeamTaskState {
     contextHash?: string;
   };
   terminalTurnId?: string;
-  resultCandidate?: {
-    summary: string;
-    details?: string;
-    submittedAt: number;
-    callId: string;
-  };
+  resultCandidate?: ManagedTeamTaskResultCandidate;
   result?: ManagedTeamTaskResult;
   delivery?: {
     status: "claimed" | "delivered";
@@ -78,7 +159,14 @@ export interface TeamToolOperationState {
   threadId: string;
   turnId: string;
   callId: string;
-  tool: "spawn_task" | "steer_task" | "cancel_task" | "submit_result";
+  tool:
+    | "spawn_task"
+    | "followup_task"
+    | "steer_task"
+    | "cancel_task"
+    | "submit_result"
+    | "integrate_task"
+    | "discard_task_changes";
   argumentsHash: string;
   status: "prepared" | "applied";
   createdAt: number;
@@ -104,7 +192,7 @@ export interface ThreadMetaState {
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
   teamOrchestration?: TeamOrchestrationState;
-  teamToolsVersion?: 1;
+  teamToolsVersion?: 1 | 2;
   managedParent?: {
     parentThreadId: string;
     taskId: string;
@@ -367,7 +455,9 @@ function validateState(value: unknown): CodexNestState {
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
       (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
-      (meta.teamToolsVersion !== undefined && meta.teamToolsVersion !== 1) ||
+      (meta.teamToolsVersion !== undefined &&
+        meta.teamToolsVersion !== 1 &&
+        meta.teamToolsVersion !== 2) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft))
@@ -536,53 +626,300 @@ function isTimelineArtifact(value: unknown): value is TimelineArtifact {
 
 function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationState {
   if (!isRecord(value) || !isRecord(value.tasks)) return false;
-  return Object.entries(value.tasks).every(([taskId, task]) => {
-    if (
-      !isRecord(task) ||
-      task.id !== taskId ||
-      typeof task.childThreadId !== "string" ||
-      typeof task.title !== "string" ||
-      !task.title.trim() ||
-      typeof task.prompt !== "string" ||
-      !task.prompt.trim() ||
-      !["queued", "starting", "running", "completed", "failed", "interrupted"].includes(
-        String(task.status),
-      ) ||
-      typeof task.createdAt !== "number" ||
-      typeof task.lastActivityAt !== "number" ||
-      (task.startedAt !== undefined && typeof task.startedAt !== "number") ||
-      (task.expectedWakeAt !== undefined &&
-        (typeof task.expectedWakeAt !== "number" || !Number.isFinite(task.expectedWakeAt))) ||
-      (task.recoveryMisses !== undefined &&
-        (typeof task.recoveryMisses !== "number" ||
-          !Number.isInteger(task.recoveryMisses) ||
-          task.recoveryMisses < 0)) ||
-      (task.lastWatchdogAt !== undefined && typeof task.lastWatchdogAt !== "number") ||
-      (task.watchdog !== undefined && !isManagedWatchdog(task.watchdog)) ||
-      (task.childThreadSource !== undefined && typeof task.childThreadSource !== "string") ||
-      (task.childTurnId !== undefined && typeof task.childTurnId !== "string") ||
-      (task.startMessageId !== undefined && typeof task.startMessageId !== "string") ||
-      (task.terminalTurnId !== undefined && typeof task.terminalTurnId !== "string") ||
-      (task.resultCandidate !== undefined && !isManagedResultCandidate(task.resultCandidate)) ||
-      (task.result !== undefined && !isManagedResult(task.result))
-    ) {
+  if (
+    !Object.entries(value.tasks).every(
+      ([taskId, task]) => isManagedTeamTaskState(task) && task.id === taskId,
+    )
+  ) {
+    return false;
+  }
+
+  const tasks = value.tasks as Record<string, ManagedTeamTaskState>;
+  for (const task of Object.values(tasks)) {
+    const references = [
+      ...(task.dependsOn ?? []),
+      ...(task.predecessorTaskId ? [task.predecessorTaskId] : []),
+    ];
+    if (references.some((taskId) => taskId === task.id || tasks[taskId] === undefined))
+      return false;
+    if (task.predecessorTaskId && tasks[task.predecessorTaskId]!.createdAt > task.createdAt) {
       return false;
     }
-    if (task.delivery === undefined) return true;
+  }
+  return !hasManagedTaskReferenceCycle(tasks);
+}
+
+function isManagedTeamTaskState(value: unknown): value is ManagedTeamTaskState {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.childThreadId !== "string" ||
+    typeof value.title !== "string" ||
+    !value.title.trim() ||
+    typeof value.prompt !== "string" ||
+    !value.prompt.trim() ||
+    !["queued", "starting", "running", "completed", "failed", "interrupted"].includes(
+      String(value.status),
+    ) ||
+    typeof value.createdAt !== "number" ||
+    typeof value.lastActivityAt !== "number" ||
+    (value.startedAt !== undefined && typeof value.startedAt !== "number") ||
+    (value.expectedWakeAt !== undefined &&
+      (typeof value.expectedWakeAt !== "number" || !Number.isFinite(value.expectedWakeAt))) ||
+    (value.recoveryMisses !== undefined &&
+      (typeof value.recoveryMisses !== "number" ||
+        !Number.isInteger(value.recoveryMisses) ||
+        value.recoveryMisses < 0)) ||
+    (value.lastWatchdogAt !== undefined && typeof value.lastWatchdogAt !== "number") ||
+    (value.watchdog !== undefined && !isManagedWatchdog(value.watchdog)) ||
+    (value.childThreadSource !== undefined && typeof value.childThreadSource !== "string") ||
+    (value.childTurnId !== undefined && typeof value.childTurnId !== "string") ||
+    (value.startMessageId !== undefined && typeof value.startMessageId !== "string") ||
+    (value.terminalTurnId !== undefined && typeof value.terminalTurnId !== "string") ||
+    (value.dependsOn !== undefined && !isManagedTaskReferences(value.dependsOn)) ||
+    (value.predecessorTaskId !== undefined && !isBoundedString(value.predecessorTaskId, 200)) ||
+    (value.access !== undefined && !isManagedTaskAccess(value.access)) ||
+    (value.resolvedModel !== undefined && !isBoundedString(value.resolvedModel, 200)) ||
+    (value.resolvedReasoningEffort !== undefined &&
+      value.resolvedReasoningEffort !== null &&
+      !isBoundedString(value.resolvedReasoningEffort, 200)) ||
+    (value.resolvedServiceTier !== undefined &&
+      value.resolvedServiceTier !== null &&
+      !isBoundedString(value.resolvedServiceTier, 200)) ||
+    (value.timeoutMinutes !== undefined &&
+      (typeof value.timeoutMinutes !== "number" ||
+        !Number.isSafeInteger(value.timeoutMinutes) ||
+        value.timeoutMinutes < 1 ||
+        value.timeoutMinutes > 1_440)) ||
+    (value.tokenBudget !== undefined &&
+      (typeof value.tokenBudget !== "number" ||
+        !Number.isSafeInteger(value.tokenBudget) ||
+        value.tokenBudget < 1 ||
+        value.tokenBudget > 10_000_000)) ||
+    (value.tokensUsed !== undefined &&
+      (typeof value.tokensUsed !== "number" ||
+        !Number.isSafeInteger(value.tokensUsed) ||
+        value.tokensUsed < 0)) ||
+    (value.timeUsedSeconds !== undefined && !isNonNegativeFiniteNumber(value.timeUsedSeconds)) ||
+    (value.failureReason !== undefined && !isBoundedString(value.failureReason, 2_000)) ||
+    (value.budgetReason !== undefined &&
+      !["timeout", "tokenBudget"].includes(String(value.budgetReason))) ||
+    (value.workspace !== undefined && !isManagedTaskWorkspace(value.workspace)) ||
+    (value.resultCandidate !== undefined && !isManagedResultCandidate(value.resultCandidate)) ||
+    (value.result !== undefined && !isManagedResult(value.result))
+  ) {
+    return false;
+  }
+  return value.delivery === undefined || isManagedDelivery(value.delivery);
+}
+
+function isManagedDelivery(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    ["claimed", "delivered"].includes(String(value.status)) &&
+    typeof value.claimId === "string" &&
+    (value.parentTurnId === undefined || typeof value.parentTurnId === "string") &&
+    (value.markerId === undefined || typeof value.markerId === "string") &&
+    (value.dispatchStartedAt === undefined || typeof value.dispatchStartedAt === "number") &&
+    (value.contextHash === undefined ||
+      (typeof value.contextHash === "string" && /^[a-f\d]{64}$/iu.test(value.contextHash)))
+  );
+}
+
+function isManagedTaskReferences(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 50 &&
+    value.every((taskId) => isBoundedString(taskId, 200)) &&
+    new Set(value).size === value.length
+  );
+}
+
+function hasManagedTaskReferenceCycle(tasks: Record<string, ManagedTeamTaskState>): boolean {
+  const states = new Map<string, "visiting" | "visited">();
+  for (const taskId of Object.keys(tasks)) {
+    if (states.has(taskId)) continue;
+    const stack: Array<{ taskId: string; references: string[]; index: number }> = [
+      { taskId, references: managedTaskReferences(tasks[taskId]!), index: 0 },
+    ];
+    states.set(taskId, "visiting");
+    while (stack.length) {
+      const current = stack.at(-1)!;
+      const reference = current.references[current.index++];
+      if (reference === undefined) {
+        states.set(current.taskId, "visited");
+        stack.pop();
+        continue;
+      }
+      if (states.get(reference) === "visiting") return true;
+      if (states.get(reference) === "visited") continue;
+      states.set(reference, "visiting");
+      stack.push({
+        taskId: reference,
+        references: managedTaskReferences(tasks[reference]!),
+        index: 0,
+      });
+    }
+  }
+  return false;
+}
+
+function managedTaskReferences(task: ManagedTeamTaskState): string[] {
+  return [...(task.dependsOn ?? []), ...(task.predecessorTaskId ? [task.predecessorTaskId] : [])];
+}
+
+function isManagedTaskAccess(value: unknown): value is ManagedTeamTaskAccessState {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["mode", "writePaths", "network"]) ||
+    !["readOnly", "isolatedWrite", "sharedWrite"].includes(String(value.mode)) ||
+    (value.network !== undefined && typeof value.network !== "boolean")
+  ) {
+    return false;
+  }
+  const writePaths = value.writePaths;
+  if (
+    writePaths !== undefined &&
+    (!isSafeRelativePathList(writePaths, 100) || !writePaths.every(isSafeManagedWritePath))
+  )
+    return false;
+  if (value.mode === "readOnly") return writePaths === undefined || writePaths.length === 0;
+  return Array.isArray(writePaths) && writePaths.length > 0;
+}
+
+function isManagedTaskWorkspace(value: unknown): value is ManagedTeamTaskWorkspaceState {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "lifecycle",
+      "repositoryRoot",
+      "gitCommonDir",
+      "worktreePath",
+      "head",
+      "baseline",
+      "createdAt",
+      "updatedAt",
+      "changedPaths",
+      "conflictPaths",
+      "error",
+    ]) ||
+    ![
+      "creating",
+      "ready",
+      "integrating",
+      "integrated",
+      "discarding",
+      "discarded",
+      "conflicted",
+      "recoveryRequired",
+    ].includes(String(value.lifecycle)) ||
+    !isSafeAbsolutePath(value.repositoryRoot) ||
+    !isSafeAbsolutePath(value.gitCommonDir) ||
+    !isSafeAbsolutePath(value.worktreePath) ||
+    !isPathInside(value.gitCommonDir, value.worktreePath) ||
+    typeof value.head !== "string" ||
+    !/^[a-f\d]{40}(?:[a-f\d]{24})?$/iu.test(value.head) ||
+    !isWorkspaceBaseline(value.baseline) ||
+    !isNonNegativeFiniteNumber(value.createdAt) ||
+    !isNonNegativeFiniteNumber(value.updatedAt) ||
+    value.updatedAt < value.createdAt ||
+    (value.changedPaths !== undefined && !isSafeRelativePathList(value.changedPaths, 10_000)) ||
+    (value.conflictPaths !== undefined && !isSafeRelativePathList(value.conflictPaths, 10_000)) ||
+    (value.error !== undefined && !isBoundedString(value.error, 4_000))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isWorkspaceBaseline(
+  value: unknown,
+): value is Record<string, ManagedTeamTaskWorkspaceFileState> {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  return (
+    entries.length <= 50_000 &&
+    entries.reduce((length, [path]) => length + path.length, 0) <= 5_000_000 &&
+    entries.every(([path, entry]) => isSafeRelativePath(path) && isWorkspaceFileState(entry))
+  );
+}
+
+function isWorkspaceFileState(value: unknown): value is ManagedTeamTaskWorkspaceFileState {
+  if (!isRecord(value)) return false;
+  if (value.type === "file") {
     return (
-      isRecord(task.delivery) &&
-      ["claimed", "delivered"].includes(String(task.delivery.status)) &&
-      typeof task.delivery.claimId === "string" &&
-      (task.delivery.parentTurnId === undefined ||
-        typeof task.delivery.parentTurnId === "string") &&
-      (task.delivery.markerId === undefined || typeof task.delivery.markerId === "string") &&
-      (task.delivery.dispatchStartedAt === undefined ||
-        typeof task.delivery.dispatchStartedAt === "number") &&
-      (task.delivery.contextHash === undefined ||
-        (typeof task.delivery.contextHash === "string" &&
-          /^[a-f\d]{64}$/iu.test(task.delivery.contextHash)))
+      hasOnlyKeys(value, ["type", "mode", "digest"]) &&
+      Number.isInteger(value.mode) &&
+      Number(value.mode) >= 0 &&
+      Number(value.mode) <= 0o777 &&
+      typeof value.digest === "string" &&
+      /^[a-f\d]{64}$/iu.test(value.digest)
     );
-  });
+  }
+  return (
+    value.type === "symlink" &&
+    hasOnlyKeys(value, ["type", "target"]) &&
+    isBoundedString(value.target, 4_096) &&
+    !value.target.includes("\0")
+  );
+}
+
+function isSafeRelativePathList(value: unknown, maximum: number): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= maximum &&
+    value.every(isSafeRelativePath) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isSafeRelativePath(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 4_096 ||
+    value.includes("\0") ||
+    value.includes("\\") ||
+    isAbsolute(value)
+  ) {
+    return false;
+  }
+  const segments = value.split("/");
+  return segments.every((segment) => Boolean(segment) && segment !== "." && segment !== "..");
+}
+
+function isSafeManagedWritePath(value: string): boolean {
+  return value.split("/").every((segment) => segment.toLowerCase() !== ".git");
+}
+
+function isSafeAbsolutePath(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 1 &&
+    value.length <= 4_096 &&
+    !value.includes("\0") &&
+    isAbsolute(value) &&
+    normalize(value) === value &&
+    dirname(value) !== value
+  );
+}
+
+function isPathInside(parent: string, candidate: string): boolean {
+  const child = relative(parent, candidate);
+  return isSafeRelativePath(child);
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isBoundedString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && Boolean(value.trim()) && value.length <= maximum;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 function isTeamToolOperation(value: unknown): value is TeamToolOperationState {
@@ -591,7 +928,15 @@ function isTeamToolOperation(value: unknown): value is TeamToolOperationState {
     typeof value.threadId !== "string" ||
     typeof value.turnId !== "string" ||
     typeof value.callId !== "string" ||
-    !["spawn_task", "steer_task", "cancel_task", "submit_result"].includes(String(value.tool)) ||
+    ![
+      "spawn_task",
+      "followup_task",
+      "steer_task",
+      "cancel_task",
+      "submit_result",
+      "integrate_task",
+      "discard_task_changes",
+    ].includes(String(value.tool)) ||
     typeof value.argumentsHash !== "string" ||
     !/^[a-f\d]{64}$/iu.test(value.argumentsHash) ||
     !["prepared", "applied"].includes(String(value.status)) ||
@@ -627,14 +972,15 @@ function isManagedParent(value: unknown): boolean {
   );
 }
 
-function isManagedResultCandidate(value: unknown): boolean {
+function isManagedResultCandidate(value: unknown): value is ManagedTeamTaskResultCandidate {
   return (
     isRecord(value) &&
     typeof value.summary === "string" &&
     Boolean(value.summary.trim()) &&
     (value.details === undefined || typeof value.details === "string") &&
     typeof value.submittedAt === "number" &&
-    typeof value.callId === "string"
+    typeof value.callId === "string" &&
+    isManagedResultFields(value)
   );
 }
 
@@ -658,8 +1004,79 @@ function isManagedResult(value: unknown): value is ManagedTeamTaskResult {
     typeof value.summary === "string" &&
     Boolean(value.summary.trim()) &&
     (value.details === undefined || typeof value.details === "string") &&
-    ["submitted", "final_answer", "agent_message", "status"].includes(String(value.source))
+    ["submitted", "final_answer", "agent_message", "status"].includes(String(value.source)) &&
+    isManagedResultFields(value)
   );
+}
+
+function isManagedResultFields(value: Record<string, unknown>): boolean {
+  const outcome = value.outcome;
+  if (
+    outcome !== undefined &&
+    !["success", "partial", "blocked", "failed"].includes(String(outcome))
+  ) {
+    return false;
+  }
+  if (
+    value.checks !== undefined &&
+    (!Array.isArray(value.checks) ||
+      value.checks.length > 100 ||
+      !value.checks.every(isManagedResultCheck))
+  ) {
+    return false;
+  }
+  if (
+    value.risks !== undefined &&
+    (!Array.isArray(value.risks) ||
+      value.risks.length > 100 ||
+      !value.risks.every((risk) => isBoundedString(risk, 4_000)))
+  ) {
+    return false;
+  }
+  if (
+    value.artifacts !== undefined &&
+    (!Array.isArray(value.artifacts) ||
+      value.artifacts.length > 100 ||
+      !value.artifacts.every(isManagedResultArtifact))
+  ) {
+    return false;
+  }
+  return (
+    outcome !== undefined ||
+    (value.checks === undefined && value.risks === undefined && value.artifacts === undefined)
+  );
+}
+
+function isManagedResultCheck(value: unknown): value is ManagedTeamTaskResultCheck {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["name", "outcome", "details"]) &&
+    isBoundedString(value.name, 500) &&
+    ["passed", "failed", "notRun"].includes(String(value.outcome)) &&
+    (value.details === undefined ||
+      (typeof value.details === "string" && value.details.length <= 10_000))
+  );
+}
+
+function isManagedResultArtifact(value: unknown): value is ManagedTeamTaskResultArtifact {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["label", "path", "url"]) &&
+    isBoundedString(value.label, 500) &&
+    (value.path === undefined || isSafeRelativePath(value.path)) &&
+    (value.url === undefined || isSafeArtifactUrl(value.url)) &&
+    (value.path !== undefined || value.url !== undefined)
+  );
+}
+
+function isSafeArtifactUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value || value.length > 2_048) return false;
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
 }
 
 function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessage {

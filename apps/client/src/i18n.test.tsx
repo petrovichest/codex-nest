@@ -52,6 +52,18 @@ describe("interface localization", () => {
       "Team mode cannot be disabled while subagents are running or their results are still pending. Ask the root agent to finish or cancel them.",
     );
   });
+
+  it("localizes rich Team result metadata", () => {
+    expect(translate("en", "Статус результата: {{status}}", { status: "Partial" })).toBe(
+      "Result status: Partial",
+    );
+    expect(translate("en", "Проверки результата")).toBe("Result checks");
+    expect(translate("en", "Показано {{shown}} из {{total}}", { shown: 20, total: 24 })).toBe(
+      "Showing 20 of 24",
+    );
+    expect(translate("en", "Изменения интегрированы")).toBe("Changes integrated");
+    expect(translate("en", "Исчерпан бюджет токенов")).toBe("Token budget exhausted");
+  });
 });
 
 function LanguageProbe() {

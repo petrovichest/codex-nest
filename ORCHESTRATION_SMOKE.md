@@ -1,74 +1,84 @@
-# CodexNest orchestration smoke report
+# CodexNest Team v2 verification report
 
-- Date: 2026-07-26
-- Commit: `f5b6261`
+- Date: 2026-08-05
+- Branch: `codex/mvp`
 - Result: **PASS**
 
 ## Scope
 
-The smoke run used two independent, read-only managed tasks. One audited the
-client transition from a completed Plan to Team mode; the other audited the
-server-side managed-task lifecycle. Only the parent coordinator created this
-report after both child results were delivered.
+This change upgrades CodexNest's application-owned Team orchestration while
+preserving existing Team v1 sessions. Team v2 keeps the root coordinator in
+control and runs up to three managed child tasks alongside it; managed children
+cannot delegate further.
 
-## Client path
+The implementation was itself reviewed through CodexNest managed tasks. Separate
+tasks audited scheduling/recovery, workspace security, UI behavior, deterministic
+race coverage, and cleanup recovery. The root coordinator integrated the results,
+implemented the fixes, and retained responsibility for verification and Git.
 
-The client audit checked `implementPlan("team")` in
-`apps/client/src/components/ThreadPage.tsx` and its tests.
+## Verified behavior
 
-- A completed Plan switches `collaborationMode` from `plan` to `team`.
-- The implementation turn uses the message
-  `Да, реализуй этот план в режиме оркестратора`.
-- The optimistic message and `startTurn` share the same `clientMessageId`.
-- A successful request accepts the optimistic message.
-- A failed request removes it and attempts to restore Plan mode.
-- Plan implementation actions are disabled while the latest plan has
-  unresolved annotations.
+- Tasks are read-only and offline by default. Explicit grants support isolated
+  worktrees, shared parent writes, scoped network access, model/reasoning/service
+  settings, dependencies, follow-ups, and hard time/token budgets.
+- Structured child results are delivered exactly once to the parent and shown as
+  bounded orchestration history in the client.
+- Isolated workspaces reproduce tracked and non-ignored parent state without
+  changing the parent index, refs, stash, or commits.
+- Integration validates repository-relative write roots, rejects every
+  case-insensitive `.git` segment, and waits for active shared-write tasks.
+- Parent and source ancestors are pinned through directory file descriptors;
+  regular-file leaves are opened with `O_NOFOLLOW` and hashed from the opened
+  handle.
+- Apply and rollback capture the current leaf atomically and publish files with
+  no-clobber operations. Concurrent parent edits are preserved, and ambiguous
+  rollback backups are retained inside the Git common directory.
+- File permissions are preserved exactly, including non-executable modes such as
+  `0600`; permission-only changes and conflicts are detected.
+- Worktree discard removes only the task's own registration. Failed cleanup after
+  successful integration remains `integrated` and is retried during recovery.
+- Team v1 remains compatible with its original tools and four-child limit.
 
-Verification:
+## Verification
 
-```text
-NODE_ENV=test npm test -w @codexnest/client -- src/components/ThreadPage.test.tsx -t "starts a completed plan in orchestrator mode"
-1 passed, 77 skipped
-```
-
-Observations:
-
-- The focused happy-path test does not directly assert the optimistic
-  add/accept actions, and the error-path test does not directly assert the
-  optimistic removal.
-- Restoring Plan mode is best-effort. If the rollback settings request also
-  fails, the session may remain in Team mode while the original error is shown.
-
-## Server path
-
-The server audit checked the managed-tool handler, task creation and scheduling,
-terminal notification handling, result claiming and delivery, and parent
-continuation in `apps/server/src/api.ts`.
-
-- Managed tool calls are accepted only for a Team parent session.
-- `spawn_task` creates a child task in `queued` state.
-- Scheduling advances tasks through `starting` and `running`.
-- Child completion records one terminal result.
-- The result is claimed, delivered to the parent continuation, and cleaned up
-  after delivery.
-- Failed parent continuation releases the claim so delivery can be retried.
-
-Verification:
+The final verification run passed:
 
 ```text
-npm test -w @codexnest/server -- src/api.test.ts -t "Team orchestration"
-4 passed, 7 skipped
+npm test
+  protocol: 5 passed
+  client:   343 passed
+  server:   221 passed, 1 opt-in integration test skipped
+
+npm run lint
+npm run typecheck
+npm run format:check
+npm run build
+
+RUN_CODEX_INTEGRATION=1 NODE_ENV=test npm test -w @codexnest/server -- \
+  --run src/codex/integration.test.ts
+  real CLI smoke: 1 passed
 ```
 
-Observation:
+The real CLI smoke initializes the installed Codex app-server and reads one
+`thread/list` page; it does not start a model turn.
 
-- Runtime handling rejects managed tool calls outside Team mode, but direct
-  boundary coverage for root tool visibility outside Team mode remains limited.
+Focused regressions also cover:
 
-## Verdict
+- a concurrent file appearing between baseline capture and child installation;
+- rollback preserving a concurrent edit of an installed child file;
+- parent symlink ancestors and nested mixed-case `.git` paths;
+- exact mode copying and permission-only conflicts;
+- active shared-write integration gating;
+- repeated cleanup failure followed by successful recovery;
+- targeted worktree registration cleanup.
 
-CodexNest successfully created two managed child tasks, ran them independently,
-delivered both terminal results to the parent session, and allowed the parent
-coordinator to synthesize this report. The tested client entry point and server
-task lifecycle both passed their focused regression tests.
+## Runtime boundary
+
+The filesystem integration uses the strongest no-clobber operations available
+through Node's portable filesystem API. A non-cooperating process that keeps an
+already-open file descriptor and writes through it can create edge cases that
+generic POSIX path APIs cannot fully serialize without native `*at`/`renameat2`
+support or a cooperative repository lock. Detected ambiguity fails closed,
+avoids clobbering a newer parent path, and retains rollback data.
+
+No server deployment was performed as part of this change.

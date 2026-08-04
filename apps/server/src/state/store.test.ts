@@ -18,6 +18,75 @@ afterEach(async () =>
   ),
 );
 
+function managedTaskFixture(id: string, createdAt: number) {
+  return {
+    id,
+    childThreadId: `${id}-child`,
+    title: `Task ${id}`,
+    prompt: `Complete ${id}.`,
+    status: "completed",
+    createdAt,
+    lastActivityAt: createdAt,
+  };
+}
+
+function validTeamV2SerializedState(): any {
+  return {
+    schemaVersion: 1,
+    auth: {},
+    projects: [],
+    threadMeta: {
+      parent: {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamToolsVersion: 2,
+        teamOrchestration: {
+          tasks: {
+            base: managedTaskFixture("base", 1),
+            task: {
+              ...managedTaskFixture("task", 2),
+              dependsOn: ["base"],
+              access: {
+                mode: "isolatedWrite",
+                writePaths: ["apps/server/src"],
+                network: false,
+              },
+              timeoutMinutes: 30,
+              tokenBudget: 10_000,
+              tokensUsed: 100,
+              timeUsedSeconds: 10,
+              workspace: {
+                lifecycle: "ready",
+                repositoryRoot: "/work/project",
+                gitCommonDir: "/work/project/.git",
+                worktreePath: "/work/project/.git/codexnest-team-worktrees/task",
+                head: "a".repeat(40),
+                baseline: {
+                  "apps/server/src/api.ts": {
+                    type: "file",
+                    mode: 0o600,
+                    digest: "b".repeat(64),
+                  },
+                },
+                createdAt: 2,
+                updatedAt: 2,
+              },
+              result: {
+                outcome: "success",
+                summary: "Done",
+                checks: [{ name: "state tests", outcome: "passed" }],
+                source: "submitted",
+              },
+            },
+          },
+        },
+      },
+    },
+    devices: {},
+    uiLanguage: "en",
+  };
+}
+
 describe("StateStore", () => {
   it("creates a private state file and serializes concurrent updates", async () => {
     const { path } = await temporaryState();
@@ -252,6 +321,286 @@ describe("StateStore", () => {
         response: { success: true },
       },
     });
+  });
+
+  it("round-trips additive Team v2 task state while retaining v1 tasks", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamToolsVersion: 2,
+        teamOrchestration: {
+          tasks: {
+            legacy: {
+              id: "legacy",
+              childThreadId: "legacy-child",
+              title: "Legacy task",
+              prompt: "Keep the v1 shape valid.",
+              status: "completed",
+              createdAt: 1,
+              lastActivityAt: 2,
+              result: { summary: "Legacy result", source: "submitted" },
+            },
+            isolated: {
+              id: "isolated",
+              childThreadId: "isolated-child",
+              title: "Isolated task",
+              prompt: "Implement the scoped change.",
+              status: "completed",
+              dependsOn: ["legacy"],
+              access: {
+                mode: "isolatedWrite",
+                writePaths: ["apps/server/src", "apps/server/package.json"],
+                network: false,
+              },
+              resolvedModel: "gpt-5.6-codex",
+              resolvedReasoningEffort: "high",
+              resolvedServiceTier: "priority",
+              timeoutMinutes: 30,
+              tokenBudget: 50_000,
+              tokensUsed: 12_345,
+              timeUsedSeconds: 83.5,
+              createdAt: 3,
+              startedAt: 4,
+              lastActivityAt: 5,
+              workspace: {
+                lifecycle: "integrated",
+                repositoryRoot: "/work/project",
+                gitCommonDir: "/work/project/.git",
+                worktreePath: "/work/project/.git/codexnest-team-worktrees/isolated",
+                head: "a".repeat(40),
+                baseline: {
+                  "apps/server/src/api.ts": {
+                    type: "file",
+                    mode: 0o600,
+                    digest: "b".repeat(64),
+                  },
+                  "apps/server/run": { type: "symlink", target: "scripts/run.sh" },
+                },
+                createdAt: 4,
+                updatedAt: 6,
+                changedPaths: ["apps/server/src/api.ts"],
+              },
+              result: {
+                outcome: "success",
+                summary: "Implemented and checked",
+                details: "The scoped change is ready.",
+                checks: [{ name: "state tests", outcome: "passed", details: "12 passed" }],
+                risks: ["Integration still needs the root test suite."],
+                artifacts: [
+                  { label: "Patch", path: "apps/server/src/api.ts" },
+                  { label: "Reference", url: "https://example.test/result/isolated" },
+                ],
+                source: "submitted",
+              },
+            },
+            followup: {
+              id: "followup",
+              childThreadId: "isolated-child",
+              title: "Follow-up task",
+              prompt: "Continue after the delivered predecessor.",
+              status: "failed",
+              predecessorTaskId: "isolated",
+              access: { mode: "readOnly", network: true },
+              resolvedModel: "gpt-5.6-codex",
+              resolvedReasoningEffort: null,
+              resolvedServiceTier: null,
+              timeoutMinutes: 5,
+              tokenBudget: 1_000,
+              tokensUsed: 1_001,
+              timeUsedSeconds: 301,
+              failureReason: "The hard task budget was exhausted.",
+              budgetReason: "tokenBudget",
+              createdAt: 7,
+              lastActivityAt: 8,
+              resultCandidate: {
+                outcome: "partial",
+                summary: "Stopped at the budget boundary",
+                checks: [{ name: "typecheck", outcome: "notRun" }],
+                submittedAt: 8,
+                callId: "result-call",
+              },
+            },
+          },
+        },
+      };
+      state.teamToolOperations = {
+        integration: {
+          threadId: "parent",
+          turnId: "parent-turn",
+          callId: "integrate-call",
+          tool: "integrate_task",
+          argumentsHash: "c".repeat(64),
+          status: "prepared",
+          createdAt: 9,
+          updatedAt: 9,
+          taskId: "isolated",
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.parent).toMatchObject({
+      teamToolsVersion: 2,
+      teamOrchestration: {
+        tasks: {
+          legacy: {
+            result: { summary: "Legacy result" },
+          },
+          isolated: {
+            dependsOn: ["legacy"],
+            access: { mode: "isolatedWrite", network: false },
+            resolvedModel: "gpt-5.6-codex",
+            timeoutMinutes: 30,
+            tokenBudget: 50_000,
+            tokensUsed: 12_345,
+            workspace: {
+              lifecycle: "integrated",
+              changedPaths: ["apps/server/src/api.ts"],
+              baseline: {
+                "apps/server/src/api.ts": { mode: 0o600 },
+              },
+            },
+            result: {
+              outcome: "success",
+              checks: [{ name: "state tests", outcome: "passed" }],
+              artifacts: [
+                { label: "Patch", path: "apps/server/src/api.ts" },
+                { label: "Reference", url: "https://example.test/result/isolated" },
+              ],
+            },
+          },
+          followup: {
+            predecessorTaskId: "isolated",
+            budgetReason: "tokenBudget",
+            failureReason: "The hard task budget was exhausted.",
+            resultCandidate: { outcome: "partial" },
+          },
+        },
+      },
+    });
+    expect(reloaded.snapshot().teamToolOperations?.integration).toMatchObject({
+      tool: "integrate_task",
+      status: "prepared",
+      taskId: "isolated",
+    });
+  });
+
+  it("rejects malformed or pathologically unsafe Team v2 task state", async () => {
+    const cases: Array<[string, (state: any) => void]> = [
+      ["unsupported tool version", (state) => (state.threadMeta.parent.teamToolsVersion = 3)],
+      [
+        "missing dependency",
+        (state) => (state.threadMeta.parent.teamOrchestration.tasks.task.dependsOn = ["missing"]),
+      ],
+      [
+        "self dependency",
+        (state) => (state.threadMeta.parent.teamOrchestration.tasks.task.dependsOn = ["task"]),
+      ],
+      [
+        "dependency cycle",
+        (state) => {
+          state.threadMeta.parent.teamOrchestration.tasks.base.dependsOn = ["task"];
+        },
+      ],
+      [
+        "too many dependencies",
+        (state) => {
+          const tasks = state.threadMeta.parent.teamOrchestration.tasks;
+          for (let index = 0; index < 51; index += 1) {
+            const id = `dependency-${index}`;
+            tasks[id] = managedTaskFixture(id, index + 10);
+          }
+          tasks.task.dependsOn = Object.keys(tasks).filter((id) => id.startsWith("dependency-"));
+        },
+      ],
+      [
+        "write path traversal",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.access.writePaths = ["../api.ts"]),
+      ],
+      [
+        "Git metadata write path",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.access.writePaths = [
+            "nested/.GiT/config",
+          ]),
+      ],
+      [
+        "read-only write path",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.access = {
+            mode: "readOnly",
+            writePaths: ["apps"],
+          }),
+      ],
+      [
+        "invalid timeout",
+        (state) => (state.threadMeta.parent.teamOrchestration.tasks.task.timeoutMinutes = 1_441),
+      ],
+      [
+        "invalid token usage",
+        (state) => (state.threadMeta.parent.teamOrchestration.tasks.task.tokensUsed = -1),
+      ],
+      [
+        "oversized structured result",
+        (state) => {
+          state.threadMeta.parent.teamOrchestration.tasks.task.result.checks = Array.from(
+            { length: 101 },
+            (_, index) => ({ name: `check-${index}`, outcome: "passed" }),
+          );
+        },
+      ],
+      [
+        "unsafe artifact URL",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.result.artifacts = [
+            { label: "secret", url: "file:///etc/passwd" },
+          ]),
+      ],
+      [
+        "external worktree",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.workspace.worktreePath =
+            "/work/other/task"),
+      ],
+      [
+        "baseline traversal",
+        (state) => {
+          state.threadMeta.parent.teamOrchestration.tasks.task.workspace.baseline = {
+            "../outside": { type: "file", mode: 0o644, digest: "b".repeat(64) },
+          };
+        },
+      ],
+      [
+        "invalid baseline digest",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.workspace.baseline[
+            "apps/server/src/api.ts"
+          ].digest = "short"),
+      ],
+      [
+        "invalid baseline mode",
+        (state) =>
+          (state.threadMeta.parent.teamOrchestration.tasks.task.workspace.baseline[
+            "apps/server/src/api.ts"
+          ].mode = 0o1000),
+      ],
+    ];
+
+    for (const [name, mutate] of cases) {
+      const { path } = await temporaryState();
+      const state = validTeamV2SerializedState();
+      mutate(state);
+      await writeFile(path, JSON.stringify(state), "utf8");
+      await expect(new StateStore(path).load(), name).rejects.toThrow(
+        "Corrupt thread metadata in CodexNest state",
+      );
+    }
   });
 
   it("reloads unmaterialized sessions and complete server drafts", async () => {

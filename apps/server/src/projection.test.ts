@@ -715,6 +715,46 @@ describe("AppProjection", () => {
     expect(projection.summary("completed-child")?.unread).toBe(false);
   });
 
+  it("persists rich managed result notices without dropping v2 metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const agent = {
+      threadId: "child",
+      taskId: "task-v2",
+      title: "Review the client",
+      nickname: "reviewer",
+      outcome: "completed" as const,
+      result: {
+        outcome: "partial" as const,
+        summary: "The presentation is implemented.",
+        checks: [{ name: "client tests", outcome: "passed" as const, details: "12 passed" }],
+      },
+      budgetReason: "tokenBudget" as const,
+      failureReason: "One optional visual check was not run.",
+      changedPaths: ["apps/client/src/components/ThreadPage.tsx"],
+      changedPathCount: 24,
+      workspaceIntegrationStatus: "integrated" as const,
+    };
+
+    await projection.recordOrchestrationNotice("parent", "parent-turn", [agent], null);
+
+    expect(store.snapshot().threadMeta.parent?.timelineArtifacts?.["parent-turn"]).toEqual([
+      expect.objectContaining({
+        type: "orchestrationNotice",
+        id: "orchestration-parent-turn-child",
+        agents: [agent],
+      }),
+    ]);
+  });
+
   it("recovers loaded subagents omitted from thread/list once per connection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -2438,6 +2478,12 @@ describe("AppProjection", () => {
                 id: "internal",
                 clientId: "codexnest-team-claim:task",
                 content: [{ type: "text", text: "Продолжить задачу", text_elements: [] }],
+              },
+              {
+                type: "userMessage",
+                id: "internal-v2",
+                clientId: "codexnest-team-continuation:task-v2",
+                content: [{ type: "text", text: "Continue Team v2", text_elements: [] }],
               },
               { type: "plan", id: "plan", text: "План" },
             ],
