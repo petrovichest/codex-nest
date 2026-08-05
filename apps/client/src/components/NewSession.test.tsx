@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Link, MemoryRouter, Route, Routes } from "react-router";
+import { Link, MemoryRouter, Route, Routes, useMatch } from "react-router";
 
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
@@ -742,13 +742,19 @@ function renderNewSession() {
       ]}
     >
       <Routes>
-        <Route
-          path="/new"
-          element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
-        />
-        <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
+        <Route path="*" element={<NewSessionWorkspace />} />
       </Routes>
     </MemoryRouter>,
+  );
+}
+
+function NewSessionWorkspace() {
+  const createdThread = useMatch("/threads/:threadId");
+  return (
+    <>
+      <NewSession projects={[project]} onOpenNavigation={() => undefined} />
+      {createdThread && <div>Созданная сессия</div>}
+    </>
   );
 }
 
