@@ -919,7 +919,9 @@ async function backupLegacyState(path: string): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const [source, existing] = await Promise.all([readFile(path), readFile(backup)]);
     if (!source.equals(existing)) {
-      throw new Error("CodexNest legacy state backup exists but does not match state.json");
+      throw new Error("CodexNest legacy state backup exists but does not match state.json", {
+        cause: error,
+      });
     }
   }
 }
