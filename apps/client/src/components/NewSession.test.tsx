@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Link, MemoryRouter, Route, Routes } from "react-router";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
@@ -454,9 +454,8 @@ describe("NewSession", () => {
       updatedAt: 20,
     });
 
-    await waitFor(
-      () => expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
-      { timeout: 3_000 },
+    await waitFor(() =>
+      expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
     );
     expect(updateThreadDraft).toHaveBeenCalledTimes(2);
     expect(updateThreadDraft).toHaveBeenLastCalledWith(
@@ -734,13 +733,19 @@ function renderNewSession() {
       ]}
     >
       <Routes>
-        <Route
-          path="/new"
-          element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
-        />
-        <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
+        <Route path="*" element={<PersistentNewSessionRoute />} />
       </Routes>
     </MemoryRouter>,
+  );
+}
+
+function PersistentNewSessionRoute() {
+  const location = useLocation();
+  return (
+    <>
+      <NewSession projects={[project]} onOpenNavigation={() => undefined} />
+      {location.pathname.startsWith("/threads/") && <div>Созданная сессия</div>}
+    </>
   );
 }
 
