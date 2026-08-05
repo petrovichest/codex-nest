@@ -1209,6 +1209,20 @@ export function ThreadPage({
     }
   }
 
+  async function beginPreparedTranscription(recording: ComposerRecording): Promise<void> {
+    const generation = preparationGenerationRef.current;
+    await preparationOperationRef.current;
+    if (
+      !preparationAliveRef.current ||
+      preparationGenerationRef.current !== generation ||
+      preparationRef.current.active ||
+      !activeThreadIdRef.current
+    ) {
+      throw new Error(t("Не удалось создать сессию"));
+    }
+    await beginTranscription(activeThreadIdRef.current, recording);
+  }
+
   async function cancelVoiceTranscription(): Promise<void> {
     if (!activeVoiceJob || voiceCancellationPending) return;
     setVoiceCancellationPending(true);
@@ -1370,6 +1384,7 @@ export function ThreadPage({
               : t("Не удалось создать сессию"),
           );
         }
+        throw caught;
       })
       .finally(() => {
         if (preparationOperationRef.current === operation) {
@@ -1380,6 +1395,7 @@ export function ThreadPage({
         }
       });
     preparationOperationRef.current = operation;
+    void operation.catch(() => undefined);
   }, [newSessionAdmitted, newSessionHydrated, newSessionProject, preparationRetry]);
 
   useEffect(() => {
@@ -2872,7 +2888,7 @@ export function ThreadPage({
             }
             voiceCancellationPending={voiceCancellationPending}
             onTranscribe={
-              preparationRef.current.active
+              preparationRef.current.active && voiceMode !== "send"
                 ? async (audio, durationMs) => {
                     if (!transcriptionProvider) {
                       throw new Error(t("Распознавание речи не настроено"));
@@ -2885,7 +2901,9 @@ export function ThreadPage({
             }
             onRecordingReady={
               preparationRef.current.active
-                ? undefined
+                ? voiceMode === "send"
+                  ? beginPreparedTranscription
+                  : undefined
                 : (recording) => beginTranscription(activeThreadIdRef.current, recording)
             }
             transcriptionStatus={draftVoiceProgress}

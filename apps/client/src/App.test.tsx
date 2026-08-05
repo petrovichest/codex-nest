@@ -2286,6 +2286,89 @@ describe("App routing and navigation", () => {
     expect(textarea).toHaveValue("Черновик A\n\nНовый черновик B");
   });
 
+  it("keeps an early auto-send recording pending until the created thread activates", async () => {
+    installMediaRecorder(async () => {
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    });
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const upload = deferred<void>();
+    const appSnapshot = snapshot([baseThread]);
+    const api = mockConnection(appSnapshot);
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.queueVoiceRecording.mockReturnValue(upload.promise);
+    api.readTranscriptionConfig.mockResolvedValue({
+      providers: ["local"],
+      provider: "local",
+      localUrl: "http://127.0.0.1:8178/inference",
+      openAiApiKeyConfigured: false,
+      openAiModel: "gpt-4o-transcribe",
+      language: "ru",
+      refineLocal: false,
+      refinementModel: "gpt-5.6-luna",
+      maxRecordingSeconds: 300,
+      maxUploadBytes: 24 * 1024 * 1024,
+      timingEstimate: {
+        sampleCount: 0,
+        estimatedFixedProcessingMs: null,
+        estimatedProcessingMsPerAudioSecond: null,
+      },
+    });
+    localStorage.setItem("codexnest.voiceInputMode", "send");
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+    await act(async () => Promise.resolve());
+
+    expect(api.transcribe).not.toHaveBeenCalled();
+    expect(api.queueVoiceRecording).not.toHaveBeenCalled();
+    expect(
+      api.queueVoiceRecording.mock.calls.some(([recording]) => recording.threadId === ""),
+    ).toBe(false);
+
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+
+    await waitFor(() =>
+      expect(api.queueVoiceRecording).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: "created",
+          audio: expect.any(Blob),
+          mode: "send",
+        }),
+      ),
+    );
+    expect(api.queueVoiceRecording).toHaveBeenCalledOnce();
+    expect(api.transcribe).not.toHaveBeenCalled();
+    expect(
+      api.queueVoiceRecording.mock.calls.some(([recording]) => recording.threadId === ""),
+    ).toBe(false);
+    expect(screen.getByRole("status", { name: "Отправляем запись" })).toHaveClass(
+      "voice-transcription-message",
+    );
+
+    const recording = api.queueVoiceRecording.mock.calls[0]![0];
+    appSnapshot.voiceTranscriptions = [
+      {
+        id: recording.id,
+        threadId: recording.threadId,
+        mode: "send",
+        status: "transcribing",
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+        audioDurationMs: recording.durationMs,
+        estimatedTotalSeconds: null,
+        error: null,
+      },
+    ];
+    upload.resolve();
+
+    expect(await screen.findByRole("status", { name: "Распознаём" })).toHaveClass(
+      "voice-transcription-message",
+    );
+  });
+
   it("queues a recording stopped after activation and shows its progress without reopening", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
