@@ -363,6 +363,7 @@ export function ThreadPage({
   const {
     api,
     state,
+    foregroundEpoch,
     dispatch,
     refreshDetail,
     forceRefreshDetail,
@@ -1583,7 +1584,7 @@ export function ThreadPage({
         }
       });
     }
-  }, [threadId, refreshDetail]);
+  }, [foregroundEpoch, threadId, refreshDetail]);
 
   useEffect(() => {
     const latestTurn = detail?.turns.at(-1);

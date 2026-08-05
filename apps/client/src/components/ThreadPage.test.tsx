@@ -3038,6 +3038,19 @@ describe("Activity", () => {
     expect(context.refreshDetail).toHaveBeenCalledTimes(1);
   });
 
+  it("reloads the open chat as soon as the native app returns to the foreground", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary);
+    const view = renderThread();
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(1));
+
+    context.foregroundEpoch += 1;
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
+    expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
+  });
+
   it("retries one completed chat read when only a plan is available", () => {
     vi.useFakeTimers();
     try {
@@ -3804,6 +3817,7 @@ function mockThreadConnection(
   };
   const value = {
     api,
+    foregroundEpoch: 0,
     state: {
       snapshot: {
         projects: [

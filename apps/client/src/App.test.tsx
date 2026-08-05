@@ -3030,6 +3030,7 @@ function mockConnection(
   };
   connection.mockReturnValue({
     api,
+    foregroundEpoch: 0,
     state: {
       snapshot: appSnapshot,
       details: Object.fromEntries(

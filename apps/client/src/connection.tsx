@@ -78,6 +78,7 @@ type VoiceRecordingUpload = Omit<
 interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
+  foregroundEpoch: number;
   dispatch: Dispatch<ClientAction>;
   refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
   forceRefreshDetail(threadId: string): Promise<ThreadDetail>;
@@ -103,6 +104,7 @@ export function ConnectionProvider({
   const stateRef = useRef(state);
   const languageRef = useRef(language);
   const [generation, setGeneration] = useState(0);
+  const [foregroundEpoch, setForegroundEpoch] = useState(0);
   const generationRef = useRef(0);
   const streamSequence = useRef<number | null>(null);
   const appliedSequence = useRef<number | null>(null);
@@ -209,6 +211,8 @@ export function ConnectionProvider({
   const reconnect = useCallback(() => {
     const next = generationRef.current + 1;
     generationRef.current = next;
+    detailRequests.current.clear();
+    turnItemRequests.current.clear();
     setGeneration(next);
     return next;
   }, []);
@@ -279,24 +283,33 @@ export function ConnectionProvider({
         detailRequestVersions.current.get(key) === version &&
         generationRef.current === targetGeneration;
       const liveAdvanced = () => appliedSequence.current !== targetSequence;
+      const preferredSummary = (incoming: ThreadSummary, preserveLive: boolean): ThreadSummary => {
+        const current = stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId);
+        if (preserveLive) return current ?? incoming;
+        return current && current.updatedAt > incoming.updatedAt ? current : incoming;
+      };
+      const acceptLatestSummary = (
+        incoming: ThreadSummary,
+        preserveLive: boolean,
+      ): ThreadSummary => {
+        const preferred = preferredSummary(incoming, preserveLive);
+        if (!preserveLive && preferred === incoming && canApply()) {
+          dispatch({ type: "thread", thread: incoming });
+        }
+        return preferred;
+      };
       const request = (async () => {
+        let acceptedSummary: ThreadSummary | undefined;
         const authoritativeLatest = async (): Promise<ThreadDetail> => {
           const detail = await api.readThread(threadId, undefined, { fresh: true });
           if (canApply()) {
-            const currentSummary = stateRef.current.snapshot?.threads.find(
-              (thread) => thread.id === threadId,
-            );
-            if (
-              !liveAdvanced() &&
-              (!currentSummary || detail.summary.updatedAt >= currentSummary.updatedAt)
-            ) {
-              dispatch({ type: "thread", thread: detail.summary });
-            }
+            const preserveLive = liveAdvanced();
+            acceptedSummary = acceptLatestSummary(detail.summary, preserveLive);
             dispatch({
               type: "detail",
               detail,
               page: "reset",
-              preserveLive: liveAdvanced(),
+              preserveLive,
             });
           }
           return detail;
@@ -332,12 +345,16 @@ export function ConnectionProvider({
                 }
                 continuationCursor = changes.continuationCursor ?? undefined;
               } while (continuationCursor);
-              const summary =
-                stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
-                merged.summary;
-              detail = threadDetailNeedsRecovery(merged, summary)
-                ? await authoritativeLatest()
-                : merged;
+              const preserveLive = liveAdvanced();
+              const summary = preferredSummary(merged.summary, preserveLive);
+              if (threadDetailNeedsRecovery(merged, summary)) {
+                detail = await authoritativeLatest();
+              } else {
+                if (canApply()) {
+                  acceptedSummary = acceptLatestSummary(merged.summary, preserveLive);
+                }
+                detail = merged;
+              }
             } catch {
               detail = await authoritativeLatest();
             }
@@ -346,16 +363,21 @@ export function ConnectionProvider({
           } else {
             detail = await api.readThread(threadId, cursor, { fresh: options.force });
             if (canApply()) {
+              const preserveLive = liveAdvanced();
+              if (!cursor) {
+                acceptedSummary = acceptLatestSummary(detail.summary, preserveLive);
+              }
               dispatch({
                 type: "detail",
                 detail,
                 page: cursor ? "older" : "latest",
-                preserveLive: liveAdvanced(),
+                preserveLive,
               });
             }
           }
           if (!cursor && canApply()) {
             const summary =
+              acceptedSummary ??
               stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
               detail.summary;
             if (liveAdvanced()) clearDetailRetry(threadId);
@@ -723,7 +745,10 @@ export function ConnectionProvider({
       setNativeNotificationAppActive(true);
       void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
         setNativeNotificationAppActive(isActive);
-        if (isActive) refresh();
+        if (isActive) {
+          setForegroundEpoch((current) => current + 1);
+          refresh();
+        }
       }).then((handle) => {
         removeNativeListener = () => handle.remove();
       });
@@ -741,6 +766,7 @@ export function ConnectionProvider({
     () => ({
       api,
       state,
+      foregroundEpoch,
       dispatch,
       refreshDetail,
       forceRefreshDetail,
@@ -753,6 +779,7 @@ export function ConnectionProvider({
     [
       api,
       state,
+      foregroundEpoch,
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
