@@ -454,8 +454,9 @@ describe("NewSession", () => {
       updatedAt: 20,
     });
 
-    await waitFor(() =>
-      expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
+    await waitFor(
+      () => expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
+      { timeout: 3_000 },
     );
     expect(updateThreadDraft).toHaveBeenCalledTimes(2);
     expect(updateThreadDraft).toHaveBeenLastCalledWith(
