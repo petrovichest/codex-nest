@@ -155,6 +155,7 @@ const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
 const TEAM_ACTIVITY_PERSIST_MS = 60_000;
+const TEAM_CHILD_MODEL_ID = "gpt-5.6-sol";
 const TEAM_SANDBOX_MOUNTPOINTS = [".agents", ".codex"] as const;
 const TEAM_CONTINUATION_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
@@ -234,8 +235,6 @@ interface ManagedTaskOptions {
   model: string;
   reasoningEffort: string | null;
   serviceTier: string | null;
-  timeoutMinutes?: number;
-  tokenBudget?: number;
 }
 
 interface ManagedChildRuntime {
@@ -277,11 +276,8 @@ const TEAM_ACCESS_SCHEMA = {
 const TEAM_TASK_OPTIONS_SCHEMA = {
   dependsOn: { type: "array", items: { type: "string" }, maxItems: 50 },
   access: TEAM_ACCESS_SCHEMA,
-  model: { type: "string" },
   reasoningEffort: { type: "string" },
   serviceTier: { type: "string" },
-  timeoutMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
-  tokenBudget: { type: "integer", minimum: 1, maximum: 10_000_000 },
 } as const;
 
 const TEAM_ROOT_DYNAMIC_TOOLS = [
@@ -307,11 +303,8 @@ const TEAM_ROOT_DYNAMIC_TOOLS = [
           title: { type: "string" },
           prompt: { type: "string", description: "Self-contained follow-up instructions." },
           access: TEAM_ACCESS_SCHEMA,
-          model: { type: "string" },
           reasoningEffort: { type: "string" },
           serviceTier: { type: "string" },
-          timeoutMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
-          tokenBudget: { type: "integer", minimum: 1, maximum: 10_000_000 },
         },
         required: ["taskId", "prompt"],
         additionalProperties: false,
@@ -1066,10 +1059,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       .catch(() => undefined)
       .then(async () => {
         const now = Date.now();
-        const affected = await enforceTeamTimeBudgets(bridge, store, now);
-        for (const threadId of await triggerTeamWatchdogs(store, managedActivity, now)) {
-          affected.add(threadId);
-        }
+        const affected = await triggerTeamWatchdogs(store, managedActivity, now);
         for (const parentThreadId of affected) {
           projection.publishThreadState(parentThreadId);
           scheduleTeamContinuation(parentThreadId);
@@ -2223,23 +2213,23 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (turn.status !== "completed") {
         return apiError(reply, 409, "conflict", "Only completed turns can be forked");
       }
-      const agentMessage = [...turn.items]
+      const forkResponse = [...turn.items]
         .reverse()
         .find(
-          (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
-            item.type === "agentMessage" && Boolean(item.text.trim()),
+          (item): item is Extract<ThreadItem, { type: "agentMessage" | "plan" }> =>
+            (item.type === "agentMessage" || item.type === "plan") && Boolean(item.text.trim()),
         );
-      if (!agentMessage || agentMessage.id !== body.agentMessageId) {
+      if (!forkResponse || forkResponse.id !== body.agentMessageId) {
         return apiError(
           reply,
           400,
           "validation_failed",
-          "agentMessageId must select the last non-empty agent message of the turn",
+          "agentMessageId must select the last non-empty agent message or plan of the turn",
         );
       }
       if (!threadTitles) throw new Error("Thread title generation is unavailable");
       const model = effectiveModel(source.settings, projection.availableModels);
-      const title = await threadTitles.generate(agentMessage.text, {
+      const title = await threadTitles.generate(forkResponse.text, {
         cwd: source.cwd,
         model: model?.id,
         effort: model?.reasoningEfforts[0]?.value,
@@ -2942,8 +2932,6 @@ async function handleManagedTeamToolCall(
       resolvedModel: options.model,
       resolvedReasoningEffort: options.reasoningEffort,
       resolvedServiceTier: options.serviceTier,
-      ...(options.timeoutMinutes ? { timeoutMinutes: options.timeoutMinutes } : {}),
-      ...(options.tokenBudget ? { tokenBudget: options.tokenBudget } : {}),
       ...(reusesWorkspace && task.workspace ? { workspace: structuredClone(task.workspace) } : {}),
       createdAt: now,
       lastActivityAt: now,
@@ -3257,7 +3245,7 @@ async function createManagedTeamTask(
   taskId: string,
   childThreadSource: string,
   recoveredThread: Thread | null,
-  options?: ManagedTaskOptions,
+  options: ManagedTaskOptions,
 ): Promise<ManagedTeamTaskState> {
   if (store.snapshot().threadMeta[parent.id]?.managedTeamToolsAvailable !== true) {
     throw new ProjectConflictError("This Team session does not have managed tools");
@@ -3267,7 +3255,9 @@ async function createManagedTeamTask(
     : parseThreadStart(
         await bridge.request<unknown>("thread/start", {
           cwd: parent.cwd,
-          ...threadSettings(parent.settings),
+          model: options.model,
+          ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
+          ...(parent.settings.personality ? { personality: parent.settings.personality } : {}),
           config: teamRuntimeConfig(),
           developerInstructions: TEAM_CHILD_INSTRUCTIONS,
           dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
@@ -3289,16 +3279,10 @@ async function createManagedTeamTask(
     prompt,
     status: "queued",
     ...(options?.dependsOn.length ? { dependsOn: options.dependsOn } : {}),
-    ...(options
-      ? {
-          access: options.access,
-          resolvedModel: options.model,
-          resolvedReasoningEffort: options.reasoningEffort,
-          resolvedServiceTier: options.serviceTier,
-        }
-      : {}),
-    ...(options?.timeoutMinutes ? { timeoutMinutes: options.timeoutMinutes } : {}),
-    ...(options?.tokenBudget ? { tokenBudget: options.tokenBudget } : {}),
+    access: options.access,
+    resolvedModel: options.model,
+    resolvedReasoningEffort: options.reasoningEffort,
+    resolvedServiceTier: options.serviceTier,
     createdAt: now,
     lastActivityAt: now,
   };
@@ -3540,24 +3524,44 @@ async function startQueuedTeamTasks(
     try {
       const parent = projection.summary(parentThreadId);
       if (!parent) throw new Error("Managed task parent is unavailable");
+      const model = managedChildModel(projection.availableModels);
+      const launchTask: ManagedTeamTaskState = {
+        ...queued,
+        resolvedModel: model.id,
+        resolvedReasoningEffort: compatibleManagedChildEffort(model, [
+          queued.resolvedReasoningEffort,
+          parent.settings.reasoningEffort,
+        ]),
+        resolvedServiceTier: compatibleManagedChildTier(model, [
+          queued.resolvedServiceTier,
+          parent.settings.serviceTier,
+        ]),
+      };
+      await store.update((state) => {
+        const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
+        if (!task || task.status !== "starting") return;
+        task.resolvedModel = launchTask.resolvedModel;
+        task.resolvedReasoningEffort = launchTask.resolvedReasoningEffort;
+        task.resolvedServiceTier = launchTask.resolvedServiceTier;
+      });
       const workspace = await prepareManagedTaskWorkspace(
         store,
         parentThreadId,
-        queued,
+        launchTask,
         parent.cwd,
       );
-      const runtime = await managedChildRuntime(queued, parent.cwd, workspace);
+      const runtime = await managedChildRuntime(launchTask, parent.cwd, workspace);
       await bridge.request<ThreadResumeResponse>(
         "thread/resume",
         {
-          threadId: queued.childThreadId,
+          threadId: launchTask.childThreadId,
           cwd: runtime.cwd,
           ...(runtime.runtimeWorkspaceRoots
             ? { runtimeWorkspaceRoots: runtime.runtimeWorkspaceRoots }
             : {}),
           approvalPolicy: "never" as const,
           excludeTurns: true,
-          ...managedChildResumeSettings(parent.settings, queued),
+          ...managedChildResumeSettings(parent.settings, projection.availableModels, launchTask),
           config: teamRuntimeConfig(),
           developerInstructions: TEAM_CHILD_INSTRUCTIONS,
         },
@@ -3565,14 +3569,19 @@ async function startQueuedTeamTasks(
       );
       const turn = parseTurnStart(
         await bridge.request<unknown>("turn/start", {
-          threadId: queued.childThreadId,
-          clientUserMessageId: queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
-          input: messageInput(queued.prompt, []),
-          ...managedChildTurnSettings(parent.settings, projection.availableModels, queued, runtime),
+          threadId: launchTask.childThreadId,
+          clientUserMessageId: launchTask.startMessageId ?? teamTaskStartMarkerId(launchTask.id),
+          input: messageInput(launchTask.prompt, []),
+          ...managedChildTurnSettings(
+            parent.settings,
+            projection.availableModels,
+            launchTask,
+            runtime,
+          ),
         }),
       );
-      await projection.markMaterialized(queued.childThreadId);
-      await projection.setCurrentTurn(queued.childThreadId, turn.turn.id);
+      await projection.markMaterialized(launchTask.childThreadId);
+      await projection.setCurrentTurn(launchTask.childThreadId, turn.turn.id);
       await store.update((state) => {
         const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
         if (!task || task.status !== "starting") return;
@@ -3652,34 +3661,14 @@ async function handleManagedTeamNotification(
       tokens: tokensUsed,
       persistedAt: shouldPersist ? now : previousUsage.persistedAt,
     });
-    let exceeded = false;
-    if (
-      shouldPersist ||
-      (managed.task.tokenBudget !== undefined &&
-        tokensUsed >= managed.task.tokenBudget &&
-        !managed.task.budgetReason)
-    ) {
+    if (shouldPersist) {
       await store.update((state) => {
         const task =
           state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
         if (!task || isTerminalTask(task)) return;
         task.tokensUsed = tokensUsed;
         task.lastActivityAt = now;
-        if (
-          task.tokenBudget !== undefined &&
-          tokensUsed >= task.tokenBudget &&
-          !task.budgetReason
-        ) {
-          task.budgetReason = "tokenBudget";
-          exceeded = true;
-        }
       });
-    }
-    if (exceeded && managed.task.childTurnId) {
-      await interruptTurnIfRunning(bridge, childThreadId, managed.task.childTurnId).catch(
-        () => undefined,
-      );
-      affected.add(managed.parentThreadId);
     }
   }
   if (
@@ -4561,59 +4550,6 @@ export async function triggerTeamWatchdogs(
   return affected;
 }
 
-export async function enforceTeamTimeBudgets(
-  bridge: CodexBridge,
-  store: StateStore,
-  now: number,
-): Promise<Set<string>> {
-  const due: Array<{
-    parentThreadId: string;
-    taskId: string;
-    childThreadId: string;
-    childTurnId: string;
-  }> = [];
-  for (const [parentThreadId, meta] of Object.entries(store.snapshot().threadMeta)) {
-    for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
-      if (
-        task.status !== "running" ||
-        !task.childTurnId ||
-        (!task.budgetReason &&
-          (!task.startedAt ||
-            task.timeoutMinutes === undefined ||
-            now - task.startedAt < task.timeoutMinutes * 60_000))
-      ) {
-        continue;
-      }
-      due.push({
-        parentThreadId,
-        taskId: task.id,
-        childThreadId: task.childThreadId,
-        childTurnId: task.childTurnId,
-      });
-    }
-  }
-  if (!due.length) return new Set();
-  const accepted = new Set<string>();
-  await store.update((state) => {
-    for (const item of due) {
-      const task = state.threadMeta[item.parentThreadId]?.teamOrchestration?.tasks[item.taskId];
-      if (!task || task.status !== "running") continue;
-      task.budgetReason ??= "timeout";
-      task.timeUsedSeconds = Math.max(0, (now - (task.startedAt ?? now)) / 1_000);
-      accepted.add(item.taskId);
-    }
-  });
-  const affected = new Set<string>();
-  for (const item of due) {
-    if (!accepted.has(item.taskId)) continue;
-    await interruptTurnIfRunning(bridge, item.childThreadId, item.childTurnId).catch(
-      () => undefined,
-    );
-    affected.add(item.parentThreadId);
-  }
-  return affected;
-}
-
 function managedSleepExpectedWakeAt(notification: ServerNotification): number | null {
   if (notification.method !== "item/started" || notification.params.item.type !== "sleep") {
     return null;
@@ -4794,14 +4730,11 @@ function publicManagedTask(
     model: task.resolvedModel ?? null,
     reasoningEffort: task.resolvedReasoningEffort ?? null,
     serviceTier: task.resolvedServiceTier ?? null,
-    timeoutMinutes: task.timeoutMinutes ?? null,
-    tokenBudget: task.tokenBudget ?? null,
     tokensUsed: task.tokensUsed ?? 0,
     timeUsedSeconds:
       task.status === "running" && task.startedAt
         ? Math.max(task.timeUsedSeconds ?? 0, (Date.now() - task.startedAt) / 1_000)
         : (task.timeUsedSeconds ?? 0),
-    budgetReason: task.budgetReason ?? null,
     failureReason: task.failureReason ?? null,
     workspace: task.workspace
       ? {
@@ -5080,20 +5013,6 @@ function optionalToolStringArray(
   return result;
 }
 
-function optionalToolInteger(
-  args: Record<string, unknown>,
-  key: string,
-  minimum: number,
-  maximum: number,
-): number | undefined {
-  const value = args[key];
-  if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > maximum) {
-    throw new ProjectValidationError(`${key} must be an integer from ${minimum} to ${maximum}`);
-  }
-  return Number(value);
-}
-
 function managedTaskAccess(
   args: Record<string, unknown>,
   inherited?: ManagedTeamTaskAccessState,
@@ -5133,40 +5052,70 @@ function managedTaskOptions(
   models: ModelOption[],
   inherited?: ManagedTeamTaskState,
 ): ManagedTaskOptions {
-  const requestedModel = optionalToolString(args, "model");
-  const modelId =
-    requestedModel ?? inherited?.resolvedModel ?? effectiveModel(settings, models)?.id;
-  const model = models.find((candidate) => candidate.id === modelId);
-  if (!model) throw new ProjectValidationError("The requested managed-task model is unavailable");
+  const model = managedChildModel(models);
   const requestedEffort = optionalToolString(args, "reasoningEffort");
-  const reasoningEffort =
-    requestedEffort ??
-    inherited?.resolvedReasoningEffort ??
-    settings.reasoningEffort ??
-    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
-    null;
   if (
-    reasoningEffort !== null &&
-    !model.reasoningEfforts.some((option) => option.value === reasoningEffort)
+    requestedEffort &&
+    !model.reasoningEfforts.some((option) => option.value === requestedEffort)
   ) {
     throw new ProjectValidationError("The requested reasoning effort is unavailable");
   }
+  const reasoningEffort =
+    requestedEffort ??
+    compatibleManagedChildEffort(model, [
+      inherited?.resolvedReasoningEffort,
+      settings.reasoningEffort,
+    ]);
   const requestedTier = optionalToolString(args, "serviceTier");
-  const serviceTier =
-    requestedTier ?? inherited?.resolvedServiceTier ?? settings.serviceTier ?? null;
-  if (serviceTier && !model.serviceTiers.some((tier) => tier.id === serviceTier)) {
+  if (requestedTier && !model.serviceTiers.some((tier) => tier.id === requestedTier)) {
     throw new ProjectValidationError("The requested service tier is unavailable");
   }
+  const serviceTier =
+    requestedTier ??
+    compatibleManagedChildTier(model, [inherited?.resolvedServiceTier, settings.serviceTier]);
   return {
     dependsOn: optionalToolStringArray(args, "dependsOn", 50) ?? [],
     access: managedTaskAccess(args, inherited?.access),
     model: model.id,
     reasoningEffort,
     serviceTier,
-    timeoutMinutes:
-      optionalToolInteger(args, "timeoutMinutes", 1, 1_440) ?? inherited?.timeoutMinutes,
-    tokenBudget: optionalToolInteger(args, "tokenBudget", 1, 10_000_000) ?? inherited?.tokenBudget,
   };
+}
+
+function managedChildModel(models: ModelOption[]): ModelOption {
+  const model = models.find((candidate) => candidate.id === TEAM_CHILD_MODEL_ID);
+  if (!model) {
+    throw new ProjectValidationError(
+      `The required managed-task model ${TEAM_CHILD_MODEL_ID} is unavailable`,
+    );
+  }
+  return model;
+}
+
+function compatibleManagedChildEffort(
+  model: ModelOption,
+  candidates: Array<string | null | undefined>,
+): string | null {
+  return (
+    candidates.find(
+      (candidate): candidate is string =>
+        Boolean(candidate) && model.reasoningEfforts.some((option) => option.value === candidate),
+    ) ??
+    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
+    null
+  );
+}
+
+function compatibleManagedChildTier(
+  model: ModelOption,
+  candidates: Array<string | null | undefined>,
+): string | null {
+  return (
+    candidates.find(
+      (candidate): candidate is string =>
+        Boolean(candidate) && model.serviceTiers.some((tier) => tier.id === candidate),
+    ) ?? null
+  );
 }
 
 function isManagedRelativePath(value: string): boolean {
@@ -5338,18 +5287,18 @@ function managedChildTurnSettings(
   task?: ManagedTeamTaskState,
   runtime?: ManagedChildRuntime,
 ): Record<string, unknown> {
-  const model = task?.resolvedModel
-    ? models.find((candidate) => candidate.id === task.resolvedModel)
-    : effectiveModel(settings, models);
-  if (!model) throw new ProjectValidationError("No model is available for managed task");
-  const effort =
-    task?.resolvedReasoningEffort ??
-    settings.reasoningEffort ??
-    model.reasoningEfforts.find((option) => option.isDefault)?.value ??
-    null;
+  const model = managedChildModel(models);
+  const effort = compatibleManagedChildEffort(model, [
+    task?.resolvedReasoningEffort,
+    settings.reasoningEffort,
+  ]);
+  const serviceTier = compatibleManagedChildTier(model, [
+    task?.resolvedServiceTier,
+    settings.serviceTier,
+  ]);
   return compact({
     model: model.id,
-    serviceTier: task?.resolvedServiceTier ?? settings.serviceTier,
+    serviceTier,
     effort,
     personality: settings.personality,
     ...(task && runtime
@@ -5373,11 +5322,16 @@ function managedChildTurnSettings(
 
 function managedChildResumeSettings(
   settings: SessionSettings,
+  models: ModelOption[],
   task: ManagedTeamTaskState,
 ): Record<string, unknown> {
+  const model = managedChildModel(models);
   return compact({
-    model: task.resolvedModel ?? settings.model,
-    serviceTier: task.resolvedServiceTier ?? settings.serviceTier,
+    model: model.id,
+    serviceTier: compatibleManagedChildTier(model, [
+      task.resolvedServiceTier,
+      settings.serviceTier,
+    ]),
     personality: settings.personality,
   });
 }

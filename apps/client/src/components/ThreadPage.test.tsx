@@ -1486,6 +1486,32 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Создать ответвление отсюда" })).toBeNull();
   });
 
+  it("offers a fork on a completed plan alongside both implementation choices", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+
+    const fork = screen.getByRole("button", { name: "Создать ответвление отсюда" });
+    expect(fork.closest("article")).toHaveClass("plan");
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Запустить в режиме оркестратора" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(fork);
+
+    await waitFor(() =>
+      expect(api.forkThread).toHaveBeenCalledWith("thread", {
+        lastTurnId: "plan-turn",
+        agentMessageId: "plan",
+      }),
+    );
+  });
+
   it("disables all fork actions, dispatches the result, navigates, and focuses the composer", async () => {
     let resolveFork: ((value: { thread: ThreadSummary }) => void) | undefined;
     const api = threadApi();

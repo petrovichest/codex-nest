@@ -490,6 +490,29 @@ describe("StateStore", () => {
     });
   });
 
+  it("retires hard budgets from unfinished tasks while preserving completed history", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    state.threadMeta.parent.teamOrchestration.tasks.running = {
+      ...managedTaskFixture("running", 3),
+      status: "running",
+      childTurnId: "running-turn",
+      timeoutMinutes: 5,
+      tokenBudget: 1_000,
+      budgetReason: "tokenBudget",
+    };
+    await writeFile(path, JSON.stringify(state), "utf8");
+
+    const store = new StateStore(path);
+    await store.load();
+
+    const tasks = store.snapshot().threadMeta.parent?.teamOrchestration?.tasks;
+    expect(tasks?.running).not.toHaveProperty("timeoutMinutes");
+    expect(tasks?.running).not.toHaveProperty("tokenBudget");
+    expect(tasks?.running).not.toHaveProperty("budgetReason");
+    expect(tasks?.task).toMatchObject({ timeoutMinutes: 30, tokenBudget: 10_000 });
+  });
+
   it("migrates the latest versioned Team state to the single managed-tool contract", async () => {
     const { path } = await temporaryState();
     const state = validManagedTeamSerializedState();

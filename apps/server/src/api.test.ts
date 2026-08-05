@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app";
-import { enforceTeamTimeBudgets, triggerTeamWatchdogs } from "./api";
+import { triggerTeamWatchdogs } from "./api";
 import type { AppManager } from "./app-management";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
@@ -1428,6 +1428,54 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
+  it("forks through a completed plan and preserves Plan mode", async () => {
+    const harness = await createForkHarness();
+    await harness.projection.setSettings("thread", {
+      collaborationMode: "plan",
+      model: "gpt-b",
+      reasoningEffort: "low",
+    });
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("plan-turn", "completed"),
+        itemsView: "full",
+        items: [
+          agentMessage("earlier-answer", "Предварительный ответ"),
+          { type: "plan", id: "selected-plan", text: "План реализации с проверками" },
+        ],
+      },
+    ]);
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/forks",
+      headers: harness.headers,
+      payload: { lastTurnId: "plan-turn", agentMessageId: "selected-plan" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().thread).toMatchObject({
+      id: "fork",
+      state: "completed",
+      settings: {
+        collaborationMode: "plan",
+        model: "gpt-b",
+        reasoningEffort: "low",
+      },
+    });
+    expect(harness.threadTitles.generate).toHaveBeenCalledWith("План реализации с проверками", {
+      cwd: "/work",
+      model: "gpt-b",
+      effort: "low",
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith("thread/fork", {
+      threadId: "thread",
+      lastTurnId: "plan-turn",
+      excludeTurns: true,
+    });
+    await harness.app.close();
+  });
+
   it("rejects missing, subagent, unfinished, missing, and mismatched fork points", async () => {
     const harness = await createForkHarness();
     harness.bridge.missingThreadIds.add("missing");
@@ -2095,6 +2143,25 @@ describe("thread settings", () => {
       config: { agents: { enabled: false } },
       dynamicTools: expect.any(Array),
     });
+    const teamThreadStart = bridge.request.mock.calls
+      .filter(([method]) => method === "thread/start")
+      .at(-1)?.[1] as {
+      dynamicTools?: Array<{
+        type: string;
+        tools?: Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+      }>;
+    };
+    const managedTools = teamThreadStart.dynamicTools?.find(
+      (candidate) => candidate.type === "namespace",
+    )?.tools;
+    for (const toolName of ["spawn_task", "followup_task"]) {
+      const properties = managedTools?.find((candidate) => candidate.name === toolName)?.inputSchema
+        .properties;
+      expect(properties).toHaveProperty("reasoningEffort");
+      expect(properties).not.toHaveProperty("model");
+      expect(properties).not.toHaveProperty("tokenBudget");
+      expect(properties).not.toHaveProperty("timeoutMinutes");
+    }
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
     ).toMatchObject({
@@ -3589,11 +3656,8 @@ describe("Team orchestration", () => {
         title: "Read-only audit",
         prompt: "Inspect the current implementation.",
         access: { mode: "readOnly", network: false },
-        model: "gpt-a",
         reasoningEffort: "high",
         serviceTier: "fast",
-        timeoutMinutes: 5,
-        tokenBudget: 2_000,
       }),
     );
     await vi.waitFor(() => {
@@ -3612,10 +3676,22 @@ describe("Team orchestration", () => {
       runtimeWorkspaceRoots: ["/work"],
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
-      model: "gpt-a",
+      model: "gpt-5.6-sol",
       effort: "high",
       serviceTier: "fast",
     });
+    const childThreadStart = bridge.request.mock.calls.find(
+      ([method, params]) =>
+        method === "thread/start" &&
+        String((params as Record<string, unknown>).threadSource).startsWith("codexnest-managed:"),
+    )?.[1];
+    expect(childThreadStart).toMatchObject({ model: "gpt-5.6-sol", serviceTier: "fast" });
+    const childResume = bridge.request.mock.calls.find(
+      ([method, params]) =>
+        method === "thread/resume" &&
+        (params as Record<string, unknown>).threadId === spawned.threadId,
+    )?.[1];
+    expect(childResume).toMatchObject({ model: "gpt-5.6-sol", serviceTier: "fast" });
 
     const submitted = await callTeamTool(bridge, String(spawned.threadId), "submit_result", {
       outcome: "success",
@@ -3651,13 +3727,50 @@ describe("Team orchestration", () => {
         expect.objectContaining({
           taskId: spawned.taskId,
           access: { mode: "readOnly", network: false },
-          tokenBudget: 2_000,
-          timeoutMinutes: 5,
+          model: "gpt-5.6-sol",
+          reasoningEffort: "high",
         }),
       ]),
     );
+    expect((listed.tasks as Array<Record<string, unknown>>)[0]).not.toHaveProperty("tokenBudget");
+    expect((listed.tasks as Array<Record<string, unknown>>)[0]).not.toHaveProperty(
+      "timeoutMinutes",
+    );
     await app.close();
     await store.flushed();
+  });
+
+  it("rejects unsupported managed-child effort before creating a thread", async () => {
+    const { app, bridge } = await createTeamHarness();
+
+    const response = await callTeamTool(bridge, "thread", "spawn_task", {
+      title: "Unsupported effort",
+      prompt: "Do not start.",
+      reasoningEffort: "low",
+    });
+
+    expect(response.success).toBe(false);
+    expect(response.contentItems[0]?.text).toContain(
+      "The requested reasoning effort is unavailable",
+    );
+    expect(bridge.managedThreads).toHaveLength(0);
+    await app.close();
+  });
+
+  it("rejects managed tasks when gpt-5.6-sol is unavailable", async () => {
+    const { app, bridge } = await createTeamHarness({ includeManagedModel: false });
+
+    const response = await callTeamTool(bridge, "thread", "spawn_task", {
+      title: "Missing fixed model",
+      prompt: "Do not start.",
+    });
+
+    expect(response.success).toBe(false);
+    expect(response.contentItems[0]?.text).toContain(
+      "The required managed-task model gpt-5.6-sol is unavailable",
+    );
+    expect(bridge.managedThreads).toHaveLength(0);
+    await app.close();
   });
 
   it("blocks isolated integration while a shared-write task is active", async () => {
@@ -3987,31 +4100,24 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("hard-stops Team tasks at token and time budgets", async () => {
+  it("tracks Team task usage without enforcing retired token or time budgets", async () => {
     const { app, bridge, store } = await createTeamHarness();
-    const tokenTask = dynamicToolJson(
+    const taskResult = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
-        title: "Token limited",
+        title: "Unbounded task",
         prompt: "Inspect briefly.",
+        // Simulate a stale caller that still sends retired fields. Production tool schemas reject
+        // these additional properties, and the handler must never turn them into hard limits.
         tokenBudget: 10,
-      }),
-    );
-    const timeTask = dynamicToolJson(
-      await callTeamTool(bridge, "thread", "spawn_task", {
-        title: "Time limited",
-        prompt: "Inspect briefly.",
         timeoutMinutes: 1,
       }),
     );
     await vi.waitFor(() => {
-      expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(tokenTask.taskId)]
-          ?.status,
-      ).toBe("running");
-      expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(timeTask.taskId)]
-          ?.status,
-      ).toBe("running");
+      const task =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(taskResult.taskId)];
+      expect(task?.status).toBe("running");
+      expect(task).not.toHaveProperty("tokenBudget");
+      expect(task).not.toHaveProperty("timeoutMinutes");
     });
     const usage = {
       totalTokens: 10,
@@ -4024,96 +4130,44 @@ describe("Team orchestration", () => {
     bridge.emit("notification", {
       method: "thread/tokenUsage/updated",
       params: {
-        threadId: String(tokenTask.threadId),
-        turnId: `turn-${String(tokenTask.threadId)}`,
+        threadId: String(taskResult.threadId),
+        turnId: `turn-${String(taskResult.threadId)}`,
         tokenUsage: { total: usage, last: usage, modelContextWindow: 100_000 },
       },
     } satisfies ServerNotification);
     await vi.waitFor(() => {
       const task =
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(tokenTask.taskId)];
-      expect(task?.budgetReason).toBe("tokenBudget");
-      expect(task?.failureReason).toBeUndefined();
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(taskResult.taskId)];
+      expect(task?.tokensUsed).toBe(10);
+      expect(task).not.toHaveProperty("budgetReason");
     });
-    await vi.waitFor(() =>
-      expect(
-        bridge.request.mock.calls.filter(
-          ([method, params]) =>
-            method === "turn/interrupt" &&
-            (params as Record<string, unknown>).threadId === tokenTask.threadId,
-        ),
-      ).toHaveLength(1),
-    );
-    await expect(
-      enforceTeamTimeBudgets(bridge as unknown as CodexBridge, store, Date.now()),
-    ).resolves.toEqual(new Set(["thread"]));
     expect(
       bridge.request.mock.calls.filter(
         ([method, params]) =>
           method === "turn/interrupt" &&
-          (params as Record<string, unknown>).threadId === tokenTask.threadId,
+          (params as Record<string, unknown>).threadId === taskResult.threadId,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
 
     bridge.emit("notification", {
       method: "turn/completed",
       params: {
-        threadId: String(tokenTask.threadId),
+        threadId: String(taskResult.threadId),
         turn: {
-          ...testTurn(`turn-${String(tokenTask.threadId)}`, "completed"),
+          ...testTurn(`turn-${String(taskResult.threadId)}`, "completed"),
           itemsView: "full",
         },
       },
     } satisfies ServerNotification);
     await vi.waitFor(() => {
       const task =
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(tokenTask.taskId)];
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(taskResult.taskId)];
       expect(task?.result).toMatchObject({
-        outcome: "failed",
+        outcome: "success",
         summary: "Managed task completed without an agent message.",
       });
       expect(task?.failureReason).toBeUndefined();
     });
-
-    const timeState =
-      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(timeTask.taskId)];
-    bridge.failInterrupts = 1;
-    await expect(
-      enforceTeamTimeBudgets(
-        bridge as unknown as CodexBridge,
-        store,
-        (timeState?.startedAt ?? Date.now()) + 60_001,
-      ),
-    ).resolves.toEqual(new Set(["thread"]));
-    await expect(
-      enforceTeamTimeBudgets(
-        bridge as unknown as CodexBridge,
-        store,
-        (timeState?.startedAt ?? Date.now()) + 60_002,
-      ),
-    ).resolves.toEqual(new Set(["thread"]));
-    expect(
-      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(timeTask.taskId)]
-        ?.budgetReason,
-    ).toBe("timeout");
-    const interrupted = bridge.request.mock.calls.filter(([method]) => method === "turn/interrupt");
-    expect(interrupted).toEqual(
-      expect.arrayContaining([
-        expect.arrayContaining([
-          "turn/interrupt",
-          expect.objectContaining({ threadId: tokenTask.threadId }),
-        ]),
-        expect.arrayContaining([
-          "turn/interrupt",
-          expect.objectContaining({ threadId: timeTask.threadId }),
-        ]),
-      ]),
-    );
-    expect(
-      interrupted.filter(
-        ([, params]) => (params as Record<string, unknown>).threadId === timeTask.threadId,
-      ),
-    ).toHaveLength(2);
     await app.close();
     await store.flushed();
   });
@@ -4394,6 +4448,7 @@ class SettingsBridge extends EventEmitter {
   managedTurnSequences = new Map<string, number>();
   managedThreads: Thread[] = [];
   threadTurns = new Map<string, Turn[]>();
+  includeManagedModel = true;
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
@@ -4408,6 +4463,9 @@ class SettingsBridge extends EventEmitter {
         data: [
           testModel("gpt-a", "high", true, [{ id: "fast", name: "Fast" }]),
           testModel("gpt-b", "low", false, []),
+          ...(this.includeManagedModel
+            ? [testModel("gpt-5.6-sol", "high", true, [{ id: "fast", name: "Fast" }])]
+            : []),
         ],
         nextCursor: null,
       };
@@ -4707,7 +4765,9 @@ async function createForkHarness() {
   };
 }
 
-async function createTeamHarness(options: { lifecycle?: boolean; projectPath?: string } = {}) {
+async function createTeamHarness(
+  options: { lifecycle?: boolean; projectPath?: string; includeManagedModel?: boolean } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-team-api-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -4723,6 +4783,7 @@ async function createTeamHarness(options: { lifecycle?: boolean; projectPath?: s
     });
   });
   const bridge = new SettingsBridge();
+  bridge.includeManagedModel = options.includeManagedModel ?? true;
   const attention = new AttentionManager();
   const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
   await projection.sync();

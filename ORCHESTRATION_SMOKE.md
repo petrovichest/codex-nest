@@ -18,8 +18,10 @@ Team chats to the single current contract.
 ## Verified behavior
 
 - Tasks are read-only and offline by default. Explicit grants support isolated
-  worktrees, shared parent writes, scoped network access, model/reasoning/service
-  settings, dependencies, follow-ups, and hard time/token budgets.
+  worktrees, shared parent writes, scoped network access, reasoning/service
+  settings, dependencies, and follow-ups. Managed children use `gpt-5.6-sol`
+  with a task-selected supported reasoning effort and have no CodexNest time or
+  token budget.
 - Structured child results are delivered exactly once to the parent and shown as
   bounded orchestration history in the client.
 - Isolated workspaces reproduce tracked and non-ignored parent state without

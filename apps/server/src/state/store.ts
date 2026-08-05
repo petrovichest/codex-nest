@@ -117,6 +117,7 @@ export interface ManagedTeamTaskState {
   resolvedModel?: string;
   resolvedReasoningEffort?: string | null;
   resolvedServiceTier?: string | null;
+  // Retained only so completed tasks from releases with hard budgets remain readable.
   timeoutMinutes?: number;
   tokenBudget?: number;
   tokensUsed?: number;
@@ -461,6 +462,7 @@ function validateState(value: unknown): CodexNestState {
         meta.settings.collaborationMode = "default";
       }
     }
+    if (isRecord(meta)) retireActiveManagedTaskBudgets(meta.teamOrchestration);
     if (
       !isRecord(meta) ||
       typeof meta.pinned !== "boolean" ||
@@ -544,6 +546,20 @@ function validateState(value: unknown): CodexNestState {
     ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
     ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
   };
+}
+
+function retireActiveManagedTaskBudgets(value: unknown): void {
+  if (!isRecord(value) || !isRecord(value.tasks)) return;
+  for (const task of Object.values(value.tasks)) {
+    if (!isRecord(task) || !["queued", "starting", "running"].includes(String(task.status))) {
+      continue;
+    }
+    delete task.timeoutMinutes;
+    delete task.tokenBudget;
+    if (["timeout", "tokenBudget"].includes(String(task.budgetReason))) {
+      delete task.budgetReason;
+    }
+  }
 }
 
 function normalizeTranscriptionTimings(

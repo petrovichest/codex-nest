@@ -2660,7 +2660,7 @@ export function ThreadPage({
                 {detail?.turns.map((turn) => {
                   const entries = groupedTurnActivities.get(turn.id)!;
                   const technicalItems = technicalTurnActivities.get(turn.id)!;
-                  const forkAgentMessageId = findForkAgentMessageId(turn);
+                  const forkResponseId = findForkResponseId(turn);
                   const turnOptimisticMessages = optimisticTurnMessages.filter(
                     (message) =>
                       message.turnId === turn.id ||
@@ -2701,7 +2701,7 @@ export function ThreadPage({
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
                               forkAction={
-                                !isSubagent && entry.id === forkAgentMessageId
+                                !isSubagent && entry.id === forkResponseId
                                   ? {
                                       disabled: forking,
                                       onFork: () => void forkFromTurn(turn.id, entry.id),
@@ -3388,7 +3388,7 @@ export function Activity({
             onDelete={onDeleteAnnotation}
           />
         </div>
-        <MessageFooter text={item.text} timestamp={item.timestamp} />
+        <MessageFooter text={item.text} timestamp={item.timestamp} forkAction={forkAction} />
       </article>
     );
   }
@@ -4487,14 +4487,16 @@ function hasVisibleActivity(item: ActivityItem): boolean {
   return true;
 }
 
-function findForkAgentMessageId(turn: TurnView): string | null {
+function findForkResponseId(turn: TurnView): string | null {
   if (turn.status !== "completed") return null;
   return (
     [...turn.items]
       .reverse()
       .find(
         (item) =>
-          item.type === "agentMessage" && item.status === "completed" && Boolean(item.text.trim()),
+          (item.type === "agentMessage" || item.type === "plan") &&
+          item.status === "completed" &&
+          Boolean(item.text.trim()),
       )?.id ?? null
   );
 }

@@ -233,11 +233,12 @@ remain isolated until the root calls the managed integration tool; conflicts
 leave the parent checkout untouched. Commit, push, and deployment remain root
 operations.
 
-Tasks may declare dependencies, model/reasoning settings, and hard time or token
-budgets. Results are structured and retained as bounded history, and a delivered
-task can be continued in the same child thread. CodexNest exposes one current
-managed-tool contract; chats created with retired tools remain available as
-ordinary sessions.
+Tasks may declare dependencies, reasoning settings, and a service tier. Every
+managed child turn runs on `gpt-5.6-sol`; the root may select any reasoning
+effort supported by that model. Tasks have no CodexNest time or token budget.
+Results are structured and retained as bounded history, and a delivered task can
+be continued in the same child thread. CodexNest exposes one current managed-tool
+contract; chats created with retired tools remain available as ordinary sessions.
 
 ## Explicit non-goals for the first release
 
