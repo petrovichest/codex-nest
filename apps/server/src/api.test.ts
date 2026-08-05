@@ -2094,6 +2094,25 @@ describe("thread settings", () => {
         },
       },
     });
+    const teamContext = (
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1] as {
+        additionalContext?: Record<string, { value?: unknown }>;
+      }
+    ).additionalContext?.["codexnest.team"]?.value;
+    expect(teamContext).toEqual(
+      expect.stringContaining(
+        "set access.network to true in that case and leave it false for local-only work",
+      ),
+    );
+    expect(teamContext).toEqual(
+      expect.stringContaining("Never run parallel sharedWrite tasks whose write paths overlap"),
+    );
+    expect(teamContext).toEqual(
+      expect.stringContaining("Parallel isolatedWrite tasks may edit overlapping files"),
+    );
+    expect(teamContext).toEqual(
+      expect.stringContaining("codexnest.inspect_task to obtain workspacePath"),
+    );
     const startsBeforeInvalidTeamGoal = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/start",
     ).length;
@@ -3684,6 +3703,88 @@ describe("Team orchestration", () => {
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(isolated.taskId)]
         ?.workspace?.lifecycle,
     ).not.toBe("integrating");
+    await app.close();
+    await store.flushed();
+  });
+
+  it("exposes overlapping isolated workspaces for sequential root-side synthesis", async () => {
+    const repository = await createApiTestRepository();
+    const { app, bridge, store } = await createTeamHarness({
+      version: 2,
+      projectPath: repository,
+    });
+    const first = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "First isolated approach",
+        prompt: "Change src/index.ts using the first approach.",
+        access: { mode: "isolatedWrite", writePaths: ["src"] },
+      }),
+    );
+    const second = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Second isolated approach",
+        prompt: "Change src/index.ts using the second approach.",
+        access: { mode: "isolatedWrite", writePaths: ["src"] },
+      }),
+    );
+    await vi.waitFor(() => {
+      const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
+      expect(tasks[String(first.taskId)]?.status).toBe("running");
+      expect(tasks[String(second.taskId)]?.status).toBe("running");
+      expect(tasks[String(first.taskId)]?.workspace?.worktreePath).toBeTruthy();
+      expect(tasks[String(second.taskId)]?.workspace?.worktreePath).toBeTruthy();
+    });
+    const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
+    const firstWorkspace = tasks[String(first.taskId)]?.workspace;
+    const secondWorkspace = tasks[String(second.taskId)]?.workspace;
+    if (!firstWorkspace || !secondWorkspace) throw new Error("Expected isolated workspaces");
+    expect(firstWorkspace.worktreePath).not.toBe(secondWorkspace.worktreePath);
+
+    await writeFile(join(firstWorkspace.worktreePath, "src", "index.ts"), "first approach\n");
+    await writeFile(join(secondWorkspace.worktreePath, "src", "index.ts"), "second approach\n");
+    await store.update((state) => {
+      for (const taskId of [String(first.taskId), String(second.taskId)]) {
+        const task = state.threadMeta.thread?.teamOrchestration?.tasks[taskId];
+        if (!task) continue;
+        task.status = "completed";
+        task.terminalTurnId = String(task.childTurnId);
+        task.result = { outcome: "success", summary: "Approach ready.", source: "submitted" };
+      }
+    });
+
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "integrate_task", {
+          taskId: first.taskId,
+        })
+      ).success,
+    ).toBe(true);
+    const conflicting = await callTeamTool(bridge, "thread", "integrate_task", {
+      taskId: second.taskId,
+    });
+    expect(conflicting.success).toBe(false);
+    expect(conflicting.contentItems[0]?.text).toContain("parent workspace changed");
+
+    const inspected = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "inspect_task", { taskId: second.taskId }),
+    );
+    expect(inspected.workspacePath).toBe(secondWorkspace.worktreePath);
+    expect(inspected.workspace).toMatchObject({
+      lifecycle: "conflicted",
+      conflictPaths: ["src/index.ts"],
+    });
+
+    await writeFile(join(repository, "src", "index.ts"), "merged first and second approaches\n");
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "discard_task_changes", {
+          taskId: second.taskId,
+        })
+      ).success,
+    ).toBe(true);
+    await expect(readFile(join(repository, "src", "index.ts"), "utf8")).resolves.toBe(
+      "merged first and second approaches\n",
+    );
     await app.close();
     await store.flushed();
   });

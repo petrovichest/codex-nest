@@ -183,8 +183,11 @@ const TEAM_MODE_CONTEXT = [
   "After scheduling all tasks that are ready now, finish the turn instead of waiting; child completion automatically notifies and resumes this parent session.",
   "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
+  "Grant network access only when a managed task requires external access such as documentation, package downloads, remote APIs, or health checks; set access.network to true in that case and leave it false for local-only work.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
-  "Never run parallel subagents that may write to overlapping files.",
+  "Never run parallel sharedWrite tasks whose write paths overlap.",
+  "Parallel isolatedWrite tasks may edit overlapping files when comparing alternatives or when their results will be synthesized; their worktrees remain separate.",
+  "Integrate isolated results sequentially. If an isolated result conflicts after another result changed the parent, call codexnest.inspect_task to obtain workspacePath, compare that workspace with the parent, manually merge the required changes in the parent, and then call codexnest.discard_task_changes for that workspace.",
   "Use codexnest.inspect_task, codexnest.steer_task, or codexnest.cancel_task when a watchdog reports that a task is silent.",
   "You may write managed-task prompts and steering messages in English whenever you judge that it improves efficiency or precision, regardless of the user's language.",
   "Keep concise task titles and the consolidated user-facing response in the user's language.",
@@ -293,7 +296,11 @@ const TEAM_ACCESS_SCHEMA = {
       items: { type: "string" },
       description: "Repository-relative writable paths. Required for write modes.",
     },
-    network: { type: "boolean", description: "Allow network access. Defaults to false." },
+    network: {
+      type: "boolean",
+      description:
+        "Allow network access when the task requires documentation, downloads, remote APIs, or health checks. Defaults to false.",
+    },
   },
   additionalProperties: false,
 } as const;
@@ -345,12 +352,16 @@ const TEAM_ROOT_DYNAMIC_TOOLS = [
         properties: {},
         additionalProperties: false,
       }),
-      dynamicTool("inspect_task", "Inspect the current progress of one managed task.", {
-        type: "object",
-        properties: { taskId: { type: "string" } },
-        required: ["taskId"],
-        additionalProperties: false,
-      }),
+      dynamicTool(
+        "inspect_task",
+        "Inspect one managed task and obtain its isolated workspace path for review or synthesis.",
+        {
+          type: "object",
+          properties: { taskId: { type: "string" } },
+          required: ["taskId"],
+          additionalProperties: false,
+        },
+      ),
       dynamicTool("steer_task", "Send corrective guidance to a running managed task.", {
         type: "object",
         properties: { taskId: { type: "string" }, message: { type: "string" } },
@@ -3213,6 +3224,10 @@ async function handleManagedTeamToolCall(
     }
     return dynamicToolSuccess({
       ...publicManagedTask(task, store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks),
+      workspacePath:
+        task.workspace && !["integrated", "discarded"].includes(task.workspace.lifecycle)
+          ? task.workspace.worktreePath
+          : null,
       recentMessages,
     });
   }

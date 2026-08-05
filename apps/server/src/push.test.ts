@@ -89,5 +89,25 @@ describe("PushNotifier", () => {
         },
       }),
     );
+
+    await store.update((state) => {
+      state.threadMeta.child = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "thread", taskId: "task" },
+      };
+    });
+    firebase.sendEachForMulticast.mockClear();
+    await notifier.send("child", "completed");
+    await notifier.send("child", "failed");
+    expect(firebase.sendEachForMulticast).not.toHaveBeenCalled();
+
+    await notifier.send("child", "attention");
+    expect(firebase.sendEachForMulticast).toHaveBeenCalledOnce();
+    expect(firebase.sendEachForMulticast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { threadId: "child", eventType: "attention" },
+      }),
+    );
   });
 });
