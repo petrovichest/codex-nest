@@ -1,8 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
 
-import { clientReducer, initialState, mergeThreadDetailChanges, sortThreads } from "./state";
+import {
+  clientReducer,
+  createClientStore,
+  initialState,
+  mergeThreadDetailChanges,
+  sortThreads,
+} from "./state";
 
 const baseThread: ThreadSummary = {
   id: "one",
@@ -24,7 +30,10 @@ const baseThread: ThreadSummary = {
 };
 
 const snapshot: AppSnapshot = {
-  sequence: 4,
+  protocolVersion: 2,
+  epoch: "test",
+  revision: 4,
+  projectionStatus: "ready",
   uiLanguage: "ru",
   connection: { state: "ready", message: null, syncedAt: null },
   projects: [],
@@ -35,6 +44,95 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("keeps hydrated cache read-only until a strict replay completes", () => {
+    const store = createClientStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.dispatch({ type: "hydrate", snapshot, goals: {} });
+
+    expect(store.getSnapshot().syncStatus).toBe("syncing");
+    store.dispatch({
+      type: "event",
+      epoch: "test",
+      revision: 6,
+      event: { type: "uiLanguage.changed", language: "en" },
+    });
+    expect(store.getSnapshot().snapshot?.revision).toBe(4);
+
+    store.dispatch({
+      type: "replay",
+      epoch: "test",
+      fromRevision: 4,
+      toRevision: 5,
+      patches: [
+        {
+          revision: 5,
+          event: { type: "uiLanguage.changed", language: "en" },
+        },
+      ],
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      network: "connected",
+      syncStatus: "synced",
+      snapshot: { revision: 5, uiLanguage: "en" },
+    });
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects patch gaps and epoch changes", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    for (const [epoch, revision] of [
+      ["test", 6],
+      ["other", 5],
+    ] as const) {
+      state = clientReducer(state, {
+        type: "event",
+        epoch,
+        revision,
+        event: { type: "uiLanguage.changed", language: "en" },
+      });
+    }
+    expect(state.snapshot).toMatchObject({ epoch: "test", revision: 4, uiLanguage: "ru" });
+
+    state = clientReducer(state, {
+      type: "event",
+      epoch: "test",
+      revision: 5,
+      event: { type: "uiLanguage.changed", language: "en" },
+    });
+    expect(state.snapshot).toMatchObject({ epoch: "test", revision: 5, uiLanguage: "en" });
+  });
+
+  it("applies server-backed drafts only through the revision stream", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+        draft: null,
+      },
+    });
+    const draft = {
+      input: "Сохранено",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 10,
+    };
+    state = clientReducer(state, {
+      type: "event",
+      epoch: "test",
+      revision: 5,
+      event: { type: "draft.changed", threadId: "one", draft },
+    });
+    expect(state.details.one?.draft).toEqual(draft);
+    expect(state.snapshot?.revision).toBe(5);
+  });
+
   it("resets all projection data on a reconnect snapshot", () => {
     const dirty = {
       ...initialState,
@@ -48,70 +146,45 @@ describe("clientReducer", () => {
     expect(next.details.old).toBeDefined();
   });
 
-  it("keeps cached sessions until the first authoritative server snapshot", () => {
-    const cached = { ...snapshot, sequence: 40, threads: [baseThread] };
+  it("invalidates epoch-scoped detail and goal projections", () => {
+    const dirty = {
+      ...clientReducer(initialState, { type: "snapshot", snapshot }),
+      details: {
+        one: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+      },
+      goals: { one: null },
+    };
+
+    const next = clientReducer(dirty, {
+      type: "snapshot",
+      snapshot: { ...snapshot, epoch: "replacement", revision: 0 },
+    });
+
+    expect(next.snapshot).toMatchObject({ epoch: "replacement", revision: 0 });
+    expect(next.details).toEqual({});
+    expect(next.goals).toEqual({});
+  });
+
+  it("atomically replaces the cache with the first authoritative server snapshot", () => {
+    const cached = { ...snapshot, revision: 40, threads: [baseThread] };
     let state = clientReducer(initialState, { type: "hydrate", snapshot: cached, goals: {} });
     state = clientReducer(state, {
       type: "snapshot",
-      snapshot: { ...snapshot, sequence: 1, threads: [] },
+      snapshot: { ...snapshot, revision: 1, threads: [] },
     });
-    expect(state.snapshot?.threads).toEqual([baseThread]);
-    expect(state.snapshot?.sequence).toBe(1);
+    expect(state.snapshot?.threads).toEqual([]);
+    expect(state.snapshot?.revision).toBe(1);
 
     state = clientReducer(state, {
       type: "snapshot",
       snapshot: {
         ...snapshot,
-        sequence: 2,
+        revision: 2,
         connection: { ...snapshot.connection, syncedAt: "2026-08-03T00:00:00.000Z" },
         threads: [],
       },
     });
     expect(state.snapshot?.threads).toEqual([]);
-  });
-
-  it("appends compact activity deltas without replacing the whole item", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [
-          {
-            ...turn("turn"),
-            status: "inProgress",
-            itemsLoaded: false,
-            items: [
-              {
-                type: "agentMessage",
-                id: "answer",
-                status: "inProgress",
-                text: "Начало",
-                images: [],
-                timestamp: 1,
-                phase: "commentary",
-              },
-            ],
-          },
-        ],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 5,
-      event: {
-        type: "activity.delta",
-        threadId: "one",
-        turnId: "turn",
-        itemId: "answer",
-        activityType: "agentMessage",
-        delta: " ответа",
-      },
-    });
-    expect(state.details.one?.turns[0]?.items[0]).toMatchObject({ text: "Начало ответа" });
   });
 
   it("does not let a stale reset roll back live progress", () => {
@@ -218,14 +291,16 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "defaultReasoningEffort.changed", reasoningEffort: "high" },
     });
     expect(state.snapshot?.defaultReasoningEffort).toBe("high");
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: { type: "defaultReasoningEffort.changed", reasoningEffort: null },
     });
     expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
@@ -234,33 +309,94 @@ describe("clientReducer", () => {
   it("applies the server-synchronized interface language", () => {
     const state = clientReducer(clientReducer(initialState, { type: "snapshot", snapshot }), {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "uiLanguage.changed", language: "en" },
     });
 
     expect(state.snapshot?.uiLanguage).toBe("en");
-    expect(state.snapshot?.sequence).toBe(5);
+    expect(state.snapshot?.revision).toBe(5);
   });
 
-  it("invalidates loaded thread details when the server requires a resync", () => {
+  it("invalidates loaded thread details on an authoritative resync", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+    });
     const epoch = state.snapshotEpoch;
 
     state = clientReducer(state, {
-      type: "event",
-      sequence: 5,
-      event: { type: "resync.required" },
+      type: "resync",
+      snapshot: { ...snapshot, revision: 5, threads: [] },
     });
 
-    expect(state.snapshot?.sequence).toBe(5);
+    expect(state.snapshot?.revision).toBe(5);
+    expect(state.snapshot?.threads).toEqual([]);
+    expect(state.details).toEqual({});
     expect(state.snapshotEpoch).toBe(epoch + 1);
+  });
+
+  it("applies an atomic reconciliation replacement as one ordinary revision", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: { summary: baseThread, turns: [], queuedMessages: [], olderTurnsCursor: null },
+    });
+    const reconciledThread = { ...baseThread, title: "Reconciled", updatedAt: 8 };
+
+    state = clientReducer(state, {
+      type: "event",
+      epoch: "test",
+      revision: 5,
+      event: {
+        type: "projection.replaced",
+        snapshot: {
+          ...snapshot,
+          revision: 4,
+          threads: [reconciledThread],
+          connection: { ...snapshot.connection, syncedAt: "2026-08-05T00:00:00.000Z" },
+        },
+      },
+    });
+
+    expect(state.snapshot).toMatchObject({
+      epoch: "test",
+      revision: 5,
+      threads: [{ id: "one", title: "Reconciled" }],
+    });
+    expect(state.details.one?.summary.title).toBe("Reconciled");
+  });
+
+  it("enables commands when reconciliation completes through an ordinary patch", () => {
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, projectionStatus: "reconciling" },
+    });
+    expect(state.syncStatus).toBe("syncing");
+
+    state = clientReducer(state, {
+      type: "event",
+      epoch: "test",
+      revision: 5,
+      event: {
+        type: "projection.replaced",
+        snapshot: { ...snapshot, revision: 4, projectionStatus: "ready" },
+      },
+    });
+
+    expect(state.network).toBe("connected");
+    expect(state.syncStatus).toBe("synced");
   });
 
   it("applies task defaults and native goal events without polling", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "taskDefaults.changed",
         taskDefaults: { serviceTier: "fast", personality: "friendly" },
@@ -278,7 +414,8 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: { type: "goal.changed", threadId: "one", goal },
     });
 
@@ -308,14 +445,16 @@ describe("clientReducer", () => {
     const transcribing = { ...job, status: "transcribing" as const, startedAt: 11 };
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "voiceTranscription.upserted", job: transcribing },
     });
     expect(state.snapshot?.voiceTranscriptions).toEqual([transcribing]);
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: {
         type: "voiceTranscription.removed",
         threadId: "one",
@@ -346,7 +485,8 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "voiceTranscription.upserted", job: transcribing },
     });
 
@@ -386,7 +526,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -404,7 +545,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -475,14 +617,15 @@ describe("clientReducer", () => {
       page: "latest",
     });
 
-    for (const [sequence, item] of [
+    for (const [revision, item] of [
       [5, message("+40", 20)],
       [6, message("same-time", 36)],
       [7, message("unknown-time", null)],
     ] as const) {
       state = clientReducer(state, {
         type: "event",
-        sequence,
+        epoch: "test",
+        revision,
         event: { type: "activity.upserted", threadId: "one", turnId: "turn", item },
       });
     }
@@ -510,7 +653,8 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "thread.upserted", thread: updated },
     });
     expect(state.snapshot?.threads[0]?.settings).toEqual(updated.settings);
@@ -533,7 +677,8 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: { type: "projects.reordered", projects: [two, one] },
     });
 
@@ -580,7 +725,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "turn.progressed",
         threadId: "one",
@@ -597,7 +743,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: {
         type: "queue.changed",
         threadId: "one",
@@ -723,7 +870,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -786,7 +934,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -804,7 +953,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 6,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -877,7 +1027,8 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      epoch: "test",
+      revision: 7,
       event: {
         type: "queue.changed",
         threadId: "one",
@@ -927,7 +1078,8 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 8,
+      epoch: "test",
+      revision: 8,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1036,7 +1188,8 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 9,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1091,7 +1244,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      epoch: "test",
+      revision: 5,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1117,12 +1271,14 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      epoch: "test",
+      revision: 6,
       event: { type: "activity.upserted", threadId: "one", turnId: "turn", item: checklist },
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 8,
+      epoch: "test",
+      revision: 7,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1140,7 +1296,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 9,
+      epoch: "test",
+      revision: 8,
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1156,7 +1313,8 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 10,
+      epoch: "test",
+      revision: 9,
       event: {
         type: "activity.upserted",
         threadId: "one",

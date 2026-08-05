@@ -1,16 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, normalize, relative } from "node:path";
+import { constants } from "node:fs";
+import { chmod, copyFile, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import type {
   ActivityItem,
+  CommandReceipt as ProtocolCommandReceipt,
+  CommandReceiptStatus as ProtocolCommandReceiptStatus,
   Project,
   QueuedMessage,
   SessionSettings,
   TaskDefaults,
   ThreadDraft,
+  ThreadDetail,
   ThreadOutcome,
+  ServerEvent,
   UiLanguage,
   VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
@@ -278,27 +284,114 @@ export function emptyState(): CodexNestState {
   };
 }
 
+export interface ProjectionCursor {
+  epoch: string;
+  revision: number;
+}
+
+export interface PersistedProjection<T = unknown> extends ProjectionCursor {
+  snapshot: T | null;
+  updatedAt: number | null;
+}
+
+export interface PersistedProjectionEvent<T = unknown> extends ProjectionCursor {
+  createdAt: number;
+  patch: T;
+}
+
+export interface ProjectionDiagnostics extends ProjectionCursor {
+  lastEventAt: number | null;
+  lastReconciledAt: number | null;
+  projectionQueueDepth: number;
+  oldestPendingCommandAgeMs: number | null;
+  lastReceiveToCommitMs: number | null;
+  lastCommitToSendMs: number | null;
+}
+
+export type CommandReceiptStatus = ProtocolCommandReceiptStatus;
+
+export type CommandReceipt<T = unknown> = ProtocolCommandReceipt<T>;
+
+const PROJECTION_EVENT_RETENTION_MS = 24 * 60 * 60 * 1_000;
+const PROJECTION_EVENT_RETENTION_REVISIONS = 50_000;
+const MAX_REPLAY_PATCH_BYTES = 1_500_000;
+const RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const RECEIPT_RETENTION_COUNT = 50_000;
+const SQLITE_HEADER = "SQLite format 3\0";
+
 export class StateStore extends EventEmitter {
   private state = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
   private loaded = false;
+  private database: DatabaseSync | null = null;
 
   constructor(public readonly path: string) {
     super();
   }
 
   async load(): Promise<CodexNestState> {
+    if (this.loaded) return this.snapshot();
+    const parent = dirname(this.path);
+    const rotateEpochMarker = `${this.path}.rotate-epoch`;
+    const rotateEpoch = await pathExists(rotateEpochMarker);
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const targetExisted = await pathExists(this.path);
+    const legacy = await this.readLegacyState();
+    if (legacy) await this.migrateLegacyState(legacy);
+
+    const database = new DatabaseSync(this.path);
     try {
-      const serialized = await readFile(this.path, "utf8");
-      const parsed: unknown = JSON.parse(serialized);
-      this.state = validateState(parsed);
+      this.configureDatabase(database);
+      if (targetExisted && !legacy && !sqliteTableExists(database, "app_state")) {
+        throw new Error("Existing CodexNest SQLite state is missing app_state");
+      }
+      this.database = database;
+      this.createSchema(database);
+      if (rotateEpoch) {
+        this.transaction(() => {
+          const epoch = randomUUID();
+          database.prepare("UPDATE projection_meta SET epoch = ? WHERE id = 1").run(epoch);
+          const row = database
+            .prepare("SELECT snapshot FROM projection_snapshot WHERE id = 1")
+            .get() as { snapshot: string } | undefined;
+          if (row) {
+            const snapshot = JSON.parse(row.snapshot) as unknown;
+            const revision = this.projectionCursor().revision;
+            database
+              .prepare("UPDATE projection_snapshot SET snapshot = ?, updated_at = ? WHERE id = 1")
+              .run(JSON.stringify(withProjectionCursor(snapshot, epoch, revision)), Date.now());
+          }
+        });
+        await unlink(rotateEpochMarker).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+      database.prepare("UPDATE projection_meta SET projection_queue_depth = 0 WHERE id = 1").run();
+      await chmod(this.path, 0o600);
+
+      const row = database.prepare("SELECT json FROM app_state WHERE id = 1").get() as
+        { json: string } | undefined;
+      if (row) {
+        this.state = validateState(JSON.parse(row.json) as unknown);
+      } else {
+        if (targetExisted || legacy) {
+          throw new Error("Existing CodexNest SQLite state is missing application data");
+        }
+        this.state = emptyState();
+        this.transaction(() => {
+          database
+            .prepare("INSERT INTO app_state (id, json, updated_at) VALUES (1, ?, ?)")
+            .run(JSON.stringify(this.state), Date.now());
+        });
+      }
+      this.loaded = true;
+      return this.snapshot();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      this.state = emptyState();
-      await this.persist(this.state);
+      if (this.database === database) this.database = null;
+      database.close();
+      if (!targetExisted && !legacy) await removeMigrationFiles(this.path);
+      throw error;
     }
-    this.loaded = true;
-    return this.snapshot();
   }
 
   snapshot(): CodexNestState {
@@ -312,12 +405,14 @@ export class StateStore extends EventEmitter {
       const draft = structuredClone(this.state);
       const originalVerifier = this.state.auth.tokenSha256;
       await mutator(draft);
+      pruneStateReceipts(draft, Date.now());
       if (draft.auth.tokenSha256 === originalVerifier) {
-        try {
-          const disk = validateState(JSON.parse(await readFile(this.path, "utf8")) as unknown);
+        const row = this.requireDatabase()
+          .prepare("SELECT json FROM app_state WHERE id = 1")
+          .get() as { json: string } | undefined;
+        if (row) {
+          const disk = validateState(JSON.parse(row.json) as unknown);
           if (disk.auth.tokenSha256 !== originalVerifier) draft.auth = structuredClone(disk.auth);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       }
       const validated = validateState(draft);
@@ -338,6 +433,7 @@ export class StateStore extends EventEmitter {
     const task = this.writeQueue.then(async () => {
       if (!this.loaded) throw new Error("StateStore.load() must be called first");
       await this.persist(this.state);
+      this.requireDatabase().exec("PRAGMA wal_checkpoint(TRUNCATE)");
     });
     this.writeQueue = task.catch(() => undefined);
     await task;
@@ -345,44 +441,710 @@ export class StateStore extends EventEmitter {
 
   async refreshAuthVerifier(): Promise<boolean> {
     await this.writeQueue;
-    const parsed = validateState(JSON.parse(await readFile(this.path, "utf8")) as unknown);
+    const row = this.requireDatabase().prepare("SELECT json FROM app_state WHERE id = 1").get() as
+      { json: string } | undefined;
+    if (!row) throw new Error("CodexNest state is missing from SQLite");
+    const parsed = validateState(JSON.parse(row.json) as unknown);
     if (parsed.auth.tokenSha256 === this.state.auth.tokenSha256) return false;
     this.state.auth = structuredClone(parsed.auth);
     this.emit("authRotated");
     return true;
   }
 
-  private async persist(next: CodexNestState): Promise<void> {
-    const parent = dirname(this.path);
-    await mkdir(parent, { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(next, null, 2)}\n`, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
+  projection<T = unknown>(): PersistedProjection<T> {
+    const database = this.requireDatabase();
+    const cursor = this.projectionCursor();
+    const row = database
+      .prepare("SELECT snapshot, updated_at AS updatedAt FROM projection_snapshot WHERE id = 1")
+      .get() as { snapshot: string; updatedAt: number } | undefined;
+    return {
+      ...cursor,
+      snapshot: row ? (JSON.parse(row.snapshot) as T) : null,
+      updatedAt: row?.updatedAt ?? null,
+    };
+  }
+
+  projectionCursor(): ProjectionCursor {
+    const row = this.requireDatabase()
+      .prepare("SELECT epoch, revision FROM projection_meta WHERE id = 1")
+      .get() as { epoch: string; revision: number } | undefined;
+    if (!row) throw new Error("Projection metadata is missing from SQLite");
+    if (!row.epoch || !Number.isSafeInteger(row.revision) || row.revision < 0) {
+      throw new Error("Projection cursor is corrupt in SQLite");
     }
+    return row;
+  }
+
+  commitProjection<TSnapshot, TPatch>(
+    snapshot: TSnapshot,
+    patch: TPatch,
+    receivedAt = Date.now(),
+    queueDepth?: number,
+  ): PersistedProjectionEvent<TPatch> {
+    const database = this.requireDatabase();
+    const committedAt = Date.now();
+    let committed!: PersistedProjectionEvent<TPatch>;
+    this.transaction(() => {
+      const cursor = this.projectionCursor();
+      const revision = cursor.revision + 1;
+      const persistedSnapshot = withProjectionCursor(snapshot, cursor.epoch, revision);
+      database
+        .prepare(
+          "UPDATE projection_meta SET revision = ?, last_event_at = ?, last_receive_to_commit_ms = ?, projection_queue_depth = COALESCE(?, projection_queue_depth) WHERE id = 1",
+        )
+        .run(
+          revision,
+          committedAt,
+          Math.max(0, committedAt - receivedAt),
+          queueDepth === undefined ? null : Math.max(0, queueDepth),
+        );
+      database
+        .prepare(
+          "INSERT INTO projection_snapshot (id, snapshot, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot, updated_at = excluded.updated_at",
+        )
+        .run(JSON.stringify(persistedSnapshot), committedAt);
+      database
+        .prepare(
+          "INSERT INTO projection_events (epoch, revision, created_at, patch) VALUES (?, ?, ?, ?)",
+        )
+        .run(cursor.epoch, revision, committedAt, JSON.stringify(patch));
+      reduceThreadProjection(database, patch);
+      database
+        .prepare("DELETE FROM projection_events WHERE created_at < ? AND revision <= ?")
+        .run(
+          committedAt - PROJECTION_EVENT_RETENTION_MS,
+          Math.max(0, revision - PROJECTION_EVENT_RETENTION_REVISIONS),
+        );
+      committed = {
+        epoch: cursor.epoch,
+        revision,
+        createdAt: committedAt,
+        patch,
+      };
+    });
+    return committed;
+  }
+
+  replayProjection<T = unknown>(cursor: ProjectionCursor): PersistedProjectionEvent<T>[] | null {
+    const current = this.projectionCursor();
+    if (
+      cursor.epoch !== current.epoch ||
+      cursor.revision < 0 ||
+      cursor.revision > current.revision
+    ) {
+      return null;
+    }
+    if (cursor.revision === current.revision) return [];
+    const size = this.requireDatabase()
+      .prepare(
+        "SELECT COALESCE(SUM(length(patch)), 0) AS bytes FROM projection_events WHERE epoch = ? AND revision > ?",
+      )
+      .get(current.epoch, cursor.revision) as { bytes: number };
+    if (size.bytes > MAX_REPLAY_PATCH_BYTES) return null;
+    const first = this.requireDatabase()
+      .prepare("SELECT MIN(revision) AS revision FROM projection_events WHERE epoch = ?")
+      .get(current.epoch) as { revision: number | null };
+    if (first.revision === null || cursor.revision + 1 < first.revision) return null;
+    const rows = this.requireDatabase()
+      .prepare(
+        "SELECT epoch, revision, created_at AS createdAt, patch FROM projection_events WHERE epoch = ? AND revision > ? ORDER BY revision ASC",
+      )
+      .all(current.epoch, cursor.revision) as Array<{
+      epoch: string;
+      revision: number;
+      createdAt: number;
+      patch: string;
+    }>;
+    if (rows.length !== current.revision - cursor.revision) return null;
+    return rows.map((row) => ({ ...row, patch: JSON.parse(row.patch) as T }));
+  }
+
+  saveThreadProjection(threadId: string, detail: ThreadDetail): void {
+    const database = this.requireDatabase();
+    const previous = this.threadProjection<ThreadDetail>(threadId);
+    writeThreadProjection(database, threadId, mergeThreadProjection(previous, detail));
+    database.prepare("DELETE FROM metadata WHERE key = ?").run(threadTombstoneKey(threadId));
+  }
+
+  saveThreadItems(threadId: string, turnId: string, items: ActivityItem[]): void {
+    const detail = this.threadProjection<ThreadDetail>(threadId);
+    if (!detail) return;
+    const turn = detail.turns.find((candidate) => candidate.id === turnId);
+    if (!turn) return;
+    turn.items = structuredClone(items);
+    turn.itemsLoaded = true;
+    writeThreadProjection(this.requireDatabase(), threadId, detail);
+  }
+
+  threadProjection<T = unknown>(threadId: string): T | null {
+    const row = this.requireDatabase()
+      .prepare("SELECT detail FROM thread_projections WHERE thread_id = ?")
+      .get(threadId) as { detail: string } | undefined;
+    return row ? (JSON.parse(row.detail) as T) : null;
+  }
+
+  acceptCommand<T>(
+    receipt: Omit<CommandReceipt<T>, "status" | "result" | "createdAt" | "updatedAt">,
+  ): {
+    receipt: CommandReceipt<T>;
+    accepted: boolean;
+  } {
+    const database = this.requireDatabase();
+    const existing = this.commandReceipt<T>(receipt.commandId);
+    if (existing) return { receipt: existing, accepted: false };
+    const now = Date.now();
+    database
+      .prepare(
+        "INSERT INTO command_receipts (command_id, kind, status, thread_id, turn_id, expected_thread_id, expected_revision, payload, result, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)",
+      )
+      .run(
+        receipt.commandId,
+        receipt.kind,
+        receipt.threadId,
+        receipt.turnId,
+        receipt.expectedThreadId,
+        receipt.expectedRevision,
+        JSON.stringify(receipt.payload),
+        now,
+        now,
+      );
+    database
+      .prepare(
+        "DELETE FROM command_receipts WHERE status != 'pending' AND updated_at < ? AND command_id NOT IN (SELECT command_id FROM command_receipts ORDER BY updated_at DESC LIMIT ?)",
+      )
+      .run(now - RECEIPT_RETENTION_MS, RECEIPT_RETENTION_COUNT);
+    return {
+      accepted: true,
+      receipt: { ...receipt, status: "pending", result: null, createdAt: now, updatedAt: now },
+    };
+  }
+
+  commandReceipt<T = unknown>(commandId: string): CommandReceipt<T> | null {
+    const row = this.requireDatabase()
+      .prepare(
+        "SELECT command_id AS commandId, kind, status, thread_id AS threadId, turn_id AS turnId, expected_thread_id AS expectedThreadId, expected_revision AS expectedRevision, payload, result, created_at AS createdAt, updated_at AS updatedAt FROM command_receipts WHERE command_id = ?",
+      )
+      .get(commandId) as
+      | (Omit<CommandReceipt<T>, "payload" | "result"> & {
+          payload: string;
+          result: string | null;
+        })
+      | undefined;
+    return row
+      ? {
+          ...row,
+          payload: JSON.parse(row.payload) as T,
+          result: row.result === null ? null : (JSON.parse(row.result) as unknown),
+        }
+      : null;
+  }
+
+  finishCommand(
+    commandId: string,
+    status: Exclude<CommandReceiptStatus, "pending">,
+    result: unknown,
+  ): void {
+    const changed = this.requireDatabase()
+      .prepare(
+        "UPDATE command_receipts SET status = ?, result = ?, updated_at = ? WHERE command_id = ?",
+      )
+      .run(status, JSON.stringify(result ?? null), Date.now(), commandId);
+    if (changed.changes !== 1) throw new Error(`Unknown command receipt: ${commandId}`);
+  }
+
+  pendingCommands<T = unknown>(): CommandReceipt<T>[] {
+    const ids = this.requireDatabase()
+      .prepare(
+        "SELECT command_id AS commandId FROM command_receipts WHERE status = 'pending' ORDER BY created_at ASC",
+      )
+      .all() as Array<{ commandId: string }>;
+    return ids.map(({ commandId }) => this.commandReceipt<T>(commandId)!);
+  }
+
+  setProjectionQueueDepth(depth: number): void {
+    this.requireDatabase()
+      .prepare("UPDATE projection_meta SET projection_queue_depth = ? WHERE id = 1")
+      .run(Math.max(0, depth));
+  }
+
+  markReconciled(at = Date.now()): void {
+    this.requireDatabase()
+      .prepare("UPDATE projection_meta SET last_reconciled_at = ? WHERE id = 1")
+      .run(at);
+  }
+
+  markProjectionSent(committedAt: number, sentAt = Date.now()): void {
+    this.requireDatabase()
+      .prepare("UPDATE projection_meta SET last_commit_to_send_ms = ? WHERE id = 1")
+      .run(Math.max(0, sentAt - committedAt));
+  }
+
+  diagnostics(now = Date.now()): ProjectionDiagnostics {
+    const row = this.requireDatabase()
+      .prepare(
+        "SELECT epoch, revision, last_event_at AS lastEventAt, last_reconciled_at AS lastReconciledAt, projection_queue_depth AS projectionQueueDepth, last_receive_to_commit_ms AS lastReceiveToCommitMs, last_commit_to_send_ms AS lastCommitToSendMs FROM projection_meta WHERE id = 1",
+      )
+      .get() as Omit<ProjectionDiagnostics, "oldestPendingCommandAgeMs">;
+    const oldest = this.requireDatabase()
+      .prepare("SELECT MIN(created_at) AS createdAt FROM command_receipts WHERE status = 'pending'")
+      .get() as { createdAt: number | null };
+    return {
+      ...row,
+      oldestPendingCommandAgeMs:
+        oldest.createdAt === null ? null : Math.max(0, now - oldest.createdAt),
+    };
+  }
+
+  close(): void {
+    this.database?.close();
+    this.database = null;
+    this.loaded = false;
+  }
+
+  private async persist(next: CodexNestState): Promise<void> {
+    this.requireDatabase()
+      .prepare("UPDATE app_state SET json = ?, updated_at = ? WHERE id = 1")
+      .run(JSON.stringify(next), Date.now());
+  }
+
+  private requireDatabase(): DatabaseSync {
+    if (!this.database) throw new Error("StateStore.load() must be called first");
+    return this.database;
+  }
+
+  private transaction<T>(callback: () => T): T {
+    const database = this.requireDatabase();
+    database.exec("BEGIN IMMEDIATE");
     try {
-      await rename(temporary, this.path);
-      const target = await open(this.path, "r+");
-      try {
-        await target.chmod(0o600);
-        await target.sync();
-      } finally {
-        await target.close();
-      }
-      const directory = await open(parent, "r");
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
+      const result = callback();
+      database.exec("COMMIT");
+      return result;
     } catch (error) {
-      await unlink(temporary).catch(() => undefined);
+      database.exec("ROLLBACK");
       throw error;
     }
   }
+
+  private createSchema(database: DatabaseSync): void {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS app_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS projection_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        epoch TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        last_event_at INTEGER,
+        last_reconciled_at INTEGER,
+        projection_queue_depth INTEGER NOT NULL DEFAULT 0,
+        last_receive_to_commit_ms INTEGER,
+        last_commit_to_send_ms INTEGER
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS projection_snapshot (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        snapshot TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS thread_projections (
+        thread_id TEXT PRIMARY KEY,
+        detail TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS projection_events (
+        epoch TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        patch TEXT NOT NULL,
+        PRIMARY KEY (epoch, revision)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS projection_events_created_at
+        ON projection_events(created_at);
+      CREATE TABLE IF NOT EXISTS command_receipts (
+        command_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'noop', 'conflict', 'failed')),
+        thread_id TEXT,
+        turn_id TEXT,
+        expected_thread_id TEXT,
+        expected_revision INTEGER,
+        payload TEXT NOT NULL,
+        result TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS command_receipts_status_created
+        ON command_receipts(status, created_at);
+    `);
+    const receiptColumns = database.prepare("PRAGMA table_info(command_receipts)").all() as Array<{
+      name: string;
+    }>;
+    if (!receiptColumns.some((column) => column.name === "expected_thread_id")) {
+      database.exec("ALTER TABLE command_receipts ADD COLUMN expected_thread_id TEXT");
+    }
+    database
+      .prepare(
+        "INSERT OR IGNORE INTO projection_meta (id, epoch, revision, projection_queue_depth) VALUES (1, ?, 0, 0)",
+      )
+      .run(randomUUID());
+  }
+
+  private configureDatabase(database: DatabaseSync): void {
+    database.exec("PRAGMA busy_timeout = 5000");
+    const journal = database.prepare("PRAGMA journal_mode = WAL").get() as
+      { journal_mode: string } | undefined;
+    if (journal?.journal_mode.toLowerCase() !== "wal") {
+      throw new Error("CodexNest SQLite state requires WAL journal mode");
+    }
+    database.exec("PRAGMA synchronous = FULL");
+    database.exec("PRAGMA foreign_keys = ON");
+  }
+
+  private async migrateLegacyState(legacy: {
+    source: string;
+    state: CodexNestState;
+  }): Promise<void> {
+    const parent = dirname(this.path);
+    const backup = await durableLegacyBackup(legacy.source);
+    const temporary = `${this.path}.${process.pid}.${randomUUID()}.migration.sqlite`;
+    let database: DatabaseSync | null = null;
+    try {
+      database = new DatabaseSync(temporary);
+      this.configureDatabase(database);
+      this.createSchema(database);
+      transactionOn(database, () => {
+        database!
+          .prepare("INSERT INTO app_state (id, json, updated_at) VALUES (1, ?, ?)")
+          .run(JSON.stringify(legacy.state), Date.now());
+        database!
+          .prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES ('legacy_import', ?)")
+          .run(backup);
+      });
+      database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      database.close();
+      database = null;
+      await chmod(temporary, 0o600);
+      await syncFile(temporary);
+      await rename(temporary, this.path);
+      await syncDirectory(parent);
+    } catch (error) {
+      database?.close();
+      await removeMigrationFiles(temporary);
+      throw error;
+    }
+  }
+
+  private async readLegacyState(): Promise<{ source: string; state: CodexNestState } | null> {
+    const candidates = [this.path];
+    if (extname(this.path) === ".sqlite") {
+      candidates.push(join(dirname(this.path), `${basename(this.path, ".sqlite")}.json`));
+    }
+    for (const candidate of candidates) {
+      let contents: Buffer;
+      try {
+        contents = await readFile(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (contents.subarray(0, SQLITE_HEADER.length).toString("binary") === SQLITE_HEADER) {
+        if (candidate === this.path) return null;
+        throw new Error(`Refusing to ignore sibling SQLite state: ${candidate}`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(contents.toString("utf8"));
+      } catch {
+        throw new Error(`Invalid legacy CodexNest JSON state: ${candidate}`);
+      }
+      return { source: candidate, state: validateState(parsed) };
+    }
+    return null;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function sqliteTableExists(database: DatabaseSync, table: string): boolean {
+  return Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
+  );
+}
+
+function transactionOn<T>(database: DatabaseSync, callback: () => T): T {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const result = callback();
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+async function durableLegacyBackup(source: string): Promise<string> {
+  const backup = await availableLegacyBackupPath(source);
+  try {
+    await copyFile(source, backup, constants.COPYFILE_EXCL);
+    await chmod(backup, 0o600);
+    await syncFile(backup);
+    await syncDirectory(dirname(source));
+    return backup;
+  } catch (error) {
+    await unlink(backup).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function syncFile(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function removeMigrationFiles(path: string): Promise<void> {
+  await Promise.all(
+    [path, `${path}-wal`, `${path}-shm`].map((candidate) =>
+      unlink(candidate).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }),
+    ),
+  );
+}
+
+async function availableLegacyBackupPath(path: string): Promise<string> {
+  const base = `${path}.pre-sqlite.json`;
+  for (let suffix = 0; ; suffix += 1) {
+    const candidate = suffix === 0 ? base : `${base}.${suffix}`;
+    try {
+      await readFile(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+      throw error;
+    }
+  }
+}
+
+function withProjectionCursor<T>(snapshot: T, epoch: string, revision: number): T {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return snapshot;
+  return { ...snapshot, epoch, revision };
+}
+
+function pruneStateReceipts(state: CodexNestState, now: number): void {
+  pruneReceiptMap(state.messageReceipts, now);
+  pruneReceiptMap(state.voiceReceipts, now);
+}
+
+function pruneReceiptMap<T extends { createdAt: number }>(
+  receipts: Record<string, T> | undefined,
+  now: number,
+): void {
+  if (!receipts || Object.keys(receipts).length <= RECEIPT_RETENTION_COUNT) return;
+  const retained = new Set(
+    Object.entries(receipts)
+      .sort(([, left], [, right]) => right.createdAt - left.createdAt)
+      .slice(0, RECEIPT_RETENTION_COUNT)
+      .map(([id]) => id),
+  );
+  const cutoff = now - RECEIPT_RETENTION_MS;
+  for (const [id, receipt] of Object.entries(receipts)) {
+    if (!retained.has(id) && receipt.createdAt < cutoff) delete receipts[id];
+  }
+}
+
+function reduceThreadProjection(database: DatabaseSync, value: unknown): void {
+  if (!isRecord(value) || typeof value.type !== "string") return;
+  const event = value as ServerEvent;
+  if (event.type === "projection.replaced") {
+    const summaries = new Map(event.snapshot.threads.map((thread) => [thread.id, thread]));
+    const rows = database
+      .prepare("SELECT thread_id AS threadId, detail FROM thread_projections")
+      .all() as Array<{ threadId: string; detail: string }>;
+    for (const row of rows) {
+      const summary = summaries.get(row.threadId);
+      if (!summary) {
+        database.prepare("DELETE FROM thread_projections WHERE thread_id = ?").run(row.threadId);
+        database
+          .prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)")
+          .run(threadTombstoneKey(row.threadId), String(Date.now()));
+        continue;
+      }
+      const detail = JSON.parse(row.detail) as ThreadDetail;
+      detail.summary = summary;
+      detail.turns = detail.turns.slice(-20);
+      writeThreadProjection(database, row.threadId, detail);
+    }
+    for (const threadId of summaries.keys()) {
+      database.prepare("DELETE FROM metadata WHERE key = ?").run(threadTombstoneKey(threadId));
+    }
+    return;
+  }
+  if (event.type === "thread.removed") {
+    database.prepare("DELETE FROM thread_projections WHERE thread_id = ?").run(event.threadId);
+    database
+      .prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)")
+      .run(threadTombstoneKey(event.threadId), String(Date.now()));
+    return;
+  }
+  const threadId = projectionEventThreadId(event);
+  if (!threadId) return;
+  const row = database
+    .prepare("SELECT detail FROM thread_projections WHERE thread_id = ?")
+    .get(threadId) as { detail: string } | undefined;
+  let detail = row ? (JSON.parse(row.detail) as ThreadDetail) : null;
+  if (!detail && event.type === "thread.upserted") {
+    const tombstone = database
+      .prepare("SELECT 1 FROM metadata WHERE key = ?")
+      .get(threadTombstoneKey(event.thread.id));
+    if (tombstone) return;
+    detail = {
+      summary: event.thread,
+      turns: [],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      draft: null,
+    };
+  }
+  if (!detail) return;
+  switch (event.type) {
+    case "thread.upserted":
+      detail.summary = event.thread;
+      if (!event.thread.currentTurnId) {
+        const active = detail.turns.find((turn) => turn.status === "inProgress");
+        if (active) {
+          active.status =
+            event.thread.state === "failed"
+              ? "failed"
+              : event.thread.state === "interrupted"
+                ? "interrupted"
+                : "completed";
+          active.completedAt ??= event.thread.updatedAt;
+        }
+      }
+      break;
+    case "activity.upserted": {
+      const turn = materializedTurn(detail, event.turnId);
+      if (!turn) return;
+      const index = turn.items.findIndex((item) => item.id === event.item.id);
+      if (index < 0) turn.items.push(event.item);
+      else turn.items[index] = event.item;
+      break;
+    }
+    case "turn.progressed": {
+      const turn = materializedTurn(detail, event.turnId);
+      if (!turn) return;
+      turn.progress = event.progress;
+      break;
+    }
+    case "queue.changed":
+      detail.queuedMessages = event.messages;
+      break;
+    case "draft.changed":
+      detail.draft = event.draft;
+      break;
+    default:
+      return;
+  }
+  detail.turns = detail.turns.slice(-20);
+  writeThreadProjection(database, threadId, detail);
+}
+
+function projectionEventThreadId(event: ServerEvent): string | null {
+  if (event.type === "thread.upserted") return event.thread.id;
+  if ("threadId" in event && typeof event.threadId === "string") return event.threadId;
+  return null;
+}
+
+function materializedTurn(
+  detail: ThreadDetail,
+  turnId: string,
+): ThreadDetail["turns"][number] | null {
+  const existing = detail.turns.find((candidate) => candidate.id === turnId);
+  if (existing) return existing;
+  if (detail.summary.currentTurnId !== turnId) return null;
+  const turn: ThreadDetail["turns"][number] = {
+    id: turnId,
+    status: "inProgress",
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+    progress: {
+      startedAt: null,
+      explanation: null,
+      steps: [],
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+    },
+    items: [],
+    itemsLoaded: false,
+  };
+  detail.turns.push(turn);
+  return turn;
+}
+
+function mergeThreadProjection(
+  previous: ThreadDetail | null,
+  incoming: ThreadDetail,
+): ThreadDetail {
+  const previousTurns = new Map(previous?.turns.map((turn) => [turn.id, turn]) ?? []);
+  const turns = incoming.turns.slice(-20).map((turn) => {
+    const persisted = previousTurns.get(turn.id);
+    if (turn.itemsLoaded !== false || !persisted || persisted.itemsLoaded === false) {
+      return structuredClone(turn);
+    }
+    const items = structuredClone(persisted.items);
+    for (const item of turn.items) {
+      const index = items.findIndex((candidate) => candidate.id === item.id);
+      if (index < 0) items.push(structuredClone(item));
+      else items[index] = structuredClone(item);
+    }
+    return { ...structuredClone(turn), items, itemsLoaded: true };
+  });
+  return { ...structuredClone(incoming), turns };
+}
+
+function writeThreadProjection(
+  database: DatabaseSync,
+  threadId: string,
+  detail: ThreadDetail,
+): void {
+  const trimmed = { ...detail, turns: detail.turns.slice(-20) };
+  database
+    .prepare(
+      "INSERT INTO thread_projections (thread_id, detail, updated_at) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET detail = excluded.detail, updated_at = excluded.updated_at",
+    )
+    .run(threadId, JSON.stringify(trimmed), Date.now());
+}
+
+function threadTombstoneKey(threadId: string): string {
+  return `thread_tombstone:${threadId}`;
 }
 
 function validateState(value: unknown): CodexNestState {

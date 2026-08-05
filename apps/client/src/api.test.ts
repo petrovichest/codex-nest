@@ -55,6 +55,7 @@ describe("ApiClient", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+    api.setProjectionCursor({ epoch: "epoch", revision: 17 });
 
     await api.forkThread("thread/id", {
       lastTurnId: "turn",
@@ -65,9 +66,64 @@ describe("ApiClient", () => {
       new URL("https://codexnest.example/api/v1/threads/thread%2Fid/forks"),
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ lastTurnId: "turn", agentMessageId: "answer" }),
+        body: expect.any(String),
       }),
     );
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({
+      lastTurnId: "turn",
+      agentMessageId: "answer",
+      expectedThreadId: "thread/id",
+      expectedRevision: 17,
+      commandId: expect.stringMatching(/^fork:/u),
+    });
+  });
+
+  it("blocks contextual commands until an explicit projection sync", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await expect(
+      api.startTurn("thread", { input: "hello", clientMessageId: "message" }),
+    ).rejects.toMatchObject({ code: "sync_required" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    api.setProjectionCursor({ epoch: "epoch", revision: 9 });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ turnId: "turn" }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+    await api.startTurn("thread", { input: "hello", clientMessageId: "message" });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      input: "hello",
+      clientMessageId: "message",
+      expectedThreadId: "thread",
+      expectedRevision: 9,
+      commandId: "message",
+    });
+  });
+
+  it("keeps queued desired-state messages valid across later projection revisions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "message", status: "queued" }), {
+        headers: { "Content-Type": "application/json" },
+        status: 202,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+    api.setProjectionCursor({ epoch: "epoch", revision: 9 });
+
+    await api.enqueue("thread", { input: "hello", clientMessageId: "message" });
+
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      input: "hello",
+      clientMessageId: "message",
+      expectedThreadId: "thread",
+      commandId: "message",
+    });
   });
 
   it("targets the separate force-restart endpoints", async () => {

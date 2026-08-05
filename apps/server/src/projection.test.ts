@@ -114,6 +114,36 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
+  it("commits reconciliation as a replayable atomic replacement", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const cursor = store.projectionCursor();
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    const replay = store.replayProjection<{
+      type: string;
+      snapshot?: { threads: Array<{ id: string }> };
+    }>(cursor);
+    expect(replay).toHaveLength(1);
+    expect(replay?.[0]?.patch).toMatchObject({
+      type: "projection.replaced",
+      snapshot: { threads: [{ id: "one" }, { id: "two" }] },
+    });
+    expect(store.projection().snapshot).toMatchObject({
+      projectionStatus: "ready",
+      threads: [{ id: "one" }, { id: "two" }],
+    });
+  });
+
   it("does not reactivate a turn after its completion notification wins the response race", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -153,6 +183,48 @@ describe("AppProjection", () => {
       currentTurnId: null,
     });
     await store.flushed();
+  });
+
+  it("ignores delayed start notifications for terminal turns and deleted threads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("reordered", "completed") },
+    } satisfies ServerNotification);
+    await projection.flushed();
+    bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "one", turn: testTurn("reordered", "inProgress") },
+    } satisfies ServerNotification);
+    await projection.flushed();
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      currentTurnId: null,
+    });
+
+    bridge.emit("notification", {
+      method: "thread/deleted",
+      params: { threadId: "one" },
+    } satisfies ServerNotification);
+    await projection.flushed();
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: thread("one", "/work", 11) },
+    } satisfies ServerNotification);
+    await projection.flushed();
+    expect(projection.summary("one")).toBeUndefined();
   });
 
   it("does not roll a live turn back when a stale full sync finishes later", async () => {
@@ -215,6 +287,55 @@ describe("AppProjection", () => {
     expect(projection.summary("one")).toMatchObject({ state: "running", currentTurnId: "live" });
   });
 
+  it("does not resurrect a completed turn from a stale reconciliation response", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new EventEmitter() as EventEmitter & {
+      state: "ready";
+      request: ReturnType<typeof vi.fn>;
+    };
+    bridge.state = "ready";
+    let releaseList!: () => void;
+    const listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    bridge.request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        if (params.archived) return { data: [], nextCursor: null, backwardsCursor: null };
+        await listGate;
+        return { data: [liveThread()], nextCursor: null, backwardsCursor: null };
+      }
+      if (method === "thread/resume") return { thread: liveThread() };
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(liveThread());
+
+    const syncing = projection.sync();
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("live", "completed") },
+    } satisfies ServerNotification);
+    await projection.flushed();
+    expect(projection.summary("one")?.currentTurnId).toBeNull();
+    releaseList();
+    await syncing;
+
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      currentTurnId: null,
+    });
+  });
+
   it("does not resurrect a thread deleted while a full sync is listing it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -263,6 +384,42 @@ describe("AppProjection", () => {
     expect(projection.summary("one")).toBeUndefined();
   });
 
+  it("serves the durable snapshot as reconciling and tombstones a startup deletion", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const first = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    first.upsertThread(thread("one", "/work", 5));
+    const persistedRevision = first.snapshot().revision;
+
+    const bridge = new FakeBridge();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    expect(restored.snapshot()).toMatchObject({
+      projectionStatus: "reconciling",
+      revision: persistedRevision,
+      threads: [{ id: "one" }],
+    });
+
+    bridge.emit("notification", {
+      method: "thread/deleted",
+      params: { threadId: "one" },
+    } satisfies ServerNotification);
+    await restored.flushed();
+    expect(restored.snapshot().threads).toEqual([]);
+    expect(store.threadProjection("one")).toBeNull();
+  });
+
   it("projects managed spawn tools as linked subagent launch activities", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -276,7 +433,7 @@ describe("AppProjection", () => {
       false,
     );
     const activities: ActivityItem[] = [];
-    projection.on("event", (_sequence, event) => {
+    projection.on("event", (_committed, event) => {
       if (event.type === "activity.upserted") activities.push(event.item);
     });
 
@@ -331,6 +488,7 @@ describe("AppProjection", () => {
         completedAtMs: 2_000,
       },
     } satisfies ServerNotification);
+    await projection.flushed();
 
     expect(activities).toEqual([
       {
@@ -363,7 +521,7 @@ describe("AppProjection", () => {
       false,
     );
     const events: Array<{ type: string }> = [];
-    projection.on("event", (_sequence, event) => events.push(event));
+    projection.on("event", (_committed, event) => events.push(event));
     const hidden = { ...thread("title", "/work", 1), ephemeral: true };
 
     bridge.emit("notification", {
@@ -499,7 +657,7 @@ describe("AppProjection", () => {
 
     const updates = vi.spyOn(store, "update");
     const published: string[] = [];
-    projection.on("event", (_sequence, event) => {
+    projection.on("event", (_committed, event) => {
       if (event.type === "thread.upserted") published.push(event.thread.id);
     });
     const firstWait = collabWaitNotification("wait-first", "completed", ["child-a", "child-b"], {
@@ -1477,7 +1635,7 @@ describe("AppProjection", () => {
     ).toHaveLength(2);
 
     const events: Array<{ type: string; [key: string]: unknown }> = [];
-    projection.on("event", (_sequence, event) => events.push(event));
+    projection.on("event", (_committed, event) => events.push(event));
     const goal = {
       threadId: "one",
       objective: "Довести задачу до конца",
@@ -1496,6 +1654,7 @@ describe("AppProjection", () => {
       method: "thread/goal/cleared",
       params: { threadId: "one" },
     } satisfies ServerNotification);
+    await projection.flushed();
     expect(events.filter((event) => event.type === "goal.changed").slice(-2)).toEqual([
       { type: "goal.changed", threadId: "one", goal },
       { type: "goal.changed", threadId: "one", goal: null },
@@ -1608,7 +1767,7 @@ describe("AppProjection", () => {
       false,
     );
     const events: Array<{ type: string; [key: string]: unknown }> = [];
-    projection.on("event", (_sequence, event) => events.push(event));
+    projection.on("event", (_committed, event) => events.push(event));
     projection.upsertThread(thread("one", "/work", 10));
 
     bridge.emit("notification", {
@@ -1628,16 +1787,18 @@ describe("AppProjection", () => {
         delta: "Продолжаю работу",
       },
     } satisfies ServerNotification);
+    await projection.flushed();
 
     expect(projection.summary("one")).toMatchObject({
       state: "running",
       currentTurnId: "first",
       unread: false,
     });
-    expect(events.filter((event) => event.type === "activity.upserted").at(-1)).toMatchObject({
-      threadId: "one",
-      turnId: "first",
-      item: { type: "agentMessage", text: "Продолжаю работу" },
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === "activity.upserted")).toHaveLength(1),
+    );
+    expect(events.find((event) => event.type === "activity.upserted")).toMatchObject({
+      item: { status: "inProgress", text: "Продолжаю работу" },
     });
 
     bridge.emit("notification", {
@@ -1732,15 +1893,18 @@ describe("AppProjection", () => {
     );
 
     bridge.emit("notification", goalNotification("paused", 3));
+    await projection.flushed();
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
 
     bridge.emit("notification", goalNotification("active", 4));
+    await projection.flushed();
     expect(projection.summary("one")).toMatchObject({ state: "running", unread: false });
 
     bridge.emit("notification", {
       method: "thread/goal/cleared",
       params: { threadId: "one" },
     } satisfies ServerNotification);
+    await projection.flushed();
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
     await store.flushed();
   });
@@ -1765,6 +1929,7 @@ describe("AppProjection", () => {
       params: { threadId: "one", turn: testTurn("goal-first", "inProgress") },
     } satisfies ServerNotification);
     bridge.emit("notification", goalNotification("complete", 3));
+    await projection.flushed();
     expect(projection.summary("one")?.state).toBe("running");
 
     bridge.emit("notification", {
@@ -1785,6 +1950,7 @@ describe("AppProjection", () => {
     await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("running"));
 
     bridge.emit("notification", goalNotification("complete", 5));
+    await projection.flushed();
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
     await store.flushed();
   });
@@ -1812,6 +1978,7 @@ describe("AppProjection", () => {
       method: "thread/status/changed",
       params: { threadId: "one", status: { type: "systemError" } },
     } satisfies ServerNotification);
+    await projection.flushed();
 
     expect(projection.summary("one")).toMatchObject({
       state: "failed",
@@ -2624,7 +2791,7 @@ describe("AppProjection", () => {
       false,
     );
     const activities: ActivityItem[] = [];
-    projection.on("event", (_sequence, event) => {
+    projection.on("event", (_committed, event) => {
       if (event.type === "activity.upserted") activities.push(event.item);
     });
     projection.upsertThread(thread("one", "/work", 10));
@@ -2660,7 +2827,10 @@ describe("AppProjection", () => {
       expect(store.snapshot().threadMeta.one?.timelineArtifacts?.live).toHaveLength(1),
     );
 
-    expect(activities.slice(0, 2).map((item) => item.id)).toEqual(["stream-agent", "stream-agent"]);
+    expect(activities.slice(0, 2).map((item) => item.id)).toEqual([
+      "stream-agent",
+      expect.stringContaining("live-plan-checklist-"),
+    ]);
     const items = (await projection.readThread("one")).turns[0]?.items ?? [];
     expect(items.map((item) => item.id)).toEqual([
       "canonical-agent",
@@ -2905,6 +3075,7 @@ describe("AppProjection", () => {
     );
 
     bridge.emit("notification", goalNotification("complete", 3));
+    await projection.flushed();
     expect(projection.summary("one")).toMatchObject({ state: "completed", unread: true });
     await store.flushed();
   });

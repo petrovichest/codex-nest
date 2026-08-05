@@ -16,7 +16,11 @@ const drafts = vi.hoisted(() => ({
   saveLocal: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../connection", () => ({ useConnection: connection }));
+vi.mock("../connection", () => ({
+  useConnection: connection,
+  useConnectionServices: () => connection(),
+  useConnectionSelector: (selector: (state: unknown) => unknown) => selector(connection().state),
+}));
 vi.mock("../offline-store", () => ({
   deleteLocalDraft: drafts.deleteLocal,
   deleteNewSessionDraft: drafts.delete,
@@ -104,7 +108,12 @@ describe("NewSession", () => {
       ),
     );
     expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(dispatch).toHaveBeenCalledWith({ type: "thread", thread });
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "detail",
+        detail: expect.objectContaining({ summary: thread }),
+      }),
+    );
     expect(drafts.delete).toHaveBeenCalledWith(connectionSettings, project.id);
   });
 
@@ -774,6 +783,7 @@ function mockConnection({
       details: {},
       snapshot: { connection: { state: "ready" }, models, taskDefaults, threads: [] },
       network: "connected",
+      syncStatus: "synced",
     },
   };
 }

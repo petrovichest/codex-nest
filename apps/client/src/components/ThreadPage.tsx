@@ -49,7 +49,7 @@ import {
   savePendingAnnotations,
 } from "../annotations";
 import { copyText } from "../clipboard";
-import { useConnection } from "../connection";
+import { useConnectionSelector, useConnectionServices } from "../connection";
 import { ApiClientError } from "../api";
 import { openDownloadUrl } from "../downloads";
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
@@ -63,7 +63,7 @@ import {
   saveNewSessionDraft,
 } from "../offline-store";
 import { acknowledgePendingThread, releaseActiveThread } from "../push";
-import type { OptimisticMessage } from "../state";
+import type { ClientState, OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
 import {
@@ -281,6 +281,76 @@ const COMPLETED_CHAT_RETRY_MS = 500;
 const TAIL_FOLLOW_THRESHOLD_PX = 120;
 const DRAFT_SAVE_DELAY_MS = 500;
 
+type ThreadPageStateView = {
+  syncStatus: ClientState["syncStatus"];
+  canQueueReliable: boolean;
+  projects: NonNullable<ClientState["snapshot"]>["projects"];
+  threads: NonNullable<ClientState["snapshot"]>["threads"];
+  models: NonNullable<ClientState["snapshot"]>["models"];
+  defaultReasoningEffort: NonNullable<ClientState["snapshot"]>["defaultReasoningEffort"];
+  taskDefaults: NonNullable<ClientState["snapshot"]>["taskDefaults"];
+  attention: NonNullable<ClientState["snapshot"]>["attention"];
+  voiceTranscription:
+    NonNullable<NonNullable<ClientState["snapshot"]>["voiceTranscriptions"]>[number] | null;
+  detail: ThreadDetail | undefined;
+  goal: ClientState["goals"][string] | undefined;
+  voiceRemoval: ClientState["voiceRemovals"][string] | undefined;
+  optimisticMessages: OptimisticMessage[];
+};
+
+function threadPageStateView(
+  state: ClientState,
+  threadId: string,
+  includeAllThreads: boolean,
+): ThreadPageStateView {
+  const snapshot = state.snapshot;
+  const thread = snapshot?.threads?.find((candidate) => candidate.id === threadId);
+  const parentThreadId =
+    thread?.relation.kind === "subagent" ? thread.relation.parentThreadId : null;
+  return {
+    syncStatus: state.syncStatus,
+    canQueueReliable: state.snapshotEpoch > 0 && state.snapshot?.projectionStatus === "ready",
+    projects: snapshot?.projects ?? [],
+    threads: includeAllThreads
+      ? (snapshot?.threads ?? [])
+      : (snapshot?.threads?.filter(
+          (candidate) => candidate.id === threadId || candidate.id === parentThreadId,
+        ) ?? []),
+    models: snapshot?.models ?? [],
+    defaultReasoningEffort: snapshot?.defaultReasoningEffort,
+    taskDefaults: snapshot?.taskDefaults,
+    attention: snapshot?.attention?.filter((item) => item.threadId === threadId) ?? [],
+    voiceTranscription:
+      snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null,
+    detail: state.details?.[threadId],
+    goal: state.goals?.[threadId],
+    voiceRemoval: state.voiceRemovals?.[threadId],
+    optimisticMessages: state.optimisticMessages?.[threadId] ?? [],
+  };
+}
+
+function sameThreadPageStateView(left: ThreadPageStateView, right: ThreadPageStateView): boolean {
+  return (
+    left.syncStatus === right.syncStatus &&
+    left.canQueueReliable === right.canQueueReliable &&
+    left.projects === right.projects &&
+    sameReferences(left.threads, right.threads) &&
+    left.models === right.models &&
+    left.defaultReasoningEffort === right.defaultReasoningEffort &&
+    left.taskDefaults === right.taskDefaults &&
+    sameReferences(left.attention, right.attention) &&
+    left.voiceTranscription === right.voiceTranscription &&
+    left.detail === right.detail &&
+    left.goal === right.goal &&
+    left.voiceRemoval === right.voiceRemoval &&
+    sameReferences(left.optimisticMessages, right.optimisticMessages)
+  );
+}
+
+function sameReferences<T>(left: T[], right: T[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
 }
@@ -337,7 +407,6 @@ export function ThreadPage({
   languageRef.current = language;
   const {
     api,
-    state,
     dispatch,
     refreshDetail,
     forceRefreshDetail,
@@ -345,10 +414,19 @@ export function ThreadPage({
     loadTurnItems,
     sendReliable,
     queueVoiceRecording,
-  } = useConnection();
+  } = useConnectionServices();
+  const connectionView = useConnectionSelector(
+    (state) =>
+      threadPageStateView(state, threadId, initialNewSessionRef.current.active && !threadId),
+    sameThreadPageStateView,
+  );
+  const commandsReady = connectionView.syncStatus === "synced";
+  const reliableQueueReady = commandsReady || connectionView.canQueueReliable;
+  const goalRef = useRef(connectionView.goal);
+  goalRef.current = connectionView.goal;
   const activeThreadIdRef = useRef(threadId);
   activeThreadIdRef.current = threadId;
-  const availableProjects = projects ?? state.snapshot?.projects ?? [];
+  const availableProjects = projects ?? connectionView.projects;
   const newSessionProject =
     availableProjects.find(
       (candidate) => candidate.id === initialNewSessionRef.current.projectId,
@@ -365,9 +443,9 @@ export function ThreadPage({
   const [storageWarning, setStorageWarning] = useState(false);
   const [pendingSettings, setPendingSettings] = useState<SessionSettings>(() =>
     initialSessionSettings(
-      state.snapshot?.defaultReasoningEffort,
-      state.snapshot?.models ?? [],
-      state.snapshot?.taskDefaults,
+      connectionView.defaultReasoningEffort,
+      connectionView.models,
+      connectionView.taskDefaults,
     ),
   );
   const pendingSettingsRef = useRef(pendingSettings);
@@ -407,20 +485,21 @@ export function ThreadPage({
   const createdInWorkspaceRef = useRef<string | null>(null);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] =
     useState<OptimisticMessage | null>(null);
-  const detail = state.details?.[threadId];
+  const detail = connectionView.detail;
   const summary = reconcileVisibleThreadSummary(
-    state.snapshot?.threads.find((thread) => thread.id === threadId),
+    connectionView.threads.find((thread) => thread.id === threadId),
     detail,
+    createdInWorkspaceRef.current === threadId,
   );
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
   const isSubagent = parentThreadId !== null;
   const parentSummary = parentThreadId
-    ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
+    ? connectionView.threads.find((thread) => thread.id === parentThreadId)
     : undefined;
   const project =
     newSessionProject ??
-    state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ??
+    connectionView.projects.find((candidate) => candidate.id === summary?.projectId) ??
     null;
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
@@ -514,19 +593,15 @@ export function ThreadPage({
     (annotationId: string) => annotationActionsRef.current?.delete(annotationId) ?? false,
     [],
   );
-  const attention = useMemo(
-    () => state.snapshot?.attention?.filter((item) => item.threadId === threadId) ?? [],
-    [state.snapshot?.attention, threadId],
-  );
-  const goal = state.goals?.[threadId];
-  const voiceJob =
-    state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
-  const voiceRemoval = state.voiceRemovals?.[threadId];
+  const attention = connectionView.attention;
+  const goal = connectionView.goal;
+  const voiceJob = connectionView.voiceTranscription;
+  const voiceRemoval = connectionView.voiceRemoval;
   const activeVoiceJob = voiceJob?.status === "failed" ? null : voiceJob;
   const localActiveVoiceJob =
     activeVoiceJob && localVoiceJobIdsRef.current.has(activeVoiceJob.id) ? activeVoiceJob : null;
   const voiceUpload = voiceUploads[threadId] ?? null;
-  const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
+  const optimisticMessages = connectionView.optimisticMessages;
   const optimisticTurnMessages = optimisticMessages.filter(
     (message) => message.destination === "turn",
   );
@@ -787,7 +862,7 @@ export function ThreadPage({
         assertPreparationGeneration(generation);
         const existingThreadId = preparationRef.current.threadId;
         let thread = existingThreadId
-          ? state.snapshot?.threads.find((candidate) => candidate.id === existingThreadId)
+          ? connectionView.threads.find((candidate) => candidate.id === existingThreadId)
           : undefined;
         if (!thread) {
           thread = existingThreadId
@@ -883,7 +958,6 @@ export function ThreadPage({
     if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) {
       return false;
     }
-    dispatch({ type: "thread", thread });
     dispatch({
       type: "detail",
       detail: {
@@ -988,7 +1062,6 @@ export function ThreadPage({
           pendingDraftsRef.current.delete(targetThreadId);
           await confirmLocalDraft(api.settings, targetThreadId, saved, pending.localUpdatedAt);
           savedDraftUpdatedAtRef.current.set(targetThreadId, saved?.updatedAt ?? null);
-          dispatch({ type: "draft", threadId: targetThreadId, draft: saved });
           if (legacyAnnotationThreadsRef.current.delete(targetThreadId)) {
             try {
               savePendingAnnotations(targetThreadId, []);
@@ -1110,7 +1183,9 @@ export function ThreadPage({
       const draft = structuredClone(currentComposerDraft());
       const expectedDraftUpdatedAt = savedDraftUpdatedAtRef.current.has(targetThreadId)
         ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
-        : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
+        : targetThreadId === threadId
+          ? (connectionView.detail?.draft?.updatedAt ?? null)
+          : null;
       await queueVoiceRecording({
         id: uploadId,
         threadId: targetThreadId,
@@ -1237,6 +1312,7 @@ export function ThreadPage({
   useEffect(() => {
     if (
       !preparationRef.current.active ||
+      !commandsReady ||
       !newSessionHydrated ||
       !newSessionAdmitted ||
       preparationDiscardRef.current
@@ -1305,7 +1381,7 @@ export function ThreadPage({
         }
       });
     preparationOperationRef.current = operation;
-  }, [newSessionAdmitted, newSessionHydrated, newSessionProject, preparationRetry]);
+  }, [commandsReady, newSessionAdmitted, newSessionHydrated, newSessionProject, preparationRetry]);
 
   useEffect(() => {
     preparationAliveRef.current = true;
@@ -1357,7 +1433,6 @@ export function ThreadPage({
       draftTouchedThreadsRef.current.delete(threadId);
       hydratedDraftSourcesRef.current.delete(threadId);
       replaceComposerDraft(emptyComposerDraft(), false);
-      dispatch({ type: "draft", threadId, draft: null });
       clearLegacyAnnotations();
       void deleteLocalDraft(api.settings, threadId)
         .catch(() => undefined)
@@ -1449,8 +1524,11 @@ export function ThreadPage({
     }
     const request = api.readGoal?.(threadId);
     if (!request) return;
+    const baseline = goalRef.current;
     void request
-      .then((value) => dispatch({ type: "goal", threadId, goal: value }))
+      .then((value) => {
+        if (goalRef.current === baseline) dispatch({ type: "goal", threadId, goal: value });
+      })
       .catch(() => undefined);
   }, [api, dispatch, isSubagent, threadId]);
 
@@ -1487,7 +1565,6 @@ export function ThreadPage({
     if (threadId && createdInWorkspaceRef.current !== threadId) {
       void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
         if (caught instanceof ApiClientError && caught.status === 404) {
-          dispatch({ type: "thread.remove", threadId });
           setThreadMissing(true);
         }
       });
@@ -1733,7 +1810,6 @@ export function ThreadPage({
     }
     pendingDraftsRef.current.delete(targetThreadId);
     savedDraftUpdatedAtRef.current.set(targetThreadId, null);
-    dispatch({ type: "draft", threadId: targetThreadId, draft: null });
     clearLegacyAnnotations(targetThreadId);
   }
 
@@ -1771,8 +1847,16 @@ export function ThreadPage({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (preparationRef.current.active && !commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     if (preparationRef.current.active && newSessionProject) {
       await submitPreparingSession(newSessionProject);
+      return;
+    }
+    if (!reliableQueueReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
       return;
     }
     const targetThreadId = activeThreadIdRef.current;
@@ -1841,7 +1925,7 @@ export function ThreadPage({
   }
 
   async function stopTask(): Promise<void> {
-    if (busy) return;
+    if (busy || !commandsReady) return;
     setBusy(true);
     setError(null);
     try {
@@ -2044,11 +2128,10 @@ export function ThreadPage({
     let changedMode = false;
     let clientMessageId: string | null = null;
     try {
-      const thread = await api.updateThreadSettings(threadId, {
+      await api.updateThreadSettings(threadId, {
         collaborationMode: targetMode,
       });
       changedMode = true;
-      dispatch({ type: "thread", thread });
       clientMessageId = createClientMessageId();
       scrollTargetMessageId.current = clientMessageId;
       dispatch({
@@ -2080,7 +2163,6 @@ export function ThreadPage({
       if (changedMode) {
         await api
           .updateThreadSettings(threadId, { collaborationMode: "plan" })
-          .then((thread) => dispatch({ type: "thread", thread }))
           .catch(() => undefined);
       }
       setError(
@@ -2096,6 +2178,10 @@ export function ThreadPage({
   }
 
   async function sendQueuedNow(messageId: string): Promise<boolean> {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return false;
+    }
     setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
@@ -2114,6 +2200,10 @@ export function ThreadPage({
   }
 
   async function updateQueued(messageId: string, value: string): Promise<boolean> {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return false;
+    }
     setQueueAction({ messageId, kind: "update" });
     setError(null);
     try {
@@ -2132,6 +2222,10 @@ export function ThreadPage({
   }
 
   async function deleteQueued(messageId: string): Promise<boolean> {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return false;
+    }
     setQueueAction({ messageId, kind: "delete" });
     setError(null);
     try {
@@ -2150,6 +2244,10 @@ export function ThreadPage({
   }
 
   async function finishThread() {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     setFinishing(true);
     setError(null);
     try {
@@ -2166,12 +2264,11 @@ export function ThreadPage({
   }
 
   async function forkFromTurn(lastTurnId: string, agentMessageId: string) {
-    if (forking) return;
+    if (forking || !commandsReady) return;
     setForking(true);
     setError(null);
     try {
       const result = await api.forkThread(threadId, { lastTurnId, agentMessageId });
-      dispatch({ type: "thread", thread: result.thread });
       navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
         state: { focusComposer: true },
       });
@@ -2195,7 +2292,6 @@ export function ThreadPage({
       if (inspectorOpen) await loadGitChanges();
     } catch (caught) {
       if (caught instanceof ApiClientError && caught.status === 404) {
-        dispatch({ type: "thread.remove", threadId });
         setThreadMissing(true);
       } else {
         setError(
@@ -2209,16 +2305,25 @@ export function ThreadPage({
     }
   }
 
-  const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
-  const toggleArchive = () => void api.archive(threadId, !summary!.archived);
+  const togglePin = () => {
+    if (!commandsReady) return;
+    void api.updateThread(threadId, { pinned: !summary!.pinned });
+  };
+  const toggleArchive = () => {
+    if (!commandsReady) return;
+    void api.archive(threadId, !summary!.archived);
+  };
 
   async function deleteThread() {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     if (!window.confirm(t("Удалить эту сессию? Это действие нельзя отменить."))) return;
     setDeleting(true);
     setError(null);
     try {
       await api.deleteThread(threadId);
-      dispatch({ type: "thread.remove", threadId });
       navigate("/", { replace: true });
     } catch (caught) {
       setError(
@@ -2248,12 +2353,15 @@ export function ThreadPage({
       setPendingSettings(next);
       return;
     }
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     setSettingsBusy(true);
     setError(null);
     setTeamUpgradeRequired(false);
     try {
-      const thread = await api.updateThreadSettings(threadId, patch);
-      dispatch({ type: "thread", thread });
+      await api.updateThreadSettings(threadId, patch);
       if (patch.collaborationMode !== undefined && patch.collaborationMode !== "default") {
         setGoalMode(false);
       }
@@ -2278,11 +2386,9 @@ export function ThreadPage({
     setError(null);
     try {
       const created = await api.createProjectThread(project.id);
-      dispatch({ type: "thread", thread: created.thread });
       const configured = await api.updateThreadSettings(created.thread.id, {
         collaborationMode: "team",
       });
-      dispatch({ type: "thread", thread: configured });
       setTeamUpgradeRequired(false);
       navigate(`/threads/${encodeURIComponent(configured.id)}`, {
         state: { focusComposer: true },
@@ -2299,11 +2405,14 @@ export function ThreadPage({
   }
 
   async function updateGoal(patch: UpdateThreadGoalRequest) {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     setGoalBusy(true);
     setError(null);
     try {
-      const updated = await api.updateGoal(threadId, patch);
-      dispatch({ type: "goal", threadId, goal: updated });
+      await api.updateGoal(threadId, patch);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -2316,11 +2425,14 @@ export function ThreadPage({
   }
 
   async function clearGoal() {
+    if (!commandsReady) {
+      setError(t("Дождитесь синхронизации с сервером"));
+      return;
+    }
     setGoalBusy(true);
     setError(null);
     try {
       await api.clearGoal(threadId);
-      dispatch({ type: "goal", threadId, goal: null });
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -2535,7 +2647,7 @@ export function ThreadPage({
                               forkAction={
                                 !isSubagent && entry.id === forkAgentMessageId
                                   ? {
-                                      disabled: forking,
+                                      disabled: forking || !commandsReady,
                                       onFork: () => void forkFromTurn(turn.id, entry.id),
                                     }
                                   : undefined
@@ -2553,7 +2665,7 @@ export function ThreadPage({
                               <div className="implement-plan-actions">
                                 <button
                                   className="implement-plan"
-                                  disabled={busy || latestPlanHasAnnotations}
+                                  disabled={busy || !commandsReady || latestPlanHasAnnotations}
                                   title={
                                     latestPlanHasAnnotations
                                       ? t("Сначала отправьте или удалите аннотации к плану")
@@ -2566,7 +2678,7 @@ export function ThreadPage({
                                 </button>
                                 <button
                                   className="implement-plan orchestrator"
-                                  disabled={busy || latestPlanHasAnnotations}
+                                  disabled={busy || !commandsReady || latestPlanHasAnnotations}
                                   title={
                                     latestPlanHasAnnotations
                                       ? t("Сначала отправьте или удалите аннотации к плану")
@@ -2642,7 +2754,7 @@ export function ThreadPage({
                   workspaceSummary.unread && (
                     <button
                       className="finish-thread-action"
-                      disabled={finishing}
+                      disabled={finishing || !commandsReady}
                       onClick={() => void finishThread()}
                     >
                       {finishing ? t("Заканчиваем…") : t("Закончить")}
@@ -2680,7 +2792,7 @@ export function ThreadPage({
             attachmentScope={attachmentScope}
             onPendingAttachmentsChange={setPendingAttachments}
             onSubmit={submit}
-            busy={busy}
+            busy={busy || !reliableQueueReady}
             running={
               Boolean(workspaceSummary.currentTurnId) ||
               (workspaceSummary.settings.collaborationMode === "team" &&
@@ -2688,10 +2800,10 @@ export function ThreadPage({
             }
             settings={preparationRef.current.active ? pendingSettings : workspaceSummary.settings}
             onSettingsChange={(patch) => void updateSettings(patch)}
-            settingsBusy={settingsBusy}
+            settingsBusy={settingsBusy || !commandsReady}
             goalMode={goalMode}
             goal={goal}
-            goalBusy={goalBusy}
+            goalBusy={goalBusy || !commandsReady}
             onGoalModeChange={(value) => {
               if (value && annotations.length) {
                 setError(t("Сначала отправьте или удалите аннотации"));
@@ -2701,8 +2813,9 @@ export function ThreadPage({
             }}
             onGoalUpdate={(patch) => void updateGoal(patch)}
             onGoalClear={() => void clearGoal()}
-            models={state.snapshot?.models ?? []}
+            models={connectionView.models}
             onStop={
+              commandsReady &&
               !busy &&
               (workspaceSummary.currentTurnId ||
                 (workspaceSummary.settings.collaborationMode === "team" &&
@@ -2757,7 +2870,7 @@ export function ThreadPage({
               <button
                 className="new-session-retry"
                 type="button"
-                disabled={preparationWorking || busy}
+                disabled={preparationWorking || busy || !commandsReady}
                 onClick={() => {
                   if (!preparationRef.current.threadId) creationPromiseRef.current = null;
                   setPreparationRetry((value) => value + 1);
@@ -4303,13 +4416,9 @@ function completedChatLooksIncomplete(
 function reconcileVisibleThreadSummary(
   snapshotSummary: ThreadSummary | undefined,
   detail: ThreadDetail | undefined,
+  allowProvisional: boolean,
 ): ThreadSummary | undefined {
-  if (!snapshotSummary) return detail?.summary;
-  if (snapshotSummary.currentTurnId) return snapshotSummary;
-  if (detail?.summary.currentTurnId && detail.summary.updatedAt >= snapshotSummary.updatedAt) {
-    return detail.summary;
-  }
-  return snapshotSummary;
+  return snapshotSummary ?? (allowProvisional ? detail?.summary : undefined);
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {

@@ -1,16 +1,21 @@
-import type {
-  ActivityItem,
-  AppSnapshot,
-  Project,
-  QueuedMessage,
-  ServerEvent,
-  ThreadChanges,
-  ThreadDetail,
-  ThreadDraft,
-  ThreadGoal,
-  ThreadSummary,
-  VoiceTranscriptionJob,
+import {
+  isAppSnapshot,
+  type ProjectionCursor,
+  type ActivityItem,
+  type AppSnapshot,
+  type Project,
+  type QueuedMessage,
+  type ServerEvent,
+  type ServerFrame,
+  type ThreadChanges,
+  type ThreadDetail,
+  type ThreadDraft,
+  type ThreadGoal,
+  type ThreadSummary,
+  type VoiceTranscriptionJob,
 } from "@codexnest/protocol";
+
+type ReplayPatches = Extract<ServerFrame, { type: "replay" }>["patches"];
 
 export interface ClientState {
   snapshot: AppSnapshot | null;
@@ -20,6 +25,7 @@ export interface ClientState {
   goals: Record<string, ThreadGoal | null>;
   voiceRemovals: Record<string, { jobId: string; outcome: "draft" | "send" | "cancelled" }>;
   network: "connecting" | "connected" | "offline";
+  syncStatus: "hydrating" | "syncing" | "synced";
   error: string | null;
   snapshotEpoch: number;
 }
@@ -43,7 +49,18 @@ export type ClientAction =
     }
   | { type: "hydrate.detail"; detail: ThreadDetail }
   | { type: "snapshot"; snapshot: AppSnapshot }
-  | { type: "event"; sequence: number; event: ServerEvent }
+  | { type: "sync"; snapshot: AppSnapshot }
+  | { type: "resync"; snapshot: AppSnapshot }
+  | { type: "thread.open"; threadId: string; detail: ThreadDetail | null }
+  | { type: "synced" }
+  | {
+      type: "replay";
+      epoch: string;
+      fromRevision: number;
+      toRevision: number;
+      patches: ReplayPatches;
+    }
+  | { type: "event"; revision: number; epoch: string; event: ServerEvent }
   | {
       type: "detail";
       detail: ThreadDetail;
@@ -71,6 +88,7 @@ export const initialState: ClientState = {
   goals: {},
   voiceRemovals: {},
   network: "connecting",
+  syncStatus: "hydrating",
   error: null,
   snapshotEpoch: 0,
 };
@@ -80,32 +98,79 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "clear":
       return initialState;
     case "network":
-      return { ...state, network: action.network, error: action.error ?? null };
+      return {
+        ...state,
+        network: action.network,
+        syncStatus: action.network === "connected" ? state.syncStatus : "syncing",
+        error: action.error ?? null,
+      };
     case "hydrate":
       return {
         ...state,
-        snapshot: action.snapshot,
+        snapshot:
+          action.snapshot && isValidProjectionSnapshot(action.snapshot) ? action.snapshot : null,
         goals: action.goals,
+        syncStatus: "syncing",
       };
     case "hydrate.detail":
       return applyDetail(state, action.detail, "latest");
-    case "snapshot":
+    case "synced":
+      return state.snapshot?.projectionStatus === "ready"
+        ? { ...state, network: "connected", syncStatus: "synced", error: null }
+        : state;
+    case "sync": {
+      if (!isValidProjectionSnapshot(action.snapshot)) return state;
+      return clientReducer(state, { type: "snapshot", snapshot: action.snapshot });
+    }
+    case "resync": {
+      if (!isValidProjectionSnapshot(action.snapshot)) return state;
+      return clientReducer(
+        { ...state, snapshot: null, details: {}, expandedHistory: {} },
+        { type: "snapshot", snapshot: action.snapshot },
+      );
+    }
+    case "thread.open":
+      if (!action.detail) {
+        return { ...state, details: withoutKey(state.details, action.threadId) };
+      }
+      return action.detail.summary.id === action.threadId
+        ? applyDetail(state, action.detail, "latest")
+        : state;
+    case "replay": {
+      if (
+        !state.snapshot ||
+        !isValidProjectionSnapshot(state.snapshot) ||
+        state.snapshot.projectionStatus !== "ready" ||
+        state.snapshot.epoch !== action.epoch ||
+        state.snapshot.revision !== action.fromRevision ||
+        !isRevision(action.toRevision) ||
+        action.toRevision !== action.fromRevision + action.patches.length ||
+        action.patches.some((patch, index) => patch.revision !== action.fromRevision + index + 1)
+      ) {
+        return state;
+      }
+      let replayed = state;
+      for (const patch of action.patches) {
+        replayed = applyEvent(replayed, patch.revision, patch.event);
+      }
+      return { ...replayed, network: "connected", syncStatus: "synced", error: null };
+    }
+    case "snapshot": {
+      if (!isValidProjectionSnapshot(action.snapshot)) return state;
+      const epochChanged =
+        state.snapshot !== null && state.snapshot.epoch !== action.snapshot.epoch;
       return {
         ...state,
-        snapshot:
-          action.snapshot.connection.syncedAt === null && state.snapshot
-            ? {
-                ...action.snapshot,
-                threads: state.snapshot.threads,
-                models: state.snapshot.models,
-                defaultReasoningEffort: state.snapshot.defaultReasoningEffort,
-                taskDefaults: state.snapshot.taskDefaults,
-              }
-            : action.snapshot,
-        network: "connected",
+        snapshot: action.snapshot,
+        details: epochChanged ? {} : state.details,
+        expandedHistory: epochChanged ? {} : state.expandedHistory,
+        goals: epochChanged ? {} : state.goals,
+        network: action.snapshot.projectionStatus === "ready" ? "connected" : "connecting",
+        syncStatus: action.snapshot.projectionStatus === "ready" ? "synced" : "syncing",
         error: null,
         snapshotEpoch: state.snapshotEpoch + 1,
       };
+    }
     case "detail":
       return applyDetail(state, action.detail, action.page, action.preserveLive);
     case "turn.items":
@@ -177,9 +242,54 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "optimistic.remove":
       return removeOptimisticMessage(state, action.threadId, action.messageId);
     case "event":
-      if (!state.snapshot) return state;
-      return applyEvent(state, action.sequence, action.event);
+      if (
+        !state.snapshot ||
+        !isRevision(action.revision) ||
+        action.epoch !== state.snapshot.epoch ||
+        action.revision !== state.snapshot.revision + 1
+      ) {
+        return state;
+      }
+      return applyEvent(state, action.revision, action.event);
   }
+}
+
+export interface ClientStore {
+  getSnapshot(): ClientState;
+  subscribe(listener: () => void): () => void;
+  dispatch(action: ClientAction): void;
+}
+
+export function createClientStore(seed: ClientState = initialState): ClientStore {
+  let current = seed;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => current,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    dispatch(action) {
+      const next = clientReducer(current, action);
+      if (next === current) return;
+      current = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+export function projectionCursor(snapshot: AppSnapshot | null): ProjectionCursor | null {
+  return snapshot && isValidProjectionSnapshot(snapshot) && snapshot.projectionStatus === "ready"
+    ? { epoch: snapshot.epoch, revision: snapshot.revision }
+    : null;
+}
+
+export function isValidProjectionSnapshot(snapshot: unknown): snapshot is AppSnapshot {
+  return isAppSnapshot(snapshot);
+}
+
+function isRevision(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function applyChanges(
@@ -241,9 +351,35 @@ export function mergeThreadDetailChanges(
   };
 }
 
-function applyEvent(state: ClientState, sequence: number, event: ServerEvent): ClientState {
-  const snapshot = { ...state.snapshot!, sequence };
+function applyEvent(state: ClientState, revision: number, event: ServerEvent): ClientState {
+  const snapshot = { ...state.snapshot!, revision };
   switch (event.type) {
+    case "projection.replaced": {
+      const summaries = new Map(event.snapshot.threads.map((thread) => [thread.id, thread]));
+      const details = Object.fromEntries(
+        Object.entries(state.details).flatMap(([threadId, detail]) => {
+          const summary = summaries.get(threadId);
+          return summary ? [[threadId, { ...detail, summary }] as const] : [];
+        }),
+      );
+      const threadIds = new Set(summaries.keys());
+      return {
+        ...state,
+        snapshot: {
+          ...event.snapshot,
+          epoch: state.snapshot!.epoch,
+          revision,
+        },
+        details,
+        expandedHistory: keepKeys(state.expandedHistory, threadIds),
+        optimisticMessages: keepKeys(state.optimisticMessages, threadIds),
+        goals: keepKeys(state.goals, threadIds),
+        network: event.snapshot.projectionStatus === "ready" ? "connected" : "connecting",
+        syncStatus: event.snapshot.projectionStatus === "ready" ? "synced" : "syncing",
+        error: null,
+        snapshotEpoch: state.snapshotEpoch + 1,
+      };
+    }
     case "connection.changed":
       snapshot.connection = event.connection;
       break;
@@ -310,8 +446,6 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         event.threadId,
         event.item.id,
       );
-    case "activity.delta":
-      return applyActivityDelta({ ...state, snapshot }, event);
     case "turn.progressed":
       return applyProgress({ ...state, snapshot }, event.threadId, event.turnId, event.progress);
     case "queue.changed":
@@ -320,10 +454,24 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
         event.threadId,
         event.messages,
       );
-    case "resync.required":
-      return { ...state, snapshot, snapshotEpoch: state.snapshotEpoch + 1 };
+    case "draft.changed": {
+      const detail = state.details[event.threadId];
+      if (!detail) break;
+      return {
+        ...state,
+        snapshot,
+        details: {
+          ...state.details,
+          [event.threadId]: { ...detail, draft: event.draft },
+        },
+      };
+    }
   }
   return { ...state, snapshot };
+}
+
+function keepKeys<T>(value: Record<string, T>, keys: ReadonlySet<string>): Record<string, T> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => keys.has(key)));
 }
 
 function removeThreadState(state: ClientState, threadId: string): ClientState {
@@ -509,63 +657,6 @@ function applyActivity(
     ...state,
     details: { ...state.details, [threadId]: { ...detail, turns, queuedMessages } },
   };
-}
-
-function applyActivityDelta(
-  state: ClientState,
-  event: Extract<ServerEvent, { type: "activity.delta" }>,
-): ClientState {
-  const detail = detailForEvent(state, event.threadId);
-  if (!detail) return state;
-  const turns = [...detail.turns];
-  let turnIndex = turns.findIndex((turn) => turn.id === event.turnId);
-  if (turnIndex < 0) {
-    turns.push({
-      id: event.turnId,
-      status: "inProgress",
-      startedAt: null,
-      completedAt: null,
-      durationMs: null,
-      progress: emptyProgress(),
-      items: [],
-      itemsLoaded: false,
-    });
-    turnIndex = turns.length - 1;
-  }
-  const turn = turns[turnIndex]!;
-  const items = [...turn.items];
-  const itemIndex = items.findIndex((item) => item.id === event.itemId);
-  if (itemIndex >= 0) {
-    const current = items[itemIndex]!;
-    if (event.activityType === "command" && current.type === "command") {
-      items[itemIndex] = { ...current, output: current.output + event.delta };
-    } else if ("text" in current) {
-      items[itemIndex] = { ...current, text: current.text + event.delta } as ActivityItem;
-    }
-  } else if (event.activityType === "command") {
-    items.push({
-      type: "command",
-      id: event.itemId,
-      status: "inProgress",
-      kind: "command",
-      command: "",
-      cwd: null,
-      output: event.delta,
-      exitCode: null,
-    });
-  } else {
-    items.push({
-      type: event.activityType,
-      id: event.itemId,
-      status: "inProgress",
-      text: event.delta,
-      images: [],
-      timestamp: turn.startedAt ?? turn.progress.startedAt,
-      phase: null,
-    });
-  }
-  turns[turnIndex] = { ...turn, items };
-  return { ...state, details: { ...state.details, [event.threadId]: { ...detail, turns } } };
 }
 
 function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem[] {

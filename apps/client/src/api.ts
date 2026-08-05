@@ -17,8 +17,10 @@ import type {
   GitChangesSummary,
   GlobalPermissionSettings,
   HealthResponse,
+  InterruptTurnRequest,
   MarkReadRequest,
   MoveProjectRequest,
+  ProjectionCursor,
   Project,
   QueuedMessage,
   QueueMessageRequest,
@@ -57,7 +59,17 @@ import type { ConnectionSettings } from "./storage";
 import { readInitialLanguage, translate } from "./i18n";
 
 export class ApiClient {
+  private projectionCursor: ProjectionCursor | null = null;
+
   constructor(public readonly settings: ConnectionSettings) {}
+
+  setProjectionCursor(cursor: ProjectionCursor | null): void {
+    this.projectionCursor = cursor;
+  }
+
+  get commandsReady(): boolean {
+    return this.projectionCursor !== null;
+  }
 
   health(): Promise<HealthResponse> {
     return this.request("/api/v1/health", { authenticated: false });
@@ -321,11 +333,16 @@ export class ApiClient {
     });
   }
 
-  forkThread(id: string, body: ForkThreadRequest): Promise<ForkThreadResponse> {
+  async forkThread(id: string, body: ForkThreadRequest): Promise<ForkThreadResponse> {
+    const contextual = this.contextualCommand(id, body);
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/forks`, {
       method: "POST",
-      body,
+      body: {
+        ...contextual,
+        commandId: contextual.commandId ?? commandId("fork"),
+      },
       timeoutMs: null,
+      retry: true,
     });
   }
 
@@ -344,20 +361,29 @@ export class ApiClient {
     });
   }
 
-  startTurn(id: string, body: StartTurnRequest): Promise<TurnStartResult> {
+  async startTurn(id: string, body: StartTurnRequest): Promise<TurnStartResult> {
+    const contextual = this.contextualCommand(id, body);
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/turns`, {
       method: "POST",
-      body,
+      body: {
+        ...contextual,
+        commandId: contextual.commandId ?? contextual.clientMessageId ?? commandId("turn"),
+      },
       timeoutMs: null,
-      retry: Boolean(body.clientMessageId),
+      retry: true,
     });
   }
 
-  enqueue(id: string, body: QueueMessageRequest): Promise<QueuedMessage> {
+  async enqueue(id: string, body: QueueMessageRequest): Promise<QueuedMessage> {
+    const contextual = this.threadCommand(id, body);
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
       method: "POST",
-      body,
+      body: {
+        ...contextual,
+        commandId: contextual.commandId ?? contextual.clientMessageId ?? commandId("queue"),
+      },
       timeoutMs: 15_000,
+      retry: true,
     });
   }
 
@@ -410,10 +436,16 @@ export class ApiClient {
     });
   }
 
-  interrupt(id: string, turnId?: string): Promise<void> {
+  async interrupt(id: string, turnId?: string): Promise<void> {
+    const body: InterruptTurnRequest = turnId ? { turnId } : {};
+    const contextual = this.contextualCommand(id, body);
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/interrupt`, {
       method: "POST",
-      body: turnId ? { turnId } : {},
+      body: {
+        ...contextual,
+        commandId: commandId("interrupt"),
+      },
+      retry: true,
     });
   }
 
@@ -450,6 +482,33 @@ export class ApiClient {
     const url = new URL("/api/v1/events", `${this.settings.baseUrl}/`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return url.toString();
+  }
+
+  private contextualCommand<T extends object>(
+    threadId: string,
+    body: T,
+  ): T & {
+    expectedThreadId: string;
+    expectedRevision: number;
+  } {
+    const contextual = this.threadCommand(threadId, body);
+    return {
+      ...contextual,
+      expectedRevision: this.projectionCursor!.revision,
+    };
+  }
+
+  private threadCommand<T extends object>(
+    threadId: string,
+    body: T,
+  ): T & { expectedThreadId: string } {
+    if (!this.projectionCursor) {
+      throw new ApiClientError(
+        "sync_required",
+        translate(readInitialLanguage(), "Дождитесь синхронизации с сервером"),
+      );
+    }
+    return { ...body, expectedThreadId: threadId };
   }
 
   private async request<T>(
@@ -572,4 +631,9 @@ export function isRetryableApiError(error: unknown): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function commandId(kind: string): string {
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}:${Math.random()}`;
+  return `${kind}:${id}`;
 }

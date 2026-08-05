@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   access,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -18,6 +19,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { SYNC_PROTOCOL_VERSION } from "@codexnest/protocol";
 
 import { buildApp } from "./app";
 import { enforceTeamTimeBudgets, triggerTeamWatchdogs } from "./api";
@@ -34,13 +37,22 @@ import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
-import { createTeamWorkspace } from "./team-workspace";
+import { computeTeamWorkspaceDelta, createTeamWorkspace } from "./team-workspace";
 import { TranscriptionError } from "./transcription";
 
 const directories: string[] = [];
 const execFileAsync = promisify(execFile);
 const TEAM_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
+function authenticationFrame(token: string) {
+  return {
+    type: "authenticate" as const,
+    protocolVersion: SYNC_PROTOCOL_VERSION,
+    token,
+    cursor: null,
+    threadId: null,
+  };
+}
 afterEach(async () =>
   Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
@@ -352,7 +364,16 @@ describe("HTTP authentication", () => {
       (
         await app.inject({ url: "/api/v1/summary", headers: { authorization: "Bearer correct" } })
       ).json(),
-    ).toMatchObject({ threadCount: 0 });
+    ).toMatchObject({
+      threadCount: 0,
+      projection: {
+        status: "reconciling",
+        epoch: expect.any(String),
+        revision: expect.any(Number),
+        projectionQueueDepth: 0,
+        oldestPendingCommandAgeMs: null,
+      },
+    });
     expect(
       (
         await app.inject({
@@ -376,7 +397,7 @@ describe("HTTP authentication", () => {
 
     const authorization = { authorization: "Bearer correct" };
     const languageChanged = new Promise<Record<string, unknown>>((resolve) => {
-      const listener = (_sequence: number, event: Record<string, unknown>) => {
+      const listener = (_committed: number, event: Record<string, unknown>) => {
         if (event.type !== "uiLanguage.changed") return;
         projection.off("event", listener);
         resolve(event);
@@ -466,7 +487,7 @@ describe("HTTP authentication", () => {
     expect(legacyProject.json()).toMatchObject({ displayName: "legacy-project" });
 
     const reorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
-      const listener = (_sequence: number, event: Record<string, unknown>) => {
+      const listener = (_committed: number, event: Record<string, unknown>) => {
         if (event.type !== "projects.reordered") return;
         projection.off("event", listener);
         resolve(event);
@@ -493,7 +514,7 @@ describe("HTTP authentication", () => {
     ]);
 
     const targetReorderedEvent = new Promise<Record<string, unknown>>((resolve) => {
-      const listener = (_sequence: number, event: Record<string, unknown>) => {
+      const listener = (_committed: number, event: Record<string, unknown>) => {
         if (event.type !== "projects.reordered") return;
         projection.off("event", listener);
         resolve(event);
@@ -619,8 +640,13 @@ describe("HTTP authentication", () => {
         resolve(JSON.parse(data.toString()) as Record<string, unknown>),
       );
     });
-    authorized.send(JSON.stringify({ type: "authenticate", token: "correct" }));
-    await expect(snapshot).resolves.toMatchObject({ type: "snapshot" });
+    authorized.send(JSON.stringify(authenticationFrame("correct")));
+    const initialFrame = await snapshot;
+    expect(initialFrame).toMatchObject({
+      type: "snapshot",
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+    });
+    const initialSnapshot = initialFrame.snapshot as { epoch: string; revision: number };
 
     const secondAuthorized = await app.injectWS("/api/v1/events", {
       headers: { origin: "http://localhost" },
@@ -630,7 +656,7 @@ describe("HTTP authentication", () => {
         resolve(JSON.parse(data.toString()) as Record<string, unknown>),
       );
     });
-    secondAuthorized.send(JSON.stringify({ type: "authenticate", token: "correct" }));
+    secondAuthorized.send(JSON.stringify(authenticationFrame("correct")));
     await expect(secondSnapshot).resolves.toMatchObject({ type: "snapshot" });
 
     const firstEvent = new Promise<Record<string, unknown>>((resolve) => {
@@ -646,19 +672,61 @@ describe("HTTP authentication", () => {
     projection.upsertThread(testThread("broadcast"));
     const [firstBroadcast, secondBroadcast] = await Promise.all([firstEvent, secondEvent]);
     expect(firstBroadcast).toMatchObject({
-      type: "event",
+      type: "patch",
+      protocolVersion: SYNC_PROTOCOL_VERSION,
       event: { type: "thread.upserted" },
     });
     expect(secondBroadcast).toEqual(firstBroadcast);
+
+    const replaySocket = await app.injectWS("/api/v1/events", {
+      headers: { origin: "http://localhost" },
+    });
+    const replayFrames = new Promise<Record<string, unknown>[]>((resolve) => {
+      const frames: Record<string, unknown>[] = [];
+      replaySocket.on("message", (data) => {
+        frames.push(JSON.parse(data.toString()) as Record<string, unknown>);
+        if (frames.length === 2) resolve(frames);
+      });
+    });
+    replaySocket.send(
+      JSON.stringify({
+        ...authenticationFrame("correct"),
+        cursor: {
+          epoch: initialSnapshot.epoch,
+          revision: initialSnapshot.revision,
+        },
+        threadId: "broadcast",
+      }),
+    );
+    await expect(replayFrames).resolves.toEqual([
+      expect.objectContaining({
+        type: "snapshot",
+        protocolVersion: SYNC_PROTOCOL_VERSION,
+        snapshot: expect.objectContaining({
+          epoch: initialSnapshot.epoch,
+          projectionStatus: "reconciling",
+          threads: [expect.objectContaining({ id: "broadcast" })],
+        }),
+      }),
+      expect.objectContaining({
+        type: "thread.open",
+        protocolVersion: SYNC_PROTOCOL_VERSION,
+        threadId: "broadcast",
+        detail: expect.objectContaining({
+          summary: expect.objectContaining({ id: "broadcast" }),
+        }),
+      }),
+    ]);
+    replaySocket.terminate();
 
     const resynced = new Promise<Record<string, unknown>>((resolve) => {
       authorized.once("message", (data) =>
         resolve(JSON.parse(data.toString()) as Record<string, unknown>),
       );
     });
-    projection.emit("event", 999, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await expect(resynced).resolves.toMatchObject({
-      type: "snapshot",
+      type: "resync",
       snapshot: {
         threads: [expect.objectContaining({ id: "broadcast" })],
       },
@@ -675,7 +743,7 @@ describe("HTTP authentication", () => {
       unauthorizedMessages += 1;
     });
     const closed = new Promise<number>((resolve) => unauthorized.once("close", resolve));
-    unauthorized.send(JSON.stringify({ type: "authenticate", token: "wrong" }));
+    unauthorized.send(JSON.stringify(authenticationFrame("wrong")));
     await expect(closed).resolves.toBe(1008);
     expect(unauthorizedMessages).toBe(0);
 
@@ -699,7 +767,7 @@ describe("HTTP authentication", () => {
         resolve(JSON.parse(data.toString()) as Record<string, unknown>),
       );
     });
-    lanOrigin.send(JSON.stringify({ type: "authenticate", token: "correct" }));
+    lanOrigin.send(JSON.stringify(authenticationFrame("correct")));
     await expect(lanSnapshot).resolves.toMatchObject({ type: "snapshot" });
     lanOrigin.terminate();
 
@@ -709,7 +777,7 @@ describe("HTTP authentication", () => {
     const revocableSnapshot = new Promise<void>((resolve) =>
       revocable.once("message", () => resolve()),
     );
-    revocable.send(JSON.stringify({ type: "authenticate", token: "correct" }));
+    revocable.send(JSON.stringify(authenticationFrame("correct")));
     await revocableSnapshot;
     const revoked = new Promise<number>((resolve) => revocable.once("close", resolve));
     await store.update((state) => {
@@ -723,7 +791,7 @@ describe("HTTP authentication", () => {
     const shutdownSnapshot = new Promise<void>((resolve) =>
       shutdownSocket.once("message", () => resolve()),
     );
-    shutdownSocket.send(JSON.stringify({ type: "authenticate", token: "rotated" }));
+    shutdownSocket.send(JSON.stringify(authenticationFrame("rotated")));
     await shutdownSnapshot;
     const shutdownClosed = new Promise<void>((resolve) =>
       shutdownSocket.once("close", () => resolve()),
@@ -1317,6 +1385,192 @@ describe("file downloads", () => {
 });
 
 describe("session forks", () => {
+  it("replays a ready projection from the requested revision", async () => {
+    const harness = await createForkHarness();
+    const cursor = harness.store.projectionCursor();
+    harness.projection.upsertThread(testThread("after-cursor"));
+    await harness.app.ready();
+    const socket = await harness.app.injectWS("/api/v1/events", {
+      headers: { origin: "http://localhost" },
+    });
+    const received = new Promise<Record<string, unknown>>((resolve) => {
+      socket.once("message", (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    socket.send(
+      JSON.stringify({
+        ...authenticationFrame("correct"),
+        cursor,
+      }),
+    );
+
+    await expect(received).resolves.toMatchObject({
+      type: "replay",
+      epoch: cursor.epoch,
+      fromRevision: cursor.revision,
+      patches: [
+        expect.objectContaining({
+          event: expect.objectContaining({ type: "thread.upserted" }),
+        }),
+      ],
+    });
+    socket.terminate();
+    await harness.app.close();
+  });
+
+  it("retries interrupt only for the expected active turn and records stale requests as no-ops", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId: "thread", turn: testTurn("active", "inProgress") },
+    } satisfies ServerNotification);
+    await harness.projection.flushed();
+    const revision = harness.projection.snapshot().revision;
+    const payload = {
+      turnId: "active",
+      commandId: "interrupt-command",
+      expectedThreadId: "thread",
+      expectedRevision: revision,
+    };
+
+    const first = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers: harness.headers,
+      payload,
+    });
+    const repeated = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers: harness.headers,
+      payload,
+    });
+    const stale = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers: harness.headers,
+      payload: {
+        turnId: "active",
+        commandId: "stale-interrupt-command",
+        expectedThreadId: "thread",
+      },
+    });
+
+    expect(first.statusCode).toBe(204);
+    expect(repeated.statusCode).toBe(204);
+    expect(stale.statusCode).toBe(204);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "turn/interrupt"),
+    ).toHaveLength(1);
+    expect(harness.store.commandReceipt("interrupt-command")?.status).toBe("succeeded");
+    expect(harness.store.commandReceipt("stale-interrupt-command")?.status).toBe("noop");
+    await harness.app.close();
+  });
+
+  it("deduplicates a durable turn start and rejects command-id reuse", async () => {
+    const harness = await createForkHarness();
+    const payload = {
+      input: "Продолжай",
+      commandId: "turn-command",
+      expectedThreadId: "thread",
+      expectedTurnId: null,
+      expectedRevision: harness.projection.snapshot().revision,
+    };
+
+    const first = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload,
+    });
+    const repeated = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload,
+    });
+    const reused = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload: { ...payload, input: "Другая команда" },
+    });
+    const changedPrecondition = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload: { ...payload, expectedRevision: payload.expectedRevision + 1 },
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(repeated.statusCode).toBe(201);
+    expect(repeated.json()).toEqual(first.json());
+    expect(reused.statusCode).toBe(409);
+    expect(changedPrecondition.statusCode).toBe(409);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+    ).toHaveLength(1);
+    expect(harness.store.commandReceipt("turn-command")).toMatchObject({
+      status: "succeeded",
+      result: first.json(),
+    });
+    await harness.app.close();
+  });
+
+  it("returns a durable fork receipt without creating a second fork", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовая реализация")],
+      },
+    ]);
+    const payload = {
+      lastTurnId: "selected-turn",
+      agentMessageId: "selected-answer",
+      commandId: "fork-command",
+      expectedThreadId: "thread",
+      expectedRevision: harness.projection.snapshot().revision,
+    };
+
+    const first = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/forks",
+      headers: harness.headers,
+      payload,
+    });
+    const repeated = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/forks",
+      headers: harness.headers,
+      payload,
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(repeated.statusCode).toBe(201);
+    expect(repeated.json()).toEqual(first.json());
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "thread/fork"),
+    ).toHaveLength(1);
+    const receipt = await harness.app.inject({
+      url: "/api/v1/commands/fork-command",
+      headers: harness.headers,
+    });
+    expect(receipt.statusCode).toBe(200);
+    expect(receipt.json()).toMatchObject({
+      commandId: "fork-command",
+      kind: "thread.fork",
+      status: "succeeded",
+      threadId: "thread",
+      turnId: "selected-turn",
+      expectedRevision: payload.expectedRevision,
+      result: first.json(),
+    });
+    await harness.app.close();
+  });
+
   it("forks through the selected completed reply with a generated title and fresh state", async () => {
     const harness = await createForkHarness();
     harness.bridge.threadTurns.set("thread", [
@@ -1501,7 +1755,7 @@ describe("thread settings", () => {
     const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
     await projection.sync();
     const activityEvents: Array<Record<string, unknown>> = [];
-    projection.on("event", (_sequence, event) => {
+    projection.on("event", (_committed, event) => {
       if (event.type === "activity.upserted") activityEvents.push(event);
     });
     const threadTitles = {
@@ -2761,7 +3015,7 @@ describe("Team orchestration", () => {
     });
     expect(bridge.managedThreads).toHaveLength(0);
 
-    projection.emit("event", 3, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     expect((await response).success).toBe(true);
     await vi.waitFor(() =>
       expect(
@@ -2796,7 +3050,7 @@ describe("Team orchestration", () => {
       task.status = "starting";
       delete task.childTurnId;
     });
-    projection.emit("event", 0, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await vi.waitFor(() =>
       expect(
         store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
@@ -2836,7 +3090,7 @@ describe("Team orchestration", () => {
       ([method, params]) =>
         method === "turn/start" && (params as Record<string, unknown>).threadId === "thread",
     ).length;
-    projection.emit("event", 1, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await vi.waitFor(() =>
       expect(
         store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
@@ -2897,7 +3151,7 @@ describe("Team orchestration", () => {
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
         ?.delivery,
     ).toMatchObject({ status: "claimed" });
-    projection.emit("event", 2, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     bridge.parentTurnStartGate = null;
@@ -2945,7 +3199,7 @@ describe("Team orchestration", () => {
       };
     });
 
-    projection.emit("event", 2, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await vi.waitFor(() =>
       expect(
         store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
@@ -3728,7 +3982,7 @@ describe("Team orchestration", () => {
       const gitDirectory = join(repository, ".git");
       await chmod(gitDirectory, 0o000);
       try {
-        projection.emit("event", 101, { type: "resync.required" });
+        projection.emit("resync", projection.snapshot());
         await vi.waitFor(() => {
           const recovered =
             store.snapshot().threadMeta.thread?.teamOrchestration?.tasks.cleanup?.workspace;
@@ -3757,7 +4011,7 @@ describe("Team orchestration", () => {
         store.snapshot().threadMeta.thread?.teamOrchestration?.tasks.cleanup?.workspace,
       ).toMatchObject({ lifecycle: "integrated", error: expect.any(String) });
 
-      projection.emit("event", 102, { type: "resync.required" });
+      projection.emit("resync", projection.snapshot());
       await vi.waitFor(() =>
         expect(
           store.snapshot().threadMeta.thread?.teamOrchestration?.tasks.cleanup?.workspace,
@@ -3788,6 +4042,18 @@ describe("Team orchestration", () => {
           ?.status,
       ).toBe("running"),
     );
+    const workspace =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+        ?.workspace;
+    if (!workspace) throw new Error("Expected an isolated Team workspace");
+    for (const name of [".agents", ".codex"]) {
+      expect((await lstat(join(workspace.worktreePath, name))).isDirectory()).toBe(true);
+      await expect(access(join(repository, name))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await expect(computeTeamWorkspaceDelta(workspace)).resolves.toEqual({
+      changedPaths: [],
+      changes: [],
+    });
     const childTurnStart = bridge.request.mock.calls.find(
       ([method, params]) =>
         method === "turn/start" &&
@@ -3801,6 +4067,78 @@ describe("Team orchestration", () => {
         excludeSlashTmp: true,
       },
     });
+    await app.close();
+    await store.flushed();
+  });
+
+  it("recreates sandbox mountpoints when an isolated workspace is reused", async () => {
+    const repository = await createApiTestRepository();
+    const { app, bridge, store } = await createTeamHarness({
+      version: 2,
+      projectPath: repository,
+    });
+    const first = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Prepare a reusable isolated change",
+        prompt: "Edit src/index.ts.",
+        access: { mode: "isolatedWrite", writePaths: ["src"] },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)]?.status,
+      ).toBe("running"),
+    );
+    const running =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)];
+    if (!running?.workspace || !running.childTurnId) {
+      throw new Error("Expected a running task with an isolated workspace");
+    }
+    await writeFile(
+      join(running.workspace.worktreePath, "src", "index.ts"),
+      "export const value = 2;\n",
+    );
+    await callTeamTool(bridge, String(first.threadId), "submit_result", {
+      outcome: "success",
+      summary: "Change prepared.",
+    });
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: String(first.threadId),
+        turn: { ...testTurn(running.childTurnId, "completed"), itemsView: "full" },
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => {
+      const completed =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)];
+      expect(completed?.status).toBe("completed");
+      expect(completed?.delivery?.status).toBe("delivered");
+      expect(completed?.workspace?.lifecycle).toBe("ready");
+    });
+
+    for (const name of [".agents", ".codex"]) {
+      await rm(join(running.workspace.worktreePath, name), { recursive: true });
+    }
+    const followup = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "followup_task", {
+        taskId: first.taskId,
+        prompt: "Continue in the existing workspace.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(followup.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    const reused =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(followup.taskId)]
+        ?.workspace;
+    expect(reused?.worktreePath).toBe(running.workspace.worktreePath);
+    for (const name of [".agents", ".codex"]) {
+      expect((await lstat(join(running.workspace.worktreePath, name))).isDirectory()).toBe(true);
+    }
     await app.close();
     await store.flushed();
   });
@@ -4029,7 +4367,7 @@ describe("Team orchestration", () => {
         items: [],
       },
     ]);
-    projection.emit("event", 20, { type: "resync.required" });
+    projection.emit("resync", projection.snapshot());
     await vi.waitFor(() => {
       const recovered =
         store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(followup.taskId)];

@@ -21,6 +21,7 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  Синхронизация: "Synchronizing",
   "Не удалось загрузить конфигурацию": "Failed to load configuration",
   "Браузер не выдал разрешение. Попробуйте ещё раз.":
     "The browser did not grant permission. Try again.",
@@ -108,6 +109,7 @@ const ENGLISH: Record<string, string> = {
   "Разрешены только адреса http:// и https://": "Only http:// and https:// addresses are allowed",
   "Не удалось подключиться к серверу": "Failed to connect to the server",
   "Связь с сервером потеряна": "Connection to the server was lost",
+  "Дождитесь синхронизации с сервером": "Wait for server synchronization",
   "Запрашивать разрешение": "Ask for permission",
   "Codex работает в проекте и спрашивает вас перед расширением доступа.":
     "Codex works within the project and asks before expanding access.",

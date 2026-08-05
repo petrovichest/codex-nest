@@ -28,6 +28,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class SelfHostedNotificationService extends Service {
@@ -53,6 +54,7 @@ public class SelfHostedNotificationService extends Service {
     private boolean stopping;
     private volatile String uiLanguage = "en";
     private int statusResource = R.string.notification_status_connecting;
+    private boolean updateRequired;
 
     static void setAppVisible(boolean visible) {
         appVisible = visible;
@@ -205,10 +207,12 @@ public class SelfHostedNotificationService extends Service {
     }
 
     private void scheduleReconnect() {
+        if (updateRequired) return;
         if (stopping || appVisible) return;
         updateStatus(R.string.notification_status_reconnecting);
-        long[] delays = { 1_000, 2_000, 4_000, 8_000, 15_000, 30_000 };
-        long delay = delays[Math.min(retry, delays.length - 1)];
+        long[] delays = { 250, 500, 1_000, 2_000, 5_000 };
+        long baseDelay = delays[Math.min(retry, delays.length - 1)];
+        long delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
         retry += 1;
         handler.removeCallbacks(reconnect);
         handler.postDelayed(reconnect, delay);
@@ -228,7 +232,10 @@ public class SelfHostedNotificationService extends Service {
             try {
                 JSONObject authentication = new JSONObject();
                 authentication.put("type", "authenticate");
+                authentication.put("protocolVersion", 2);
                 authentication.put("token", token);
+                authentication.put("cursor", JSONObject.NULL);
+                authentication.put("threadId", JSONObject.NULL);
                 webSocket.send(authentication.toString());
                 updateStatus(R.string.notification_status_authenticating);
             } catch (Exception error) {
@@ -241,7 +248,24 @@ public class SelfHostedNotificationService extends Service {
             if (webSocket != socket) return;
             try {
                 JSONObject frame = acceptFrame(text);
-                if ("snapshot".equals(frame.optString("type"))) {
+                if (
+                    "error".equals(frame.optString("type")) &&
+                    "client_update_required".equals(
+                        frame.optJSONObject("error") == null
+                            ? null
+                            : frame.optJSONObject("error").optString("code")
+                    )
+                ) {
+                    updateRequired = true;
+                    updateStatus(R.string.notification_status_update_required);
+                    webSocket.close(1008, "Client update required");
+                    return;
+                }
+                if (
+                    "snapshot".equals(frame.optString("type")) ||
+                    "resync".equals(frame.optString("type")) ||
+                    "replay".equals(frame.optString("type"))
+                ) {
                     retry = 0;
                     updateStatus(R.string.notification_status_connected);
                 }
@@ -254,6 +278,7 @@ public class SelfHostedNotificationService extends Service {
         public void onClosed(WebSocket webSocket, int code, String reason) {
             if (webSocket != socket) return;
             socket = null;
+            if (updateRequired) return;
             scheduleReconnect();
         }
 
@@ -261,6 +286,7 @@ public class SelfHostedNotificationService extends Service {
         public void onFailure(WebSocket webSocket, Throwable error, Response response) {
             if (webSocket != socket) return;
             socket = null;
+            if (updateRequired) return;
             scheduleReconnect();
         }
     }
@@ -402,20 +428,42 @@ public class SelfHostedNotificationService extends Service {
 
     private void applyFrameLanguage(JSONObject frame) {
         String language = null;
-        if ("snapshot".equals(frame.optString("type"))) {
+        String frameType = frame.optString("type");
+        if ("snapshot".equals(frameType) || "resync".equals(frameType)) {
             JSONObject snapshot = frame.optJSONObject("snapshot");
             if (snapshot != null) {
                 language = snapshot.has("uiLanguage")
                     ? snapshot.optString("uiLanguage", null)
                     : "ru";
             }
-        } else if ("event".equals(frame.optString("type"))) {
+        } else if ("patch".equals(frameType)) {
             JSONObject event = frame.optJSONObject("event");
-            if (event != null && "uiLanguage.changed".equals(event.optString("type"))) {
-                language = event.optString("language", null);
+            language = eventLanguage(event);
+        } else if ("replay".equals(frameType)) {
+            JSONArray patches = frame.optJSONArray("patches");
+            if (patches != null) {
+                for (int index = 0; index < patches.length(); index += 1) {
+                    JSONObject patch = patches.optJSONObject(index);
+                    String candidate = patch == null
+                        ? null
+                        : eventLanguage(patch.optJSONObject("event"));
+                    if (candidate != null) language = candidate;
+                }
             }
         }
         if ("en".equals(language) || "ru".equals(language)) applyUiLanguage(language);
+    }
+
+    private static String eventLanguage(JSONObject event) {
+        if (event == null) return null;
+        if ("uiLanguage.changed".equals(event.optString("type"))) {
+            return event.optString("language", null);
+        }
+        if ("projection.replaced".equals(event.optString("type"))) {
+            JSONObject snapshot = event.optJSONObject("snapshot");
+            return snapshot == null ? null : snapshot.optString("uiLanguage", null);
+        }
+        return null;
     }
 
     private void applyUiLanguage(String language) {

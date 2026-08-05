@@ -41,7 +41,11 @@ const capacitor = vi.hoisted(() => ({
   removeListener: vi.fn(),
 }));
 
-vi.mock("./connection", () => ({ useConnection: connection }));
+vi.mock("./connection", () => ({
+  useConnection: connection,
+  useConnectionServices: () => connection(),
+  useConnectionSelector: (selector: (state: unknown) => unknown) => selector(connection().state),
+}));
 vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   saveLocalDraft,
@@ -241,8 +245,8 @@ describe("App routing and navigation", () => {
 
   it.each([
     ["connected", "Подключено"],
-    ["connecting", "Подключение…"],
-    ["offline", "Нет связи"],
+    ["connecting", "Синхронизация"],
+    ["offline", "Синхронизация"],
   ] as const)("renders the %s server state as only a dot and label", (network, label) => {
     mockConnection(snapshot([baseThread]), network);
 
@@ -593,7 +597,7 @@ describe("App routing and navigation", () => {
     navigation.scrollTop = 240;
     const context = connection.mock.results.at(-1)?.value;
     context.state.snapshotEpoch += 1;
-    context.state.snapshot = { ...context.state.snapshot, sequence: 2 };
+    context.state.snapshot = { ...context.state.snapshot, revision: 2 };
 
     view.rerender(
       <MemoryRouter initialEntries={["/threads/newer"]}>
@@ -1451,10 +1455,14 @@ describe("App routing and navigation", () => {
     creation.resolve({ thread: { ...baseThread, id: "abandoned", title: "Оставленная задача" } });
     await act(async () => Promise.resolve());
 
-    expect(api.dispatch).not.toHaveBeenCalledWith({
-      type: "thread",
-      thread: expect.objectContaining({ id: "abandoned" }),
-    });
+    expect(api.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "detail",
+        detail: expect.objectContaining({
+          summary: expect.objectContaining({ id: "abandoned" }),
+        }),
+      }),
+    );
     expect(screen.queryByText("Оставленная задача")).not.toBeInTheDocument();
   });
 
@@ -1485,20 +1493,28 @@ describe("App routing and navigation", () => {
       },
     });
     await waitFor(() =>
-      expect(api.dispatch).toHaveBeenCalledWith({
-        type: "thread",
-        thread: expect.objectContaining({ id: "second-created" }),
-      }),
+      expect(api.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "detail",
+          detail: expect.objectContaining({
+            summary: expect.objectContaining({ id: "second-created" }),
+          }),
+        }),
+      ),
     );
     firstCreation.resolve({
       thread: { ...baseThread, id: "first-abandoned", title: "Первая задача" },
     });
     await act(async () => Promise.resolve());
 
-    expect(api.dispatch).not.toHaveBeenCalledWith({
-      type: "thread",
-      thread: expect.objectContaining({ id: "first-abandoned" }),
-    });
+    expect(api.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "detail",
+        detail: expect.objectContaining({
+          summary: expect.objectContaining({ id: "first-abandoned" }),
+        }),
+      }),
+    );
   });
 
   it("keeps the same focused textarea, caret, draft, and empty greeting after creation resolves", async () => {
@@ -1525,10 +1541,14 @@ describe("App routing and navigation", () => {
 
     await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledOnce());
     await waitFor(() =>
-      expect(api.dispatch).toHaveBeenCalledWith({
-        type: "thread",
-        thread: expect.objectContaining({ id: "created" }),
-      }),
+      expect(api.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "detail",
+          detail: expect.objectContaining({
+            summary: expect.objectContaining({ id: "created" }),
+          }),
+        }),
+      ),
     );
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBe(textarea);
     expect(textarea).toHaveFocus();
@@ -1589,10 +1609,14 @@ describe("App routing and navigation", () => {
       }),
     );
     await waitFor(() =>
-      expect(api.dispatch).toHaveBeenCalledWith({
-        type: "thread",
-        thread: expect.objectContaining({ id: "created" }),
-      }),
+      expect(api.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "detail",
+          detail: expect.objectContaining({
+            summary: expect.objectContaining({ id: "created" }),
+          }),
+        }),
+      ),
     );
     expect(screen.getByRole("dialog", { name: "Настройки модели" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
@@ -1684,10 +1708,14 @@ describe("App routing and navigation", () => {
       },
     });
     await waitFor(() =>
-      expect(api.dispatch).toHaveBeenCalledWith({
-        type: "thread",
-        thread: expect.objectContaining({ id: "created" }),
-      }),
+      expect(api.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "detail",
+          detail: expect.objectContaining({
+            summary: expect.objectContaining({ id: "created" }),
+          }),
+        }),
+      ),
     );
 
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
@@ -1741,12 +1769,18 @@ describe("App routing and navigation", () => {
     fireEvent.change(textarea, { target: { value: "Отправь на границе создания" } });
 
     let submittedDuringHandoff = false;
-    api.dispatch.mockImplementation((action: { type: string; thread?: ThreadSummary }) => {
-      if (!submittedDuringHandoff && action.type === "thread" && action.thread?.id === "created") {
-        submittedDuringHandoff = true;
-        fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
-      }
-    });
+    api.dispatch.mockImplementation(
+      (action: { type: string; detail?: { summary: ThreadSummary } }) => {
+        if (
+          !submittedDuringHandoff &&
+          action.type === "detail" &&
+          action.detail?.summary.id === "created"
+        ) {
+          submittedDuringHandoff = true;
+          fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+        }
+      },
+    );
 
     creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
 
@@ -2154,10 +2188,14 @@ describe("App routing and navigation", () => {
 
     creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
     await waitFor(() =>
-      expect(api.dispatch).toHaveBeenCalledWith({
-        type: "thread",
-        thread: expect.objectContaining({ id: "created" }),
-      }),
+      expect(api.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "detail",
+          detail: expect.objectContaining({
+            summary: expect.objectContaining({ id: "created" }),
+          }),
+        }),
+      ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Остановить запись" }));
 
@@ -2685,7 +2723,10 @@ function defaultProject(): Project {
 
 function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProject()]): AppSnapshot {
   return {
-    sequence: 1,
+    protocolVersion: 2,
+    epoch: "test",
+    revision: 1,
+    projectionStatus: "ready",
     uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects,
@@ -2787,6 +2828,7 @@ function mockConnection(
         ]),
       ),
       network,
+      syncStatus: network === "connected" ? "synced" : "syncing",
       error: null,
       snapshotEpoch: 1,
     },

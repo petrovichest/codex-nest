@@ -10,9 +10,11 @@ import type {
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
+import { isValidProjectionSnapshot } from "./state";
 
 const DATABASE_NAME = "codexnest-offline";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
+const CACHE_FORMAT_VERSION = 2;
 const THREAD_CACHE_LIMIT_BYTES = 250 * 1024 * 1024;
 const THREAD_CACHE_CLEANUP_INTERVAL_MS = 30_000;
 
@@ -23,6 +25,7 @@ const OUTBOX_STORE = "outbox";
 const RECORDING_STORE = "recordings";
 
 export type CachedMeta = {
+  formatVersion: typeof CACHE_FORMAT_VERSION;
   snapshot: AppSnapshot | null;
   goals: Record<string, ThreadGoal | null>;
   updatedAt: number;
@@ -95,20 +98,68 @@ export function connectionCacheKey(settings: ConnectionSettings): string {
 }
 
 export async function loadCachedMeta(settings: ConnectionSettings): Promise<CachedMeta | null> {
-  return readValue<CachedMeta>(META_STORE, connectionCacheKey(settings));
+  const cached = await readValue<CachedMeta>(META_STORE, connectionCacheKey(settings));
+  if (
+    !cached ||
+    cached.formatVersion !== CACHE_FORMAT_VERSION ||
+    (cached.snapshot !== null && !isValidProjectionSnapshot(cached.snapshot))
+  ) {
+    return null;
+  }
+  return cached;
 }
 
-export async function saveCachedMeta(
+export async function replaceCachedProjection(
   settings: ConnectionSettings,
-  snapshot: AppSnapshot | null,
+  snapshot: AppSnapshot,
+  activeThread: ThreadDetail | null,
   goals: Record<string, ThreadGoal | null>,
-): Promise<void> {
-  await writeValue(META_STORE, {
-    key: connectionCacheKey(settings),
-    snapshot,
-    goals,
-    updatedAt: Date.now(),
-  });
+  activeThreadId: string | null = activeThread?.summary.id ?? null,
+): Promise<boolean> {
+  if (
+    !isValidProjectionSnapshot(snapshot) ||
+    snapshot.projectionStatus !== "ready" ||
+    (activeThread !== null && activeThread.summary.id !== activeThreadId)
+  ) {
+    return false;
+  }
+  const database = await openDatabase();
+  if (!database) return false;
+  const connectionKey = connectionCacheKey(settings);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction([META_STORE, THREAD_STORE], "readwrite");
+      transaction.objectStore(META_STORE).put({
+        key: connectionKey,
+        formatVersion: CACHE_FORMAT_VERSION,
+        snapshot,
+        goals,
+        updatedAt: Date.now(),
+      } satisfies CachedMeta & { key: string });
+      if (activeThread) {
+        const serialized = JSON.stringify(activeThread);
+        transaction.objectStore(THREAD_STORE).put({
+          key: scopedKey(connectionKey, activeThread.summary.id),
+          connectionKey,
+          threadId: activeThread.summary.id,
+          detail: activeThread,
+          accessedAt: Date.now(),
+          bytes: new Blob([serialized]).size,
+          formatVersion: CACHE_FORMAT_VERSION,
+        } satisfies CachedThread);
+      } else if (activeThreadId) {
+        transaction.objectStore(THREAD_STORE).delete(scopedKey(connectionKey, activeThreadId));
+      }
+      transaction.addEventListener("complete", () => resolve());
+      transaction.addEventListener("abort", () => reject(transaction.error));
+      transaction.addEventListener("error", () => reject(transaction.error));
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    database.close();
+  }
 }
 
 export async function loadCachedThread(
@@ -118,11 +169,12 @@ export async function loadCachedThread(
   const key = scopedKey(connectionCacheKey(settings), threadId);
   const cached = await readValue<CachedThread>(THREAD_STORE, key);
   if (!cached) return null;
+  if (cached.formatVersion !== CACHE_FORMAT_VERSION) {
+    void deleteValue(THREAD_STORE, key);
+    return null;
+  }
   void writeValue(THREAD_STORE, { ...cached, accessedAt: Date.now() });
-  if (cached.formatVersion === 2) return cached.detail;
-  const detail = lightweightCachedDetail(cached.detail);
-  void saveCachedThread(settings, detail);
-  return detail;
+  return cached.detail;
 }
 
 export async function saveCachedThread(
@@ -138,26 +190,9 @@ export async function saveCachedThread(
     detail,
     accessedAt: Date.now(),
     bytes: new Blob([serialized]).size,
-    formatVersion: 2,
+    formatVersion: CACHE_FORMAT_VERSION,
   } satisfies CachedThread);
   void cleanupThreadCache();
-}
-
-function lightweightCachedDetail(detail: ThreadDetail): ThreadDetail {
-  return {
-    ...detail,
-    turns: detail.turns.map((turn) => ({
-      ...turn,
-      itemsLoaded: false,
-      items: turn.items.filter(
-        (item) =>
-          item.type !== "reasoning" &&
-          item.type !== "command" &&
-          item.type !== "fileChange" &&
-          item.type !== "tool",
-      ),
-    })),
-  };
 }
 
 export async function deleteCachedThread(
@@ -337,20 +372,36 @@ async function openDatabase(): Promise<IDBDatabase | null> {
   if (!("indexedDB" in globalThis)) return null;
   return new Promise<IDBDatabase | null>((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-    request.addEventListener("upgradeneeded", () => {
-      const database = request.result;
-      for (const name of [META_STORE, THREAD_STORE, DRAFT_STORE, OUTBOX_STORE, RECORDING_STORE]) {
-        if (!database.objectStoreNames.contains(name)) {
-          database.createObjectStore(name, {
-            keyPath: name === OUTBOX_STORE || name === RECORDING_STORE ? "id" : "key",
-          });
-        }
-      }
-    });
+    request.addEventListener("upgradeneeded", (event) =>
+      upgradeOfflineDatabase(
+        request.result,
+        request.transaction,
+        (event as IDBVersionChangeEvent).oldVersion,
+      ),
+    );
     request.addEventListener("success", () => resolve(request.result));
     request.addEventListener("error", () => reject(request.error));
     request.addEventListener("blocked", () => resolve(null));
   }).catch(() => null);
+}
+
+export function upgradeOfflineDatabase(
+  database: IDBDatabase,
+  transaction: IDBTransaction | null,
+  oldVersion: number,
+): void {
+  for (const name of [META_STORE, THREAD_STORE, DRAFT_STORE, OUTBOX_STORE, RECORDING_STORE]) {
+    if (!database.objectStoreNames.contains(name)) {
+      database.createObjectStore(name, {
+        keyPath: name === OUTBOX_STORE || name === RECORDING_STORE ? "id" : "key",
+      });
+    }
+  }
+  if (oldVersion !== 1) return;
+  // v1 projection records have no protocol epoch/revision. Discard only the
+  // reconstructable cache; local drafts and durable outbox entries must survive.
+  transaction?.objectStore(META_STORE).clear();
+  transaction?.objectStore(THREAD_STORE).clear();
 }
 
 async function readValue<T>(storeName: string, key: IDBValidKey): Promise<T | null> {

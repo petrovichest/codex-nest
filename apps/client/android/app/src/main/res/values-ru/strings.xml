@@ -14,6 +14,7 @@
     <string name="notification_status_reconnecting">Нет связи, переподключение…</string>
     <string name="notification_status_authenticating">Авторизация…</string>
     <string name="notification_status_connected">Подключено</string>
+    <string name="notification_status_update_required">Обновите CodexNest для подключения</string>
     <string name="notification_task_completed">Задача завершена</string>
     <string name="notification_task_failed">Задача завершилась с ошибкой</string>
     <string name="notification_attention">Codex ждёт решения</string>

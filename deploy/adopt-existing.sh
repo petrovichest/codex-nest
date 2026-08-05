@@ -33,6 +33,7 @@ done
 adopt_backup=""
 adopt_activation_started=false
 adopt_complete=false
+adopt_state_backed_up=false
 
 adopt_log() { printf '\n==> %s\n' "$1"; }
 adopt_die() {
@@ -99,11 +100,35 @@ printf '%s' "$adopt_release_json" | "$adopt_node_bin" -e '
 adopt_state_path="$(awk -F= '$1 == "CODEXNEST_STATE_PATH" { print substr($0, index($0, "=") + 1); exit }' "$adopt_config")"
 [[ -n "$adopt_state_path" ]] || adopt_state_path="$adopt_state_root/state.json"
 [[ -f "$adopt_state_path" ]] || adopt_die "existing CodexNest state is missing"
-adopt_token_before="$($adopt_node_bin -e '
-  const fs = require("node:fs");
-  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  process.stdout.write(state.auth?.tokenSha256 ?? "");
-' "$adopt_state_path")"
+adopt_token_fingerprint() {
+  "$adopt_node_bin" -e '
+    const crypto = require("node:crypto");
+    const fs = require("node:fs");
+    try {
+      const path = process.argv[1];
+      const contents = fs.readFileSync(path);
+      let state;
+      if (contents.subarray(0, 16).toString("binary") === "SQLite format 3\0") {
+        const { DatabaseSync } = require("node:sqlite");
+        const database = new DatabaseSync(path, { readOnly: true });
+        try {
+          const row = database.prepare("SELECT json FROM app_state WHERE id = 1").get();
+          state = row ? JSON.parse(row.json) : undefined;
+        } finally {
+          database.close();
+        }
+      } else {
+        state = JSON.parse(contents.toString("utf8"));
+      }
+      const verifier = state?.auth?.tokenSha256 ?? "";
+      if (!/^[0-9a-f]{64}$/i.test(verifier)) process.exit(1);
+      process.stdout.write(crypto.createHash("sha256").update(verifier).digest("hex"));
+    } catch {
+      process.exit(1);
+    }
+  ' "$1" 2>/dev/null
+}
+adopt_token_before="$(adopt_token_fingerprint "$adopt_state_path" || true)"
 [[ "$adopt_token_before" =~ ^[0-9a-fA-F]{64}$ ]] || adopt_die "existing bearer token verifier is missing"
 
 adopt_origin="${CODEXNEST_REPOSITORY_URL:-https://github.com/petrovichest/codex-nest.git}"
@@ -153,12 +178,36 @@ adopt_set_env() {
   mv -f "$temporary" "$adopt_config"
 }
 
+adopt_backup_state() {
+  local suffix source
+  for suffix in "" -wal -shm -journal; do
+    source="$adopt_state_path$suffix"
+    [[ ! -f "$source" ]] || cp -p "$source" "$adopt_backup/state$suffix"
+  done
+  [[ -f "$adopt_backup/state" ]]
+  adopt_state_backed_up=true
+}
+
+adopt_restore_state() {
+  local suffix
+  $adopt_state_backed_up || return 0
+  for suffix in "" -wal -shm -journal; do
+    rm -f -- "$adopt_state_path$suffix"
+  done
+  for suffix in "" -wal -shm -journal; do
+    [[ ! -f "$adopt_backup/state$suffix" ]] \
+      || cp -p "$adopt_backup/state$suffix" "$adopt_state_path$suffix"
+  done
+}
+
 adopt_restore() {
   trap - ERR INT TERM
+  systemctl --user stop codexnest.service || true
   cp -p "$adopt_backup/server.env" "$adopt_config"
   cp -p "$adopt_backup/codexnest.service" "$adopt_service"
+  adopt_restore_state
   systemctl --user daemon-reload || true
-  systemctl --user restart codexnest.service || true
+  systemctl --user start codexnest.service || true
 }
 
 adopt_on_failure() {
@@ -234,6 +283,8 @@ install -m 0644 "$adopt_release/deploy/systemd/codexnest-update.service" "$adopt
 
 adopt_log "Activating managed CodexNest $adopt_tag"
 adopt_activation_started=true
+systemctl --user stop codexnest.service
+adopt_backup_state
 adopt_set_env CODEXNEST_CLIENT_DIST "$adopt_root/current/apps/client/dist"
 adopt_set_env CODEXNEST_MANAGED_INSTALL true
 adopt_set_env CODEXNEST_MANAGEMENT_CLI "$HOME/.local/bin/codexnest"
@@ -243,14 +294,10 @@ grep -q '^CODEXNEST_UPDATE_CHANNEL=' "$adopt_config" \
 adopt_set_env CODEXNEST_VERSION "$adopt_version"
 install -m 0644 "$adopt_release/deploy/systemd/codexnest-managed.service" "$adopt_service"
 systemctl --user daemon-reload
-systemctl --user restart codexnest.service
+systemctl --user start codexnest.service
 adopt_health_ok "$adopt_version"
 
-adopt_token_after="$($adopt_node_bin -e '
-  const fs = require("node:fs");
-  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  process.stdout.write(state.auth?.tokenSha256 ?? "");
-' "$adopt_state_path")"
+adopt_token_after="$(adopt_token_fingerprint "$adopt_state_path" || true)"
 [[ "$adopt_token_after" == "$adopt_token_before" ]] || adopt_die "bearer token verifier changed"
 
 adopt_complete=true

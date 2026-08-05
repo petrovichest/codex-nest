@@ -14,6 +14,7 @@
     <string name="notification_status_reconnecting">Offline, reconnecting…</string>
     <string name="notification_status_authenticating">Authenticating…</string>
     <string name="notification_status_connected">Connected</string>
+    <string name="notification_status_update_required">Update CodexNest to reconnect</string>
     <string name="notification_task_completed">Task completed</string>
     <string name="notification_task_failed">Task failed</string>
     <string name="notification_attention">Codex needs your decision</string>

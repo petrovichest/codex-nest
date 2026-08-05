@@ -1,6 +1,7 @@
 import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -71,6 +72,7 @@ const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
+const MemoizedNewSession = memo(NewSession);
 
 type ListExpansion = number | "all";
 
@@ -140,6 +142,7 @@ export function App({
       setTranscriptionConfig((current) => (current ? { ...current, timingEstimate } : current)),
     [],
   );
+  const openNavigation = useCallback(() => setDrawer(true), []);
   const [transcriptionConfigError, setTranscriptionConfigError] = useState<string | null>(null);
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [installedApkVersion, setInstalledApkVersion] = useState<string | null>(null);
@@ -346,23 +349,20 @@ export function App({
             <p>{t("Получаем состояние Codex…")}</p>
           </div>
         ) : sessionWorkspace ? (
-          <NewSession
+          <MemoizedNewSession
             key={sessionWorkspaceKey}
             projects={snapshot?.projects ?? []}
             transcriptionProvider={activeTranscriptionProvider(transcriptionConfig)}
             transcriptionConfig={transcriptionConfig}
             onTranscriptionTimingEstimateChange={updateTranscriptionTimingEstimate}
-            onOpenNavigation={() => setDrawer(true)}
+            onOpenNavigation={openNavigation}
           />
         ) : (
           <Routes>
             <Route
               path="/"
               element={
-                <HomeRoute
-                  threads={snapshot?.threads ?? []}
-                  onOpenNavigation={() => setDrawer(true)}
-                />
+                <HomeRoute threads={snapshot?.threads ?? []} onOpenNavigation={openNavigation} />
               }
             />
             <Route
@@ -648,6 +648,10 @@ function Sidebar({
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
   const snapshot = state.snapshot;
+  const serverStatusLabel =
+    state.syncStatus === "syncing" && snapshot
+      ? t("Синхронизация")
+      : networkLabel(state.network, t);
   const snapshotReady = snapshot !== null;
   const allThreads = snapshot?.threads ?? [];
   const roots = topLevelThreads(allThreads);
@@ -1060,13 +1064,13 @@ function Sidebar({
         <div className="server-status">
           <div
             aria-label={t("Состояние сервера: {{state}}", {
-              state: networkLabel(state.network, t),
+              state: serverStatusLabel,
             })}
             className="server-connection"
             role="status"
           >
             <ConnectionDot state={state.network} />
-            <span>{networkLabel(state.network, t)}</span>
+            <span>{serverStatusLabel}</span>
           </div>
           {updateAvailable && (
             <NavLink

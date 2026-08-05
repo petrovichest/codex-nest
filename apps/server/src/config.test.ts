@@ -37,9 +37,13 @@ describe("loadConfig", () => {
   });
 
   it("keeps speech-to-text optional and defaults OpenAI to the accurate model", () => {
+    vi.stubEnv("CODEXNEST_STT_PROVIDER", "");
     vi.stubEnv("CODEXNEST_STT_LOCAL_URL", "");
     vi.stubEnv("CODEXNEST_STT_OPENAI_API_KEY", "");
     vi.stubEnv("CODEXNEST_STT_OPENAI_MODEL", "");
+    vi.stubEnv("CODEXNEST_STT_LANGUAGE", "");
+    vi.stubEnv("CODEXNEST_STT_REFINE_LOCAL", "");
+    vi.stubEnv("CODEXNEST_STT_REFINEMENT_MODEL", "");
     expect(loadConfig()).toMatchObject({
       sttLocalUrl: undefined,
       sttProvider: undefined,

@@ -10,6 +10,10 @@ test_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 
+grep -Fq 'codexnest_state="$codexnest_state_root/state.sqlite"' "$test_script_dir/install.sh"
+grep -Fq 'CODEXNEST_STATE_PATH=/home/CHANGE_ME/.local/state/codexnest/state.sqlite' \
+  "$test_script_dir/systemd/codexnest.env.example"
+
 prepare_case() {
   local name="$1"
   case_home="$test_root/$name/home"
@@ -115,9 +119,46 @@ if [[ "$*" == *'/api/v1/internal/restart/prepare'* ]]; then
   exit 0
 fi
 if [[ "$*" == *'/api/v1/internal/restart/resume'* ]]; then exit 0; fi
-if [[ -f "$HOME/fail-health" ]]; then exit 22; fi
 current="$(readlink -f "$HOME/.local/share/codexnest/current" 2>/dev/null || true)"
 version="${current##*/v}"
+should_migrate=false
+if [[ -f "$HOME/migrate-state-on-health" ]]; then
+  should_migrate=true
+elif [[ -f "$HOME/migrate-state-on-update" && "$version" =~ -[0-9a-f]{7}$ ]]; then
+  should_migrate=true
+fi
+if $should_migrate; then
+  state_path="$(awk -F= '$1 == "CODEXNEST_STATE_PATH" { print substr($0, index($0, "=") + 1); exit }' \
+    "$HOME/.config/codexnest/server.env")"
+  "$CODEXNEST_TEST_NODE" -e '
+    const fs = require("node:fs");
+    const { DatabaseSync } = require("node:sqlite");
+    const path = process.argv[1];
+    const contents = fs.readFileSync(path);
+    if (contents.subarray(0, 16).toString("binary") === "SQLite format 3\0") process.exit(0);
+    const state = JSON.parse(contents.toString("utf8"));
+    const temporary = `${path}.test-migration.sqlite`;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try { fs.unlinkSync(`${temporary}${suffix}`); } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    const database = new DatabaseSync(temporary);
+    database.exec("PRAGMA journal_mode = WAL");
+    database.exec("CREATE TABLE app_state (id INTEGER PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT");
+    database.prepare("INSERT INTO app_state (id, json, updated_at) VALUES (1, ?, ?)")
+      .run(JSON.stringify(state), Date.now());
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    database.close();
+    fs.renameSync(temporary, path);
+  ' "$state_path"
+  if [[ -f "$HOME/create-state-sidecars" ]]; then
+    printf '%s\n' sidecar > "$state_path-wal"
+    printf '%s\n' sidecar > "$state_path-shm"
+    printf '%s\n' sidecar > "$state_path-journal"
+  fi
+fi
+if [[ -f "$HOME/fail-health" ]]; then exit 22; fi
 if [[ -f "$HOME/fail-rolling-health" && "$version" =~ -[0-9a-f]{7}$ ]]; then exit 22; fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7})?$ ]] || version=0.1.0
 printf '{"status":"ok","serverVersion":"%s","recoveryState":"ready"}\n' "$version"
@@ -131,6 +172,7 @@ run_adoption() {
   XDG_STATE_HOME="$case_home/.local/state" \
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
   CODEXNEST_REPOSITORY_URL="$case_repo" \
+  CODEXNEST_TEST_NODE="$case_real_node" \
   PATH="$case_fake_bin:/usr/bin:/bin" \
   CODEXNEST_HEALTH_ATTEMPTS=1 \
   CODEXNEST_HEALTH_DELAY_SECONDS=0 \
@@ -143,6 +185,7 @@ run_cli() {
   XDG_STATE_HOME="$case_home/.local/state" \
   CODEXNEST_ROOT="$case_home/.local/share/codexnest" \
   CODEXNEST_REPOSITORY_URL="$case_repo" \
+  CODEXNEST_TEST_NODE="$case_real_node" \
   CODEXNEST_UPDATE_CHANNEL="${CODEXNEST_UPDATE_CHANNEL:-}" \
   CODEXNEST_HEALTH_ATTEMPTS=1 \
   CODEXNEST_HEALTH_DELAY_SECONDS=0 \
@@ -152,7 +195,9 @@ run_cli() {
 
 prepare_case success
 run_adoption --dry-run >/dev/null
-run_adoption >/dev/null
+touch "$case_home/migrate-state-on-health"
+success_adoption_output="$(run_adoption)"
+[[ "$success_adoption_output" != *"0000000000000000000000000000000000000000000000000000000000000000"* ]]
 run_adoption >/dev/null
 grep -q '^CUSTOM_SETTING=keep$' "$case_home/.config/codexnest/server.env"
 grep -q '^CODEXNEST_MANAGED_INSTALL=true$' "$case_home/.config/codexnest/server.env"
@@ -163,13 +208,24 @@ test -x "$case_home/.local/bin/codexnest"
 test -f "$case_home/.config/systemd/user/codexnest-update.service"
 grep -q '^KillMode=process$' "$case_home/.config/systemd/user/codexnest.service"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+test "$(LC_ALL=C head -c 15 "$case_home/.local/state/codexnest/state.json")" = "SQLite format 3"
+grep -q '^CODEXNEST_STATE_PATH=.*/state.json$' "$case_home/.config/codexnest/server.env"
 test -z "$(find "$case_home/.local/state/codexnest" -maxdepth 1 -name 'adoption-backup.*' -print -quit)"
 success_commit="$(git -C "$case_repo" rev-parse codex/mvp)"
 success_version="0.1.1-${success_commit:0:7}"
+printf '%s\n' wal > "$case_home/.local/state/codexnest/state.json-wal"
+printf '%s\n' shm > "$case_home/.local/state/codexnest/state.json-shm"
+printf '%s\n' journal > "$case_home/.local/state/codexnest/state.json-journal"
 run_cli update-worker >/dev/null
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = "v$success_version"
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/previous")")" = v0.1.0
 test "$(cat "$case_home/.local/share/codexnest/current/.codexnest-built")" = "$success_commit"
+cmp "$case_home/.local/state/codexnest/state.json-wal" \
+  "$case_home/.local/state/codexnest/update-rollback-state/state-wal"
+cmp "$case_home/.local/state/codexnest/state.json-shm" \
+  "$case_home/.local/state/codexnest/update-rollback-state/state-shm"
+cmp "$case_home/.local/state/codexnest/state.json-journal" \
+  "$case_home/.local/state/codexnest/update-rollback-state/state-journal"
 grep -q '^KillMode=process$' "$case_home/.config/systemd/user/codexnest.service"
 grep -q '"result":"updated"' "$case_home/.local/state/codexnest/update.json"
 run_cli check-update | grep -q '"updateAvailable":false'
@@ -217,17 +273,51 @@ fi
 test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
 grep -q '"result":"rolled_back"' "$case_home/.local/state/codexnest/update.json"
 
+prepare_case migration_update_rollback
+run_adoption >/dev/null
+cp "$case_home/.local/state/codexnest/state.json" "$test_root/migration-update-state"
+touch "$case_home/migrate-state-on-update" "$case_home/fail-rolling-health" \
+  "$case_home/create-state-sidecars"
+if run_cli update-worker >/dev/null 2>&1; then
+  printf '%s\n' 'Expected SQLite migration update health failure' >&2
+  exit 1
+fi
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+cmp "$test_root/migration-update-state" "$case_home/.local/state/codexnest/state.json"
+test ! -e "$case_home/.local/state/codexnest/state.json-wal"
+test ! -e "$case_home/.local/state/codexnest/state.json-shm"
+test ! -e "$case_home/.local/state/codexnest/state.json-journal"
+grep -q '"result":"rolled_back"' "$case_home/.local/state/codexnest/update.json"
+
+prepare_case migration_manual_rollback
+run_adoption >/dev/null
+cp "$case_home/.local/state/codexnest/state.json" "$test_root/migration-manual-state"
+touch "$case_home/migrate-state-on-update"
+run_cli update-worker >/dev/null
+test "$(LC_ALL=C head -c 15 "$case_home/.local/state/codexnest/state.json")" = "SQLite format 3"
+rm "$case_home/migrate-state-on-update"
+run_cli rollback >/dev/null
+test "$(basename "$(readlink -f "$case_home/.local/share/codexnest/current")")" = v0.1.0
+cmp "$test_root/migration-manual-state" "$case_home/.local/state/codexnest/state.json"
+test ! -e "$case_home/.local/state/codexnest/state.json-wal"
+test ! -e "$case_home/.local/state/codexnest/state.json-shm"
+test ! -e "$case_home/.local/state/codexnest/state.json-journal"
+
 prepare_case rollback
 cp "$case_home/.config/codexnest/server.env" "$test_root/rollback-env"
 cp "$case_home/.config/systemd/user/codexnest.service" "$test_root/rollback-service"
-touch "$case_home/fail-health"
+cp "$case_home/.local/state/codexnest/state.json" "$test_root/rollback-state"
+touch "$case_home/fail-health" "$case_home/migrate-state-on-health" \
+  "$case_home/create-state-sidecars"
 if run_adoption >/dev/null 2>&1; then
   printf '%s\n' 'Expected adoption health failure' >&2
   exit 1
 fi
 cmp "$test_root/rollback-env" "$case_home/.config/codexnest/server.env"
 cmp "$test_root/rollback-service" "$case_home/.config/systemd/user/codexnest.service"
-grep -q '"tokenSha256":"0000000000000000000000000000000000000000000000000000000000000000"' \
-  "$case_home/.local/state/codexnest/state.json"
+cmp "$test_root/rollback-state" "$case_home/.local/state/codexnest/state.json"
+test ! -e "$case_home/.local/state/codexnest/state.json-wal"
+test ! -e "$case_home/.local/state/codexnest/state.json-shm"
+test ! -e "$case_home/.local/state/codexnest/state.json-journal"
 
 printf '%s\n' 'CodexNest adoption tests passed.'

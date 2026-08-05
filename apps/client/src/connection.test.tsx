@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
-import { ConnectionProvider, useConnection } from "./connection";
+import {
+  ConnectionProvider,
+  reconnectDelay,
+  useConnection,
+  useConnectionSelector,
+} from "./connection";
 
 const capacitor = vi.hoisted(() => ({ native: false }));
 const addAppListener = vi.hoisted(() => vi.fn());
@@ -17,6 +22,17 @@ const deletePendingVoiceRecording = vi.hoisted(() =>
 const observeNativeNotificationEvent = vi.hoisted(() => vi.fn());
 const observeNativeNotificationSnapshot = vi.hoisted(() => vi.fn());
 const setNativeNotificationAppActive = vi.hoisted(() => vi.fn());
+const replaceCachedProjection = vi.hoisted(() =>
+  vi.fn<
+    (
+      settings: unknown,
+      snapshot: AppSnapshot,
+      activeThread: ThreadDetail | null,
+      goals: unknown,
+      activeThreadId?: string | null,
+    ) => Promise<boolean>
+  >(() => Promise.resolve(true)),
+);
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
@@ -31,6 +47,7 @@ vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listPendingVoiceRecordings,
   deletePendingVoiceRecording,
+  replaceCachedProjection,
 }));
 
 const summary: ThreadSummary = {
@@ -54,6 +71,7 @@ const summary: ThreadSummary = {
 
 describe("ConnectionProvider", () => {
   beforeEach(() => {
+    window.history.replaceState(null, "", "/");
     capacitor.native = false;
     addAppListener.mockReset();
     listPendingVoiceRecordings.mockReset();
@@ -63,10 +81,15 @@ describe("ConnectionProvider", () => {
     observeNativeNotificationEvent.mockReset();
     observeNativeNotificationSnapshot.mockReset();
     setNativeNotificationAppActive.mockReset();
+    replaceCachedProjection.mockReset();
+    replaceCachedProjection.mockResolvedValue(true);
     FakeWebSocket.instances = [];
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it("discards persisted voice recordings without uploading them in the background", async () => {
     listPendingVoiceRecordings.mockResolvedValueOnce([{ id: "stale-recording" }]);
@@ -280,7 +303,7 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("applies the authoritative snapshot and replaces the full detail on a manual refresh", async () => {
+  it("keeps global projection state separate while replacing detail on a manual refresh", async () => {
     const refreshedSummary = {
       ...summary,
       title: "Актуальная сессия",
@@ -354,7 +377,7 @@ describe("ConnectionProvider", () => {
       await refresh?.();
     });
 
-    expect(screen.getByText("Актуальная сессия")).toBeInTheDocument();
+    expect(screen.getByText("none")).toBeInTheDocument();
     expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("https://codexnest.example/api/v1/threads/thread/refresh"),
@@ -431,10 +454,10 @@ describe("ConnectionProvider", () => {
         <Probe />
       </ConnectionProvider>,
     );
-    const socket = FakeWebSocket.instances[0]!;
+    const socket = await waitForSocket();
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", snapshot: snapshot(1, [running]) });
+      socket.receive(snapshotFrame(snapshot(1, [running])));
     });
     expect(await screen.findByText("Начало")).toBeInTheDocument();
 
@@ -445,8 +468,10 @@ describe("ConnectionProvider", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     act(() => {
       socket.receive({
-        type: "event",
-        sequence: 2,
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 2,
         event: {
           type: "activity.upserted",
           threadId: "thread",
@@ -609,7 +634,7 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("repairs a stale terminal snapshot from a newer authoritative running detail", async () => {
+  it("does not let an HTTP detail override a stale terminal projection", async () => {
     const staleCompleted = {
       ...summary,
       state: "completed" as const,
@@ -665,10 +690,10 @@ describe("ConnectionProvider", () => {
         <Probe />
       </ConnectionProvider>,
     );
-    const socket = FakeWebSocket.instances[0]!;
+    const socket = await waitForSocket();
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", snapshot: snapshot(1, [staleCompleted]) });
+      socket.receive(snapshotFrame(snapshot(1, [staleCompleted])));
     });
     expect(screen.getByText("completed:none")).toBeInTheDocument();
 
@@ -676,7 +701,7 @@ describe("ConnectionProvider", () => {
       await refresh?.();
     });
 
-    expect(screen.getByText("running:live-turn")).toBeInTheDocument();
+    expect(screen.getByText("completed:none")).toBeInTheDocument();
     view.unmount();
   });
 
@@ -940,6 +965,7 @@ describe("ConnectionProvider", () => {
     await waitFor(() =>
       expect(addAppListener).toHaveBeenCalledWith("appStateChange", expect.any(Function)),
     );
+    await waitForSocket();
 
     act(() => appStateListener?.({ isActive: false }));
     expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(false);
@@ -950,7 +976,7 @@ describe("ConnectionProvider", () => {
     const resumed = FakeWebSocket.instances[1]!;
     act(() => {
       resumed.open();
-      resumed.receive({ type: "snapshot", snapshot: snapshot(2, []) });
+      resumed.receive(snapshotFrame(snapshot(2, [])));
     });
     expect(await screen.findByText("snapshot:2")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -961,7 +987,7 @@ describe("ConnectionProvider", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
 
-  it("forwards only accepted native stream frames to the notification bridge", () => {
+  it("forwards only accepted native stream frames to the notification bridge", async () => {
     capacitor.native = true;
     addAppListener.mockResolvedValue({ remove: vi.fn().mockResolvedValue(undefined) });
     vi.stubGlobal("fetch", vi.fn());
@@ -971,20 +997,24 @@ describe("ConnectionProvider", () => {
         <SnapshotProbe />
       </ConnectionProvider>,
     );
-    const socket = FakeWebSocket.instances[0]!;
+    const socket = await waitForSocket();
     const initial = snapshot(1);
 
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", snapshot: initial });
+      socket.receive(snapshotFrame(initial));
       socket.receive({
-        type: "event",
-        sequence: 2,
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 2,
         event: { type: "thread.upserted", thread: summary },
       });
       socket.receive({
-        type: "event",
-        sequence: 2,
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 2,
         event: { type: "attention.removed", attentionId: "late-duplicate" },
       });
     });
@@ -999,7 +1029,7 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("closes an unresponsive socket after a heartbeat and isolates its late events", () => {
+  it("closes an unresponsive socket after a heartbeat and isolates its late events", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -1009,13 +1039,21 @@ describe("ConnectionProvider", () => {
         <SnapshotProbe />
       </ConnectionProvider>,
     );
-    const first = FakeWebSocket.instances[0]!;
+    const first = await waitForSocket();
 
     act(() => {
       first.open();
-      first.receive({ type: "snapshot", snapshot: snapshot(1) });
+      first.receive(snapshotFrame(snapshot(1)));
     });
-    expect(first.sent).toContain(JSON.stringify({ type: "authenticate", token: "token" }));
+    expect(first.sent).toContain(
+      JSON.stringify({
+        type: "authenticate",
+        protocolVersion: 2,
+        token: "token",
+        cursor: null,
+        threadId: null,
+      }),
+    );
 
     act(() => vi.advanceTimersByTime(15_000));
     expect(first.sent.at(-1)).toBe(JSON.stringify({ type: "ping" }));
@@ -1026,7 +1064,7 @@ describe("ConnectionProvider", () => {
     const second = FakeWebSocket.instances[1]!;
     act(() => {
       second.open();
-      second.receive({ type: "snapshot", snapshot: snapshot(2) });
+      second.receive(snapshotFrame(snapshot(2)));
       first.receive({ invalid: true });
     });
     expect(second.readyState).toBe(FakeWebSocket.OPEN);
@@ -1049,10 +1087,10 @@ describe("ConnectionProvider", () => {
         <ThreadTitleProbe />
       </ConnectionProvider>,
     );
-    const socket = FakeWebSocket.instances[0]!;
+    const socket = await waitForSocket();
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", snapshot: snapshot(1) });
+      socket.receive(snapshotFrame(snapshot(1)));
     });
     await waitFor(() =>
       expect(addAppListener).toHaveBeenCalledWith("appStateChange", expect.any(Function)),
@@ -1063,13 +1101,15 @@ describe("ConnectionProvider", () => {
     const resumedSocket = FakeWebSocket.instances[1]!;
     act(() => {
       resumedSocket.open();
-      resumedSocket.receive({ type: "snapshot", snapshot: snapshot(3, [synced]) });
+      resumedSocket.receive(snapshotFrame(snapshot(3, [synced])));
     });
     expect(await screen.findByText("Синхронизировано")).toBeInTheDocument();
     act(() => {
       socket.receive({
-        type: "event",
-        sequence: 2,
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 2,
         event: { type: "thread.upserted", thread: { ...summary, title: "Устарело" } },
       });
     });
@@ -1078,11 +1118,251 @@ describe("ConnectionProvider", () => {
     expect(screen.queryByText("Устарело")).toBeNull();
     view.unmount();
   });
+
+  it("accepts a separate thread.open projection without advancing revision", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const detail: ThreadDetail = {
+      summary: { ...summary, title: "Открытая сессия" },
+      turns: [],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <DetailTitleProbe />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    act(() => {
+      socket.open();
+      socket.receive(snapshotFrame(snapshot(4)));
+      socket.receive({
+        type: "thread.open",
+        protocolVersion: 2,
+        threadId: "thread",
+        detail,
+      });
+    });
+
+    expect(await screen.findByText("4:Открытая сессия")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("waits for the active thread.open frame before atomically caching the projection", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", "/threads/thread");
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const detail: ThreadDetail = {
+      summary,
+      turns: [],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <SnapshotProbe />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    act(() => {
+      socket.open();
+      socket.receive(snapshotFrame(snapshot(4)));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(replaceCachedProjection).not.toHaveBeenCalled();
+
+    act(() => {
+      socket.receive({
+        type: "thread.open",
+        protocolVersion: 2,
+        threadId: "thread",
+        detail,
+      });
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(replaceCachedProjection).toHaveBeenCalledOnce();
+    expect(replaceCachedProjection.mock.calls[0]?.[2]).toEqual(detail);
+    expect(replaceCachedProjection.mock.calls[0]?.[4]).toBe("thread");
+    view.unmount();
+  });
+
+  it("accepts an authoritative resync frame without a synthetic event", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const replacement = { ...summary, title: "После resync" };
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ThreadTitleProbe />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    act(() => {
+      socket.open();
+      socket.receive(snapshotFrame(snapshot(1)));
+      socket.receive({
+        type: "resync",
+        protocolVersion: 2,
+        snapshot: snapshot(5, [replacement]),
+      });
+    });
+
+    expect(await screen.findByText("После resync")).toBeInTheDocument();
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+    view.unmount();
+  });
+
+  it("forces a cursorless resync after a revision gap", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <SnapshotProbe />
+      </ConnectionProvider>,
+    );
+    const first = await waitForSocket();
+    act(() => {
+      first.open();
+      first.receive(snapshotFrame(snapshot(1)));
+      first.receive({
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 3,
+        event: { type: "attention.removed", attentionId: "gap" },
+      });
+    });
+    expect(first.readyState).toBe(FakeWebSocket.CLOSED);
+
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    const second = FakeWebSocket.instances[1]!;
+    act(() => second.open());
+    expect(JSON.parse(second.sent[0]!)).toMatchObject({
+      type: "authenticate",
+      protocolVersion: 2,
+      cursor: null,
+    });
+    view.unmount();
+  });
+
+  it("preserves an update-required error and does not reconnect", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ErrorProbe />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    act(() => {
+      socket.open();
+      socket.receive({
+        type: "error",
+        error: { code: "client_update_required", message: "Обновите приложение" },
+      });
+    });
+    expect(screen.getByText("Обновите приложение")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    view.unmount();
+  });
+
+  it("uses the bounded reconnect schedule with symmetric jitter", () => {
+    expect([0, 1, 2, 3, 4, 9].map((attempt) => reconnectDelay(attempt, () => 0.5))).toEqual([
+      250, 500, 1_000, 2_000, 5_000, 5_000,
+    ]);
+    expect(reconnectDelay(0, () => 0)).toBe(200);
+    expect(reconnectDelay(0, () => 1)).toBe(300);
+  });
+
+  it("throttles atomic projection cache writes while keeping the latest revision", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <SnapshotProbe />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    act(() => {
+      socket.open();
+      socket.receive(snapshotFrame(snapshot(1)));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(replaceCachedProjection).toHaveBeenCalledOnce();
+
+    act(() => {
+      socket.receive({
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 2,
+        event: { type: "attention.removed", attentionId: "one" },
+      });
+      socket.receive({
+        type: "patch",
+        protocolVersion: 2,
+        epoch: "test",
+        revision: 3,
+        event: { type: "attention.removed", attentionId: "two" },
+      });
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(249));
+    expect(replaceCachedProjection).toHaveBeenCalledOnce();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(replaceCachedProjection).toHaveBeenCalledTimes(2);
+    expect(replaceCachedProjection.mock.calls[1]?.[1]).toMatchObject({ revision: 3 });
+    view.unmount();
+  });
+
+  it("does not rerender a selector subscriber for unrelated store updates", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let dispatch: ReturnType<typeof useConnection>["dispatch"] | undefined;
+    let selectorRenders = 0;
+
+    function Control() {
+      dispatch = useConnection().dispatch;
+      return null;
+    }
+    function SelectedRevision() {
+      selectorRenders += 1;
+      const revision = useConnectionSelector((state) => state.snapshot?.revision ?? null);
+      return <span>selected:{revision ?? "none"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Control />
+        <SelectedRevision />
+      </ConnectionProvider>,
+    );
+    const socket = await waitForSocket();
+    const beforeUnrelatedUpdate = selectorRenders;
+    act(() => dispatch?.({ type: "goal", threadId: "thread", goal: null }));
+    expect(selectorRenders).toBe(beforeUnrelatedUpdate);
+
+    act(() => {
+      socket.open();
+      socket.receive(snapshotFrame(snapshot(1)));
+    });
+    expect(await screen.findByText("selected:1")).toBeInTheDocument();
+    expect(selectorRenders).toBe(beforeUnrelatedUpdate + 1);
+    view.unmount();
+  });
 });
 
-function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSnapshot {
+function snapshot(revision: number, threads: ThreadSummary[] = [summary]): AppSnapshot {
   return {
-    sequence,
+    protocolVersion: 2,
+    epoch: "test",
+    revision,
+    projectionStatus: "ready",
     uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects: [],
@@ -1093,14 +1373,44 @@ function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSn
   };
 }
 
+function snapshotFrame(value: AppSnapshot) {
+  return { type: "snapshot", protocolVersion: 2, snapshot: value } as const;
+}
+
+async function waitForSocket(index = 0): Promise<FakeWebSocket> {
+  if (vi.isFakeTimers()) {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(FakeWebSocket.instances[index]).toBeDefined();
+    return FakeWebSocket.instances[index]!;
+  }
+  await waitFor(() => expect(FakeWebSocket.instances[index]).toBeDefined());
+  return FakeWebSocket.instances[index]!;
+}
+
 function SnapshotProbe() {
   const { state } = useConnection();
-  return <span>snapshot:{state.snapshot?.sequence ?? "none"}</span>;
+  return <span>snapshot:{state.snapshot?.revision ?? "none"}</span>;
+}
+
+function ErrorProbe() {
+  const { state } = useConnection();
+  return <span>{state.error ?? "none"}</span>;
 }
 
 function ThreadTitleProbe() {
   const { state } = useConnection();
   return <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>;
+}
+
+function DetailTitleProbe() {
+  const { state } = useConnection();
+  return (
+    <span>{`${state.snapshot?.revision ?? "none"}:${state.details.thread?.summary.title ?? "none"}`}</span>
+  );
 }
 
 class FakeWebSocket extends EventTarget {
