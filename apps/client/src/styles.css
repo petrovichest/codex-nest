@@ -1628,11 +1628,13 @@ pre {
   position: fixed;
   inset: 0;
   z-index: 120;
+  height: 100dvh;
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 12px;
+  overflow: hidden;
   padding: max(56px, calc(14px + env(safe-area-inset-top)))
     max(14px, calc(14px + env(safe-area-inset-right)))
     max(18px, calc(14px + env(safe-area-inset-bottom)))
@@ -1647,15 +1649,20 @@ pre {
   min-height: 0;
   display: grid;
   place-items: center;
+  overflow: hidden;
 }
 
 .image-viewer-image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
   max-width: 100%;
   max-height: 100%;
   display: block;
   border-radius: 8px;
   object-fit: contain;
   box-shadow: 0 12px 42px rgb(0 0 0 / 32%);
+  transform: translate(-50%, -50%);
   user-select: none;
 }
 

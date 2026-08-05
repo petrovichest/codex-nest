@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-export const RESTART_RECOVERY_PROTOCOL_VERSION = 1;
+export const RESTART_RECOVERY_PROTOCOL_VERSION = 2;
 
 export type RecoveryState =
   "starting" | "syncing" | "recovering" | "ready" | "draining" | "unavailable" | "failed";

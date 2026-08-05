@@ -99,7 +99,7 @@ describe("HTTP authentication", () => {
     expect((await app.inject({ url: "/api/v1/health" })).json()).toMatchObject({
       status: "degraded",
       recoveryState: "starting",
-      restartProtocolVersion: 1,
+      restartProtocolVersion: 2,
       transport: "daemon",
     });
     expect(
@@ -137,7 +137,7 @@ describe("HTTP authentication", () => {
       state.threadMeta["managed-parent"] = {
         pinned: false,
         lastReadUpdatedAt: 0,
-        teamToolsVersion: 2,
+        managedTeamToolsAvailable: true,
         teamOrchestration: {
           tasks: {
             managed: {
@@ -163,7 +163,6 @@ describe("HTTP authentication", () => {
       recoveryState: "draining",
       transport: "daemon",
       hasManagedWork: true,
-      managedTeamToolsVersions: [2],
       quiescent: false,
     });
     expect(
@@ -201,6 +200,25 @@ describe("HTTP authentication", () => {
       ).statusCode,
     ).toBe(204);
     expect(lifecycle.state).toBe("ready");
+    await store.update((state) => {
+      const task = state.threadMeta["managed-parent"]?.teamOrchestration?.tasks.managed;
+      if (!task) return;
+      task.status = "completed";
+      task.terminalTurnId = "managed-terminal";
+      task.result = { outcome: "success", summary: "Recovered", source: "status" };
+      task.delivery = {
+        status: "delivered",
+        claimId: "managed-claim",
+        parentTurnId: "parent-terminal",
+      };
+    });
+    const historyOnly = await app.inject({
+      method: "POST",
+      url: "/api/v1/internal/restart/prepare",
+      headers: { "x-codexnest-restart-token": token },
+    });
+    expect(historyOnly.json()).toMatchObject({ hasManagedWork: false, quiescent: true });
+    await lifecycle.resume(token);
     await app.close();
     await lifecycle.close();
   });
@@ -1403,7 +1421,7 @@ describe("session forks", () => {
         model: "gpt-b",
         reasoningEffort: "low",
       },
-      teamToolsVersion: 1,
+      managedTeamToolsAvailable: true,
     });
     expect(harness.store.snapshot().messageQueues?.fork).toBeUndefined();
     expect(harness.projection.summary("fork")).toEqual(response.json().thread);
@@ -2859,8 +2877,9 @@ describe("Team orchestration", () => {
     projection.emit("event", 1, { type: "resync.required" });
     await vi.waitFor(() =>
       expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
-      ).toBeUndefined(),
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.delivery,
+      ).toMatchObject({ status: "delivered", parentTurnId: "recovered-parent-turn" }),
     );
     expect(
       store.snapshot().threadMeta.thread?.timelineArtifacts?.["recovered-parent-turn"]?.[0],
@@ -2889,6 +2908,7 @@ describe("Team orchestration", () => {
       ).toBe("running"),
     );
     await callTeamTool(bridge, String(spawned.threadId), "submit_result", {
+      outcome: "success",
       summary: "One durable result",
     });
 
@@ -2924,8 +2944,9 @@ describe("Team orchestration", () => {
     releaseParentStart();
     await vi.waitFor(() =>
       expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
-      ).toBeUndefined(),
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.delivery,
+      ).toMatchObject({ status: "delivered" }),
     );
     expect(
       bridge.request.mock.calls.filter(
@@ -2982,8 +3003,9 @@ describe("Team orchestration", () => {
 
     await vi.waitFor(() =>
       expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)],
-      ).toBeUndefined(),
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+          ?.delivery,
+      ).toMatchObject({ status: "delivered" }),
     );
     expect(
       bridge.request.mock.calls.filter(
@@ -3019,6 +3041,7 @@ describe("Team orchestration", () => {
     });
 
     const submitted = await callTeamTool(bridge, String(firstResult.threadId), "submit_result", {
+      outcome: "success",
       summary: "Интерфейс проверен",
       details: "Ошибок не обнаружено.",
     });
@@ -3073,8 +3096,9 @@ describe("Team orchestration", () => {
     });
     await vi.waitFor(() =>
       expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(firstResult.taskId)],
-      ).toBeUndefined(),
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(firstResult.taskId)]
+          ?.delivery,
+      ).toMatchObject({ status: "delivered" }),
     );
     expect(
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(secondResult.taskId)],
@@ -3215,10 +3239,10 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("keeps the legacy four-task limit and starts the fifth from the FIFO queue", async () => {
+  it("runs ten child tasks and starts the eleventh from the FIFO queue", async () => {
     const { app, bridge, store } = await createTeamHarness();
     const spawned = [];
-    for (let index = 1; index <= 5; index += 1) {
+    for (let index = 1; index <= 11; index += 1) {
       spawned.push(
         dynamicToolJson(
           await callTeamTool(bridge, "thread", "spawn_task", {
@@ -3230,8 +3254,8 @@ describe("Team orchestration", () => {
     }
     await vi.waitFor(() => {
       const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
-      expect(Object.values(tasks).filter((task) => task.status === "running")).toHaveLength(4);
-      expect(tasks[String(spawned[4]!.taskId)]?.status).toBe("queued");
+      expect(Object.values(tasks).filter((task) => task.status === "running")).toHaveLength(10);
+      expect(tasks[String(spawned[10]!.taskId)]?.status).toBe("queued");
     });
     const firstTurnId =
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned[0]!.taskId)]
@@ -3259,37 +3283,14 @@ describe("Team orchestration", () => {
 
     await vi.waitFor(() => {
       const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
-      expect(tasks[String(spawned[4]!.taskId)]?.status).toBe("running");
+      expect(tasks[String(spawned[10]!.taskId)]?.status).toBe("running");
     });
     const childStarts = bridge.request.mock.calls.filter(
       ([method, params]) =>
         method === "turn/start" &&
         String((params as Record<string, unknown>).threadId) !== "thread",
     );
-    expect(childStarts).toHaveLength(5);
-
-    await app.close();
-    await store.flushed();
-  });
-
-  it("limits Team v2 to three child tasks alongside the root coordinator", async () => {
-    const { app, bridge, store } = await createTeamHarness({ version: 2 });
-    const spawned = [];
-    for (let index = 1; index <= 4; index += 1) {
-      spawned.push(
-        dynamicToolJson(
-          await callTeamTool(bridge, "thread", "spawn_task", {
-            title: `v2 task ${index}`,
-            prompt: `Run v2 task ${index}.`,
-          }),
-        ),
-      );
-    }
-    await vi.waitFor(() => {
-      const tasks = store.snapshot().threadMeta.thread?.teamOrchestration?.tasks ?? {};
-      expect(Object.values(tasks).filter((task) => task.status === "running")).toHaveLength(3);
-      expect(tasks[String(spawned[3]!.taskId)]?.status).toBe("queued");
-    });
+    expect(childStarts).toHaveLength(11);
     await app.close();
     await store.flushed();
   });
@@ -3496,8 +3497,8 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("keeps stopped Team v2 state while workspace work still needs a decision", async () => {
-    const { app, bridge, headers, store } = await createTeamHarness({ version: 2 });
+  it("keeps stopped Team state while workspace work still needs a decision", async () => {
+    const { app, bridge, headers, store } = await createTeamHarness();
     const spawned = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
         title: "Preserve isolated changes",
@@ -3572,8 +3573,8 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("enforces Team v2 task settings and preserves structured results", async () => {
-    const { app, bridge, store } = await createTeamHarness({ version: 2 });
+  it("enforces Team task settings and preserves structured results", async () => {
+    const { app, bridge, store } = await createTeamHarness();
     const unsafeWriteRoot = await callTeamTool(bridge, "thread", "spawn_task", {
       title: "Unsafe Git metadata write",
       prompt: "Do not start.",
@@ -3662,7 +3663,6 @@ describe("Team orchestration", () => {
   it("blocks isolated integration while a shared-write task is active", async () => {
     const repository = await createApiTestRepository();
     const { app, bridge, store } = await createTeamHarness({
-      version: 2,
       projectPath: repository,
     });
     const isolated = dynamicToolJson(
@@ -3710,7 +3710,6 @@ describe("Team orchestration", () => {
   it("exposes overlapping isolated workspaces for sequential root-side synthesis", async () => {
     const repository = await createApiTestRepository();
     const { app, bridge, store } = await createTeamHarness({
-      version: 2,
       projectPath: repository,
     });
     const first = dynamicToolJson(
@@ -3795,7 +3794,6 @@ describe("Team orchestration", () => {
       const repository = await createApiTestRepository();
       const workspace = await createTeamWorkspace(repository, "cleanup recovery");
       const { app, headers, projection, store } = await createTeamHarness({
-        version: 2,
         projectPath: repository,
       });
       await store.update((state) => {
@@ -3874,7 +3872,6 @@ describe("Team orchestration", () => {
   it("removes implicit temporary-directory writes from isolated child sandboxes", async () => {
     const repository = await createApiTestRepository();
     const { app, bridge, store } = await createTeamHarness({
-      version: 2,
       projectPath: repository,
     });
     const spawned = dynamicToolJson(
@@ -3922,7 +3919,6 @@ describe("Team orchestration", () => {
   it("recreates sandbox mountpoints when an isolated workspace is reused", async () => {
     const repository = await createApiTestRepository();
     const { app, bridge, store } = await createTeamHarness({
-      version: 2,
       projectPath: repository,
     });
     const first = dynamicToolJson(
@@ -3991,8 +3987,8 @@ describe("Team orchestration", () => {
     await store.flushed();
   });
 
-  it("hard-stops Team v2 tasks at token and time budgets", async () => {
-    const { app, bridge, store } = await createTeamHarness({ version: 2 });
+  it("hard-stops Team tasks at token and time budgets", async () => {
+    const { app, bridge, store } = await createTeamHarness();
     const tokenTask = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
         title: "Token limited",
@@ -4123,7 +4119,7 @@ describe("Team orchestration", () => {
   });
 
   it("waits for delivered dependencies and reuses a child thread for follow-up work", async () => {
-    const { app, bridge, projection, store } = await createTeamHarness({ version: 2 });
+    const { app, bridge, projection, store } = await createTeamHarness();
     const first = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
         title: "Inspect API",
@@ -4248,7 +4244,7 @@ describe("Team orchestration", () => {
     );
     expect(childStart?.[1]).toMatchObject({
       developerInstructions: expect.stringMatching(
-        /fixed delay.*asynchronously.*startup check.*built-in sleep tool once.*without shell sleep commands.*periodic polling.*After waking/is,
+        /fixed delay.*asynchronously.*startup check.*built-in sleep tool once.*remaining time.*submit_result with outcome/is,
       ),
     });
 
@@ -4673,7 +4669,7 @@ async function createForkHarness() {
   await store.update((state) => {
     const meta = state.threadMeta.thread!;
     meta.pinned = true;
-    meta.teamToolsVersion = 1;
+    meta.managedTeamToolsAvailable = true;
     meta.draft = {
       input: "source draft",
       images: [],
@@ -4711,9 +4707,7 @@ async function createForkHarness() {
   };
 }
 
-async function createTeamHarness(
-  options: { lifecycle?: boolean; version?: 1 | 2; projectPath?: string } = {},
-) {
+async function createTeamHarness(options: { lifecycle?: boolean; projectPath?: string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-team-api-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -4742,7 +4736,7 @@ async function createTeamHarness(
   });
   await store.update((state) => {
     const meta = state.threadMeta.thread ?? { pinned: false, lastReadUpdatedAt: 0 };
-    meta.teamToolsVersion = options.version ?? 1;
+    meta.managedTeamToolsAvailable = true;
     state.threadMeta.thread = meta;
   });
   const config = loadConfig({

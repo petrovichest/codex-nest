@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
   "recoveryProtocolVersion": 1,
-  "supportedTeamToolsVersions": [1, 2]
+  "runtimeRecoveryProtocolVersion": 2,
+  "supportedTeamToolsVersions": [2]
 }

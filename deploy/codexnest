@@ -64,31 +64,13 @@ codexnest_release_recovery_protocol() {
   "$node_bin" -e '
     const fs = require("node:fs");
     const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const protocol = value.runtimeRecoveryProtocolVersion ?? value.recoveryProtocolVersion;
     if (
       value.schemaVersion !== 1 ||
-      !Number.isInteger(value.recoveryProtocolVersion) ||
-      value.recoveryProtocolVersion < 1 ||
-      !Array.isArray(value.supportedTeamToolsVersions) ||
-      !value.supportedTeamToolsVersions.every(Number.isInteger)
+      !Number.isInteger(protocol) ||
+      protocol < 1
     ) process.exit(1);
-    process.stdout.write(String(value.recoveryProtocolVersion));
-  ' "$manifest"
-}
-
-codexnest_release_team_versions() {
-  local release="$1"
-  local manifest="$release/deploy/restart-protocol.json"
-  local node_bin="$codexnest_root/runtime/current/bin/node"
-  [[ -f "$manifest" && -x "$node_bin" ]] || return 1
-  "$node_bin" -e '
-    const fs = require("node:fs");
-    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    if (
-      !Array.isArray(value.supportedTeamToolsVersions) ||
-      !value.supportedTeamToolsVersions.every((version) =>
-        Number.isInteger(version) && version > 0)
-    ) process.exit(1);
-    process.stdout.write(JSON.stringify([...new Set(value.supportedTeamToolsVersions)].sort()));
+    process.stdout.write(String(protocol));
   ' "$manifest"
 }
 
@@ -296,10 +278,9 @@ codexnest_resume_after_aborted_restart() {
 }
 
 codexnest_prepare_restart() {
-  local target="$1" target_protocol target_team_versions token_path token body node_bin
+  local target="$1" target_protocol token_path token body node_bin
   codexnest_preflight_error=""
   target_protocol="$(codexnest_release_recovery_protocol "$target")" || return 1
-  target_team_versions="$(codexnest_release_team_versions "$target")" || return 1
   token_path="$(codexnest_restart_token_path)"
   [[ -f "$token_path" ]] || return 1
   token="$(tr -d '\r\n' < "$token_path")"
@@ -326,19 +307,12 @@ codexnest_prepare_restart() {
     const fs = require("node:fs");
     const value = JSON.parse(fs.readFileSync(0, "utf8"));
     const targetProtocol = Number(process.argv[1]);
-    const targetTeamVersions = JSON.parse(process.argv[2]);
-    const activeTeamVersions = Array.isArray(value.managedTeamToolsVersions)
-      ? value.managedTeamToolsVersions
-      : value.hasManagedWork
-        ? [1]
-        : [];
     const compatible =
       value.transport === "daemon" &&
       value.appServerReady === true &&
-      value.restartProtocolVersion === targetProtocol &&
-      activeTeamVersions.every((version) => targetTeamVersions.includes(version));
+      value.restartProtocolVersion === targetProtocol;
     process.exit(compatible || value.quiescent === true ? 0 : 1);
-  ' "$target_protocol" "$target_team_versions"; then
+  ' "$target_protocol"; then
     codexnest_preflight_error="The target release cannot safely recover the current CodexNest work"
     codexnest_resume_after_aborted_restart
     return 2

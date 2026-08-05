@@ -22,10 +22,14 @@ describe("RuntimeLifecycle", () => {
   it("keeps the built release marker aligned with the server protocol", async () => {
     const marker = JSON.parse(
       await readFile(resolve(process.cwd(), "../../deploy/restart-protocol.json"), "utf8"),
-    ) as { recoveryProtocolVersion: number; supportedTeamToolsVersions: number[] };
-    expect(marker.recoveryProtocolVersion).toBe(RESTART_RECOVERY_PROTOCOL_VERSION);
-    expect(marker.supportedTeamToolsVersions).toContain(1);
-    expect(marker.supportedTeamToolsVersions).toContain(2);
+    ) as {
+      recoveryProtocolVersion: number;
+      runtimeRecoveryProtocolVersion: number;
+      supportedTeamToolsVersions: number[];
+    };
+    expect(marker.recoveryProtocolVersion).toBe(1);
+    expect(marker.runtimeRecoveryProtocolVersion).toBe(RESTART_RECOVERY_PROTOCOL_VERSION);
+    expect(marker.supportedTeamToolsVersions).toEqual([2]);
   });
 
   it("drains tracked work, checkpoints, and resumes with a protected token", async () => {

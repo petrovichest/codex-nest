@@ -192,7 +192,7 @@ export interface ThreadMetaState {
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
   teamOrchestration?: TeamOrchestrationState;
-  teamToolsVersion?: 1 | 2;
+  managedTeamToolsAvailable?: true;
   managedParent?: {
     parentThreadId: string;
     taskId: string;
@@ -442,6 +442,25 @@ function validateState(value: unknown): CodexNestState {
     if (isRecord(meta) && isLegacyTeamOrchestrationState(meta.teamOrchestration)) {
       delete meta.teamOrchestration;
     }
+    if (isRecord(meta) && meta.teamToolsVersion === 2) {
+      meta.managedTeamToolsAvailable = true;
+      delete meta.teamToolsVersion;
+    }
+    if (isRecord(meta) && meta.teamToolsVersion === 1) {
+      const orchestration = meta.teamOrchestration;
+      if (
+        isRecord(orchestration) &&
+        isRecord(orchestration.tasks) &&
+        Object.keys(orchestration.tasks).length
+      ) {
+        throw new Error("Unsupported unfinished legacy Team orchestration in CodexNest state");
+      }
+      delete meta.teamToolsVersion;
+      delete meta.teamOrchestration;
+      if (isRecord(meta.settings) && meta.settings.collaborationMode === "team") {
+        meta.settings.collaborationMode = "default";
+      }
+    }
     if (
       !isRecord(meta) ||
       typeof meta.pinned !== "boolean" ||
@@ -455,9 +474,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
       (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
-      (meta.teamToolsVersion !== undefined &&
-        meta.teamToolsVersion !== 1 &&
-        meta.teamToolsVersion !== 2) ||
+      meta.teamToolsVersion !== undefined ||
+      (meta.managedTeamToolsAvailable !== undefined && meta.managedTeamToolsAvailable !== true) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft))

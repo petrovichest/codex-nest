@@ -2534,7 +2534,7 @@ describe("AppProjection", () => {
                 type: "userMessage",
                 id: "internal-v2",
                 clientId: "codexnest-team-continuation:task-v2",
-                content: [{ type: "text", text: "Continue Team v2", text_elements: [] }],
+                content: [{ type: "text", text: "Continue Team", text_elements: [] }],
               },
               { type: "plan", id: "plan", text: "План" },
             ],

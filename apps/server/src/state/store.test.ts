@@ -30,7 +30,7 @@ function managedTaskFixture(id: string, createdAt: number) {
   };
 }
 
-function validTeamV2SerializedState(): any {
+function validManagedTeamSerializedState(): any {
   return {
     schemaVersion: 1,
     auth: {},
@@ -39,7 +39,7 @@ function validTeamV2SerializedState(): any {
       parent: {
         pinned: false,
         lastReadUpdatedAt: 0,
-        teamToolsVersion: 2,
+        managedTeamToolsAvailable: true,
         teamOrchestration: {
           tasks: {
             base: managedTaskFixture("base", 1),
@@ -323,7 +323,7 @@ describe("StateStore", () => {
     });
   });
 
-  it("round-trips additive Team v2 task state while retaining v1 tasks", async () => {
+  it("round-trips the current managed Team task state", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
@@ -331,14 +331,14 @@ describe("StateStore", () => {
       state.threadMeta.parent = {
         pinned: false,
         lastReadUpdatedAt: 0,
-        teamToolsVersion: 2,
+        managedTeamToolsAvailable: true,
         teamOrchestration: {
           tasks: {
             legacy: {
               id: "legacy",
               childThreadId: "legacy-child",
               title: "Legacy task",
-              prompt: "Keep the v1 shape valid.",
+              prompt: "Keep the minimal stored shape valid.",
               status: "completed",
               createdAt: 1,
               lastActivityAt: 2,
@@ -445,7 +445,7 @@ describe("StateStore", () => {
     const reloaded = new StateStore(path);
     await reloaded.load();
     expect(reloaded.snapshot().threadMeta.parent).toMatchObject({
-      teamToolsVersion: 2,
+      managedTeamToolsAvailable: true,
       teamOrchestration: {
         tasks: {
           legacy: {
@@ -490,9 +490,64 @@ describe("StateStore", () => {
     });
   });
 
-  it("rejects malformed or pathologically unsafe Team v2 task state", async () => {
+  it("migrates the latest versioned Team state to the single managed-tool contract", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    delete state.threadMeta.parent.managedTeamToolsAvailable;
+    state.threadMeta.parent.teamToolsVersion = 2;
+    await writeFile(path, JSON.stringify(state), "utf8");
+
+    const store = new StateStore(path);
+    await store.load();
+
+    expect(store.snapshot().threadMeta.parent).toMatchObject({
+      managedTeamToolsAvailable: true,
+      teamOrchestration: { tasks: { task: { id: "task" } } },
+    });
+    expect("teamToolsVersion" in store.snapshot().threadMeta.parent!).toBe(false);
+  });
+
+  it("keeps empty legacy Team chats but retires their orchestration mode", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    delete state.threadMeta.parent.managedTeamToolsAvailable;
+    state.threadMeta.parent.teamToolsVersion = 1;
+    state.threadMeta.parent.settings = {
+      collaborationMode: "team",
+      model: "gpt-a",
+      reasoningEffort: "high",
+    };
+    state.threadMeta.parent.teamOrchestration = { tasks: {} };
+    await writeFile(path, JSON.stringify(state), "utf8");
+
+    const store = new StateStore(path);
+    await store.load();
+
+    expect(store.snapshot().threadMeta.parent).toMatchObject({
+      settings: { collaborationMode: "default" },
+    });
+    expect(store.snapshot().threadMeta.parent?.managedTeamToolsAvailable).toBeUndefined();
+    expect(store.snapshot().threadMeta.parent?.teamOrchestration).toBeUndefined();
+  });
+
+  it("fails closed instead of discarding unfinished legacy Team work", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    delete state.threadMeta.parent.managedTeamToolsAvailable;
+    state.threadMeta.parent.teamToolsVersion = 1;
+    await writeFile(path, JSON.stringify(state), "utf8");
+
+    await expect(new StateStore(path).load()).rejects.toThrow(
+      "Unsupported unfinished legacy Team orchestration in CodexNest state",
+    );
+  });
+
+  it("rejects malformed or pathologically unsafe managed Team task state", async () => {
     const cases: Array<[string, (state: any) => void]> = [
-      ["unsupported tool version", (state) => (state.threadMeta.parent.teamToolsVersion = 3)],
+      [
+        "invalid managed-tool capability",
+        (state) => (state.threadMeta.parent.managedTeamToolsAvailable = false),
+      ],
       [
         "missing dependency",
         (state) => (state.threadMeta.parent.teamOrchestration.tasks.task.dependsOn = ["missing"]),
@@ -594,7 +649,7 @@ describe("StateStore", () => {
 
     for (const [name, mutate] of cases) {
       const { path } = await temporaryState();
-      const state = validTeamV2SerializedState();
+      const state = validManagedTeamSerializedState();
       mutate(state);
       await writeFile(path, JSON.stringify(state), "utf8");
       await expect(new StateStore(path).load(), name).rejects.toThrow(

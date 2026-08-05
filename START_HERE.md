@@ -222,10 +222,10 @@ References:
 ## Team mode
 
 CodexNest Team mode is an application-owned managed orchestration layer. The
-root session keeps responsibility for the final result and may run up to three
-Team v2 child tasks alongside itself. Child sessions cannot delegate further.
+root session keeps responsibility for the final result and may run up to ten
+managed child tasks alongside itself. Child sessions cannot delegate further.
 
-Team v2 tasks are read-only and offline by default. A root may explicitly grant
+Managed tasks are read-only and offline by default. A root may explicitly grant
 network access or repository-relative write paths. Writable tasks normally run
 in detached Git worktrees that reproduce the current tracked and non-ignored
 working-tree contents without commits, stash, or index changes. Child changes
@@ -235,9 +235,9 @@ operations.
 
 Tasks may declare dependencies, model/reasoning settings, and hard time or token
 budgets. Results are structured and retained as bounded history, and a delivered
-task can be continued in the same child thread. Existing Team v1 sessions keep
-their original tools and four-child scheduling limit; v2 is attached only to new
-sessions.
+task can be continued in the same child thread. CodexNest exposes one current
+managed-tool contract; chats created with retired tools remain available as
+ordinary sessions.
 
 ## Explicit non-goals for the first release
 

@@ -1,20 +1,19 @@
-# CodexNest Team v2 verification report
+# CodexNest Team orchestration verification report
 
-- Date: 2026-08-05
+- Date: 2026-08-06
 - Branch: `codex/mvp`
 - Result: **PASS**
 
 ## Scope
 
-This change upgrades CodexNest's application-owned Team orchestration while
-preserving existing Team v1 sessions. Team v2 keeps the root coordinator in
-control and runs up to three managed child tasks alongside it; managed children
-cannot delegate further.
+CodexNest's application-owned Team orchestration keeps the root coordinator in
+control and runs up to ten managed child tasks alongside it; managed children
+cannot delegate further. A single current managed-tool contract covers task
+scheduling, isolation, structured results, and recovery.
 
-The implementation was itself reviewed through CodexNest managed tasks. Separate
-tasks audited scheduling/recovery, workspace security, UI behavior, deterministic
-race coverage, and cleanup recovery. The root coordinator integrated the results,
-implemented the fixes, and retained responsibility for verification and Git.
+Verification covers scheduling and recovery, workspace security, UI behavior,
+deterministic race handling, cleanup recovery, and the transition from retired
+Team chats to the single current contract.
 
 ## Verified behavior
 
@@ -37,9 +36,10 @@ implemented the fixes, and retained responsibility for verification and Git.
   `0600`; permission-only changes and conflicts are detected.
 - Worktree discard removes only the task's own registration. Failed cleanup after
   successful integration remains `integrated` and is retried during recovery.
-- Managed restart preflight reports the exact active Team tool versions and
-  rejects an update or rollback target that cannot recover every active version.
-- Team v1 remains compatible with its original tools and four-child limit.
+- Managed restart preflight uses one recovery protocol and rejects an update or
+  rollback target that cannot recover active work.
+- Retired Team chats remain available as ordinary sessions, while unfinished
+  legacy orchestration fails closed instead of discarding work.
 
 ## Verification
 
@@ -48,8 +48,8 @@ The final verification run passed:
 ```text
 npm test
   protocol: 5 passed
-  client:   343 passed
-  server:   221 passed, 1 opt-in integration test skipped
+  client:   360 passed
+  server:   226 passed, 1 opt-in integration test skipped
 
 npm run lint
 npm run typecheck

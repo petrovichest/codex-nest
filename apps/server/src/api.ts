@@ -150,10 +150,7 @@ import {
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
-const TEAM_TOOLS_VERSION = 2;
-const TEAM_LEGACY_TOOLS_VERSION = 1;
-const TEAM_MAX_ACTIVE_TASKS = 3;
-const TEAM_LEGACY_MAX_ACTIVE_TASKS = 4;
+const TEAM_MAX_ACTIVE_TASKS = 10;
 const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
@@ -185,6 +182,7 @@ const TEAM_MODE_CONTEXT = [
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
   "Grant network access only when a managed task requires external access such as documentation, package downloads, remote APIs, or health checks; set access.network to true in that case and leave it false for local-only work.",
   "Choose sequential or parallel delegation based on dependencies and workspace overlap.",
+  "Do not run multiple repository-wide builds, full test suites, or similarly resource-heavy commands in parallel; schedule those tasks sequentially.",
   "Never run parallel sharedWrite tasks whose write paths overlap.",
   "Parallel isolatedWrite tasks may edit overlapping files when comparing alternatives or when their results will be synthesized; their worktrees remain separate.",
   "Integrate isolated results sequentially. If an isolated result conflicts after another result changed the parent, call codexnest.inspect_task to obtain workspacePath, compare that workspace with the parent, manually merge the required changes in the parent, and then call codexnest.discard_task_changes for that workspace.",
@@ -193,16 +191,6 @@ const TEAM_MODE_CONTEXT = [
   "Keep concise task titles and the consolidated user-facing response in the user's language.",
   "When the required results are ready, return one consolidated result to the user.",
   "The user should not need to coordinate subagents directly.",
-].join(" ");
-const TEAM_CHILD_INSTRUCTIONS_V1 = [
-  "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
-  "Do not create or delegate to subagents.",
-  "When the task explicitly requires checking results after a fixed delay or deadline, start the workload asynchronously so it continues independently.",
-  "Perform one brief task-appropriate startup check, such as confirming the process is alive and its first logs contain no immediate failure; if startup failed, diagnose it or report the failure instead of sleeping.",
-  "Then use the built-in sleep tool once for only the time remaining until the requested check, without shell sleep commands, loops, or periodic polling.",
-  "After waking, inspect the result and complete the task normally; do not introduce a delay when the task did not explicitly request one.",
-  "Before finishing, call codexnest.submit_result with a concise summary and optional Markdown details.",
-  "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
 ].join(" ");
 const TEAM_CHILD_INSTRUCTIONS = [
   "You are a CodexNest managed child agent. Complete exactly the assigned task in this thread.",
@@ -263,25 +251,6 @@ interface ManagedChildRuntime {
         excludeSlashTmp: boolean;
       };
 }
-
-const TEAM_CHILD_DYNAMIC_TOOLS_V1 = [
-  {
-    type: "namespace",
-    name: "codexnest",
-    description: "Return the result of the current CodexNest managed task.",
-    tools: [
-      dynamicTool("submit_result", "Submit the result candidate for this managed task.", {
-        type: "object",
-        properties: {
-          summary: { type: "string", description: "Concise non-empty result summary." },
-          details: { type: "string", description: "Optional Markdown details." },
-        },
-        required: ["summary"],
-        additionalProperties: false,
-      }),
-    ],
-  },
-] as const;
 
 const TEAM_ACCESS_SCHEMA = {
   type: "object",
@@ -527,9 +496,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (
       summary.settings.collaborationMode === "team" &&
-      ![TEAM_LEGACY_TOOLS_VERSION, TEAM_TOOLS_VERSION].includes(
-        store.snapshot().threadMeta[threadId]?.teamToolsVersion as 1 | 2,
-      )
+      store.snapshot().threadMeta[threadId]?.managedTeamToolsAvailable !== true
     ) {
       throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
     }
@@ -685,9 +652,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
     for (const candidate of projection.emptyThreadCandidates(projectId)) {
-      if (
-        store.snapshot().threadMeta[candidate.thread.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION
-      ) {
+      if (store.snapshot().threadMeta[candidate.thread.id]?.managedTeamToolsAvailable !== true) {
         continue;
       }
       if (candidate.knownUnmaterialized) return candidate.thread;
@@ -918,13 +883,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               const tasks = Object.values(
                 store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
               );
-              const version = store.snapshot().threadMeta[threadId]?.teamToolsVersion;
               const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
-              if (
-                tasks.length &&
-                tasks.every(isTerminalTask) &&
-                (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
-              ) {
+              if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
                 await store.update((state) => {
                   const meta = state.threadMeta[threadId];
                   if (meta) delete meta.teamOrchestration;
@@ -1377,16 +1337,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const activeTurnCount = projection
       .snapshot()
       .threads.filter((thread) => thread.currentTurnId !== null).length;
-    const managedTeamToolsVersions = [
-      ...new Set(
-        Object.values(snapshot.threadMeta).flatMap((meta) =>
-          meta.teamOrchestration && Object.keys(meta.teamOrchestration.tasks).length
-            ? [meta.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION]
-            : [],
-        ),
-      ),
-    ].sort();
-    const hasManagedWork = managedTeamToolsVersions.length > 0;
+    const hasManagedWork = Object.values(snapshot.threadMeta).some((meta) =>
+      Object.values(meta.teamOrchestration?.tasks ?? {}).some(managedTeamTaskHasWork),
+    );
     const hasDispatchingMessages = Object.values(snapshot.messageQueues ?? {}).some((messages) =>
       messages.some((message) => message.status === "dispatching"),
     );
@@ -1407,7 +1360,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       recoveryState: lifecycle.state,
       activeTurnCount,
       hasManagedWork,
-      managedTeamToolsVersions,
       pendingToolOperationCount,
       pendingAttentionCount,
       hasDispatchingMessages,
@@ -2310,9 +2262,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           lastOutcome: "completed",
           outcomeUpdatedAt: forked.updatedAt * 1_000,
           settings: structuredClone(source.settings),
-          ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION ||
-          sourceMeta?.teamToolsVersion === TEAM_LEGACY_TOOLS_VERSION
-            ? { teamToolsVersion: sourceMeta.teamToolsVersion }
+          ...(sourceMeta?.managedTeamToolsAvailable === true
+            ? { managedTeamToolsAvailable: true as const }
             : {}),
         };
         if (state.messageQueues) delete state.messageQueues[forked.id];
@@ -2401,7 +2352,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (
         settings.collaborationMode === "team" &&
         summary.settings.collaborationMode !== "team" &&
-        store.snapshot().threadMeta[request.params.id]?.teamToolsVersion !== TEAM_TOOLS_VERSION
+        store.snapshot().threadMeta[request.params.id]?.managedTeamToolsAvailable !== true
       ) {
         throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
       }
@@ -2627,13 +2578,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const tasks = Object.values(
           store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
         );
-        const version = store.snapshot().threadMeta[request.params.id]?.teamToolsVersion;
         const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
-        if (
-          tasks.length &&
-          tasks.every(isTerminalTask) &&
-          (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
-        ) {
+        if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
           await store.update((state) => {
             const meta = state.threadMeta[request.params.id];
             if (meta) delete meta.teamOrchestration;
@@ -2824,11 +2770,8 @@ async function handleManagedTeamToolCall(
       fields.artifacts,
       managed.task.workspace?.worktreePath ?? projection.summary(managed.parentThreadId)?.cwd,
     );
-    const parentVersion =
-      store.snapshot().threadMeta[managed.parentThreadId]?.teamToolsVersion ??
-      TEAM_LEGACY_TOOLS_VERSION;
-    if (parentVersion === TEAM_TOOLS_VERSION && !fields.outcome) {
-      throw new ProjectValidationError("outcome is required for Team v2 results");
+    if (!fields.outcome) {
+      throw new ProjectValidationError("outcome is required for managed Team results");
     }
     let accepted = false;
     await store.update((state) => {
@@ -2872,20 +2815,11 @@ async function handleManagedTeamToolCall(
   if (tool === "spawn_task") {
     const title = requiredToolString(args, "title");
     const prompt = requiredToolString(args, "prompt");
-    const parentVersion =
-      store.snapshot().threadMeta[threadId]?.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION;
-    const options =
-      parentVersion === TEAM_TOOLS_VERSION
-        ? managedTaskOptions(args, parent.settings, projection.availableModels)
-        : undefined;
-    if (options) {
-      const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
-      const missing = options.dependsOn.filter((dependency) => !tasks[dependency]);
-      if (missing.length) {
-        return finish(
-          dynamicToolError(`Managed task dependencies not found: ${missing.join(", ")}`),
-        );
-      }
+    const options = managedTaskOptions(args, parent.settings, projection.availableModels);
+    const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const missing = options.dependsOn.filter((dependency) => !tasks[dependency]);
+    if (missing.length) {
+      return finish(dynamicToolError(`Managed task dependencies not found: ${missing.join(", ")}`));
     }
     const operation = prepared!.operation;
     const taskId = operation.taskId!;
@@ -3325,8 +3259,7 @@ async function createManagedTeamTask(
   recoveredThread: Thread | null,
   options?: ManagedTaskOptions,
 ): Promise<ManagedTeamTaskState> {
-  const teamToolsVersion = store.snapshot().threadMeta[parent.id]?.teamToolsVersion;
-  if (teamToolsVersion !== TEAM_TOOLS_VERSION && teamToolsVersion !== TEAM_LEGACY_TOOLS_VERSION) {
+  if (store.snapshot().threadMeta[parent.id]?.managedTeamToolsAvailable !== true) {
     throw new ProjectConflictError("This Team session does not have managed tools");
   }
   const started = recoveredThread
@@ -3336,14 +3269,8 @@ async function createManagedTeamTask(
           cwd: parent.cwd,
           ...threadSettings(parent.settings),
           config: teamRuntimeConfig(),
-          developerInstructions:
-            teamToolsVersion === TEAM_TOOLS_VERSION
-              ? TEAM_CHILD_INSTRUCTIONS
-              : TEAM_CHILD_INSTRUCTIONS_V1,
-          dynamicTools:
-            teamToolsVersion === TEAM_TOOLS_VERSION
-              ? TEAM_CHILD_DYNAMIC_TOOLS
-              : TEAM_CHILD_DYNAMIC_TOOLS_V1,
+          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+          dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
           threadSource: childThreadSource,
         }),
       );
@@ -3574,11 +3501,7 @@ async function startQueuedTeamTasks(
     const active = Object.values(orchestration.tasks).filter(
       (task) => task.status === "starting" || task.status === "running",
     ).length;
-    const maxActiveTasks =
-      store.snapshot().threadMeta[parentThreadId]?.teamToolsVersion === TEAM_TOOLS_VERSION
-        ? TEAM_MAX_ACTIVE_TASKS
-        : TEAM_LEGACY_MAX_ACTIVE_TASKS;
-    if (active >= maxActiveTasks) return;
+    if (active >= TEAM_MAX_ACTIVE_TASKS) return;
     const queuedTasks = Object.values(orchestration.tasks)
       .filter((task) => task.status === "queued")
       .sort((left, right) => left.createdAt - right.createdAt);
@@ -3617,12 +3540,12 @@ async function startQueuedTeamTasks(
     try {
       const parent = projection.summary(parentThreadId);
       if (!parent) throw new Error("Managed task parent is unavailable");
-      const teamToolsVersion =
-        store.snapshot().threadMeta[parentThreadId]?.teamToolsVersion ?? TEAM_LEGACY_TOOLS_VERSION;
-      const workspace =
-        teamToolsVersion === TEAM_TOOLS_VERSION
-          ? await prepareManagedTaskWorkspace(store, parentThreadId, queued, parent.cwd)
-          : null;
+      const workspace = await prepareManagedTaskWorkspace(
+        store,
+        parentThreadId,
+        queued,
+        parent.cwd,
+      );
       const runtime = await managedChildRuntime(queued, parent.cwd, workspace);
       await bridge.request<ThreadResumeResponse>(
         "thread/resume",
@@ -3632,16 +3555,11 @@ async function startQueuedTeamTasks(
           ...(runtime.runtimeWorkspaceRoots
             ? { runtimeWorkspaceRoots: runtime.runtimeWorkspaceRoots }
             : {}),
-          ...(teamToolsVersion === TEAM_TOOLS_VERSION ? { approvalPolicy: "never" as const } : {}),
+          approvalPolicy: "never" as const,
           excludeTurns: true,
-          ...(teamToolsVersion === TEAM_TOOLS_VERSION
-            ? managedChildResumeSettings(parent.settings, queued)
-            : threadSettings(parent.settings)),
+          ...managedChildResumeSettings(parent.settings, queued),
           config: teamRuntimeConfig(),
-          developerInstructions:
-            teamToolsVersion === TEAM_TOOLS_VERSION
-              ? TEAM_CHILD_INSTRUCTIONS
-              : TEAM_CHILD_INSTRUCTIONS_V1,
+          developerInstructions: TEAM_CHILD_INSTRUCTIONS,
         },
         30_000,
       );
@@ -3650,12 +3568,7 @@ async function startQueuedTeamTasks(
           threadId: queued.childThreadId,
           clientUserMessageId: queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
           input: messageInput(queued.prompt, []),
-          ...managedChildTurnSettings(
-            parent.settings,
-            projection.availableModels,
-            teamToolsVersion === TEAM_TOOLS_VERSION ? queued : undefined,
-            runtime,
-          ),
+          ...managedChildTurnSettings(parent.settings, projection.availableModels, queued, runtime),
         }),
       );
       await projection.markMaterialized(queued.childThreadId);
@@ -3930,14 +3843,12 @@ async function finalizeManagedTask(
     task.status = outcome;
     task.terminalTurnId = terminalTurnId;
     if (workspaceUpdate) task.workspace = workspaceUpdate;
-    const normalizedResult =
-      state.threadMeta[managed.parentThreadId]?.teamToolsVersion === TEAM_TOOLS_VERSION &&
-      !result.outcome
-        ? {
-            ...result,
-            outcome: outcome === "completed" ? ("success" as const) : ("failed" as const),
-          }
-        : result;
+    const normalizedResult = !result.outcome
+      ? {
+          ...result,
+          outcome: outcome === "completed" ? ("success" as const) : ("failed" as const),
+        }
+      : result;
     task.result = task.budgetReason
       ? {
           ...normalizedResult,
@@ -4072,48 +3983,38 @@ async function releaseTeamClaim(
 }
 
 function cleanupTeamOrchestration(state: CodexNestState, parentThreadId: string): void {
-  const meta = state.threadMeta[parentThreadId];
-  const orchestration = meta?.teamOrchestration;
+  const orchestration = state.threadMeta[parentThreadId]?.teamOrchestration;
   if (!orchestration) return;
-  if (meta?.teamToolsVersion === TEAM_TOOLS_VERSION) {
-    const terminal = Object.values(orchestration.tasks)
-      .filter(
-        (task) => isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog,
-      )
-      .sort((left, right) => right.createdAt - left.createdAt);
-    const retained = new Set(terminal.slice(0, TEAM_TASK_HISTORY_LIMIT).map((task) => task.id));
-    for (const task of terminal.slice(TEAM_TASK_HISTORY_LIMIT).reverse()) {
-      const requiredByActiveTask = Object.values(orchestration.tasks).some(
-        (candidate) =>
-          !isTerminalTask(candidate) &&
-          (candidate.predecessorTaskId === task.id || candidate.dependsOn?.includes(task.id)),
-      );
-      if (requiredByActiveTask) continue;
-      const successor = Object.values(orchestration.tasks).find(
-        (candidate) => candidate.predecessorTaskId === task.id,
-      );
-      const workspaceResolved =
-        !task.workspace ||
-        !managedTaskHasPendingWorkspace(task) ||
-        Boolean(successor?.workspace?.worktreePath === task.workspace.worktreePath);
-      if (!workspaceResolved || retained.has(task.id)) continue;
-      for (const candidate of Object.values(orchestration.tasks)) {
-        if (candidate.predecessorTaskId === task.id) delete candidate.predecessorTaskId;
-        if (candidate.dependsOn?.includes(task.id)) {
-          candidate.dependsOn = candidate.dependsOn.filter((dependency) => dependency !== task.id);
-          if (!candidate.dependsOn.length) delete candidate.dependsOn;
-        }
+  const terminal = Object.values(orchestration.tasks)
+    .filter(
+      (task) => isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog,
+    )
+    .sort((left, right) => right.createdAt - left.createdAt);
+  const retained = new Set(terminal.slice(0, TEAM_TASK_HISTORY_LIMIT).map((task) => task.id));
+  for (const task of terminal.slice(TEAM_TASK_HISTORY_LIMIT).reverse()) {
+    const requiredByActiveTask = Object.values(orchestration.tasks).some(
+      (candidate) =>
+        !isTerminalTask(candidate) &&
+        (candidate.predecessorTaskId === task.id || candidate.dependsOn?.includes(task.id)),
+    );
+    if (requiredByActiveTask) continue;
+    const successor = Object.values(orchestration.tasks).find(
+      (candidate) => candidate.predecessorTaskId === task.id,
+    );
+    const workspaceResolved =
+      !task.workspace ||
+      !managedTaskHasPendingWorkspace(task) ||
+      Boolean(successor?.workspace?.worktreePath === task.workspace.worktreePath);
+    if (!workspaceResolved || retained.has(task.id)) continue;
+    for (const candidate of Object.values(orchestration.tasks)) {
+      if (candidate.predecessorTaskId === task.id) delete candidate.predecessorTaskId;
+      if (candidate.dependsOn?.includes(task.id)) {
+        candidate.dependsOn = candidate.dependsOn.filter((dependency) => dependency !== task.id);
+        if (!candidate.dependsOn.length) delete candidate.dependsOn;
       }
-      delete orchestration.tasks[task.id];
     }
-    return;
+    delete orchestration.tasks[task.id];
   }
-  for (const [taskId, task] of Object.entries(orchestration.tasks)) {
-    if (isTerminalTask(task) && task.delivery?.status === "delivered" && !task.watchdog) {
-      delete orchestration.tasks[taskId];
-    }
-  }
-  if (!Object.keys(orchestration.tasks).length) delete meta!.teamOrchestration;
 }
 
 function hasPendingTeamContinuation(store: StateStore, parentThreadId: string): boolean {
@@ -5484,22 +5385,22 @@ function managedChildResumeSettings(
 async function markTeamToolsAvailable(store: StateStore, threadId: string): Promise<void> {
   await store.update((state) => {
     const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-    meta.teamToolsVersion = TEAM_TOOLS_VERSION;
+    meta.managedTeamToolsAvailable = true;
     state.threadMeta[threadId] = meta;
   });
 }
 
 function teamOrchestrationHasWork(store: StateStore, parentThreadId: string): boolean {
   const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  return Boolean(orchestration && Object.values(orchestration.tasks).some(managedTeamTaskHasWork));
+}
+
+function managedTeamTaskHasWork(task: ManagedTeamTaskState): boolean {
   return Boolean(
-    orchestration &&
-    Object.values(orchestration.tasks).some(
-      (task) =>
-        !isTerminalTask(task) ||
-        task.delivery?.status !== "delivered" ||
-        task.watchdog ||
-        managedTaskHasPendingWorkspace(task),
-    ),
+    !isTerminalTask(task) ||
+    task.delivery?.status !== "delivered" ||
+    task.watchdog ||
+    managedTaskHasPendingWorkspace(task),
   );
 }
 
