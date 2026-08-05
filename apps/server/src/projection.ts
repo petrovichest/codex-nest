@@ -111,14 +111,20 @@ export class AppProjection extends EventEmitter {
         cached.liveOutcome = undefined;
         cached.thread.status = { type: "active", activeFlags: [] };
       }
-      if (!request.threadId || this.isThreadVisible(request.threadId)) {
+      if (!request.threadId) {
+        this.publish({ type: "attention.upserted", attention: request });
+        return;
+      }
+      const state = this.store.snapshot();
+      if (this.isThreadVisible(request.threadId, state)) {
         this.publish({ type: "attention.upserted", attention: request });
       }
-      if (request.threadId) this.publishThread(request.threadId);
+      this.publishThread(request.threadId, state);
     });
     attention.on("removed", (attentionId: string) => {
       this.publish({ type: "attention.removed", attentionId });
-      for (const threadId of this.threads.keys()) this.publishThread(threadId);
+      const state = this.store.snapshot();
+      for (const threadId of this.threads.keys()) this.publishThread(threadId, state);
     });
   }
 
@@ -132,7 +138,9 @@ export class AppProjection extends EventEmitter {
 
   snapshot(): AppSnapshot {
     const state = this.store.snapshot();
-    const threads = this.sortedThreads().filter((thread) => this.isCwdVisible(thread.cwd, state));
+    const threads = this.sortedThreads(state).filter((thread) =>
+      this.isCwdVisible(thread.cwd, state),
+    );
     const visibleThreadIds = new Set(threads.map((thread) => thread.id));
     return {
       sequence: this.sequence,
@@ -144,8 +152,8 @@ export class AppProjection extends EventEmitter {
         .list()
         .filter((request) => !request.threadId || visibleThreadIds.has(request.threadId)),
       models: this.models,
-      defaultReasoningEffort: this.store.snapshot().defaultReasoningEffort,
-      taskDefaults: this.store.snapshot().taskDefaults ?? {},
+      defaultReasoningEffort: state.defaultReasoningEffort,
+      taskDefaults: state.taskDefaults ?? {},
       pushConfigured: this.pushConfigured,
       voiceTranscriptions: Object.values(state.voiceTranscriptions ?? {})
         .filter((job) => visibleThreadIds.has(job.threadId))
@@ -426,8 +434,8 @@ export class AppProjection extends EventEmitter {
   ): Array<{ thread: ThreadSummary; knownUnmaterialized: boolean }> {
     const state = this.store.snapshot();
     return [...this.threads.values()]
-      .filter((cached) => {
-        const summary = this.toSummary(cached);
+      .map((cached) => ({ cached, summary: this.toSummary(cached, state) }))
+      .filter(({ cached, summary }) => {
         const unmaterialized = state.threadMeta[cached.thread.id]?.unmaterialized;
         return (
           !isSpawnedSubagent(cached.thread) &&
@@ -441,12 +449,12 @@ export class AppProjection extends EventEmitter {
         );
       })
       .sort((a, b) => {
-        const aKnown = state.threadMeta[a.thread.id]?.unmaterialized === true ? 1 : 0;
-        const bKnown = state.threadMeta[b.thread.id]?.unmaterialized === true ? 1 : 0;
-        return bKnown - aKnown || b.thread.updatedAt - a.thread.updatedAt;
+        const aKnown = state.threadMeta[a.cached.thread.id]?.unmaterialized === true ? 1 : 0;
+        const bKnown = state.threadMeta[b.cached.thread.id]?.unmaterialized === true ? 1 : 0;
+        return bKnown - aKnown || b.cached.thread.updatedAt - a.cached.thread.updatedAt;
       })
-      .map((cached) => ({
-        thread: this.toSummary(cached),
+      .map(({ cached, summary }) => ({
+        thread: summary,
         knownUnmaterialized: state.threadMeta[cached.thread.id]?.unmaterialized === true,
       }));
   }
@@ -538,10 +546,11 @@ export class AppProjection extends EventEmitter {
   }
 
   publishQueue(threadId: string, messages: QueuedMessage[]): void {
-    if (this.isThreadVisible(threadId)) {
+    const state = this.store.snapshot();
+    if (this.isThreadVisible(threadId, state)) {
       this.publish({ type: "queue.changed", threadId, messages });
     }
-    this.publishThread(threadId);
+    this.publishThread(threadId, state);
   }
 
   publishVoiceTranscription(job: VoiceTranscriptionState): void {
@@ -567,8 +576,7 @@ export class AppProjection extends EventEmitter {
       goalStatus: this.threads.get(thread.id)?.goalStatus,
     };
     this.threads.set(thread.id, cached);
-    this.publishThread(thread.id);
-    return this.toSummary(cached);
+    return this.publishThread(thread.id)!;
   }
 
   async refreshThread(threadId: string): Promise<ThreadSummary | undefined> {
@@ -803,7 +811,10 @@ export class AppProjection extends EventEmitter {
     this.activity.set(activityKey(threadId, turnId, item.id), item);
     this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
-    for (const deliveredThreadId of markedRead) this.publishThread(deliveredThreadId);
+    if (markedRead.length) {
+      const state = this.store.snapshot();
+      for (const deliveredThreadId of markedRead) this.publishThread(deliveredThreadId, state);
+    }
   }
 
   private historyRevision(threadId: string): number {
@@ -1594,7 +1605,10 @@ export class AppProjection extends EventEmitter {
     await this.store.update((state) => {
       markedRead.push(...applyReadMarkers(state, readMarkers));
     });
-    for (const threadId of markedRead) this.publishThread(threadId);
+    if (markedRead.length) {
+      const state = this.store.snapshot();
+      for (const threadId of markedRead) this.publishThread(threadId, state);
+    }
   }
 
   private readMarkers(
@@ -1683,8 +1697,10 @@ export class AppProjection extends EventEmitter {
     return undefined;
   }
 
-  private toSummary(cached: CachedThread): ThreadSummary {
-    const state = this.store.snapshot();
+  private toSummary(
+    cached: CachedThread,
+    state: CodexNestState = this.store.snapshot(),
+  ): ThreadSummary {
     const meta = state.threadMeta[cached.thread.id] ?? { pinned: false, lastReadUpdatedAt: 0 };
     const updatedAt = cached.thread.updatedAt * 1_000;
     const threadState = this.threadState(cached, meta.lastOutcome, state);
@@ -1745,21 +1761,31 @@ export class AppProjection extends EventEmitter {
     return cached.liveOutcome ?? stored ?? "idle";
   }
 
-  private sortedThreads(): ThreadSummary[] {
+  private sortedThreads(state: CodexNestState): ThreadSummary[] {
     return [...this.threads.values()]
-      .map((cached) => this.toSummary(cached))
+      .map((cached) => this.toSummary(cached, state))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  private publishThread(threadId: string): void {
-    if (!this.isThreadVisible(threadId)) return;
-    const summary = this.summary(threadId);
-    if (summary) this.publish({ type: "thread.upserted", thread: summary });
+  private publishThread(
+    threadId: string,
+    state: CodexNestState = this.store.snapshot(),
+  ): ThreadSummary | undefined {
+    const cached = this.threads.get(threadId);
+    if (!cached) return undefined;
+    const summary = this.toSummary(cached, state);
+    if (this.isCwdVisible(cached.thread.cwd, state)) {
+      this.publish({ type: "thread.upserted", thread: summary });
+    }
+    return summary;
   }
 
-  private isThreadVisible(threadId: string): boolean {
+  private isThreadVisible(
+    threadId: string,
+    state: CodexNestState = this.store.snapshot(),
+  ): boolean {
     const cached = this.threads.get(threadId);
-    return !cached || this.isCwdVisible(cached.thread.cwd, this.store.snapshot());
+    return !cached || this.isCwdVisible(cached.thread.cwd, state);
   }
 
   private isCwdVisible(cwd: string, state: CodexNestState): boolean {

@@ -114,6 +114,57 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
+  it("reuses one state snapshot while materializing thread views", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.projects.push({
+        id: "root",
+        displayName: "Root",
+        path: "/work",
+        createdAt: "x",
+        updatedAt: "x",
+      });
+      state.threadMeta.empty = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        unmaterialized: true,
+      };
+    });
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const stateSnapshots = vi.spyOn(store, "snapshot");
+
+    projection.upsertThread(thread("one", "/work", 1));
+    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+
+    stateSnapshots.mockClear();
+    projection.upsertThread({ ...thread("empty", "/work", 2), preview: "" });
+    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+
+    stateSnapshots.mockClear();
+    expect(projection.snapshot().threads.map((candidate) => candidate.id)).toEqual([
+      "empty",
+      "one",
+    ]);
+    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+
+    stateSnapshots.mockClear();
+    expect(projection.emptyThreadCandidates("root")).toEqual([
+      {
+        thread: expect.objectContaining({ id: "empty", projectId: "root" }),
+        knownUnmaterialized: true,
+      },
+    ]);
+    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+  });
+
   it("does not reactivate a turn after its completion notification wins the response race", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
