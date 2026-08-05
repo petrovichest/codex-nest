@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   access,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -34,7 +35,7 @@ import { AppProjection } from "./projection";
 import { PushNotifier } from "./push";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
-import { createTeamWorkspace } from "./team-workspace";
+import { computeTeamWorkspaceDelta, createTeamWorkspace } from "./team-workspace";
 import { TranscriptionError } from "./transcription";
 
 const directories: string[] = [];
@@ -3788,6 +3789,18 @@ describe("Team orchestration", () => {
           ?.status,
       ).toBe("running"),
     );
+    const workspace =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
+        ?.workspace;
+    if (!workspace) throw new Error("Expected an isolated Team workspace");
+    for (const name of [".agents", ".codex"]) {
+      expect((await lstat(join(workspace.worktreePath, name))).isDirectory()).toBe(true);
+      await expect(access(join(repository, name))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await expect(computeTeamWorkspaceDelta(workspace)).resolves.toEqual({
+      changedPaths: [],
+      changes: [],
+    });
     const childTurnStart = bridge.request.mock.calls.find(
       ([method, params]) =>
         method === "turn/start" &&
@@ -3801,6 +3814,78 @@ describe("Team orchestration", () => {
         excludeSlashTmp: true,
       },
     });
+    await app.close();
+    await store.flushed();
+  });
+
+  it("recreates sandbox mountpoints when an isolated workspace is reused", async () => {
+    const repository = await createApiTestRepository();
+    const { app, bridge, store } = await createTeamHarness({
+      version: 2,
+      projectPath: repository,
+    });
+    const first = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "spawn_task", {
+        title: "Prepare a reusable isolated change",
+        prompt: "Edit src/index.ts.",
+        access: { mode: "isolatedWrite", writePaths: ["src"] },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)]?.status,
+      ).toBe("running"),
+    );
+    const running =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)];
+    if (!running?.workspace || !running.childTurnId) {
+      throw new Error("Expected a running task with an isolated workspace");
+    }
+    await writeFile(
+      join(running.workspace.worktreePath, "src", "index.ts"),
+      "export const value = 2;\n",
+    );
+    await callTeamTool(bridge, String(first.threadId), "submit_result", {
+      outcome: "success",
+      summary: "Change prepared.",
+    });
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: String(first.threadId),
+        turn: { ...testTurn(running.childTurnId, "completed"), itemsView: "full" },
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => {
+      const completed =
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(first.taskId)];
+      expect(completed?.status).toBe("completed");
+      expect(completed?.delivery?.status).toBe("delivered");
+      expect(completed?.workspace?.lifecycle).toBe("ready");
+    });
+
+    for (const name of [".agents", ".codex"]) {
+      await rm(join(running.workspace.worktreePath, name), { recursive: true });
+    }
+    const followup = dynamicToolJson(
+      await callTeamTool(bridge, "thread", "followup_task", {
+        taskId: first.taskId,
+        prompt: "Continue in the existing workspace.",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(followup.taskId)]
+          ?.status,
+      ).toBe("running"),
+    );
+    const reused =
+      store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(followup.taskId)]
+        ?.workspace;
+    expect(reused?.worktreePath).toBe(running.workspace.worktreePath);
+    for (const name of [".agents", ".codex"]) {
+      expect((await lstat(join(running.workspace.worktreePath, name))).isDirectory()).toBe(true);
+    }
     await app.close();
     await store.flushed();
   });

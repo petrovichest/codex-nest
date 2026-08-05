@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
-import { access, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { access, lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 
@@ -158,6 +158,7 @@ const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
 const TEAM_ACTIVITY_PERSIST_MS = 60_000;
+const TEAM_SANDBOX_MOUNTPOINTS = [".agents", ".codex"] as const;
 const TEAM_CONTINUATION_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
 const TEAM_SESSION_UPGRADE_MESSAGE =
@@ -3428,6 +3429,7 @@ async function prepareManagedTaskWorkspace(
   if (task.access?.mode !== "isolatedWrite") return null;
   if (task.workspace) {
     const reused = { ...task.workspace, lifecycle: "ready" as const, updatedAt: Date.now() };
+    await ensureManagedTaskSandboxMountpoints(reused.worktreePath);
     await store.update((state) => {
       const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
       if (current?.status === "starting") current.workspace = reused;
@@ -3443,6 +3445,7 @@ async function prepareManagedTaskWorkspace(
     updatedAt: now,
   };
   try {
+    await ensureManagedTaskSandboxMountpoints(workspace.worktreePath);
     await store.update((state) => {
       const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
       if (!current || current.status !== "starting") {
@@ -3455,6 +3458,20 @@ async function prepareManagedTaskWorkspace(
     throw error;
   }
   return workspace;
+}
+
+async function ensureManagedTaskSandboxMountpoints(worktreePath: string): Promise<void> {
+  for (const name of TEAM_SANDBOX_MOUNTPOINTS) {
+    const mountpoint = join(worktreePath, name);
+    try {
+      await mkdir(mountpoint);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (!(await lstat(mountpoint)).isDirectory()) {
+      throw new ProjectConflictError(`Team sandbox mountpoint is not a directory: ${name}`);
+    }
+  }
 }
 
 async function managedChildRuntime(
