@@ -127,8 +127,8 @@ describe("native push navigation", () => {
       snapshot,
     });
     expect(JSON.parse(plugin.observeFrame.mock.calls[1]![0].frame)).toEqual({
-      type: "patch",
-      revision: 2,
+      type: "event",
+      sequence: 2,
       event: { type: "thread.upserted", thread: snapshot.threads[0] },
     });
   });
@@ -178,10 +178,7 @@ function notificationSnapshot(): AppSnapshot {
     settings: { collaborationMode: "default" },
   };
   return {
-    protocolVersion: 2,
-    epoch: "test",
-    revision: 1,
-    projectionStatus: "ready",
+    sequence: 1,
     uiLanguage: "ru",
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],

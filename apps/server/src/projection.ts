@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
-import { DEFAULT_SESSION_SETTINGS, SYNC_PROTOCOL_VERSION } from "@codexnest/protocol";
+import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
   ActivityItem,
   AttentionRequest,
@@ -60,7 +60,6 @@ interface CachedThread {
 }
 
 const THREAD_TURN_PAGE_SIZE = 20;
-const PROVISIONAL_ACTIVITY_INTERVAL_MS = 100;
 
 export class AppProjection extends EventEmitter {
   private readonly threads = new Map<string, CachedThread>();
@@ -73,21 +72,8 @@ export class AppProjection extends EventEmitter {
   private readonly pendingSubagentTitles = new Map<string, string>();
   private readonly subagentTitleUpdates = new Set<string>();
   private readonly deliveredNativeWaits = new Set<string>();
-  private readonly provisionalActivityTimers = new Map<string, NodeJS.Timeout>();
   private models: ModelOption[] = [];
-  private revision = 0;
-  private epoch = "";
-  private projectionStatus: AppSnapshot["projectionStatus"] = "reconciling";
-  private persistedSnapshot: AppSnapshot | null = null;
-  private readonly deletedThreadIds = new Set<string>();
-  private readonly notificationQueue: Array<{
-    notification: ServerNotification;
-    receivedAt: number;
-  }> = [];
-  private notificationReducing = false;
-  private notificationDrain: Promise<void> = Promise.resolve();
-  private notificationQueueDepth = 0;
-  private reducingReceivedAt: number | null = null;
+  private sequence = 0;
   private syncedAt: string | null = null;
   private syncPromise?: Promise<void>;
   private recoverLoadedThreads = true;
@@ -100,14 +86,9 @@ export class AppProjection extends EventEmitter {
     private readonly pushConfigured: boolean,
   ) {
     super();
-    const persisted = store.projection<AppSnapshot>();
-    this.epoch = persisted.epoch;
-    this.revision = persisted.revision;
-    this.persistedSnapshot = persisted.snapshot;
     this.historyCache = new HistoryCache(store.path);
     bridge.on("state", (state) => {
       if (state !== "ready") {
-        this.projectionStatus = "reconciling";
         this.subscribedThreads.clear();
         this.hiddenThreads.clear();
         this.pendingSubagentTitles.clear();
@@ -116,14 +97,12 @@ export class AppProjection extends EventEmitter {
       } else {
         this.recoverLoadedThreads = true;
       }
-      this.publish({ type: "projection.replaced", snapshot: this.snapshot() });
+      this.publish({ type: "connection.changed", connection: this.connection });
     });
     bridge.on("notification", (notification: ServerNotification) => {
-      const receivedAt = Date.now();
-      this.notificationQueue.push({ notification, receivedAt });
-      this.notificationQueueDepth =
-        this.notificationQueue.length + Number(this.notificationReducing);
-      if (!this.notificationReducing) this.notificationDrain = this.drainNotifications();
+      void this.onNotification(notification).catch((error: unknown) => {
+        this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+      });
     });
     attention.on("upserted", (request) => {
       const cached = request.threadId ? this.threads.get(request.threadId) : undefined;
@@ -143,29 +122,6 @@ export class AppProjection extends EventEmitter {
     });
   }
 
-  private async drainNotifications(): Promise<void> {
-    if (this.notificationReducing) return;
-    this.notificationReducing = true;
-    try {
-      let queued: (typeof this.notificationQueue)[number] | undefined;
-      while ((queued = this.notificationQueue.shift())) {
-        this.notificationQueueDepth = this.notificationQueue.length;
-        this.reducingReceivedAt = queued.receivedAt;
-        try {
-          await this.onNotification(queued.notification);
-        } catch (error) {
-          this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
-        } finally {
-          this.reducingReceivedAt = null;
-        }
-      }
-    } finally {
-      this.notificationReducing = false;
-      this.notificationQueueDepth = this.notificationQueue.length;
-      if (this.notificationQueue.length) void this.drainNotifications();
-    }
-  }
-
   get connection(): AppSnapshot["connection"] {
     return {
       state: this.bridge.state,
@@ -174,34 +130,12 @@ export class AppProjection extends EventEmitter {
     };
   }
 
-  async flushed(): Promise<void> {
-    await this.notificationDrain;
-    await this.store.flushed();
-  }
-
   snapshot(): AppSnapshot {
-    if (this.projectionStatus === "reconciling" && this.persistedSnapshot) {
-      return {
-        ...this.persistedSnapshot,
-        protocolVersion: SYNC_PROTOCOL_VERSION,
-        epoch: this.epoch,
-        revision: this.revision,
-        projectionStatus: this.projectionStatus,
-        connection: this.connection,
-      };
-    }
-    return this.liveSnapshot();
-  }
-
-  private liveSnapshot(): AppSnapshot {
     const state = this.store.snapshot();
     const threads = this.sortedThreads().filter((thread) => this.isCwdVisible(thread.cwd, state));
     const visibleThreadIds = new Set(threads.map((thread) => thread.id));
     return {
-      protocolVersion: SYNC_PROTOCOL_VERSION,
-      epoch: this.epoch,
-      revision: this.revision,
-      projectionStatus: this.projectionStatus,
+      sequence: this.sequence,
       uiLanguage: state.uiLanguage,
       connection: this.connection,
       projects: state.projects,
@@ -228,22 +162,8 @@ export class AppProjection extends EventEmitter {
     return this.syncedAt;
   }
 
-  get status(): AppSnapshot["projectionStatus"] {
-    return this.projectionStatus;
-  }
-
   get availableModels(): ModelOption[] {
     return structuredClone(this.models);
-  }
-
-  hasActiveSessions(projectId: string): boolean {
-    return this.sortedThreads().some(
-      (thread) =>
-        thread.projectId === projectId &&
-        (thread.state === "running" ||
-          thread.state === "needsAttention" ||
-          thread.queuedMessageCount > 0),
-    );
   }
 
   get newSessionSettings(): SessionSettings {
@@ -279,23 +199,17 @@ export class AppProjection extends EventEmitter {
 
   async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
-    if (!local && cursor === null) {
-      const persisted = this.store.threadProjection<ThreadDetail>(id);
-      if (persisted) return persisted;
-    }
     const meta = this.store.snapshot().threadMeta[id];
     const subagent = local ? hasSubagentTranscript(local.thread, meta) : false;
     if (local && this.isUnmaterialized(id)) {
       const state = this.store.snapshot();
-      const detail: ThreadDetail = {
+      return {
         summary: this.toSummary(local),
         turns: [],
         queuedMessages: state.messageQueues?.[id] ?? [],
         olderTurnsCursor: null,
         draft: state.threadMeta[id]?.draft ?? null,
       };
-      this.store.saveThreadProjection(id, detail);
-      return detail;
     }
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
@@ -309,7 +223,7 @@ export class AppProjection extends EventEmitter {
       !subagent && cursor === null
         ? syncPointForPage(page.backwardsCursor, visibleTurns)
         : undefined;
-    const detail: ThreadDetail = {
+    return {
       summary: this.toSummary(cached),
       turns: visibleTurns,
       queuedMessages: state.messageQueues?.[id] ?? [],
@@ -317,12 +231,6 @@ export class AppProjection extends EventEmitter {
       draft: state.threadMeta[id]?.draft ?? null,
       ...(syncPoint === undefined ? {} : { syncPoint }),
     };
-    this.store.saveThreadProjection(id, detail);
-    return detail;
-  }
-
-  projectedThread(id: string): ThreadDetail | null {
-    return this.store.threadProjection<ThreadDetail>(id);
   }
 
   async readThreadChanges(
@@ -510,7 +418,6 @@ export class AppProjection extends EventEmitter {
       }
       state.threadMeta[threadId] = meta;
     });
-    this.publish({ type: "draft.changed", threadId, draft });
     return draft;
   }
 
@@ -617,8 +524,8 @@ export class AppProjection extends EventEmitter {
 
   publishProject(projectId: string): void {
     const project = this.store.snapshot().projects.find((candidate) => candidate.id === projectId);
-    if (!project) return;
-    this.publish({ type: "projection.replaced", snapshot: this.liveSnapshot() });
+    if (project) this.publish({ type: "project.upserted", project });
+    this.publish({ type: "resync.required" });
   }
 
   publishProjectsReordered(projects: Project[]): void {
@@ -626,17 +533,12 @@ export class AppProjection extends EventEmitter {
   }
 
   removeProject(projectId: string): void {
-    if (this.store.snapshot().projects.some((project) => project.id === projectId)) return;
-    this.publish({ type: "projection.replaced", snapshot: this.liveSnapshot() });
+    this.publish({ type: "project.removed", projectId });
+    this.publish({ type: "resync.required" });
   }
 
   publishQueue(threadId: string, messages: QueuedMessage[]): void {
     if (this.isThreadVisible(threadId)) {
-      this.publish({
-        type: "draft.changed",
-        threadId,
-        draft: this.store.snapshot().threadMeta[threadId]?.draft ?? null,
-      });
       this.publish({ type: "queue.changed", threadId, messages });
     }
     this.publishThread(threadId);
@@ -664,7 +566,6 @@ export class AppProjection extends EventEmitter {
       liveOutcome: this.threads.get(thread.id)?.liveOutcome,
       goalStatus: this.threads.get(thread.id)?.goalStatus,
     };
-    this.deletedThreadIds.delete(thread.id);
     this.threads.set(thread.id, cached);
     this.publishThread(thread.id);
     return this.toSummary(cached);
@@ -731,7 +632,6 @@ export class AppProjection extends EventEmitter {
         `CodexNest turn items read slow (${durationMs}ms, ${pages} pages, ${items.length} items)\n`,
       );
     }
-    this.store.saveThreadItems(threadId, turnId, items);
     return { threadId, turnId, items };
   }
 
@@ -760,7 +660,6 @@ export class AppProjection extends EventEmitter {
       delete meta.draft;
       state.threadMeta[threadId] = meta;
     });
-    this.publish({ type: "draft.changed", threadId, draft: null });
   }
 
   async setCurrentTurn(threadId: string, turnId: string): Promise<void> {
@@ -982,7 +881,6 @@ export class AppProjection extends EventEmitter {
       const liveCached = this.threads.get(thread.id);
       const liveGoalStatus = liveCached?.goalStatus;
       const resumedTurnId = activeTurnId(thread);
-      this.deletedThreadIds.delete(thread.id);
       this.threads.set(thread.id, {
         thread,
         archived: false,
@@ -996,7 +894,6 @@ export class AppProjection extends EventEmitter {
     for (const thread of archived) {
       incoming.add(thread.id);
       if (changedDuringSync(thread.id)) continue;
-      this.deletedThreadIds.delete(thread.id);
       this.threads.set(thread.id, {
         thread,
         archived: true,
@@ -1029,10 +926,9 @@ export class AppProjection extends EventEmitter {
     await this.reconcileOutcomes();
     this.models = models;
     this.syncedAt = new Date().toISOString();
-    this.projectionStatus = "ready";
-    this.store.markReconciled();
     if (shouldRecoverLoaded) this.recoverLoadedThreads = false;
-    this.publish({ type: "projection.replaced", snapshot: this.snapshot() });
+    this.publish({ type: "models.changed", models });
+    this.publish({ type: "resync.required" });
     this.backfillSubagentTitles();
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 1_000) {
@@ -1251,27 +1147,15 @@ export class AppProjection extends EventEmitter {
     for (const cached of this.threads.values()) {
       if (cached.thread.status.type !== "idle") continue;
       if (isSpawnedSubagent(cached.thread)) continue;
-      const threadId = cached.thread.id;
       const updatedAt = cached.thread.updatedAt * 1_000;
-      const baselineRevision = this.historyRevision(threadId);
-      const isCurrent = () => {
-        const current = this.threads.get(threadId);
-        return (
-          this.historyRevision(threadId) === baselineRevision &&
-          current === cached &&
-          current.thread.status.type === "idle" &&
-          current.thread.updatedAt * 1_000 === updatedAt
-        );
-      };
-      const meta = state.threadMeta[threadId];
+      const meta = state.threadMeta[cached.thread.id];
       if (meta?.outcomeUpdatedAt === updatedAt && meta.awaitingPlanResponse !== undefined) {
         continue;
       }
       const planMode = meta?.settings?.collaborationMode === "plan";
       if (meta?.outcomeUpdatedAt === updatedAt && !planMode) {
         await this.store.update((draft) => {
-          if (!isCurrent()) return;
-          const item = draft.threadMeta[threadId];
+          const item = draft.threadMeta[cached.thread.id];
           if (item) item.awaitingPlanResponse = false;
         });
         continue;
@@ -1280,7 +1164,7 @@ export class AppProjection extends EventEmitter {
         await this.bridge.request<unknown>(
           "thread/turns/list",
           {
-            threadId,
+            threadId: cached.thread.id,
             limit: 1,
             sortDirection: "desc",
             itemsView: planMode ? "full" : "notLoaded",
@@ -1288,21 +1172,19 @@ export class AppProjection extends EventEmitter {
           30_000,
         ),
       );
-      if (!isCurrent()) continue;
       const latestTurn = page.data[0];
       const outcome = normalizeOutcome(latestTurn?.status);
       const awaitingPlanResponse =
         planMode && outcome === "completed" && Boolean(latestTurn && turnContainsPlan(latestTurn));
       await this.store.update((draft) => {
-        if (!isCurrent()) return;
-        const item = draft.threadMeta[threadId] ?? {
+        const item = draft.threadMeta[cached.thread.id] ?? {
           pinned: false,
           lastReadUpdatedAt: updatedAt,
         };
         item.lastOutcome = outcome;
         item.outcomeUpdatedAt = updatedAt;
         item.awaitingPlanResponse = awaitingPlanResponse;
-        draft.threadMeta[threadId] = item;
+        draft.threadMeta[cached.thread.id] = item;
       });
     }
   }
@@ -1341,7 +1223,6 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "thread/started": {
-        if (this.deletedThreadIds.has(notification.params.thread.id)) break;
         this.upsertThread(notification.params.thread);
         const pendingTitle = this.pendingSubagentTitles.get(notification.params.thread.id);
         if (pendingTitle) {
@@ -1407,7 +1288,6 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "thread/deleted":
-        this.deletedThreadIds.add(notification.params.threadId);
         this.threads.delete(notification.params.threadId);
         this.subscribedThreads.delete(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
@@ -1426,7 +1306,6 @@ export class AppProjection extends EventEmitter {
           cached.thread.status = { type: "notLoaded" };
           this.publishThread(notification.params.threadId);
         } else {
-          this.deletedThreadIds.add(notification.params.threadId);
           this.threads.delete(notification.params.threadId);
           this.unmaterializedThreads.delete(notification.params.threadId);
           for (const key of this.progress.keys()) {
@@ -1437,11 +1316,6 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "turn/started": {
-        const cached = this.threads.get(notification.params.threadId);
-        const knownTurn = cached?.thread.turns.find(
-          (turn) => turn.id === notification.params.turn.id,
-        );
-        if (knownTurn && knownTurn.status !== "inProgress") break;
         this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
         const progress = emptyProgress(notification.params.turn.startedAt);
@@ -1449,15 +1323,15 @@ export class AppProjection extends EventEmitter {
           turnKey(notification.params.threadId, notification.params.turn.id),
           progress,
         );
-        if (cached) {
-          await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
-        }
         this.publish({
           type: "turn.progressed",
           threadId: notification.params.threadId,
           turnId: notification.params.turn.id,
           progress,
         });
+        if (this.threads.has(notification.params.threadId)) {
+          await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
+        }
         break;
       }
       case "turn/completed": {
@@ -1616,7 +1490,6 @@ export class AppProjection extends EventEmitter {
             item = { ...item, id: previous.id } as ActivityItem;
           }
         }
-        this.clearProvisionalActivity(key);
         this.activity.set(key, item);
         this.publish({
           type: "activity.upserted",
@@ -1639,11 +1512,6 @@ export class AppProjection extends EventEmitter {
             : notification.method.startsWith("item/reasoning")
               ? "reasoning"
               : "agentMessage",
-        );
-        this.scheduleProvisionalActivity(
-          notification.params.threadId,
-          notification.params.turnId,
-          notification.params.itemId,
         );
         break;
       }
@@ -1668,10 +1536,22 @@ export class AppProjection extends EventEmitter {
                 exitCode: null,
               };
         this.activity.set(key, item);
-        this.scheduleProvisionalActivity(
-          notification.params.threadId,
-          notification.params.turnId,
-          notification.params.itemId,
+        this.publish(
+          previous?.type === "command"
+            ? {
+                type: "activity.delta",
+                threadId: notification.params.threadId,
+                turnId: notification.params.turnId,
+                itemId: notification.params.itemId,
+                activityType: "command",
+                delta: notification.params.delta,
+              }
+            : {
+                type: "activity.upserted",
+                threadId: notification.params.threadId,
+                turnId: notification.params.turnId,
+                item,
+              },
         );
         break;
       }
@@ -1774,26 +1654,11 @@ export class AppProjection extends EventEmitter {
       phase: previous && "phase" in previous ? previous.phase : null,
     };
     this.activity.set(key, item);
-  }
-
-  private scheduleProvisionalActivity(threadId: string, turnId: string, itemId: string): void {
-    const key = activityKey(threadId, turnId, itemId);
-    if (this.provisionalActivityTimers.has(key)) return;
-    const timer = setTimeout(() => {
-      this.provisionalActivityTimers.delete(key);
-      const item = this.activity.get(key);
-      if (!item || item.status !== "inProgress") return;
-      this.publish({ type: "activity.upserted", threadId, turnId, item });
-    }, PROVISIONAL_ACTIVITY_INTERVAL_MS);
-    timer.unref();
-    this.provisionalActivityTimers.set(key, timer);
-  }
-
-  private clearProvisionalActivity(key: string): void {
-    const timer = this.provisionalActivityTimers.get(key);
-    if (!timer) return;
-    clearTimeout(timer);
-    this.provisionalActivityTimers.delete(key);
+    this.publish(
+      previous && "text" in previous && previous.type === type
+        ? { type: "activity.delta", threadId, turnId, itemId, activityType: type, delta }
+        : { type: "activity.upserted", threadId, turnId, item },
+    );
   }
 
   private streamingActivityAlias(
@@ -1909,120 +1774,9 @@ export class AppProjection extends EventEmitter {
   }
 
   private publish(event: ServerEvent): void {
-    const revision = this.revision + 1;
-    const committedEvent: ServerEvent =
-      event.type === "projection.replaced"
-        ? {
-            ...event,
-            snapshot: { ...event.snapshot, epoch: this.epoch, revision },
-          }
-        : event;
-    const runtimeSnapshot = this.snapshot();
-    const snapshot = this.persistedSnapshot
-      ? reduceSnapshot(this.persistedSnapshot, committedEvent)
-      : runtimeSnapshot;
-    const committed = this.store.commitProjection(
-      snapshot,
-      committedEvent,
-      this.reducingReceivedAt ?? Date.now(),
-      this.notificationQueueDepth,
-    );
-    this.revision = committed.revision;
-    this.epoch = committed.epoch;
-    this.persistedSnapshot = {
-      ...snapshot,
-      epoch: committed.epoch,
-      revision: committed.revision,
-    };
-    this.emit("event", committed, committedEvent);
+    this.sequence += 1;
+    this.emit("event", this.sequence, event);
   }
-}
-
-function reduceSnapshot(snapshot: AppSnapshot, event: ServerEvent): AppSnapshot {
-  switch (event.type) {
-    case "projection.replaced":
-      return event.snapshot;
-    case "connection.changed":
-      return { ...snapshot, connection: event.connection };
-    case "project.upserted":
-      return {
-        ...snapshot,
-        projects: upsertById(snapshot.projects, event.project),
-      };
-    case "projects.reordered":
-      return { ...snapshot, projects: event.projects };
-    case "project.removed":
-      return {
-        ...snapshot,
-        projects: snapshot.projects.filter((project) => project.id !== event.projectId),
-      };
-    case "thread.upserted":
-      return {
-        ...snapshot,
-        threads: upsertById(snapshot.threads, event.thread).sort(
-          (left, right) => right.updatedAt - left.updatedAt,
-        ),
-      };
-    case "thread.removed":
-      return {
-        ...snapshot,
-        threads: snapshot.threads.filter((thread) => thread.id !== event.threadId),
-        attention: snapshot.attention.filter((request) => request.threadId !== event.threadId),
-        voiceTranscriptions: snapshot.voiceTranscriptions?.filter(
-          (job) => job.threadId !== event.threadId,
-        ),
-      };
-    case "attention.upserted":
-      return {
-        ...snapshot,
-        attention: upsertById(snapshot.attention, event.attention),
-      };
-    case "attention.removed":
-      return {
-        ...snapshot,
-        attention: snapshot.attention.filter((request) => request.id !== event.attentionId),
-      };
-    case "models.changed":
-      return { ...snapshot, models: event.models };
-    case "defaultReasoningEffort.changed": {
-      const next = { ...snapshot };
-      if (event.reasoningEffort === null) delete next.defaultReasoningEffort;
-      else next.defaultReasoningEffort = event.reasoningEffort;
-      return next;
-    }
-    case "taskDefaults.changed":
-      return { ...snapshot, taskDefaults: event.taskDefaults };
-    case "uiLanguage.changed":
-      return { ...snapshot, uiLanguage: event.language };
-    case "voiceTranscription.upserted":
-      return {
-        ...snapshot,
-        voiceTranscriptions: upsertById(snapshot.voiceTranscriptions ?? [], event.job).sort(
-          (left, right) => left.createdAt - right.createdAt,
-        ),
-      };
-    case "voiceTranscription.removed":
-      return {
-        ...snapshot,
-        voiceTranscriptions: (snapshot.voiceTranscriptions ?? []).filter(
-          (job) => job.id !== event.jobId,
-        ),
-      };
-    case "activity.upserted":
-    case "turn.progressed":
-    case "queue.changed":
-    case "draft.changed":
-    case "goal.changed":
-      return snapshot;
-  }
-}
-
-function upsertById<T extends { id: string }>(values: T[], value: T): T[] {
-  const index = values.findIndex((candidate) => candidate.id === value.id);
-  if (index < 0) return [...values, value];
-  const next = values.slice();
-  next[index] = value;
-  return next;
 }
 
 function applyReadMarkers(

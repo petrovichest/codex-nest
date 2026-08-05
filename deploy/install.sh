@@ -75,7 +75,7 @@ codexnest_runtime="$codexnest_root/runtime"
 codexnest_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest"
 codexnest_config="$codexnest_config_root/server.env"
 codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
-codexnest_state="$codexnest_state_root/state.sqlite"
+codexnest_state="$codexnest_state_root/state.json"
 codexnest_service_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 mkdir -p "$codexnest_root" "$codexnest_releases" "$codexnest_runtime" \
@@ -224,35 +224,6 @@ codexnest_set_env_value CODEXNEST_UPDATE_STATUS_PATH "$codexnest_state_root/upda
 codexnest_ensure_env_value CODEXNEST_UPDATE_CHANNEL rolling
 codexnest_set_env_value CODEXNEST_VERSION "$codexnest_version"
 
-codexnest_configured_state="$(awk -F= '$1 == "CODEXNEST_STATE_PATH" { print substr($0, index($0, "=") + 1); exit }' "$codexnest_config")"
-[[ -n "$codexnest_configured_state" ]] || codexnest_configured_state="$codexnest_state"
-
-codexnest_state_has_verifier() {
-  "$codexnest_runtime/current/bin/node" -e '
-    const fs = require("node:fs");
-    try {
-      const path = process.argv[1];
-      const contents = fs.readFileSync(path);
-      let state;
-      if (contents.subarray(0, 16).toString("binary") === "SQLite format 3\0") {
-        const { DatabaseSync } = require("node:sqlite");
-        const database = new DatabaseSync(path, { readOnly: true });
-        try {
-          const row = database.prepare("SELECT json FROM app_state WHERE id = 1").get();
-          state = row ? JSON.parse(row.json) : undefined;
-        } finally {
-          database.close();
-        }
-      } else {
-        state = JSON.parse(contents.toString("utf8"));
-      }
-      process.exit(/^[0-9a-f]{64}$/i.test(state?.auth?.tokenSha256 ?? "") ? 0 : 1);
-    } catch {
-      process.exit(1);
-    }
-  ' "$1"
-}
-
 install -m 0755 "$codexnest_release/deploy/codexnest" "$HOME/.local/bin/codexnest"
 install -m 0644 "$codexnest_release/deploy/systemd/codexnest-managed.service" \
   "$codexnest_service_root/codexnest.service"
@@ -260,7 +231,7 @@ install -m 0644 "$codexnest_release/deploy/systemd/codexnest-update.service" \
   "$codexnest_service_root/codexnest-update.service"
 
 codexnest_token=""
-if ! codexnest_state_has_verifier "$codexnest_configured_state"; then
+if [[ ! -f "$codexnest_state" ]] || ! grep -q '"tokenSha256"' "$codexnest_state"; then
   codexnest_log "Generating owner access token"
   codexnest_token="$(
     set -a

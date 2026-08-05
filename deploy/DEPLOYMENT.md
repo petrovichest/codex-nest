@@ -74,12 +74,6 @@ UI один раз проверяет обновления после подкл
 стабильным semver-релизам установите `CODEXNEST_UPDATE_CHANNEL=stable` в
 `server.env`.
 
-Перед переключением updater сохраняет приватный rollback-снимок state. Если новый
-релиз мигрировал JSON в SQLite, но не прошёл health-check, исходный JSON и старый
-релиз восстанавливаются вместе. Тот же снимок используется командой
-`codexnest rollback`. Это страховка одного обновления, а не замена регулярной
-резервной копии.
-
 В daemon-режиме совместимые релизы могут обновляться во время активных turn:
 updater сначала переводит только CodexNest в короткий drain, сохраняет state,
 проверяет recovery protocol target-релиза и перезапускает Node.js-сервис, не
@@ -112,10 +106,8 @@ deploy/adopt-existing.sh \
 ```
 
 Скрипт сначала собирает tagged release рядом с работающей версией и только затем
-останавливает и переключает user-systemd service. Перед первым запуском он
-сохраняет исходный state. При неудачном restart, миграции или health-check прежние
-state, `server.env` и базовый unit восстанавливаются автоматически, а SQLite
-sidecar-файлы не остаются рядом с восстановленным JSON.
+переключает user-systemd service. При неудачном restart или health-check прежние
+`server.env` и базовый unit восстанавливаются автоматически.
 
 ## 1. Требования
 
@@ -393,7 +385,7 @@ accept-all certificate handler). Android-клиент доверяет сист�
 | `CODEXNEST_HOST`                 | Адрес прослушивания                               | `127.0.0.1`                                   |
 | `CODEXNEST_PORT`                 | HTTP/API порт                                     | `4310`                                        |
 | `CODEXNEST_ALLOWED_ORIGINS`      | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
-| `CODEXNEST_STATE_PATH`           | State (SQLite; legacy JSON мигрируется in-place)  | `~/.local/state/codexnest/state.sqlite`       |
+| `CODEXNEST_STATE_PATH`           | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
 | `CODEXNEST_CODEX_BIN`            | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
 | `CODEXNEST_CODEX_MANAGEMENT_BIN` | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
 | `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
@@ -586,8 +578,7 @@ curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health
 ## 7. Обновление
 
 Развёртывайте обновления только через Git. После того как изменения закоммичены
-и отправлены в remote, сначала сделайте резервную копию по инструкции ниже, затем
-выполните на сервере:
+и отправлены в remote, выполните на сервере:
 
 ```bash
 cd "$HOME/codex-nest"
@@ -606,43 +597,15 @@ curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health
 
 ## 8. Резервная копия
 
-Новые установки хранят state в SQLite с WAL. Старые конфиги с путём
-`state.json` поддерживаются без переименования: после автоматической миграции
-этот файл уже может содержать SQLite, поэтому расширение не определяет формат.
-Проверить формат без чтения содержащихся в state секретов можно так:
+Остановите сервис и скопируйте файл `CODEXNEST_STATE_PATH`:
 
 ```bash
-state_path="$(awk -F= '$1 == "CODEXNEST_STATE_PATH" { print substr($0, index($0, "=") + 1); exit }' \
-  "$HOME/.config/codexnest/server.env")"
-[[ -n "$state_path" ]] || state_path="$HOME/.local/state/codexnest/state.sqlite"
-[[ "$(LC_ALL=C head -c 15 "$state_path")" == "SQLite format 3" ]] \
-  && printf '%s\n' SQLite || printf '%s\n' JSON
-```
-
-Для согласованной файловой копии сначала остановите сервис, затем скопируйте
-основной файл и все существующие SQLite sidecar-файлы как один набор:
-
-```bash
-state_path="$(awk -F= '$1 == "CODEXNEST_STATE_PATH" { print substr($0, index($0, "=") + 1); exit }' \
-  "$HOME/.config/codexnest/server.env")"
-[[ -n "$state_path" ]] || state_path="$HOME/.local/state/codexnest/state.sqlite"
-backup_dir="$HOME/backups/codexnest-$(date -u +%Y%m%dT%H%M%SZ)"
-install -d -m 0700 "$backup_dir"
 systemctl --user stop codexnest.service
-cp -p -- "$state_path" "$backup_dir/"
-for suffix in -wal -shm -journal; do
-  [[ ! -f "$state_path$suffix" ]] || cp -p -- "$state_path$suffix" "$backup_dir/"
-done
+cp "$HOME/.local/state/codexnest/state.json" <КАТАЛОГ-РЕЗЕРВНЫХ-КОПИЙ>/state.json
 systemctl --user start codexnest.service
 ```
 
-Не копируйте работающий SQLite-файл отдельно от WAL: подтверждённые транзакции
-могут находиться только в `-wal`. Если остановка невозможна, используйте SQLite
-Online Backup API, а не обычный `cp`. При восстановлении также остановите сервис,
-удалите текущий основной файл и его `-wal`/`-shm`/`-journal`, затем верните весь
-сохранённый набор до запуска сервиса.
-
-В state находятся verifier токена, список проектов, read/pin/outcome metadata и
+В нём находятся verifier токена, список проектов, read/pin/outcome metadata и
 регистрации FCM. Промпты, ответы и вывод команд там не хранятся. История Codex
 остаётся в `~/.codex` и должна резервироваться отдельно.
 

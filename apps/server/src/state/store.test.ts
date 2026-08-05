@@ -1,11 +1,8 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-import type { ActivityItem, ThreadDetail } from "@codexnest/protocol";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { StateStore } from "./store";
 
@@ -15,55 +12,11 @@ async function temporaryState(): Promise<{ directory: string; path: string }> {
   directories.push(directory);
   return { directory, path: join(directory, "state.json") };
 }
-afterEach(async () => {
-  vi.useRealTimers();
-  await Promise.all(
+afterEach(async () =>
+  Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
-function projectedDetail(turnCount: number): ThreadDetail {
-  return {
-    summary: {
-      id: "thread",
-      projectId: null,
-      title: "Thread",
-      preview: "",
-      cwd: "/work",
-      state: "idle",
-      unread: false,
-      unseen: false,
-      pinned: false,
-      archived: false,
-      createdAt: 1,
-      updatedAt: 2,
-      currentTurnId: null,
-      queuedMessageCount: 0,
-      settings: { collaborationMode: "default" },
-      relation: { kind: "session", sessionId: "thread" },
-    },
-    turns: Array.from({ length: turnCount }, (_, index) => ({
-      id: `turn-${index}`,
-      status: "completed" as const,
-      startedAt: index,
-      completedAt: index + 1,
-      durationMs: 1,
-      progress: {
-        startedAt: index,
-        explanation: null,
-        steps: [],
-        filesChanged: 0,
-        additions: 0,
-        deletions: 0,
-      },
-      items: [],
-      itemsLoaded: false,
-    })),
-    queuedMessages: [],
-    olderTurnsCursor: null,
-    draft: null,
-  };
-}
+  ),
+);
 
 function managedTaskFixture(id: string, createdAt: number) {
   return {
@@ -150,183 +103,13 @@ describe("StateStore", () => {
     ]);
     expect(Object.keys(store.snapshot().devices)).toEqual(["a", "b"]);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
-    const reloaded = new StateStore(path);
-    await reloaded.load();
-    expect(reloaded.snapshot()).toMatchObject({ schemaVersion: 1 });
-    reloaded.close();
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ schemaVersion: 1 });
   });
 
   it("rejects corrupt and unsupported schemas", async () => {
     const { path } = await temporaryState();
     await writeFile(path, '{"schemaVersion":2}', "utf8");
     await expect(new StateStore(path).load()).rejects.toThrow("Unsupported or corrupt");
-    expect(await readFile(path, "utf8")).toBe('{"schemaVersion":2}');
-    expect(await readdir(join(path, ".."))).toEqual(["state.json"]);
-  });
-
-  it("imports sibling JSON through a durable backup and preserves WAL projection cursors", async () => {
-    const { directory } = await temporaryState();
-    const legacyPath = join(directory, "state.json");
-    const sqlitePath = join(directory, "state.sqlite");
-    const serialized = JSON.stringify({
-      schemaVersion: 1,
-      auth: {},
-      projects: [],
-      threadMeta: {},
-      devices: {},
-      uiLanguage: "ru",
-    });
-    await writeFile(legacyPath, serialized, { mode: 0o600 });
-
-    const store = new StateStore(sqlitePath);
-    await store.load();
-    expect(store.snapshot().uiLanguage).toBe("ru");
-    expect(await readFile(join(directory, "state.json.pre-sqlite.json"), "utf8")).toBe(serialized);
-    expect((await readFile(sqlitePath)).subarray(0, 16).toString("binary")).toBe(
-      "SQLite format 3\0",
-    );
-
-    store.commitProjection({ value: "snapshot" }, { type: "first" });
-    const cursor = store.projectionCursor();
-    store.close();
-
-    const database = new DatabaseSync(sqlitePath, { readOnly: true });
-    expect(database.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-    database.close();
-    const reloaded = new StateStore(sqlitePath);
-    await reloaded.load();
-    expect(reloaded.projectionCursor()).toEqual(cursor);
-    expect(reloaded.projection<{ value: string }>().snapshot).toMatchObject({
-      value: "snapshot",
-      epoch: cursor.epoch,
-      revision: cursor.revision,
-    });
-    reloaded.close();
-  });
-
-  it("rolls snapshot, revision, and journal back together when a patch cannot serialize", async () => {
-    const { path } = await temporaryState();
-    const store = new StateStore(path);
-    await store.load();
-    store.commitProjection({ value: "stable" }, { type: "stable" });
-    const before = store.projection<{ value: string }>();
-
-    expect(() =>
-      store.commitProjection({ value: "partial" }, { type: "broken", value: 1n }),
-    ).toThrow();
-
-    expect(store.projection()).toEqual(before);
-    expect(store.replayProjection(before)).toEqual([]);
-    store.close();
-  });
-
-  it("rotates the epoch after a rollback restore without rewinding the revision", async () => {
-    const { path } = await temporaryState();
-    const store = new StateStore(path);
-    await store.load();
-    const committed = store.commitProjection({ value: "before-rollback" }, { type: "first" });
-    store.close();
-
-    await writeFile(`${path}.rotate-epoch`, "", { mode: 0o600 });
-    const restored = new StateStore(path);
-    await restored.load();
-    const cursor = restored.projectionCursor();
-    expect(cursor.revision).toBe(committed.revision);
-    expect(cursor.epoch).not.toBe(committed.epoch);
-    expect(restored.projection().snapshot).toMatchObject(cursor);
-    expect(restored.replayProjection(committed)).toBeNull();
-    restored.close();
-  });
-
-  it("falls back to a snapshot before replay can exceed the websocket frame budget", async () => {
-    const { path } = await temporaryState();
-    const store = new StateStore(path);
-    await store.load();
-    const cursor = store.projectionCursor();
-    store.commitProjection({}, { type: "large", value: "x".repeat(800_000) });
-    store.commitProjection({}, { type: "large", value: "y".repeat(800_000) });
-    expect(store.replayProjection(cursor)).toBeNull();
-    store.close();
-  });
-
-  it("keeps at least 24 hours and the last 50000 revisions before pruning replay", async () => {
-    const { path } = await temporaryState();
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const store = new StateStore(path);
-    await store.load();
-    const first = store.commitProjection({}, { type: "first" });
-    vi.setSystemTime(24 * 60 * 60 * 1_000 + 1);
-    const second = store.commitProjection({}, { type: "second" });
-    expect(store.replayProjection({ epoch: first.epoch, revision: 0 })).toEqual([first, second]);
-    expect(store.replayProjection({ epoch: second.epoch, revision: 1 })).toEqual([second]);
-    store.close();
-
-    const database = new DatabaseSync(path);
-    database.prepare("UPDATE projection_meta SET revision = 50001 WHERE id = 1").run();
-    database.close();
-    const reloaded = new StateStore(path);
-    await reloaded.load();
-    const capped = reloaded.commitProjection({}, { type: "capped" });
-    expect(capped.revision).toBe(50_002);
-    expect(reloaded.replayProjection({ epoch: capped.epoch, revision: 0 })).toBeNull();
-    expect(reloaded.replayProjection({ epoch: capped.epoch, revision: 50_001 })).toEqual([capped]);
-    reloaded.close();
-    const inspected = new DatabaseSync(path, { readOnly: true });
-    expect(
-      inspected.prepare("SELECT 1 FROM projection_events WHERE revision = 1").get(),
-    ).toBeUndefined();
-    expect(inspected.prepare("SELECT 1 FROM projection_events WHERE revision = 2").get()).toEqual({
-      1: 1,
-    });
-    inspected.close();
-    vi.useRealTimers();
-  });
-
-  it("keeps the last 20 turns, persists lazy technical items, and tombstones removals", async () => {
-    const { path } = await temporaryState();
-    const store = new StateStore(path);
-    await store.load();
-    const detail = projectedDetail(25);
-    store.saveThreadProjection("thread", detail);
-    expect(store.threadProjection<ThreadDetail>("thread")?.turns.map((turn) => turn.id)).toEqual(
-      Array.from({ length: 20 }, (_, index) => `turn-${index + 5}`),
-    );
-
-    const command: ActivityItem = {
-      type: "command",
-      id: "technical",
-      status: "completed",
-      kind: "command",
-      command: "npm test",
-      cwd: "/work",
-      output: "ok",
-      exitCode: 0,
-    };
-    store.saveThreadItems("thread", "turn-24", [command]);
-    const refreshed = projectedDetail(25);
-    refreshed.turns[24]!.items = [
-      {
-        type: "agentMessage",
-        id: "answer",
-        status: "completed",
-        text: "Done",
-        images: [],
-        timestamp: 25,
-        phase: "final_answer",
-      },
-    ];
-    store.saveThreadProjection("thread", refreshed);
-    expect(store.threadProjection<ThreadDetail>("thread")?.turns.at(-1)).toMatchObject({
-      id: "turn-24",
-      itemsLoaded: true,
-      items: [{ id: "technical" }, { id: "answer" }],
-    });
-
-    store.commitProjection({}, { type: "thread.removed", threadId: "thread" });
-    store.commitProjection({}, { type: "thread.upserted", thread: detail.summary });
-    expect(store.threadProjection("thread")).toBeNull();
-    store.close();
   });
 
   it("accepts legacy permission fields for backward-compatible state loading", async () => {
@@ -935,12 +718,9 @@ describe("StateStore", () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
-    const external = new StateStore(path);
-    await external.load();
-    await external.update((state) => {
-      state.auth.tokenSha256 = "a".repeat(64);
-    });
-    external.close();
+    const rotated = store.snapshot();
+    rotated.auth.tokenSha256 = "a".repeat(64);
+    await writeFile(path, JSON.stringify(rotated), { mode: 0o600 });
     const revoked = new Promise<void>((resolve) => store.once("authRotated", resolve));
     await expect(store.refreshAuthVerifier()).resolves.toBe(true);
     await revoked;

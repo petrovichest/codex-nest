@@ -12,7 +12,6 @@ codexnest_config="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest/server.env"
 codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
 codexnest_update_status="$codexnest_state_root/update.json"
 codexnest_restart_token_default="$codexnest_state_root/restart-token"
-codexnest_rollback_state="$codexnest_state_root/update-rollback-state"
 codexnest_service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 codexnest_rolling_manifest_url="https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.json"
 codexnest_preflight_error=""
@@ -52,82 +51,6 @@ codexnest_restart_token_path() {
   local configured
   configured="$(codexnest_config_value CODEXNEST_RESTART_TOKEN_PATH || true)"
   printf '%s\n' "${configured:-$codexnest_restart_token_default}"
-}
-
-codexnest_state_path() {
-  local configured
-  configured="$(codexnest_config_value CODEXNEST_STATE_PATH || true)"
-  printf '%s\n' "${configured:-$codexnest_state_root/state.sqlite}"
-}
-
-codexnest_state_format() {
-  local path="$1"
-  [[ -f "$path" ]] || return 1
-  if [[ "$(LC_ALL=C head -c 15 "$path")" == "SQLite format 3" ]]; then
-    printf '%s\n' sqlite
-  else
-    printf '%s\n' json
-  fi
-}
-
-codexnest_backup_state_for_rollback() {
-  local release="$1" state_path format temporary suffix source
-  state_path="$(codexnest_state_path)"
-  format="$(codexnest_state_format "$state_path")" || return 1
-  mkdir -p "$codexnest_state_root"
-  chmod 700 "$codexnest_state_root"
-  temporary="$(mktemp -d "$codexnest_state_root/update-rollback-state.XXXXXX")" || return 1
-  chmod 700 "$temporary"
-  for suffix in "" -wal -shm -journal; do
-    source="$state_path$suffix"
-    if [[ -f "$source" ]]; then
-      cp -p "$source" "$temporary/state$suffix" || {
-        rm -rf -- "$temporary"
-        return 1
-      }
-      sync -f "$temporary/state$suffix"
-    fi
-  done
-  [[ -f "$temporary/state" ]] || {
-    rm -rf -- "$temporary"
-    return 1
-  }
-  printf '%s\n' "$state_path" > "$temporary/path"
-  printf '%s\n' "$release" > "$temporary/release"
-  printf '%s\n' "$format" > "$temporary/format"
-  chmod 600 "$temporary/path" "$temporary/release" "$temporary/format"
-  rm -rf -- "$codexnest_rollback_state"
-  mv "$temporary" "$codexnest_rollback_state"
-  sync -f "$codexnest_state_root"
-}
-
-codexnest_restore_state_for_release() {
-  local release="$1" state_path saved_path saved_release saved_format suffix
-  [[ -d "$codexnest_rollback_state" ]] || return 0
-  [[ -f "$codexnest_rollback_state/path" && \
-     -f "$codexnest_rollback_state/release" && \
-     -f "$codexnest_rollback_state/format" && \
-     -f "$codexnest_rollback_state/state" ]] || return 1
-  state_path="$(codexnest_state_path)"
-  saved_path="$(cat "$codexnest_rollback_state/path")"
-  saved_release="$(cat "$codexnest_rollback_state/release")"
-  saved_format="$(cat "$codexnest_rollback_state/format")"
-  [[ "$saved_path" == "$state_path" && "$saved_release" == "$release" ]] || return 0
-  [[ "$saved_format" == json || "$saved_format" == sqlite ]] || return 1
-  for suffix in "" -wal -shm -journal; do
-    rm -f -- "$state_path$suffix"
-  done
-  for suffix in "" -wal -shm -journal; do
-    [[ ! -f "$codexnest_rollback_state/state$suffix" ]] \
-      || {
-        cp -p "$codexnest_rollback_state/state$suffix" "$state_path$suffix"
-        sync -f "$state_path$suffix"
-      }
-  done
-  : > "$state_path.rotate-epoch"
-  chmod 600 "$state_path.rotate-epoch"
-  sync -f "$state_path.rotate-epoch"
-  sync -f "$(dirname "$state_path")"
 }
 
 codexnest_release_recovery_protocol() {
@@ -470,12 +393,7 @@ codexnest_restore_release() {
   codexnest_switch_release "$target" || restored=false
   codexnest_set_env_value CODEXNEST_VERSION "$version" || restored=false
   codexnest_install_assets "$target" || restored=false
-  if systemctl --user stop codexnest.service; then
-    codexnest_restore_state_for_release "$target" || restored=false
-  else
-    restored=false
-  fi
-  systemctl --user start codexnest.service || restored=false
+  systemctl --user restart codexnest.service || restored=false
   if $restored && codexnest_health_ok "$version"; then
     codexnest_write_status idle rolled_back "$reason; the previous release was restored" "$latest" true
   else
@@ -518,12 +436,6 @@ codexnest_update_worker() {
   old_target="$(readlink -f "$codexnest_current")"
   [[ "$old_target" == "$codexnest_releases"/* ]] || codexnest_die "invalid current release path"
   old_version="$(basename "$old_target" | sed 's/^v//')"
-  if ! codexnest_backup_state_for_rollback "$old_target"; then
-    codexnest_resume_after_aborted_restart
-    codexnest_write_status idle failed \
-      "Failed to back up state for CodexNest $latest_version rollback" "$latest_version" true
-    return 1
-  fi
   if ! ln -sfn "$old_target" "$codexnest_previous"; then
     codexnest_resume_after_aborted_restart
     codexnest_write_status idle failed "Failed to prepare rollback for CodexNest $latest_version" "$latest_version" true
@@ -575,10 +487,7 @@ codexnest_rollback() {
   codexnest_set_env_value CODEXNEST_VERSION "$version"
   codexnest_install_assets "$target"
   codexnest_prepare_restart "$target" || codexnest_die "rollback preflight expired"
-  systemctl --user stop codexnest.service
-  codexnest_restore_state_for_release "$target" \
-    || codexnest_die "rollback state could not be restored"
-  systemctl --user start codexnest.service
+  systemctl --user restart codexnest.service
   codexnest_health_ok "$version" || codexnest_die "rolled back release did not become healthy"
   printf 'Rolled back to CodexNest %s.\n' "$version"
 }

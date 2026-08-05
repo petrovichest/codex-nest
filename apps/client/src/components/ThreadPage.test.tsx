@@ -34,11 +34,7 @@ const deleteLocalDraft = vi.hoisted(() =>
 const acknowledgePendingThread = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 const releaseActiveThread = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 
-vi.mock("../connection", () => ({
-  useConnection: connection,
-  useConnectionServices: () => connection(),
-  useConnectionSelector: (selector: (state: unknown) => unknown) => selector(connection().state),
-}));
+vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../downloads", () => ({ openDownloadUrl }));
 vi.mock("../push", () => ({ acknowledgePendingThread, releaseActiveThread }));
 vi.mock("../offline-store", async (importOriginal) => ({
@@ -1325,7 +1321,7 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Создать ответвление отсюда" })).toBeNull();
   });
 
-  it("disables all fork actions, navigates, and waits for the projected result", async () => {
+  it("disables all fork actions, dispatches the result, navigates, and focuses the composer", async () => {
     let resolveFork: ((value: { thread: ThreadSummary }) => void) | undefined;
     const api = threadApi();
     api.forkThread.mockReturnValue(
@@ -1352,6 +1348,17 @@ describe("Activity", () => {
       unseen: true,
       updatedAt: 3,
     };
+    context.dispatch.mockImplementation((action) => {
+      if (action.type !== "thread") return;
+      context.state.snapshot.threads = [...context.state.snapshot.threads, action.thread];
+      (context.state.details as Record<string, ThreadDetail>).fork = {
+        summary: action.thread,
+        turns: [],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+        draft: null,
+      };
+    });
     render(forkThreadRoute());
 
     const buttons = screen.getAllByRole("button", { name: "Создать ответвление отсюда" });
@@ -1364,11 +1371,11 @@ describe("Activity", () => {
 
     await act(async () => resolveFork?.({ thread: forked }));
 
-    expect(context.dispatch).not.toHaveBeenCalledWith({ type: "thread", thread: forked });
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: forked });
     await waitFor(() =>
       expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/fork:true"),
     );
-    expect(screen.getByText("Получаем состояние Codex…")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveFocus();
   });
 
   it("surfaces fork errors without navigating and restores the action", async () => {
@@ -1384,7 +1391,7 @@ describe("Activity", () => {
     expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/thread:false");
   });
 
-  it("keeps the projection authoritative when a detail claims a newer running turn", () => {
+  it("treats a newer in-progress detail turn as running when the snapshot is stale", () => {
     const staleCompleted = {
       ...summary,
       state: "completed" as const,
@@ -1414,9 +1421,9 @@ describe("Activity", () => {
 
     renderThread();
 
-    expect(screen.getByRole("button", { name: "Закончить" })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Остановить задачу" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Направить текущую задачу" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Остановить задачу" })).toBeInTheDocument();
   });
 
   it("keeps an interrupted session purple until the user finishes it", () => {
@@ -2049,7 +2056,13 @@ describe("Activity", () => {
       saves[1]!.resolve({ ...saves[1]!.draft, updatedAt: 20 });
       await Promise.resolve();
     });
-    expect(context.dispatch.mock.calls.some(([action]) => action.type === "draft")).toBe(false);
+    await waitFor(() =>
+      expect(context.dispatch).toHaveBeenCalledWith({
+        type: "draft",
+        threadId: "thread",
+        draft: expect.objectContaining({ input: "Последняя версия" }),
+      }),
+    );
     expect(saves).toHaveLength(2);
   });
 
@@ -3283,7 +3296,11 @@ describe("Activity", () => {
 
     await waitFor(() => expect(textarea).toHaveValue(""));
     expect(screen.queryByAltText("screenshot.png")).toBeNull();
-    expect(context.dispatch.mock.calls.some(([action]) => action.type === "draft")).toBe(false);
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "draft",
+      threadId: "thread",
+      draft: null,
+    });
     expect(deleteLocalDraft).toHaveBeenCalledWith(api.settings, "thread");
     expect(context.refreshDetail).not.toHaveBeenCalled();
 
@@ -3538,10 +3555,6 @@ function mockThreadConnection(
     api,
     state: {
       snapshot: {
-        protocolVersion: 2,
-        epoch: "test",
-        revision: 1,
-        projectionStatus: "ready",
         projects: [
           {
             id: "project",
@@ -3575,7 +3588,6 @@ function mockThreadConnection(
         { jobId: string; outcome: "draft" | "send" | "cancelled" }
       >,
       network: "connected",
-      syncStatus: "synced",
       snapshotEpoch: 1,
     },
     refreshDetail: vi.fn().mockResolvedValue(detail),

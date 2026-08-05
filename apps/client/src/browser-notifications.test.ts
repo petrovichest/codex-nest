@@ -221,10 +221,7 @@ function snapshot(
   uiLanguage: AppSnapshot["uiLanguage"] = "ru",
 ): AppSnapshot {
   return {
-    protocolVersion: 2,
-    epoch: "test",
-    revision: 1,
-    projectionStatus: "ready",
+    sequence: 1,
     uiLanguage,
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],

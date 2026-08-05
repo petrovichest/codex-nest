@@ -8,17 +8,15 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
-  useSyncExternalStore,
 } from "react";
 
 import {
   isServerFrame,
-  SYNC_PROTOCOL_VERSION,
   type AppSnapshot,
   type QueueMessageRequest,
-  type ServerEvent,
   type ThreadDetail,
   type ThreadSummary,
 } from "@codexnest/protocol";
@@ -42,28 +40,23 @@ import {
   listOutboxMessages,
   listPendingVoiceRecordings,
   putOutboxMessage,
+  saveCachedMeta,
   saveCachedThread,
-  replaceCachedProjection,
   saveLocalDraft,
   type OutboxMessage,
   type PendingVoiceRecording,
 } from "./offline-store";
 import {
-  createClientStore,
+  clientReducer,
   initialState,
-  isValidProjectionSnapshot,
   mergeThreadDetailChanges,
-  projectionCursor,
   type ClientAction,
-  type ClientStore,
   type ClientState,
 } from "./state";
 import type { ConnectionSettings } from "./storage";
 
 const HEARTBEAT_IDLE_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
-const PROJECTION_CACHE_THROTTLE_MS = 250;
-const RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
 const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 
 type DetailReadOptions = {
@@ -98,9 +91,7 @@ interface ConnectionContextValue {
   reconnect(): number;
 }
 
-type ConnectionServices = Omit<ConnectionContextValue, "state"> & { store: ClientStore };
-
-const ConnectionContext = createContext<ConnectionServices | null>(null);
+const ConnectionContext = createContext<ConnectionContextValue | null>(null);
 
 export function ConnectionProvider({
   settings,
@@ -108,18 +99,14 @@ export function ConnectionProvider({
 }: PropsWithChildren<{ settings: ConnectionSettings }>) {
   const { language } = useI18n();
   const api = useMemo(() => new ApiClient(settings), [settings]);
-  const [store] = useState(() => createClientStore(initialState));
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  const dispatch = store.dispatch;
+  const [state, dispatch] = useReducer(clientReducer, initialState);
   const stateRef = useRef(state);
   const languageRef = useRef(language);
   const [generation, setGeneration] = useState(0);
-  const [cacheReady, setCacheReady] = useState(false);
   const generationRef = useRef(0);
-  const streamRevision = useRef<number | null>(null);
-  const streamEpoch = useRef<string | null>(null);
-  const appliedRevision = useRef<number | null>(null);
-  const syncedSnapshotFloor = useRef<{ generation: number; revision: number } | null>(null);
+  const streamSequence = useRef<number | null>(null);
+  const appliedSequence = useRef<number | null>(null);
+  const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
   const detailRequestVersions = useRef(new Map<string, number>());
   const turnItemRequests = useRef(new Map<string, Promise<void>>());
@@ -129,20 +116,9 @@ export function ConnectionProvider({
   const persistedDetails = useRef<Record<string, ThreadDetail>>({});
   const detailPersistTimers = useRef(new Map<string, number>());
   const persistenceConnectionKey = useRef(connectionCacheKey(settings));
-  const foregroundRefreshTimer = useRef<number | undefined>(undefined);
+  const foregroundRefresh = useRef<Promise<void> | null>(null);
   const outboxDrain = useRef<Promise<void> | null>(null);
   const outboxRetryTimer = useRef<number | undefined>(undefined);
-  const forceSnapshot = useRef(false);
-  const awaitingThreadProjection = useRef<string | null>(null);
-  const projectionPersistTimer = useRef<number | undefined>(undefined);
-  const projectionPersistedAt = useRef(0);
-  const pendingProjection = useRef<{
-    snapshot: AppSnapshot;
-    activeThreadId: string | null;
-    activeThread: ThreadDetail | null;
-    goals: ClientState["goals"];
-  } | null>(null);
-  const projectionWriteQueue = useRef<Promise<unknown>>(Promise.resolve());
   const browserNotifications = useMemo(
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
     [],
@@ -159,20 +135,10 @@ export function ConnectionProvider({
 
   useEffect(() => {
     let active = true;
-    setCacheReady(false);
-    api.setProjectionCursor(null);
-    void loadCachedMeta(settings)
-      .then((cached) => {
+    void Promise.all([loadCachedMeta(settings), listOutboxMessages(settings)]).then(
+      ([cached, outbox]) => {
         if (!active) return;
         if (cached) dispatch({ type: "hydrate", snapshot: cached.snapshot, goals: cached.goals });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (active) setCacheReady(true);
-      });
-    void listOutboxMessages(settings)
-      .then((outbox) => {
-        if (!active) return;
         for (const message of outbox) {
           dispatch({
             type: "optimistic.add",
@@ -187,60 +153,20 @@ export function ConnectionProvider({
             },
           });
         }
-      })
-      .catch(() => undefined);
+      },
+    );
     return () => {
       active = false;
     };
-  }, [api, settings]);
+  }, [settings]);
 
   useEffect(() => {
-    if (
-      state.syncStatus !== "synced" ||
-      !state.snapshot ||
-      !isValidProjectionSnapshot(state.snapshot)
-    ) {
-      return;
-    }
-    const activeThreadId = currentRouteThreadId();
-    if (activeThreadId && awaitingThreadProjection.current === activeThreadId) return;
-    pendingProjection.current = {
-      snapshot: state.snapshot,
-      activeThreadId,
-      activeThread: activeThreadId ? (state.details[activeThreadId] ?? null) : null,
-      goals: state.goals,
-    };
-    if (projectionPersistTimer.current !== undefined) return;
-    const elapsed = Date.now() - projectionPersistedAt.current;
-    const wait = Math.max(0, PROJECTION_CACHE_THROTTLE_MS - elapsed);
-    projectionPersistTimer.current = window.setTimeout(() => {
-      projectionPersistTimer.current = undefined;
-      const pending = pendingProjection.current;
-      pendingProjection.current = null;
-      if (!pending) return;
-      projectionPersistedAt.current = Date.now();
-      projectionWriteQueue.current = projectionWriteQueue.current.then(() =>
-        replaceCachedProjection(
-          settings,
-          pending.snapshot,
-          pending.activeThread,
-          pending.goals,
-          pending.activeThreadId,
-        ),
-      );
-    }, wait);
-  }, [settings, state.details, state.goals, state.snapshot, state.syncStatus]);
-
-  useEffect(
-    () => () => {
-      if (projectionPersistTimer.current !== undefined) {
-        window.clearTimeout(projectionPersistTimer.current);
-        projectionPersistTimer.current = undefined;
-      }
-      pendingProjection.current = null;
-    },
-    [settings],
-  );
+    if (!state.snapshot) return;
+    const timer = window.setTimeout(() => {
+      void saveCachedMeta(settings, state.snapshot, state.goals);
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [settings, state.goals, state.snapshot]);
 
   useEffect(() => {
     const connectionKey = connectionCacheKey(settings);
@@ -281,13 +207,29 @@ export function ConnectionProvider({
   );
 
   const reconnect = useCallback(() => {
-    api.setProjectionCursor(null);
-    dispatch({ type: "network", network: "connecting" });
     const next = generationRef.current + 1;
     generationRef.current = next;
     setGeneration(next);
     return next;
-  }, [api, dispatch]);
+  }, []);
+  const acceptSyncedSnapshot = useCallback(
+    (snapshot: AppSnapshot, targetGeneration: number) => {
+      if (generationRef.current !== targetGeneration) return;
+      if (appliedSequence.current !== null && snapshot.sequence < appliedSequence.current) {
+        return;
+      }
+      appliedSequence.current = snapshot.sequence;
+      syncedSnapshotFloor.current = {
+        generation: targetGeneration,
+        sequence: snapshot.sequence,
+      };
+      browserNotifications?.acceptSnapshot(snapshot);
+      observeNativeNotificationSnapshot(snapshot);
+      dispatch({ type: "snapshot", snapshot });
+    },
+    [browserNotifications],
+  );
+
   const clearDetailRetry = useCallback((threadId: string) => {
     const timer = detailRetryTimers.current.get(threadId);
     if (timer !== undefined) window.clearTimeout(timer);
@@ -332,15 +274,24 @@ export function ConnectionProvider({
       const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
       detailRequestVersions.current.set(key, version);
       const targetGeneration = generationRef.current;
-      const targetRevision = appliedRevision.current;
+      const targetSequence = appliedSequence.current;
       const canApply = () =>
         detailRequestVersions.current.get(key) === version &&
         generationRef.current === targetGeneration;
-      const liveAdvanced = () => appliedRevision.current !== targetRevision;
+      const liveAdvanced = () => appliedSequence.current !== targetSequence;
       const request = (async () => {
         const authoritativeLatest = async (): Promise<ThreadDetail> => {
           const detail = await api.readThread(threadId, undefined, { fresh: true });
           if (canApply()) {
+            const currentSummary = stateRef.current.snapshot?.threads.find(
+              (thread) => thread.id === threadId,
+            );
+            if (
+              !liveAdvanced() &&
+              (!currentSummary || detail.summary.updatedAt >= currentSummary.updatedAt)
+            ) {
+              dispatch({ type: "thread", thread: detail.summary });
+            }
             dispatch({
               type: "detail",
               detail,
@@ -433,9 +384,10 @@ export function ConnectionProvider({
   const forceRefreshDetail = useCallback(
     async (threadId: string): Promise<ThreadDetail> => {
       const targetGeneration = generationRef.current;
-      const targetRevision = appliedRevision.current;
-      const { detail } = await api.refreshThread(threadId);
-      const liveAdvanced = appliedRevision.current !== targetRevision;
+      const targetSequence = appliedSequence.current;
+      const { snapshot, detail } = await api.refreshThread(threadId);
+      const liveAdvanced = appliedSequence.current !== targetSequence;
+      acceptSyncedSnapshot(snapshot, targetGeneration);
       if (generationRef.current === targetGeneration) {
         dispatch({
           type: "detail",
@@ -446,7 +398,7 @@ export function ConnectionProvider({
       }
       return detail;
     },
-    [api],
+    [acceptSyncedSnapshot, api],
   );
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
@@ -503,9 +455,6 @@ export function ConnectionProvider({
   }, []);
 
   const drainReliableOutbox = useCallback((): Promise<void> => {
-    if (store.getSnapshot().syncStatus !== "synced" || !api.commandsReady) {
-      return Promise.resolve();
-    }
     if (outboxDrain.current) return outboxDrain.current;
     const request = (async () => {
       const messages = await listOutboxMessages(settings);
@@ -524,17 +473,11 @@ export function ConnectionProvider({
             attempts: message.attempts + 1,
             lastError: error instanceof Error ? error.message : "Delivery failed",
           };
+          await putOutboxMessage(next);
           if (isRetryableApiError(error)) {
-            await putOutboxMessage(next);
             scheduleOutboxRetry(next.attempts, () => void drainReliableOutbox());
             break;
           }
-          await deleteOutboxMessage(message.id);
-          dispatch({
-            type: "optimistic.remove",
-            threadId: message.threadId,
-            messageId: message.id,
-          });
         }
       }
     })().finally(() => {
@@ -542,7 +485,7 @@ export function ConnectionProvider({
     });
     outboxDrain.current = request;
     return request;
-  }, [api, scheduleOutboxRetry, settings, store]);
+  }, [api, scheduleOutboxRetry, settings]);
 
   const sendReliable = useCallback(
     async (
@@ -560,10 +503,7 @@ export function ConnectionProvider({
         attempts: 0,
         lastError: null,
       };
-      if (!(await putOutboxMessage(message))) {
-        throw new Error("Не удалось сохранить сообщение для повторной отправки");
-      }
-      if (store.getSnapshot().syncStatus !== "synced" || !api.commandsReady) return "pending";
+      await putOutboxMessage(message);
       try {
         await api.enqueue(threadId, body);
         await deleteOutboxMessage(message.id);
@@ -583,7 +523,7 @@ export function ConnectionProvider({
         return "pending";
       }
     },
-    [api, drainReliableOutbox, scheduleOutboxRetry, settings, store],
+    [api, drainReliableOutbox, scheduleOutboxRetry, settings],
   );
 
   const uploadVoiceRecording = useCallback(
@@ -647,14 +587,13 @@ export function ConnectionProvider({
   }, [settings]);
 
   useEffect(() => {
-    if (!cacheReady) return;
     let stopped = false;
     let socket: WebSocket | undefined;
     let retryTimer: number | undefined;
     let heartbeatTimer: number | undefined;
     let heartbeatTimeout: number | undefined;
     let retry = 0;
-    let fatalError: string | null = null;
+    const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 
     const clearHeartbeat = () => {
       if (heartbeatTimer !== undefined) window.clearTimeout(heartbeatTimer);
@@ -677,47 +616,14 @@ export function ConnectionProvider({
       }, HEARTBEAT_IDLE_MS);
     };
 
-    const requireSnapshot = (candidate: WebSocket) => {
-      forceSnapshot.current = true;
-      api.setProjectionCursor(null);
-      candidate.close();
-    };
-
-    const observeProjectionEvent = (revision: number, epoch: string, event: ServerEvent) => {
-      if (event.type === "projection.replaced") {
-        const snapshot = { ...event.snapshot, epoch, revision };
-        browserNotifications?.acceptSnapshot(snapshot);
-        observeNativeNotificationSnapshot(snapshot);
-        return;
-      }
-      browserNotifications?.acceptEvent(event);
-      observeNativeNotificationEvent(revision, event);
-    };
-
     const connect = () => {
       if (stopped) return;
-      api.setProjectionCursor(null);
       dispatch({ type: "network", network: "connecting" });
       const candidate = new WebSocket(api.webSocketUrl());
       socket = candidate;
       candidate.addEventListener("open", () => {
         if (stopped || socket !== candidate) return;
-        const cached = store.getSnapshot().snapshot;
-        const threadId = currentRouteThreadId();
-        awaitingThreadProjection.current = threadId;
-        const cursor =
-          !forceSnapshot.current && cached?.projectionStatus === "ready"
-            ? projectionCursor(cached)
-            : null;
-        candidate.send(
-          JSON.stringify({
-            type: "authenticate",
-            protocolVersion: SYNC_PROTOCOL_VERSION,
-            token: settings.token,
-            cursor,
-            threadId,
-          }),
-        );
+        candidate.send(JSON.stringify({ type: "authenticate", token: settings.token }));
       });
       candidate.addEventListener("message", (message) => {
         if (stopped || socket !== candidate) return;
@@ -733,184 +639,55 @@ export function ConnectionProvider({
           return;
         }
         scheduleHeartbeat(candidate);
-        if (frame.type === "snapshot" || frame.type === "resync") {
-          if (!isValidProjectionSnapshot(frame.snapshot)) {
-            requireSnapshot(candidate);
-            return;
-          }
-          const current = store.getSnapshot().snapshot;
-          if (
-            current?.epoch === frame.snapshot.epoch &&
-            appliedRevision.current !== null &&
-            frame.snapshot.revision < appliedRevision.current
-          ) {
-            requireSnapshot(candidate);
-            return;
-          }
-          forceSnapshot.current = false;
-          awaitingThreadProjection.current = currentRouteThreadId();
-          streamEpoch.current = frame.snapshot.epoch;
-          streamRevision.current = frame.snapshot.revision;
+        if (frame.type === "snapshot") {
+          retry = 0;
+          streamSequence.current = frame.snapshot.sequence;
           const floor = syncedSnapshotFloor.current;
-          if (floor?.generation === generation && frame.snapshot.revision < floor.revision) {
+          if (floor?.generation === generation && frame.snapshot.sequence < floor.sequence) {
             return;
           }
           if (floor?.generation === generation) syncedSnapshotFloor.current = null;
-          appliedRevision.current = frame.snapshot.revision;
+          appliedSequence.current = frame.snapshot.sequence;
           browserNotifications?.acceptSnapshot(frame.snapshot);
           observeNativeNotificationSnapshot(frame.snapshot);
-          dispatch({
-            type: frame.type === "resync" ? "resync" : "sync",
-            snapshot: frame.snapshot,
-          });
-          api.setProjectionCursor(
-            frame.snapshot.projectionStatus === "ready" ? projectionCursor(frame.snapshot) : null,
-          );
-          if (frame.snapshot.projectionStatus === "ready") {
-            retry = 0;
-            void drainReliableOutbox();
-          }
-        } else if (frame.type === "replay") {
-          const localState = store.getSnapshot();
-          const local = localState.snapshot;
-          if (
-            !local ||
-            !isValidProjectionSnapshot(local) ||
-            local.projectionStatus !== "ready" ||
-            local.epoch !== frame.epoch ||
-            local.revision !== frame.fromRevision ||
-            !Number.isSafeInteger(frame.fromRevision) ||
-            !Number.isSafeInteger(frame.toRevision) ||
-            frame.fromRevision < 0 ||
-            frame.patches.some(
-              (patch, index) =>
-                !Number.isSafeInteger(patch.revision) ||
-                patch.revision !== frame.fromRevision + index + 1,
-            ) ||
-            frame.toRevision !== frame.fromRevision + frame.patches.length
-          ) {
-            requireSnapshot(candidate);
+          dispatch({ type: "snapshot", snapshot: frame.snapshot });
+          void drainReliableOutbox();
+        } else if (frame.type === "event") {
+          if (streamSequence.current === null || frame.sequence !== streamSequence.current + 1) {
+            candidate.close();
             return;
           }
-          forceSnapshot.current = false;
-          awaitingThreadProjection.current = currentRouteThreadId();
-          streamEpoch.current = frame.epoch;
-          streamRevision.current = frame.toRevision;
-          appliedRevision.current = frame.toRevision;
-          dispatch({
-            type: "replay",
-            epoch: frame.epoch,
-            fromRevision: frame.fromRevision,
-            toRevision: frame.toRevision,
-            patches: frame.patches,
-          });
-          for (const patch of frame.patches) {
-            observeProjectionEvent(patch.revision, frame.epoch, patch.event);
-          }
-          const replayed = store.getSnapshot();
-          if (replayed.syncStatus === "synced") {
-            retry = 0;
-            api.setProjectionCursor(projectionCursor(replayed.snapshot));
-            void drainReliableOutbox();
-          } else {
-            requireSnapshot(candidate);
-          }
-        } else if (frame.type === "patch") {
-          if (
-            !Number.isSafeInteger(frame.revision) ||
-            frame.revision < 0 ||
-            streamEpoch.current !== frame.epoch ||
-            streamRevision.current === null ||
-            frame.revision !== streamRevision.current + 1
-          ) {
-            requireSnapshot(candidate);
-            return;
-          }
-          streamRevision.current = frame.revision;
-          if (appliedRevision.current !== null && frame.revision <= appliedRevision.current) {
+          streamSequence.current = frame.sequence;
+          if (appliedSequence.current !== null && frame.sequence <= appliedSequence.current) {
             const floor = syncedSnapshotFloor.current;
-            if (floor?.generation === generation && frame.revision >= floor.revision) {
+            if (floor?.generation === generation && frame.sequence >= floor.sequence) {
               syncedSnapshotFloor.current = null;
-              const current = store.getSnapshot().snapshot;
-              if (
-                current?.epoch === frame.epoch &&
-                current.revision === frame.revision &&
-                current.projectionStatus === "ready"
-              ) {
-                retry = 0;
-                dispatch({ type: "synced" });
-                api.setProjectionCursor(projectionCursor(current));
-                void drainReliableOutbox();
-              }
             }
             return;
           }
-          const current = store.getSnapshot().snapshot;
-          if (
-            !current ||
-            current.epoch !== frame.epoch ||
-            current.revision + 1 !== frame.revision
-          ) {
-            requireSnapshot(candidate);
-            return;
-          }
-          appliedRevision.current = frame.revision;
+          appliedSequence.current = frame.sequence;
           if (syncedSnapshotFloor.current?.generation === generation) {
             syncedSnapshotFloor.current = null;
           }
-          observeProjectionEvent(frame.revision, frame.epoch, frame.event);
-          dispatch({
-            type: "event",
-            epoch: frame.epoch,
-            revision: frame.revision,
-            event: frame.event,
-          });
-          const updated = store.getSnapshot();
-          if (updated.snapshot?.projectionStatus === "ready") {
-            retry = 0;
-            api.setProjectionCursor({ epoch: frame.epoch, revision: frame.revision });
-            void drainReliableOutbox();
-          } else {
-            api.setProjectionCursor(null);
-          }
-        } else if (frame.type === "thread.open") {
-          if (awaitingThreadProjection.current === frame.threadId) {
-            awaitingThreadProjection.current = null;
-          }
-          const detailKey = JSON.stringify([frame.threadId, null]);
-          detailRequestVersions.current.set(
-            detailKey,
-            (detailRequestVersions.current.get(detailKey) ?? 0) + 1,
-          );
-          dispatch({
-            type: "thread.open",
-            threadId: frame.threadId,
-            detail: frame.detail,
-          });
+          browserNotifications?.acceptEvent(frame.event);
+          observeNativeNotificationEvent(frame.sequence, frame.event);
+          dispatch({ type: "event", sequence: frame.sequence, event: frame.event });
         } else if (frame.type === "error") {
-          if (frame.error.code === "client_update_required") fatalError = frame.error.message;
           dispatch({ type: "network", network: "offline", error: frame.error.message });
-          api.setProjectionCursor(null);
-          candidate.close();
         }
       });
       candidate.addEventListener("close", () => {
         if (stopped || socket !== candidate) return;
         socket = undefined;
         clearHeartbeat();
-        streamRevision.current = null;
-        streamEpoch.current = null;
-        api.setProjectionCursor(null);
-        if (fatalError) {
-          dispatch({ type: "network", network: "offline", error: fatalError });
-          return;
-        }
+        streamSequence.current = null;
         dispatch({
           type: "network",
           network: "offline",
           error: translate(languageRef.current, "Связь с сервером потеряна"),
         });
-        const delay = reconnectDelay(retry);
+        const baseDelay = delays[Math.min(retry, delays.length - 1)] ?? 30_000;
+        const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
         retry += 1;
         retryTimer = window.setTimeout(connect, delay);
       });
@@ -922,30 +699,21 @@ export function ConnectionProvider({
       stopped = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       clearHeartbeat();
-      streamRevision.current = null;
-      streamEpoch.current = null;
-      api.setProjectionCursor(null);
+      streamSequence.current = null;
       socket?.close();
     };
-  }, [
-    api,
-    browserNotifications,
-    cacheReady,
-    dispatch,
-    drainReliableOutbox,
-    generation,
-    settings,
-    store,
-  ]);
+  }, [api, browserNotifications, drainReliableOutbox, generation, settings.token]);
 
   useEffect(() => {
     const refresh = () => {
-      if (foregroundRefreshTimer.current !== undefined) return;
+      if (foregroundRefresh.current) return;
       reconnect();
-      void drainReliableOutbox().catch(() => undefined);
-      foregroundRefreshTimer.current = window.setTimeout(() => {
-        foregroundRefreshTimer.current = undefined;
-      }, 250);
+      const request = drainReliableOutbox()
+        .catch(() => undefined)
+        .finally(() => {
+          if (foregroundRefresh.current === request) foregroundRefresh.current = null;
+        });
+      foregroundRefresh.current = request;
     };
     const foreground = () => {
       if (document.visibilityState === "visible") refresh();
@@ -962,14 +730,8 @@ export function ConnectionProvider({
     } else {
       document.addEventListener("visibilitychange", foreground);
     }
-    window.addEventListener("online", refresh);
     return () => {
       document.removeEventListener("visibilitychange", foreground);
-      window.removeEventListener("online", refresh);
-      if (foregroundRefreshTimer.current !== undefined) {
-        window.clearTimeout(foregroundRefreshTimer.current);
-        foregroundRefreshTimer.current = undefined;
-      }
       setNativeNotificationAppActive(true);
       void removeNativeListener?.();
     };
@@ -978,8 +740,8 @@ export function ConnectionProvider({
   const value = useMemo(
     () => ({
       api,
+      state,
       dispatch,
-      store,
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
@@ -990,8 +752,7 @@ export function ConnectionProvider({
     }),
     [
       api,
-      dispatch,
-      store,
+      state,
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
@@ -1004,71 +765,10 @@ export function ConnectionProvider({
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;
 }
 
-function currentRouteThreadId(): string | null {
-  const match = /^\/threads\/([^/]+)\/?$/u.exec(window.location.pathname);
-  if (!match?.[1]) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return null;
-  }
-}
-
 export function useConnection(): ConnectionContextValue {
-  const services = useContext(ConnectionContext);
-  if (!services) throw new Error("useConnection must be used inside ConnectionProvider");
-  const state = useSyncExternalStore(
-    services.store.subscribe,
-    services.store.getSnapshot,
-    services.store.getSnapshot,
-  );
-  return useMemo(() => ({ ...services, state }), [services, state]);
-}
-
-export function useConnectionServices(): ConnectionServices {
-  const services = useContext(ConnectionContext);
-  if (!services) throw new Error("useConnectionServices must be used inside ConnectionProvider");
-  return services;
-}
-
-export function useConnectionSelector<T>(
-  selector: (state: ClientState) => T,
-  isEqual: (left: T, right: T) => boolean = Object.is,
-): T {
-  const services = useContext(ConnectionContext);
-  if (!services) throw new Error("useConnectionSelector must be used inside ConnectionProvider");
-  const selectorRef = useRef(selector);
-  const isEqualRef = useRef(isEqual);
-  const cached = useRef<{
-    state: ClientState;
-    selector: (state: ClientState) => T;
-    selection: T;
-  } | null>(null);
-  selectorRef.current = selector;
-  isEqualRef.current = isEqual;
-  const getSelection = useCallback(() => {
-    const state = services.store.getSnapshot();
-    const current = cached.current;
-    if (current?.state === state && current.selector === selectorRef.current) {
-      return current.selection;
-    }
-    const selection = selectorRef.current(state);
-    if (current && isEqualRef.current(current.selection, selection)) {
-      cached.current = { state, selector: selectorRef.current, selection: current.selection };
-      return current.selection;
-    }
-    cached.current = { state, selector: selectorRef.current, selection };
-    return selection;
-  }, [services.store]);
-  return useSyncExternalStore(services.store.subscribe, getSelection, getSelection);
-}
-
-export function reconnectDelay(attempt: number, random = Math.random): number {
-  const base =
-    RECONNECT_DELAYS_MS[
-      Math.min(Math.max(0, Math.trunc(attempt)), RECONNECT_DELAYS_MS.length - 1)
-    ] ?? 5_000;
-  return Math.round(base * (0.8 + random() * 0.4));
+  const value = useContext(ConnectionContext);
+  if (!value) throw new Error("useConnection must be used inside ConnectionProvider");
+  return value;
 }
 
 function threadDetailNeedsRecovery(detail: ThreadDetail, summary: ThreadSummary): boolean {

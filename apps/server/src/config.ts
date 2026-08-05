@@ -80,7 +80,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
     port,
-    statePath: env("CODEXNEST_STATE_PATH") ?? resolve(stateRoot, "codexnest/state.sqlite"),
+    statePath: env("CODEXNEST_STATE_PATH") ?? resolve(stateRoot, "codexnest/state.json"),
     codexBin: env("CODEXNEST_CODEX_BIN") ?? "codex",
     codexManagementBin: env("CODEXNEST_CODEX_MANAGEMENT_BIN") ?? resolve(homedir(), "bin/codex"),
     codexProxyEnvFile:

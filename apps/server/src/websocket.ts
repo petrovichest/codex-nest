@@ -1,20 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 
-import {
-  isClientFrame,
-  isRecord,
-  SYNC_PROTOCOL_VERSION,
-  type AppSnapshot,
-  type ServerEvent,
-  type ServerFrame,
-} from "@codexnest/protocol";
+import { isClientFrame, type ServerFrame } from "@codexnest/protocol";
 
 import { verifyToken } from "./auth";
 import { isAllowedRequestOrigin } from "./origin";
 import type { AppProjection } from "./projection";
 import type { StateStore } from "./state/store";
-import type { PersistedProjectionEvent } from "./state/store";
 
 export function registerEventsWebSocket(
   app: FastifyInstance,
@@ -26,35 +18,14 @@ export function registerEventsWebSocket(
   const sockets = new Set<WebSocket>();
   const authenticatedSockets = new Set<WebSocket>();
   const alive = new WeakMap<WebSocket, boolean>();
-  let sendMetricTimer: NodeJS.Timeout | undefined;
-  let pendingSendMetric: { committedAt: number; sentAt: number } | null = null;
-  const recordProjectionSent = (committedAt: number) => {
-    pendingSendMetric = { committedAt, sentAt: Date.now() };
-    if (sendMetricTimer) return;
-    sendMetricTimer = setTimeout(() => {
-      sendMetricTimer = undefined;
-      const metric = pendingSendMetric;
-      pendingSendMetric = null;
-      if (metric) store.markProjectionSent(metric.committedAt, metric.sentAt);
-    }, 100);
-    sendMetricTimer.unref();
+  const eventListener = (sequence: number, event: unknown) => {
+    const frame: ServerFrame = isResyncRequired(event)
+      ? { type: "snapshot", snapshot: projection.snapshot() }
+      : ({ type: "event", sequence, event } as ServerFrame);
+    broadcast(frame);
   };
-  const eventListener = (committed: PersistedProjectionEvent<ServerEvent>, event: ServerEvent) => {
-    const sent = broadcast({
-      type: "patch",
-      protocolVersion: SYNC_PROTOCOL_VERSION,
-      epoch: committed.epoch,
-      revision: committed.revision,
-      event,
-    });
-    if (sent) recordProjectionSent(committed.createdAt);
-  };
-  const resyncListener = (snapshot: AppSnapshot) => {
-    broadcast({ type: "resync", protocolVersion: SYNC_PROTOCOL_VERSION, snapshot });
-  };
-  const broadcast = (frame: ServerFrame): boolean => {
+  const broadcast = (frame: ServerFrame) => {
     const payload = JSON.stringify(frame);
-    let sent = false;
     for (const socket of authenticatedSockets) {
       if (socket.bufferedAmount > 2 * 1024 * 1024) {
         app.log.warn({ bufferedBytes: socket.bufferedAmount }, "terminating slow websocket client");
@@ -62,12 +33,9 @@ export function registerEventsWebSocket(
         continue;
       }
       sendSerialized(socket, payload);
-      sent = true;
     }
-    return sent;
   };
   projection.on("event", eventListener);
-  projection.on("resync", resyncListener);
   const heartbeat = setInterval(() => {
     for (const socket of sockets) {
       if (alive.get(socket) === false) {
@@ -81,11 +49,7 @@ export function registerEventsWebSocket(
   heartbeat.unref();
   app.addHook("onClose", async () => {
     clearInterval(heartbeat);
-    if (sendMetricTimer) clearTimeout(sendMetricTimer);
-    const metric = pendingSendMetric;
-    if (metric) store.markProjectionSent(metric.committedAt, metric.sentAt);
     projection.off("event", eventListener);
-    projection.off("resync", resyncListener);
   });
   store.on("authRotated", () => {
     for (const socket of sockets) socket.close(1008, "Token rotated");
@@ -115,22 +79,6 @@ export function registerEventsWebSocket(
         socket.close(1003, "Malformed frame");
         return;
       }
-      if (
-        !authenticated &&
-        isRecord(frame) &&
-        frame.type === "authenticate" &&
-        frame.protocolVersion !== SYNC_PROTOCOL_VERSION
-      ) {
-        send(socket, {
-          type: "error",
-          error: {
-            code: "client_update_required",
-            message: "Клиент CodexNest устарел. Обновите приложение и повторите подключение.",
-          },
-        });
-        socket.close(1008, "Client update required");
-        return;
-      }
       if (!isClientFrame(frame)) {
         socket.close(1008, "Invalid frame");
         return;
@@ -146,35 +94,7 @@ export function registerEventsWebSocket(
         authenticated = true;
         clearTimeout(timeout);
         authenticatedSockets.add(socket);
-        const replay =
-          frame.cursor && projection.status === "ready"
-            ? store.replayProjection<ServerEvent>(frame.cursor)
-            : null;
-        if (replay !== null) {
-          const current = store.projectionCursor();
-          send(socket, {
-            type: "replay",
-            protocolVersion: SYNC_PROTOCOL_VERSION,
-            epoch: current.epoch,
-            fromRevision: frame.cursor?.revision ?? current.revision,
-            toRevision: current.revision,
-            patches: replay.map(({ revision, patch }) => ({ revision, event: patch })),
-          });
-        } else {
-          send(socket, {
-            type: "snapshot",
-            protocolVersion: SYNC_PROTOCOL_VERSION,
-            snapshot: projection.snapshot(),
-          });
-        }
-        if (frame.threadId) {
-          send(socket, {
-            type: "thread.open",
-            protocolVersion: SYNC_PROTOCOL_VERSION,
-            threadId: frame.threadId,
-            detail: projection.projectedThread(frame.threadId),
-          });
-        }
+        send(socket, { type: "snapshot", snapshot: projection.snapshot() });
         return;
       }
       if (frame.type === "ping") send(socket, { type: "pong" });
@@ -197,4 +117,10 @@ function send(socket: WebSocket, frame: ServerFrame): void {
 
 function sendSerialized(socket: WebSocket, payload: string): void {
   if (socket.readyState === 1) socket.send(payload);
+}
+
+function isResyncRequired(event: unknown): event is { type: "resync.required" } {
+  return (
+    !!event && typeof event === "object" && "type" in event && event.type === "resync.required"
+  );
 }

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Link, MemoryRouter, Route, Routes, useMatch } from "react-router";
+import { Link, MemoryRouter, Route, Routes } from "react-router";
 
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
@@ -16,11 +16,7 @@ const drafts = vi.hoisted(() => ({
   saveLocal: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../connection", () => ({
-  useConnection: connection,
-  useConnectionServices: () => connection(),
-  useConnectionSelector: (selector: (state: unknown) => unknown) => selector(connection().state),
-}));
+vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../offline-store", () => ({
   deleteLocalDraft: drafts.deleteLocal,
   deleteNewSessionDraft: drafts.delete,
@@ -108,12 +104,7 @@ describe("NewSession", () => {
       ),
     );
     expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "detail",
-        detail: expect.objectContaining({ summary: thread }),
-      }),
-    );
+    expect(dispatch).toHaveBeenCalledWith({ type: "thread", thread });
     expect(drafts.delete).toHaveBeenCalledWith(connectionSettings, project.id);
   });
 
@@ -742,19 +733,13 @@ function renderNewSession() {
       ]}
     >
       <Routes>
-        <Route path="*" element={<NewSessionWorkspace />} />
+        <Route
+          path="/new"
+          element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
+        />
+        <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
       </Routes>
     </MemoryRouter>,
-  );
-}
-
-function NewSessionWorkspace() {
-  const createdThread = useMatch("/threads/:threadId");
-  return (
-    <>
-      <NewSession projects={[project]} onOpenNavigation={() => undefined} />
-      {createdThread && <div>Созданная сессия</div>}
-    </>
   );
 }
 
@@ -789,7 +774,6 @@ function mockConnection({
       details: {},
       snapshot: { connection: { state: "ready" }, models, taskDefaults, threads: [] },
       network: "connected",
-      syncStatus: "synced",
     },
   };
 }

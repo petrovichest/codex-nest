@@ -23,8 +23,7 @@ const store = new StateStore(config.statePath);
 await store.load();
 let authRefreshTimer: NodeJS.Timeout | undefined;
 const stateWatcher = watch(dirname(config.statePath), { persistent: false }, (_event, filename) => {
-  const stateName = basename(config.statePath);
-  if (filename && ![stateName, `${stateName}-wal`, `${stateName}-shm`].includes(filename)) return;
+  if (filename && filename !== basename(config.statePath)) return;
   if (authRefreshTimer) clearTimeout(authRefreshTimer);
   authRefreshTimer = setTimeout(() => {
     authRefreshTimer = undefined;
@@ -112,15 +111,8 @@ bridge.on("state", (state) => {
     attention.expireAll();
   }
 });
-const reconciliationTimer = setInterval(() => {
-  if (bridge.state !== "ready") return;
-  void projection.sync().catch((error: Error) => {
-    process.stderr.write(`CodexNest background reconciliation failed (${error.name})\n`);
-  });
-}, 60_000);
-reconciliationTimer.unref();
 const pushedTerminal = new Map<string, string>();
-projection.on("event", (_committed, event) => {
+projection.on("event", (_sequence, event) => {
   if (event.type === "attention.upserted" && event.attention.threadId) {
     void push.send(event.attention.threadId, "attention").catch(() => undefined);
   }
@@ -157,7 +149,6 @@ let shutdownPromise: Promise<void> | undefined;
 function shutdown(): Promise<void> {
   shutdownPromise ??= (async () => {
     stateWatcher.close();
-    clearInterval(reconciliationTimer);
     if (authRefreshTimer) clearTimeout(authRefreshTimer);
     if (emergencyShutdownRequested) {
       await within(app.close(), 2_000).catch(() => undefined);
@@ -169,7 +160,6 @@ function shutdown(): Promise<void> {
     }
     bridge.stop();
     await lifecycle.close();
-    store.close();
   })();
   return shutdownPromise;
 }

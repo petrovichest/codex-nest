@@ -13,7 +13,7 @@ final class NotificationEventTracker {
     private final Map<String, String> threadTitles = new HashMap<>();
     private final Map<String, String> attentionThreads = new HashMap<>();
     private long lastObservedAt;
-    private long lastRevision = -1;
+    private long lastSequence = -1;
     private String defaultThreadTitle;
     private String detailsTitle;
     private String untitledThreadTitle;
@@ -48,47 +48,23 @@ final class NotificationEventTracker {
         List<CodexNotification> notifications = new ArrayList<>();
         JSONObject frame = new JSONObject(serializedFrame);
         String type = frame.optString("type");
-        if ("snapshot".equals(type) || "resync".equals(type)) {
+        if ("snapshot".equals(type)) {
             JSONObject snapshot = frame.getJSONObject("snapshot");
-            lastRevision = snapshot.has("revision") ? requiredRevision(snapshot) : -1;
+            lastSequence = snapshot.optLong("sequence", -1);
             acceptSnapshot(snapshot, notifications);
-        } else if ("patch".equals(type)) {
-            long revision = requiredRevision(frame);
-            if (lastRevision >= 0 && revision <= lastRevision) {
+        } else if ("event".equals(type)) {
+            long sequence = frame.optLong("sequence", -1);
+            if (sequence >= 0 && lastSequence >= 0 && sequence <= lastSequence) {
                 return notifications;
             }
-            if (lastRevision >= 0 && revision != lastRevision + 1) {
-                throw new Exception("Projection revision gap");
-            }
             acceptEvent(frame.getJSONObject("event"), notifications);
-            lastRevision = revision;
-        } else if ("replay".equals(type)) {
-            JSONArray patches = frame.optJSONArray("patches");
-            if (patches == null) return notifications;
-            for (int index = 0; index < patches.length(); index += 1) {
-                JSONObject patch = patches.optJSONObject(index);
-                if (patch == null) continue;
-                long revision = requiredRevision(patch);
-                if (lastRevision >= 0 && revision <= lastRevision) continue;
-                if (lastRevision >= 0 && revision != lastRevision + 1) {
-                    throw new Exception("Projection replay gap");
-                }
-                acceptEvent(patch.getJSONObject("event"), notifications);
-                lastRevision = revision;
-            }
+            if (sequence >= 0) lastSequence = sequence;
         }
         return notifications;
     }
 
     synchronized long lastObservedAt() {
         return lastObservedAt;
-    }
-
-    private long requiredRevision(JSONObject value) throws Exception {
-        if (!value.has("revision")) throw new Exception("Projection revision is missing");
-        long revision = value.getLong("revision");
-        if (revision < 0) throw new Exception("Projection revision is invalid");
-        return revision;
     }
 
     private void acceptSnapshot(JSONObject snapshot, List<CodexNotification> notifications) {
@@ -160,9 +136,7 @@ final class NotificationEventTracker {
     private void acceptEvent(JSONObject event, List<CodexNotification> notifications)
         throws Exception {
         String type = event.optString("type");
-        if ("projection.replaced".equals(type)) {
-            acceptSnapshot(event.getJSONObject("snapshot"), notifications);
-        } else if ("thread.upserted".equals(type)) {
+        if ("thread.upserted".equals(type)) {
             JSONObject thread = event.getJSONObject("thread");
             String id = thread.optString("id");
             String state = thread.optString("state");

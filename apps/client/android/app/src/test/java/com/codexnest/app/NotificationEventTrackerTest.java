@@ -8,14 +8,6 @@ import org.junit.Test;
 
 public class NotificationEventTrackerTest {
 
-    @Test(expected = Exception.class)
-    public void patchWithoutRevisionIsRejected() throws Exception {
-        NotificationEventTracker tracker = new NotificationEventTracker(0);
-        tracker.accept(
-            "{\"type\":\"patch\",\"event\":{\"type\":\"thread.removed\",\"threadId\":\"one\"}}"
-        );
-    }
-
     @Test
     public void initialSnapshotDoesNotNotifyForOldThreads() throws Exception {
         NotificationEventTracker tracker = new NotificationEventTracker(0);
@@ -33,10 +25,10 @@ public class NotificationEventTrackerTest {
             "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
         );
         List<CodexNotification> first = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":200}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":200}}}"
         );
         List<CodexNotification> duplicate = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":201}}}"
+            "{\"type\":\"event\",\"sequence\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":201}}}"
         );
         assertEquals(1, first.size());
         assertEquals(CodexNotification.Kind.COMPLETED, first.get(0).kind);
@@ -50,10 +42,10 @@ public class NotificationEventTrackerTest {
             "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
         );
         List<CodexNotification> first = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":200}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":200}}}"
         );
         List<CodexNotification> duplicate = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":201}}}"
+            "{\"type\":\"event\",\"sequence\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":201}}}"
         );
         assertEquals(1, first.size());
         assertEquals(CodexNotification.Kind.ATTENTION, first.get(0).kind);
@@ -64,17 +56,17 @@ public class NotificationEventTrackerTest {
     public void outgoingQueuedMessageDoesNotLookLikeACompletedTurn() throws Exception {
         NotificationEventTracker tracker = new NotificationEventTracker(0);
         tracker.accept(
-            "{\"type\":\"snapshot\",\"snapshot\":{\"revision\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
+            "{\"type\":\"snapshot\",\"snapshot\":{\"sequence\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
         );
 
         List<CodexNotification> queued = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200,\"queuedMessageCount\":1}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200,\"queuedMessageCount\":1}}}"
         );
         tracker.accept(
-            "{\"type\":\"patch\",\"revision\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":201,\"queuedMessageCount\":0}}}"
+            "{\"type\":\"event\",\"sequence\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":201,\"queuedMessageCount\":0}}}"
         );
         List<CodexNotification> completed = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":4,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":300,\"queuedMessageCount\":0}}}"
+            "{\"type\":\"event\",\"sequence\":4,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":300,\"queuedMessageCount\":0}}}"
         );
 
         assertEquals(0, queued.size());
@@ -86,48 +78,18 @@ public class NotificationEventTrackerTest {
     public void staleDuplicateStreamEventCannotRestoreATerminalState() throws Exception {
         NotificationEventTracker tracker = new NotificationEventTracker(0);
         tracker.accept(
-            "{\"type\":\"snapshot\",\"snapshot\":{\"revision\":10,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
+            "{\"type\":\"snapshot\",\"snapshot\":{\"sequence\":10,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":100,\"queuedMessageCount\":0}],\"attention\":[]}}"
         );
         tracker.accept(
-            "{\"type\":\"patch\",\"revision\":11,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200,\"queuedMessageCount\":0}}}"
+            "{\"type\":\"event\",\"sequence\":12,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":200,\"queuedMessageCount\":0}}}"
         );
 
         List<CodexNotification> stale = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":11,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":150,\"queuedMessageCount\":0}}}"
+            "{\"type\":\"event\",\"sequence\":11,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":150,\"queuedMessageCount\":0}}}"
         );
 
         assertEquals(0, stale.size());
         assertEquals(200, tracker.lastObservedAt());
-    }
-
-    @Test
-    public void reconciliationReplacementIsAppliedAsASnapshotPatch() throws Exception {
-        NotificationEventTracker tracker = new NotificationEventTracker(0);
-        tracker.accept(
-            "{\"type\":\"snapshot\",\"snapshot\":{\"revision\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
-        );
-
-        List<CodexNotification> notifications = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"projection.replaced\",\"snapshot\":{\"revision\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200,\"queuedMessageCount\":0}],\"attention\":[]}}}"
-        );
-
-        assertEquals(1, notifications.size());
-        assertEquals(CodexNotification.Kind.COMPLETED, notifications.get(0).kind);
-    }
-
-    @Test
-    public void replayAppliesRevisionedPatchesInOrder() throws Exception {
-        NotificationEventTracker tracker = new NotificationEventTracker(0);
-        tracker.accept(
-            "{\"type\":\"snapshot\",\"snapshot\":{\"revision\":1,\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
-        );
-
-        List<CodexNotification> notifications = tracker.accept(
-            "{\"type\":\"replay\",\"patches\":[{\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":200,\"queuedMessageCount\":0}}},{\"revision\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"updatedAt\":201,\"queuedMessageCount\":0}}}] }"
-        );
-
-        assertEquals(1, notifications.size());
-        assertEquals(CodexNotification.Kind.COMPLETED, notifications.get(0).kind);
     }
 
     @Test
@@ -137,10 +99,10 @@ public class NotificationEventTrackerTest {
             "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
         );
         List<CodexNotification> request = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"attention.upserted\",\"attention\":{\"id\":\"attention-1\",\"threadId\":\"one\",\"createdAt\":200}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"attention.upserted\",\"attention\":{\"id\":\"attention-1\",\"threadId\":\"one\",\"createdAt\":200}}}"
         );
         List<CodexNotification> state = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":201}}}"
+            "{\"type\":\"event\",\"sequence\":3,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"needsAttention\",\"updatedAt\":201}}}"
         );
         assertEquals(1, request.size());
         assertEquals(0, state.size());
@@ -176,7 +138,7 @@ public class NotificationEventTrackerTest {
             "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Task\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
         );
         List<CodexNotification> immediate = foreground.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Task\",\"state\":\"completed\",\"unread\":true,\"updatedAt\":200}}}"
         );
 
         NotificationEventTracker background = new NotificationEventTracker(
@@ -232,7 +194,7 @@ public class NotificationEventTrackerTest {
             "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[{\"id\":\"one\",\"title\":\"Без названия\",\"state\":\"running\",\"unread\":false,\"updatedAt\":100}],\"attention\":[]}}"
         );
         List<CodexNotification> notifications = tracker.accept(
-            "{\"type\":\"patch\",\"revision\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Без названия\",\"state\":\"completed\",\"updatedAt\":200}}}"
+            "{\"type\":\"event\",\"sequence\":2,\"event\":{\"type\":\"thread.upserted\",\"thread\":{\"id\":\"one\",\"title\":\"Без названия\",\"state\":\"completed\",\"updatedAt\":200}}}"
         );
 
         assertEquals("Untitled", notifications.get(0).threadTitle);

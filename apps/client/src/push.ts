@@ -42,7 +42,7 @@ export function observeNativeNotificationSnapshot(snapshot: AppSnapshot): void {
   }).catch(() => undefined);
 }
 
-export function observeNativeNotificationEvent(revision: number, event: ServerEvent): void {
+export function observeNativeNotificationEvent(sequence: number, event: ServerEvent): void {
   if (
     !Capacitor.isNativePlatform() ||
     !nativeNotificationAppActive ||
@@ -51,7 +51,7 @@ export function observeNativeNotificationEvent(revision: number, event: ServerEv
     return;
   }
   void SelfHostedNotifications.observeFrame({
-    frame: JSON.stringify({ type: "patch", revision, event }),
+    frame: JSON.stringify({ type: "event", sequence, event }),
   }).catch(() => undefined);
 }
 

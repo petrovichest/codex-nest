@@ -1,15 +1,13 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
-import { access, lstat, mkdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { access, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type {
   ApiErrorCode,
   AppUpdateStatus,
-  CommandMetadata,
-  CommandReceipt,
   ForceRestartAccepted,
   ForkThreadRequest,
   ForkThreadResponse,
@@ -160,7 +158,6 @@ const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
 const TEAM_ACTIVITY_PERSIST_MS = 60_000;
-const TEAM_SANDBOX_MOUNTPOINTS = [".agents", ".codex"] as const;
 const TEAM_CONTINUATION_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
 const TEAM_SESSION_UPGRADE_MESSAGE =
@@ -463,80 +460,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const turnStartLocks = new Map<string, Promise<unknown>>();
   const teamParentLocks = new Map<string, Promise<unknown>>();
   const teamToolOperationLocks = new Map<string, Promise<unknown>>();
-  const commandRuns = new Map<string, Promise<unknown>>();
   const stoppedTeamParents = new Set<string>();
-  const executeDurableCommand = async <TResult>(
-    command: CommandMetadata,
-    kind: string,
-    threadId: string | null,
-    turnId: string | null,
-    payload: unknown,
-    execute: (recovering: boolean) => Promise<TResult | DurableCommandNoop<TResult>>,
-  ): Promise<TResult> => {
-    const commandId = optionalCommandId(command.commandId);
-    if (command.commandId !== undefined && commandId === null) {
-      throw new ProjectValidationError("commandId must be a non-empty string");
-    }
-    validateCommandContext(command);
-    if (!commandId) return unwrapDurableCommandResult(await execute(false));
-
-    const metadata = {
-      commandId,
-      kind,
-      threadId,
-      turnId,
-      expectedThreadId: command.expectedThreadId ?? null,
-      expectedRevision: command.expectedRevision ?? null,
-      payload,
-    };
-    const admission = store.acceptCommand(metadata);
-    if (!sameCommandReceipt(admission.receipt, metadata)) {
-      throw new MessageQueueConflictError("Command id has already been used");
-    }
-    if (!admission.accepted) {
-      const running = commandRuns.get(commandId);
-      if (running) return running as Promise<TResult>;
-      if (admission.receipt.status === "succeeded" || admission.receipt.status === "noop") {
-        return admission.receipt.result as TResult;
-      }
-      if (admission.receipt.status === "conflict") {
-        throw new ProjectConflictError(commandResultMessage(admission.receipt.result));
-      }
-      if (admission.receipt.status === "failed") {
-        throw new Error(commandResultMessage(admission.receipt.result));
-      }
-    }
-
-    const run = (async () => {
-      if (admission.accepted) {
-        const conflict = commandContextConflict(command, threadId, projection.snapshot());
-        if (conflict) {
-          store.finishCommand(commandId, "conflict", { message: conflict });
-          throw new ProjectConflictError(conflict);
-        }
-      }
-      try {
-        const outcome = await execute(!admission.accepted);
-        const noop = outcome instanceof DurableCommandNoop;
-        const result = unwrapDurableCommandResult(outcome);
-        store.finishCommand(commandId, noop ? "noop" : "succeeded", result);
-        return result;
-      } catch (error) {
-        if (isPermanentCommandConflict(error)) {
-          store.finishCommand(commandId, "conflict", {
-            message:
-              error instanceof Error ? error.message : "Command conflicts with current state",
-          });
-        }
-        // Ambiguous transport failures deliberately remain pending so the same command can recover.
-        throw error;
-      }
-    })().finally(() => {
-      if (commandRuns.get(commandId) === run) commandRuns.delete(commandId);
-    });
-    commandRuns.set(commandId, run);
-    return run;
-  };
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
@@ -745,29 +669,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           : run();
       return result.finally(() => release?.());
     });
-  };
-  const recoverClientTurn = async (
-    threadId: string,
-    input: string,
-    images: string[],
-    clientMessageId: string,
-    goal: boolean,
-  ): Promise<TurnStartResult | null> => {
-    const deliveredTurnId = await deliveredClientMessageTurnId(bridge, threadId, clientMessageId);
-    if (!deliveredTurnId) return null;
-    await projection.markMaterialized(threadId);
-    await projection.setCurrentTurn(threadId, deliveredTurnId);
-    await store.update((state) => {
-      state.messageReceipts ??= {};
-      state.messageReceipts[clientMessageId] = {
-        threadId,
-        turnId: deliveredTurnId,
-        contentHash: messageContentHash(input, images, goal),
-        createdAt: Date.now(),
-      };
-    });
-    projection.recordUserMessage(threadId, deliveredTurnId, clientMessageId, input, images);
-    return { turnId: deliveredTurnId };
   };
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
@@ -1346,11 +1247,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   });
 
-  projection.on("resync", () => {
-    void runRecovery().catch(() => undefined);
-  });
-  projection.on("event", (_committed, event) => {
-    if (event.type === "projection.replaced") {
+  projection.on("event", (_sequence, event) => {
+    if (event.type === "resync.required") {
       void runRecovery().catch(() => undefined);
     } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
       void queue.drain(event.thread.id).catch(() => undefined);
@@ -1540,10 +1438,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     projectCount: store.snapshot().projects.length,
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
-    projection: {
-      status: projection.status,
-      ...store.diagnostics(),
-    },
   }));
 
   app.get("/api/v1/transcriptions/config", async (): Promise<TranscriptionConfigResponse> => {
@@ -2034,7 +1928,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!project) {
       return apiError(reply, 404, "not_found", "Project not found");
     }
-    const hasActiveSessions = projection.hasActiveSessions(project.id);
+    const hasActiveSessions = projection
+      .snapshot()
+      .threads.some(
+        (thread) =>
+          thread.projectId === project.id &&
+          (thread.state === "running" ||
+            thread.state === "needsAttention" ||
+            thread.queuedMessageCount > 0),
+      );
     if (hasActiveSessions) {
       return apiError(
         reply,
@@ -2274,9 +2176,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/threads",
     { bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
+      codexManager?.assertTurnsAllowed();
       const body = validateThreadBody(request.body, reply);
       if (!body) return;
-      if (body.clientMessageId && !body.commandId) {
+      if (body.clientMessageId) {
         const receipt = store.snapshot().messageReceipts?.[body.clientMessageId];
         if (receipt) {
           if (
@@ -2298,165 +2201,114 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           });
         }
       }
-      const images = body.images ?? [];
-      const clientMessageId = body.clientMessageId ?? body.commandId ?? null;
-      const commandSource = body.commandId ? `codexnest-command:${sha256(body.commandId)}` : null;
-      const result = await executeDurableCommand(
-        body,
-        "thread.create",
-        null,
-        null,
-        {
-          projectId: body.projectId,
-          input: body.input,
-          images,
-          goal: body.goal ?? false,
-          settings: body.settings ?? {},
-          clientMessageId,
-        },
-        async (recovering) => {
-          codexManager?.assertTurnsAllowed();
-          const project = store
-            .snapshot()
-            .projects.find((candidate) => candidate.id === body.projectId);
-          if (!project) throw new ProjectNotFoundError("Project not found");
-          const settings = mergeSettings(
-            projection.newSessionSettings,
-            body.settings ?? {},
-            projection.availableModels,
-          );
-          if (body.goal && settings.collaborationMode === "team") {
-            throw new ProjectConflictError("Team mode cannot be combined with a goal");
-          }
-          const recoveredThread =
-            recovering && commandSource
-              ? await findManagedThreadBySource(bridge, commandSource)
-              : null;
-          const startedThread =
-            recoveredThread ??
-            parseThreadStart(
-              await bridge.request<unknown>("thread/start", {
-                cwd: project.path,
-                ...threadSettings(settings),
-                dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
-                ...(commandSource ? { threadSource: commandSource } : {}),
-                ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
-              }),
-            ).thread;
-          projection.upsertThread(startedThread);
-          await projection.markUnmaterialized(startedThread.id);
-          await markTeamToolsAvailable(store, startedThread.id);
-          await projection.setSettings(startedThread.id, settings);
-          let turnResult: TurnStartResult | null = null;
-          if (recovering && clientMessageId) {
-            turnResult = await recoverClientTurn(
-              startedThread.id,
-              body.input,
-              images,
-              clientMessageId,
-              body.goal ?? false,
-            );
-          }
-          turnResult ??= await startTurn(
-            startedThread.id,
-            body.input,
-            images,
-            clientMessageId,
-            body.goal ?? false,
-          );
-          if (body.settings?.reasoningEffort !== undefined) {
-            await projection.setDefaultReasoningEffort(settings.reasoningEffort);
-          }
-          return {
-            thread: projection.summary(startedThread.id)!,
-            ...turnResult,
-          };
-        },
+      const project = store
+        .snapshot()
+        .projects.find((candidate) => candidate.id === body.projectId);
+      if (!project) return apiError(reply, 404, "not_found", "Project not found");
+      const settings = mergeSettings(
+        projection.newSessionSettings,
+        body.settings ?? {},
+        projection.availableModels,
       );
-      return reply.code(201).send(result);
+      if (body.goal && settings.collaborationMode === "team") {
+        throw new ProjectConflictError("Team mode cannot be combined with a goal");
+      }
+      const started = parseThreadStart(
+        await bridge.request<unknown>("thread/start", {
+          cwd: project.path,
+          ...threadSettings(settings),
+          dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
+          ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
+        }),
+      );
+      projection.upsertThread(started.thread);
+      await projection.markUnmaterialized(started.thread.id);
+      await markTeamToolsAvailable(store, started.thread.id);
+      await projection.setSettings(started.thread.id, settings);
+      const result = await startTurn(
+        started.thread.id,
+        body.input,
+        body.images ?? [],
+        body.clientMessageId ?? null,
+        body.goal ?? false,
+      );
+      if (body.settings?.reasoningEffort !== undefined) {
+        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+      }
+      return reply.code(201).send({
+        thread: projection.summary(started.thread.id),
+        ...result,
+      });
     },
   );
 
   app.post<{ Params: { id: string }; Body: ForkThreadRequest }>(
     "/api/v1/threads/:id/forks",
     async (request, reply) => {
+      codexManager?.assertTurnsAllowed();
       const body = validateForkThreadBody(request.body);
-      const commandSource = body.commandId
-        ? `codexnest-command-fork:${sha256(body.commandId)}`
-        : null;
-      const result = await executeDurableCommand<ForkThreadResponse>(
-        body,
-        "thread.fork",
-        request.params.id,
-        body.lastTurnId,
-        { lastTurnId: body.lastTurnId, agentMessageId: body.agentMessageId },
-        async (recovering) => {
-          codexManager?.assertTurnsAllowed();
-          let source = projection.summary(request.params.id);
-          if (!source) source = await projection.refreshThread(request.params.id);
-          if (!source) throw new ProjectNotFoundError("Thread not found");
-          assertWritableThread(source);
+      let source = projection.summary(request.params.id);
+      if (!source) source = await projection.refreshThread(request.params.id);
+      if (!source) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(source);
 
-          const turn = await readForkTurn(bridge, source.id, body.lastTurnId);
-          if (!turn) throw new ProjectValidationError("Fork turn was not found");
-          if (turn.status !== "completed") {
-            throw new ProjectConflictError("Only completed turns can be forked");
-          }
-          const agentMessage = [...turn.items]
-            .reverse()
-            .find(
-              (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
-                item.type === "agentMessage" && Boolean(item.text.trim()),
-            );
-          if (!agentMessage || agentMessage.id !== body.agentMessageId) {
-            throw new ProjectValidationError(
-              "agentMessageId must select the last non-empty agent message of the turn",
-            );
-          }
-          if (!threadTitles) throw new Error("Thread title generation is unavailable");
-          const model = effectiveModel(source.settings, projection.availableModels);
-          const title = await threadTitles.generate(agentMessage.text, {
-            cwd: source.cwd,
-            model: model?.id,
-            effort: model?.reasoningEfforts[0]?.value,
-          });
-          const recoveredFork =
-            recovering && commandSource
-              ? await findManagedThreadBySource(bridge, commandSource)
-              : null;
-          const forked =
-            recoveredFork ??
-            parseThreadStart(
-              await bridge.request<unknown>("thread/fork", {
-                threadId: source.id,
-                lastTurnId: turn.id,
-                excludeTurns: true,
-                ...(commandSource ? { threadSource: commandSource } : {}),
-              }),
-            ).thread;
-          await bridge.request("thread/goal/clear", { threadId: forked.id });
-          await bridge.request("thread/name/set", { threadId: forked.id, name: title });
+      const turn = await readForkTurn(bridge, source.id, body.lastTurnId);
+      if (!turn) {
+        return apiError(reply, 400, "validation_failed", "Fork turn was not found");
+      }
+      if (turn.status !== "completed") {
+        return apiError(reply, 409, "conflict", "Only completed turns can be forked");
+      }
+      const agentMessage = [...turn.items]
+        .reverse()
+        .find(
+          (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+            item.type === "agentMessage" && Boolean(item.text.trim()),
+        );
+      if (!agentMessage || agentMessage.id !== body.agentMessageId) {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "agentMessageId must select the last non-empty agent message of the turn",
+        );
+      }
+      if (!threadTitles) throw new Error("Thread title generation is unavailable");
+      const model = effectiveModel(source.settings, projection.availableModels);
+      const title = await threadTitles.generate(agentMessage.text, {
+        cwd: source.cwd,
+        model: model?.id,
+        effort: model?.reasoningEfforts[0]?.value,
+      });
+      const forked = parseThreadStart(
+        await bridge.request<unknown>("thread/fork", {
+          threadId: source.id,
+          lastTurnId: turn.id,
+          excludeTurns: true,
+        }),
+      ).thread;
+      await bridge.request("thread/goal/clear", { threadId: forked.id });
+      await bridge.request("thread/name/set", { threadId: forked.id, name: title });
 
-          const sourceMeta = store.snapshot().threadMeta[source.id];
-          await store.update((state) => {
-            state.threadMeta[forked.id] = {
-              pinned: false,
-              lastReadUpdatedAt: 0,
-              lastOutcome: "completed",
-              outcomeUpdatedAt: forked.updatedAt * 1_000,
-              settings: structuredClone(source.settings),
-              ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION ||
-              sourceMeta?.teamToolsVersion === TEAM_LEGACY_TOOLS_VERSION
-                ? { teamToolsVersion: sourceMeta.teamToolsVersion }
-                : {}),
-            };
-            if (state.messageQueues) delete state.messageQueues[forked.id];
-          });
-          projection.upsertThread({ ...forked, name: title });
-          return { thread: projection.summary(forked.id)! };
-        },
-      );
-      return reply.code(201).send(result);
+      const sourceMeta = store.snapshot().threadMeta[source.id];
+      await store.update((state) => {
+        state.threadMeta[forked.id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: forked.updatedAt * 1_000,
+          settings: structuredClone(source.settings),
+          ...(sourceMeta?.teamToolsVersion === TEAM_TOOLS_VERSION ||
+          sourceMeta?.teamToolsVersion === TEAM_LEGACY_TOOLS_VERSION
+            ? { teamToolsVersion: sourceMeta.teamToolsVersion }
+            : {}),
+        };
+        if (state.messageQueues) delete state.messageQueues[forked.id];
+      });
+      projection.upsertThread({ ...forked, name: title });
+      return reply.code(201).send({
+        thread: projection.summary(forked.id)!,
+      } satisfies ForkThreadResponse);
     },
   );
 
@@ -2597,38 +2449,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
-      const images = body.images ?? [];
-      const clientMessageId = body.clientMessageId ?? body.commandId ?? null;
-      const result = await executeDurableCommand(
-        body,
-        "turn.start",
+      const result = await startTurn(
         request.params.id,
-        body.expectedTurnId ?? null,
-        {
-          input: body.input,
-          images,
-          goal: body.goal ?? false,
-          clientMessageId,
-        },
-        async (recovering) => {
-          if (recovering && clientMessageId) {
-            const recovered = await recoverClientTurn(
-              request.params.id,
-              body.input,
-              images,
-              clientMessageId,
-              body.goal ?? false,
-            );
-            if (recovered) return recovered;
-          }
-          return startTurn(
-            request.params.id,
-            body.input,
-            images,
-            clientMessageId,
-            body.goal ?? false,
-          );
-        },
+        body.input,
+        body.images ?? [],
+        body.clientMessageId ?? null,
+        body.goal ?? false,
       );
       return reply.code(201).send(result);
     },
@@ -2672,26 +2498,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
       assertWritableThread(summary);
-      const effectiveClientMessageId = clientMessageId ?? optionalCommandId(body.commandId);
-      const message = await executeDurableCommand(
-        body,
-        "message.enqueue",
+      const message = await queue.enqueue(
         request.params.id,
-        body.expectedTurnId ?? null,
-        {
-          input: body.input,
-          images,
-          goal: body.goal ?? false,
-          clientMessageId: effectiveClientMessageId,
-        },
-        () =>
-          queue.enqueue(
-            request.params.id,
-            body.input,
-            images,
-            effectiveClientMessageId ?? undefined,
-            { goal: body.goal },
-          ),
+        body.input,
+        images,
+        clientMessageId ?? undefined,
+        { goal: body.goal },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
@@ -2777,66 +2589,47 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (body.turnId !== undefined && typeof body.turnId !== "string") {
         return apiError(reply, 400, "validation_failed", "turnId must be a string");
       }
-      const requestedTurnId = body.turnId ?? summary.currentTurnId;
-      await executeDurableCommand(
-        body,
-        "turn.interrupt",
-        request.params.id,
-        requestedTurnId ?? null,
-        { turnId: requestedTurnId ?? null },
-        async (recovering) => {
-          const current = projection.summary(request.params.id);
-          const orchestration = store.snapshot().threadMeta[request.params.id]?.teamOrchestration;
-          if (
-            (requestedTurnId && current?.currentTurnId !== requestedTurnId) ||
-            (!requestedTurnId && !orchestration)
-          ) {
-            if (recovering || body.commandId) {
-              return durableCommandNoop({ interruptedTurnIds: [] as string[] });
-            }
-            throw new ProjectValidationError("There is no matching running task to stop");
-          }
-          if (orchestration) {
-            stoppedTeamParents.add(request.params.id);
-            const immediate = teamContinuationImmediates.get(request.params.id);
-            if (immediate) clearImmediate(immediate);
-            teamContinuationImmediates.delete(request.params.id);
-            scheduledTeamContinuations.delete(request.params.id);
-          }
-          const interruptedTurnIds: string[] = [];
-          await withKeyLock(teamParentLocks, request.params.id, async () => {
-            if (requestedTurnId) {
-              const interrupted = await interruptTurnIfRunning(
-                bridge,
-                request.params.id,
-                requestedTurnId,
-              );
-              interruptedTurnIds.push(requestedTurnId);
-              if (interrupted && interrupted !== requestedTurnId) {
-                interruptedTurnIds.push(interrupted);
-              }
-            }
-            const tasks = Object.values(
-              store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
-            );
-            const version = store.snapshot().threadMeta[request.params.id]?.teamToolsVersion;
-            const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
-            if (
-              tasks.length &&
-              tasks.every(isTerminalTask) &&
-              (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
-            ) {
-              await store.update((state) => {
-                const meta = state.threadMeta[request.params.id];
-                if (meta) delete meta.teamOrchestration;
-              });
-            }
+      const requestedTurnId = summary.currentTurnId ?? body.turnId;
+      const orchestration = store.snapshot().threadMeta[request.params.id]?.teamOrchestration;
+      if (!requestedTurnId && !orchestration) {
+        return apiError(reply, 400, "validation_failed", "There is no running task to stop");
+      }
+      if (orchestration) {
+        stoppedTeamParents.add(request.params.id);
+        const immediate = teamContinuationImmediates.get(request.params.id);
+        if (immediate) clearImmediate(immediate);
+        teamContinuationImmediates.delete(request.params.id);
+        scheduledTeamContinuations.delete(request.params.id);
+      }
+      const interruptedTurnIds: string[] = [];
+      await withKeyLock(teamParentLocks, request.params.id, async () => {
+        if (requestedTurnId) {
+          const interrupted = await interruptTurnIfRunning(
+            bridge,
+            request.params.id,
+            requestedTurnId,
+          );
+          interruptedTurnIds.push(requestedTurnId);
+          if (interrupted && interrupted !== requestedTurnId) interruptedTurnIds.push(interrupted);
+        }
+        const tasks = Object.values(
+          store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
+        );
+        const version = store.snapshot().threadMeta[request.params.id]?.teamToolsVersion;
+        const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
+        if (
+          tasks.length &&
+          tasks.every(isTerminalTask) &&
+          (version !== TEAM_TOOLS_VERSION || !hasPendingWorkspace)
+        ) {
+          await store.update((state) => {
+            const meta = state.threadMeta[request.params.id];
+            if (meta) delete meta.teamOrchestration;
           });
-          await projection.markInterrupted(request.params.id, interruptedTurnIds);
-          projection.publishThreadState(request.params.id);
-          return { interruptedTurnIds };
-        },
-      );
+        }
+      });
+      await projection.markInterrupted(request.params.id, interruptedTurnIds);
+      projection.publishThreadState(request.params.id);
       return reply.code(204).send();
     },
   );
@@ -2913,15 +2706,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         delete state.devices[request.params.installationId];
       });
       return reply.code(204).send();
-    },
-  );
-
-  app.get<{ Params: { commandId: string } }>(
-    "/api/v1/commands/:commandId",
-    async (request, reply) => {
-      const receipt = store.commandReceipt(request.params.commandId);
-      if (!receipt) return apiError(reply, 404, "not_found", "Command was not found");
-      return receipt;
     },
   );
 
@@ -3644,7 +3428,6 @@ async function prepareManagedTaskWorkspace(
   if (task.access?.mode !== "isolatedWrite") return null;
   if (task.workspace) {
     const reused = { ...task.workspace, lifecycle: "ready" as const, updatedAt: Date.now() };
-    await ensureManagedTaskSandboxMountpoints(reused.worktreePath);
     await store.update((state) => {
       const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
       if (current?.status === "starting") current.workspace = reused;
@@ -3660,7 +3443,6 @@ async function prepareManagedTaskWorkspace(
     updatedAt: now,
   };
   try {
-    await ensureManagedTaskSandboxMountpoints(workspace.worktreePath);
     await store.update((state) => {
       const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
       if (!current || current.status !== "starting") {
@@ -3673,20 +3455,6 @@ async function prepareManagedTaskWorkspace(
     throw error;
   }
   return workspace;
-}
-
-async function ensureManagedTaskSandboxMountpoints(worktreePath: string): Promise<void> {
-  for (const name of TEAM_SANDBOX_MOUNTPOINTS) {
-    const mountpoint = join(worktreePath, name);
-    try {
-      await mkdir(mountpoint);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    if (!(await lstat(mountpoint)).isDirectory()) {
-      throw new ProjectConflictError(`Team sandbox mountpoint is not a directory: ${name}`);
-    }
-  }
 }
 
 async function managedChildRuntime(
@@ -5898,115 +5666,6 @@ function assertWritableThread(summary: ThreadSummary): void {
   }
 }
 
-class DurableCommandNoop<T> {
-  constructor(readonly result: T) {}
-}
-
-function durableCommandNoop<T>(result: T): DurableCommandNoop<T> {
-  return new DurableCommandNoop(result);
-}
-
-function unwrapDurableCommandResult<T>(result: T | DurableCommandNoop<T>): T {
-  return result instanceof DurableCommandNoop ? result.result : result;
-}
-
-function optionalCommandId(value: unknown): string | null {
-  return typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 200 &&
-    value.trim() === value
-    ? value
-    : null;
-}
-
-function validateCommandContext(command: CommandMetadata): void {
-  if (
-    command.expectedThreadId !== undefined &&
-    (typeof command.expectedThreadId !== "string" ||
-      !command.expectedThreadId ||
-      command.expectedThreadId.trim() !== command.expectedThreadId)
-  ) {
-    throw new ProjectValidationError("expectedThreadId must be a non-empty string");
-  }
-  if (
-    command.expectedTurnId !== undefined &&
-    command.expectedTurnId !== null &&
-    (typeof command.expectedTurnId !== "string" ||
-      !command.expectedTurnId ||
-      command.expectedTurnId.trim() !== command.expectedTurnId)
-  ) {
-    throw new ProjectValidationError("expectedTurnId must be null or a non-empty string");
-  }
-  if (
-    command.expectedRevision !== undefined &&
-    (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)
-  ) {
-    throw new ProjectValidationError("expectedRevision must be a non-negative integer");
-  }
-}
-
-function sameCommandReceipt(
-  receipt: CommandReceipt,
-  expected: Pick<
-    CommandReceipt,
-    | "commandId"
-    | "kind"
-    | "threadId"
-    | "turnId"
-    | "expectedThreadId"
-    | "expectedRevision"
-    | "payload"
-  >,
-): boolean {
-  return (
-    receipt.commandId === expected.commandId &&
-    receipt.kind === expected.kind &&
-    receipt.threadId === expected.threadId &&
-    receipt.turnId === expected.turnId &&
-    receipt.expectedThreadId === expected.expectedThreadId &&
-    receipt.expectedRevision === expected.expectedRevision &&
-    canonicalJson(receipt.payload) === canonicalJson(expected.payload)
-  );
-}
-
-function commandContextConflict(
-  command: CommandMetadata,
-  threadId: string | null,
-  snapshot: { revision: number; threads: ThreadSummary[] },
-): string | null {
-  if (command.expectedThreadId !== undefined && command.expectedThreadId !== threadId) {
-    return `Command targets thread ${command.expectedThreadId}, not ${threadId ?? "a new thread"}`;
-  }
-  if (command.expectedRevision !== undefined && command.expectedRevision !== snapshot.revision) {
-    return `Expected revision ${command.expectedRevision}, current revision is ${snapshot.revision}`;
-  }
-  if (command.expectedTurnId !== undefined && threadId) {
-    const currentTurnId =
-      snapshot.threads.find((thread) => thread.id === threadId)?.currentTurnId ?? null;
-    if (command.expectedTurnId !== currentTurnId) {
-      return `Expected turn ${command.expectedTurnId ?? "none"}, current turn is ${currentTurnId ?? "none"}`;
-    }
-  }
-  return null;
-}
-
-function commandResultMessage(value: unknown): string {
-  return isObjectRecord(value) && typeof value.message === "string"
-    ? value.message
-    : "Command has already finished";
-}
-
-function isPermanentCommandConflict(error: unknown): boolean {
-  return (
-    error instanceof ProjectConflictError ||
-    error instanceof ProjectNotFoundError ||
-    error instanceof ProjectValidationError ||
-    error instanceof MessageQueueConflictError ||
-    error instanceof MessageQueueNotFoundError ||
-    error instanceof MessageQueueValidationError
-  );
-}
-
 function compact(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
 }
@@ -6058,18 +5717,7 @@ function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadReq
 
 function validateForkThreadBody(value: unknown): ForkThreadRequest {
   const body = requireRecord<ForkThreadRequest>(value);
-  if (
-    Object.keys(body).some(
-      (key) =>
-        ![
-          "lastTurnId",
-          "agentMessageId",
-          "commandId",
-          "expectedThreadId",
-          "expectedRevision",
-        ].includes(key),
-    )
-  ) {
+  if (Object.keys(body).some((key) => !["lastTurnId", "agentMessageId"].includes(key))) {
     throw new ProjectValidationError("Unknown fork field");
   }
   if (
@@ -6115,19 +5763,7 @@ async function readForkTurn(
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {
   const value = requireRecord<StartTurnRequest>(body);
   if (
-    Object.keys(value).some(
-      (key) =>
-        ![
-          "input",
-          "images",
-          "goal",
-          "clientMessageId",
-          "commandId",
-          "expectedThreadId",
-          "expectedTurnId",
-          "expectedRevision",
-        ].includes(key),
-    )
+    Object.keys(value).some((key) => !["input", "images", "goal", "clientMessageId"].includes(key))
   ) {
     throw new ProjectValidationError("Unknown turn field");
   }
