@@ -46,6 +46,8 @@ import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
 import type {
   CodexNestState,
+  CodexNestStateView,
+  DeepReadonly,
   StateStore,
   TimelineArtifact,
   VoiceTranscriptionState,
@@ -115,7 +117,7 @@ export class AppProjection extends EventEmitter {
         this.publish({ type: "attention.upserted", attention: request });
         return;
       }
-      const state = this.store.snapshot();
+      const state = this.store.view();
       if (this.isThreadVisible(request.threadId, state)) {
         this.publish({ type: "attention.upserted", attention: request });
       }
@@ -123,7 +125,7 @@ export class AppProjection extends EventEmitter {
     });
     attention.on("removed", (attentionId: string) => {
       this.publish({ type: "attention.removed", attentionId });
-      const state = this.store.snapshot();
+      const state = this.store.view();
       for (const threadId of this.threads.keys()) this.publishThread(threadId, state);
     });
   }
@@ -137,7 +139,7 @@ export class AppProjection extends EventEmitter {
   }
 
   snapshot(): AppSnapshot {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     const threads = this.sortedThreads(state).filter((thread) =>
       this.isCwdVisible(thread.cwd, state),
     );
@@ -146,7 +148,7 @@ export class AppProjection extends EventEmitter {
       sequence: this.sequence,
       uiLanguage: state.uiLanguage,
       connection: this.connection,
-      projects: state.projects,
+      projects: cloneView<Project[]>(state.projects),
       threads,
       attention: this.attention
         .list()
@@ -175,7 +177,7 @@ export class AppProjection extends EventEmitter {
   }
 
   get newSessionSettings(): SessionSettings {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     const settings = { ...DEFAULT_SESSION_SETTINGS, ...(state.taskDefaults ?? {}) };
     const reasoningEffort = state.defaultReasoningEffort;
     const model = this.models.find((candidate) => candidate.isDefault) ?? this.models[0];
@@ -207,23 +209,23 @@ export class AppProjection extends EventEmitter {
 
   async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
     const local = this.threads.get(id);
-    const meta = this.store.snapshot().threadMeta[id];
+    const meta = this.store.view().threadMeta[id];
     const subagent = local ? hasSubagentTranscript(local.thread, meta) : false;
     if (local && this.isUnmaterialized(id)) {
-      const state = this.store.snapshot();
+      const state = this.store.view();
       return {
         summary: this.toSummary(local),
         turns: [],
-        queuedMessages: state.messageQueues?.[id] ?? [],
+        queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
         olderTurnsCursor: null,
-        draft: state.threadMeta[id]?.draft ?? null,
+        draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
       };
     }
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
     const page = await this.readTurnsPage(id, subagent ? null : cursor, "desc", !subagent);
     if (cursor === null) await this.restoreActiveTurnFromPage(cached, page.turns);
-    const state = this.store.snapshot();
+    const state = this.store.view();
     const visibleTurns = subagent
       ? subagentTranscriptTurnViews(cached.thread, page.turns, meta)
       : page.turns;
@@ -234,9 +236,9 @@ export class AppProjection extends EventEmitter {
     return {
       summary: this.toSummary(cached),
       turns: visibleTurns,
-      queuedMessages: state.messageQueues?.[id] ?? [],
+      queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
       olderTurnsCursor: subagent ? null : page.nextCursor,
-      draft: state.threadMeta[id]?.draft ?? null,
+      draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
       ...(syncPoint === undefined ? {} : { syncPoint }),
     };
   }
@@ -248,7 +250,7 @@ export class AppProjection extends EventEmitter {
   ): Promise<ThreadChanges> {
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
-    if (hasSubagentTranscript(cached.thread, this.store.snapshot().threadMeta[id])) {
+    if (hasSubagentTranscript(cached.thread, this.store.view().threadMeta[id])) {
       return this.resetThreadChanges(id);
     }
 
@@ -272,7 +274,7 @@ export class AppProjection extends EventEmitter {
     }
     await this.restoreActiveTurnFromPage(cached, turns);
 
-    const state = this.store.snapshot();
+    const state = this.store.view();
     let nextSyncPoint: ThreadSyncPoint | null = null;
     if (page.nextCursor === null) {
       const latest = page.turns.at(-1);
@@ -290,8 +292,8 @@ export class AppProjection extends EventEmitter {
     return {
       summary: this.toSummary(cached),
       turns,
-      queuedMessages: state.messageQueues?.[id] ?? [],
-      draft: state.threadMeta[id]?.draft ?? null,
+      queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
+      draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
       continuationCursor: page.nextCursor,
       syncPoint: nextSyncPoint,
       resetLatest: false,
@@ -324,7 +326,7 @@ export class AppProjection extends EventEmitter {
     if (!activeTurn) return;
     const knownTurn = cached.thread.turns.find((turn) => turn.id === activeTurn.id);
     if (knownTurn && knownTurn.status !== "inProgress") return;
-    const outcomeUpdatedAt = this.store.snapshot().threadMeta[cached.thread.id]?.outcomeUpdatedAt;
+    const outcomeUpdatedAt = this.store.view().threadMeta[cached.thread.id]?.outcomeUpdatedAt;
     const startedAt = activeTurn.startedAt ?? activeTurn.progress.startedAt;
     if (outcomeUpdatedAt !== undefined && (startedAt === null || startedAt < outcomeUpdatedAt)) {
       return;
@@ -379,7 +381,7 @@ export class AppProjection extends EventEmitter {
         `CodexNest thread history read slow (${durationMs}ms, ${response.data.length} turns)\n`,
       );
     }
-    const state = this.store.snapshot();
+    const state = this.store.view();
     const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
     const ordered = direction === "desc" ? response.data.slice().reverse() : response.data;
     const page: CachedTurnsPage = {
@@ -393,7 +395,7 @@ export class AppProjection extends EventEmitter {
           turn,
           this.progress.get(turnKey(id, turn.id)),
           this.liveActivities(id, turn.id),
-          artifacts[turn.id] ?? [],
+          cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         ),
       ),
@@ -432,7 +434,7 @@ export class AppProjection extends EventEmitter {
   emptyThreadCandidates(
     projectId: string,
   ): Array<{ thread: ThreadSummary; knownUnmaterialized: boolean }> {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     return [...this.threads.values()]
       .map((cached) => ({ cached, summary: this.toSummary(cached, state) }))
       .filter(({ cached, summary }) => {
@@ -531,8 +533,8 @@ export class AppProjection extends EventEmitter {
   }
 
   publishProject(projectId: string): void {
-    const project = this.store.snapshot().projects.find((candidate) => candidate.id === projectId);
-    if (project) this.publish({ type: "project.upserted", project });
+    const project = this.store.view().projects.find((candidate) => candidate.id === projectId);
+    if (project) this.publish({ type: "project.upserted", project: cloneView<Project>(project) });
     this.publish({ type: "resync.required" });
   }
 
@@ -546,7 +548,7 @@ export class AppProjection extends EventEmitter {
   }
 
   publishQueue(threadId: string, messages: QueuedMessage[]): void {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     if (this.isThreadVisible(threadId, state)) {
       this.publish({ type: "queue.changed", threadId, messages });
     }
@@ -656,7 +658,7 @@ export class AppProjection extends EventEmitter {
   isUnmaterialized(threadId: string): boolean {
     return (
       this.unmaterializedThreads.has(threadId) ||
-      this.store.snapshot().threadMeta[threadId]?.unmaterialized === true
+      this.store.view().threadMeta[threadId]?.unmaterialized === true
     );
   }
 
@@ -679,7 +681,7 @@ export class AppProjection extends EventEmitter {
     cached.liveOutcome = undefined;
     cached.thread.status = { type: "active", activeFlags: [] };
     cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
-    if (this.store.snapshot().threadMeta[threadId]?.awaitingPlanResponse) {
+    if (this.store.view().threadMeta[threadId]?.awaitingPlanResponse) {
       await this.store.update((state) => {
         const meta = state.threadMeta[threadId];
         if (meta) meta.awaitingPlanResponse = false;
@@ -812,7 +814,7 @@ export class AppProjection extends EventEmitter {
     this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
     if (markedRead.length) {
-      const state = this.store.snapshot();
+      const state = this.store.view();
       for (const deliveredThreadId of markedRead) this.publishThread(deliveredThreadId, state);
     }
   }
@@ -1096,7 +1098,7 @@ export class AppProjection extends EventEmitter {
     loadedThreadIds: string[],
     listedIds: Set<string>,
   ): Promise<Thread[]> {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     const managedParentIds = new Set<string>();
     for (const [threadId, meta] of Object.entries(state.threadMeta)) {
       if (meta.teamOrchestration !== undefined) managedParentIds.add(threadId);
@@ -1154,7 +1156,7 @@ export class AppProjection extends EventEmitter {
   }
 
   private async reconcileOutcomes(): Promise<void> {
-    const state = this.store.snapshot();
+    const state = this.store.view();
     for (const cached of this.threads.values()) {
       if (cached.thread.status.type !== "idle") continue;
       if (isSpawnedSubagent(cached.thread)) continue;
@@ -1592,7 +1594,7 @@ export class AppProjection extends EventEmitter {
     deliveredAt: number,
   ): Promise<void> {
     const readMarkers = this.readMarkers(threadIds, deliveredAt);
-    const snapshot = this.store.snapshot();
+    const snapshot = this.store.view();
     if (
       !readMarkers.some(
         ([threadId, updatedAt]) =>
@@ -1606,7 +1608,7 @@ export class AppProjection extends EventEmitter {
       markedRead.push(...applyReadMarkers(state, readMarkers));
     });
     if (markedRead.length) {
-      const state = this.store.snapshot();
+      const state = this.store.view();
       for (const threadId of markedRead) this.publishThread(threadId, state);
     }
   }
@@ -1699,7 +1701,7 @@ export class AppProjection extends EventEmitter {
 
   private toSummary(
     cached: CachedThread,
-    state: CodexNestState = this.store.snapshot(),
+    state: CodexNestStateView = this.store.view(),
   ): ThreadSummary {
     const meta = state.threadMeta[cached.thread.id] ?? { pinned: false, lastReadUpdatedAt: 0 };
     const updatedAt = cached.thread.updatedAt * 1_000;
@@ -1728,7 +1730,7 @@ export class AppProjection extends EventEmitter {
   private threadState(
     cached: CachedThread,
     stored: ThreadOutcome | undefined,
-    state: CodexNestState,
+    state: CodexNestStateView,
   ): ThreadState {
     if (
       this.attention
@@ -1761,7 +1763,7 @@ export class AppProjection extends EventEmitter {
     return cached.liveOutcome ?? stored ?? "idle";
   }
 
-  private sortedThreads(state: CodexNestState): ThreadSummary[] {
+  private sortedThreads(state: CodexNestStateView): ThreadSummary[] {
     return [...this.threads.values()]
       .map((cached) => this.toSummary(cached, state))
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -1769,7 +1771,7 @@ export class AppProjection extends EventEmitter {
 
   private publishThread(
     threadId: string,
-    state: CodexNestState = this.store.snapshot(),
+    state: CodexNestStateView = this.store.view(),
   ): ThreadSummary | undefined {
     const cached = this.threads.get(threadId);
     if (!cached) return undefined;
@@ -1782,13 +1784,13 @@ export class AppProjection extends EventEmitter {
 
   private isThreadVisible(
     threadId: string,
-    state: CodexNestState = this.store.snapshot(),
+    state: CodexNestStateView = this.store.view(),
   ): boolean {
     const cached = this.threads.get(threadId);
     return !cached || this.isCwdVisible(cached.thread.cwd, state);
   }
 
-  private isCwdVisible(cwd: string, state: CodexNestState): boolean {
+  private isCwdVisible(cwd: string, state: CodexNestStateView): boolean {
     const project = projectForCwd(state.projects, cwd);
     let dismissedPath: string | undefined;
     for (const path of state.dismissedProjectPaths ?? []) {
@@ -1833,7 +1835,7 @@ function isSpawnedSubagent(thread: Thread): boolean {
 
 function hasSubagentTranscript(
   thread: Thread,
-  meta?: CodexNestState["threadMeta"][string],
+  meta?: CodexNestStateView["threadMeta"][string],
 ): boolean {
   return isSpawnedSubagent(thread) || meta?.managedParent !== undefined;
 }
@@ -1841,7 +1843,7 @@ function hasSubagentTranscript(
 function subagentTranscriptTurnViews(
   thread: Thread,
   turns: TurnView[],
-  meta?: CodexNestState["threadMeta"][string],
+  meta?: CodexNestStateView["threadMeta"][string],
 ): TurnView[] {
   if (!turns.length) return [];
   if (!isSpawnedSubagent(thread) && meta?.managedParent) {
@@ -1944,7 +1946,7 @@ function subagentTaskTitle(prompt: string): string | null {
 
 function threadRelation(
   thread: Thread,
-  meta?: CodexNestState["threadMeta"][string],
+  meta?: CodexNestStateView["threadMeta"][string],
 ): ThreadSummary["relation"] {
   if (meta?.managedParent) {
     return {
@@ -2471,7 +2473,7 @@ function isTerminal(state: ThreadState): state is ThreadOutcome {
 }
 
 function teamOrchestrationIsActive(
-  orchestration: CodexNestState["threadMeta"][string]["teamOrchestration"],
+  orchestration: CodexNestStateView["threadMeta"][string]["teamOrchestration"],
 ): boolean {
   if (!orchestration) return false;
   return Object.values(orchestration.tasks).some(
@@ -2481,4 +2483,8 @@ function teamOrchestrationIsActive(
       task.status === "running" ||
       task.delivery?.status !== "delivered",
   );
+}
+
+function cloneView<T>(value: DeepReadonly<T>): T {
+  return structuredClone(value) as T;
 }

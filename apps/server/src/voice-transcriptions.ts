@@ -93,7 +93,7 @@ export class VoiceTranscriptionManager {
   }
 
   job(threadId: string): VoiceTranscriptionState | null {
-    return this.options.store.snapshot().voiceTranscriptions?.[threadId] ?? null;
+    return this.options.store.view().voiceTranscriptions?.[threadId] ?? null;
   }
 
   active(threadId: string): boolean {
@@ -145,8 +145,8 @@ export class VoiceTranscriptionManager {
     const requestedId = input.clientUploadId;
     if (
       requestedId &&
-      (this.options.store.snapshot().voiceReceipts?.[requestedId] ||
-        this.options.store.snapshot().messageReceipts?.[requestedId])
+      (this.options.store.view().voiceReceipts?.[requestedId] ||
+        this.options.store.view().messageReceipts?.[requestedId])
     ) {
       return null;
     }
@@ -157,9 +157,10 @@ export class VoiceTranscriptionManager {
         "A voice transcription is already active in this thread",
       );
     }
-    const activeBytes = Object.values(
-      this.options.store.snapshot().voiceTranscriptions ?? {},
-    ).reduce((total, job) => total + job.audioBytes, 0);
+    const activeBytes = Object.values(this.options.store.view().voiceTranscriptions ?? {}).reduce(
+      (total, job) => total + job.audioBytes,
+      0,
+    );
     if (activeBytes + input.audio.length > MAX_VOICE_QUEUE_BYTES) {
       throw new VoiceTranscriptionQueueFullError("Voice transcription queue is full");
     }
@@ -300,7 +301,7 @@ export class VoiceTranscriptionManager {
   private nextJob(): VoiceTranscriptionState | null {
     const now = Date.now();
     return (
-      Object.values(this.options.store.snapshot().voiceTranscriptions ?? {})
+      Object.values(this.options.store.view().voiceTranscriptions ?? {})
         .filter(
           (job) =>
             ["queued", "transcribing", "applying"].includes(job.status) &&
@@ -321,7 +322,7 @@ export class VoiceTranscriptionManager {
       current.startedAt = startedAt;
       current.error = null;
       delete current.nextAttemptAt;
-      active = structuredClone(current);
+      active = { ...current };
     });
     if (!active) return;
     this.options.projection.publishVoiceTranscription(active);
@@ -345,7 +346,7 @@ export class VoiceTranscriptionManager {
           { audioDurationMs: current.audioDurationMs, processingMs },
         );
       }
-      applying = structuredClone(current);
+      applying = { ...current };
     });
     if (applying) this.options.projection.publishVoiceTranscription(applying);
   }
@@ -383,8 +384,11 @@ export class VoiceTranscriptionManager {
   }
 
   private async applyToQueue(job: VoiceTranscriptionState, transcript: string): Promise<void> {
-    const snapshot = this.options.store.snapshot();
-    const draft = snapshot.threadMeta[job.threadId]?.draft ?? emptyDraft();
+    const snapshot = this.options.store.view();
+    const draft = structuredClone(snapshot.threadMeta[job.threadId]?.draft ?? emptyDraft()) as Omit<
+      ThreadDraft,
+      "updatedAt"
+    >;
     const inserted = insertTranscript(draft, job.selectionStart, job.selectionEnd, transcript);
     const text = formatDraftMessage(inserted, snapshot.uiLanguage);
     await this.options.queue.enqueue(
@@ -429,7 +433,7 @@ export class VoiceTranscriptionManager {
       current.attempts = attempts;
       current.nextAttemptAt = Date.now() + Math.round(base * (0.8 + Math.random() * 0.4));
       current.error = error.message;
-      retrying = structuredClone(current);
+      retrying = { ...current };
     });
     if (retrying) this.options.projection.publishVoiceTranscription(retrying);
   }
@@ -443,14 +447,14 @@ export class VoiceTranscriptionManager {
       current.error = error instanceof Error ? error.message : "Voice transcription failed";
       delete current.nextAttemptAt;
       delete current.transcript;
-      failed = structuredClone(current);
+      failed = { ...current };
     });
     if (failed) this.options.projection.publishVoiceTranscription(failed);
   }
 
   private scheduleNextRetry(): void {
     if (this.stopped || this.retryTimer) return;
-    const nextAttemptAt = Object.values(this.options.store.snapshot().voiceTranscriptions ?? {})
+    const nextAttemptAt = Object.values(this.options.store.view().voiceTranscriptions ?? {})
       .filter((job) => job.status === "queued" && job.nextAttemptAt)
       .reduce<number | null>(
         (earliest, job) =>
@@ -470,7 +474,7 @@ export class VoiceTranscriptionManager {
 
   private async removeOrphanedAudio(): Promise<void> {
     const referenced = new Set(
-      Object.values(this.options.store.snapshot().voiceTranscriptions ?? {}).flatMap((job) =>
+      Object.values(this.options.store.view().voiceTranscriptions ?? {}).flatMap((job) =>
         job.audioFile ? [job.audioFile] : [],
       ),
     );

@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -88,7 +89,7 @@ function validManagedTeamSerializedState(): any {
 }
 
 describe("StateStore", () => {
-  it("creates a private state file and serializes concurrent updates", async () => {
+  it("creates a private database and serializes concurrent updates", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
@@ -102,8 +103,10 @@ describe("StateStore", () => {
       }),
     ]);
     expect(Object.keys(store.snapshot().devices)).toEqual(["a", "b"]);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ schemaVersion: 1 });
+    expect((await stat(store.databasePath)).mode & 0o777).toBe(0o600);
+    const database = new DatabaseSync(store.databasePath, { readOnly: true });
+    expect(database.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    database.close();
   });
 
   it("rejects corrupt and unsupported schemas", async () => {
@@ -461,9 +464,7 @@ describe("StateStore", () => {
             workspace: {
               lifecycle: "integrated",
               changedPaths: ["apps/server/src/api.ts"],
-              baseline: {
-                "apps/server/src/api.ts": { mode: 0o600 },
-              },
+              baseline: {},
             },
             result: {
               outcome: "success",
@@ -792,10 +793,306 @@ describe("StateStore", () => {
     });
   });
 
+  it("migrates legacy JSON with a backup and exports a compact rollback checkpoint", async () => {
+    const { path } = await temporaryState();
+    const legacy = {
+      schemaVersion: 1,
+      auth: {},
+      projects: [],
+      threadMeta: {},
+      devices: { original: { fcmToken: "before", updatedAt: 1 } },
+      uiLanguage: "en",
+    };
+    const serialized = `${JSON.stringify(legacy, null, 2)}\n`;
+    await writeFile(path, serialized, { mode: 0o600 });
+
+    const store = new StateStore(path);
+    await store.load();
+    expect(await readFile(`${path}.pre-sqlite`, "utf8")).toBe(serialized);
+    expect((await stat(`${path}.pre-sqlite`)).mode & 0o777).toBe(0o600);
+
+    await store.update((state) => {
+      state.devices.current = { fcmToken: "after", updatedAt: 2 };
+    });
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("devices.current");
+
+    await store.checkpoint();
+    const checkpoint = await readFile(path, "utf8");
+    expect(checkpoint).not.toContain("\n  ");
+    expect(JSON.parse(checkpoint).devices.current).toEqual({ fcmToken: "after", updatedAt: 2 });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().devices).toMatchObject({
+      original: { fcmToken: "before" },
+      current: { fcmToken: "after" },
+    });
+  });
+
+  it("keeps view reads zero-copy while updates use copy-on-write", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    const before = store.view();
+    const beforeThreadMeta = before.threadMeta;
+
+    await store.update((state) => {
+      state.devices.first = { fcmToken: "one", updatedAt: 1 };
+    });
+
+    const after = store.view();
+    expect(after).not.toBe(before);
+    expect(after.threadMeta).toBe(beforeThreadMeta);
+    expect(before.devices).toEqual({});
+    expect(after.devices.first).toEqual({ fcmToken: "one", updatedAt: 1 });
+    const exported = store.snapshot();
+    exported.devices.first!.fcmToken = "mutated snapshot";
+    expect(store.view().devices.first?.fcmToken).toBe("one");
+  });
+
+  it("skips SQLite writes for no-op updates", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    const database = new DatabaseSync(store.databasePath);
+    database.exec(`
+      CREATE TABLE write_audit (kind TEXT NOT NULL);
+      CREATE TRIGGER audit_insert AFTER INSERT ON state_entries BEGIN
+        INSERT INTO write_audit(kind) VALUES ('insert');
+      END;
+      CREATE TRIGGER audit_update AFTER UPDATE ON state_entries BEGIN
+        INSERT INTO write_audit(kind) VALUES ('update');
+      END;
+      CREATE TRIGGER audit_delete AFTER DELETE ON state_entries BEGIN
+        INSERT INTO write_audit(kind) VALUES ('delete');
+      END;
+    `);
+
+    await store.update(() => undefined);
+    await store.update((state) => {
+      state.uiLanguage = "en";
+    });
+    expect(database.prepare("SELECT count(*) AS count FROM write_audit").get()).toEqual({
+      count: 0,
+    });
+    database.close();
+  });
+
+  it("rolls back a failed SQLite transaction without publishing the draft", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    const before = store.view();
+    const database = new DatabaseSync(store.databasePath);
+    database.exec(`
+      CREATE TRIGGER reject_broken_device BEFORE INSERT ON state_entries
+      WHEN NEW.namespace = 'devices' AND NEW.entry_key = 'broken'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced rollback');
+      END;
+    `);
+
+    await expect(
+      store.update((state) => {
+        state.devices.broken = { fcmToken: "never", updatedAt: 1 };
+      }),
+    ).rejects.toThrow("forced rollback");
+    expect(store.view()).toBe(before);
+    expect(store.view().devices.broken).toBeUndefined();
+    expect(
+      database
+        .prepare(
+          "SELECT json FROM state_entries WHERE namespace = 'devices' AND entry_key = 'broken'",
+        )
+        .get(),
+    ).toBeUndefined();
+    database.close();
+  });
+
+  it("batches deferred activity updates into one transaction", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path, { deferredFlushMs: 25 });
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamOrchestration: {
+          tasks: {
+            task: {
+              id: "task",
+              childThreadId: "child",
+              title: "Activity",
+              prompt: "Track activity.",
+              status: "running",
+              createdAt: 1,
+              lastActivityAt: 1,
+            },
+          },
+        },
+      };
+    });
+    const database = new DatabaseSync(store.databasePath);
+    database.exec(`
+      CREATE TABLE deferred_audit (value INTEGER NOT NULL);
+      CREATE TRIGGER audit_parent_activity AFTER UPDATE ON state_entries
+      WHEN NEW.namespace = 'threadMeta' AND NEW.entry_key = 'parent'
+      BEGIN
+        INSERT INTO deferred_audit(value) VALUES (1);
+      END;
+    `);
+
+    await store.updateDeferred((state) => {
+      const task = state.threadMeta.parent!.teamOrchestration!.tasks.task!;
+      task.lastActivityAt = 2;
+      task.tokensUsed = 10;
+    });
+    await store.updateDeferred((state) => {
+      const task = state.threadMeta.parent!.teamOrchestration!.tasks.task!;
+      task.lastActivityAt = 3;
+      task.tokensUsed = 20;
+    });
+    const beforeFlush = JSON.parse(
+      String(
+        (
+          database
+            .prepare(
+              "SELECT json FROM state_entries WHERE namespace = 'threadMeta' AND entry_key = 'parent'",
+            )
+            .get() as { json: string }
+        ).json,
+      ),
+    );
+    expect(beforeFlush.teamOrchestration.tasks.task.lastActivityAt).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await store.flushed();
+    const afterFlush = JSON.parse(
+      (
+        database
+          .prepare(
+            "SELECT json FROM state_entries WHERE namespace = 'threadMeta' AND entry_key = 'parent'",
+          )
+          .get() as { json: string }
+      ).json,
+    );
+    expect(afterFlush.teamOrchestration.tasks.task).toMatchObject({
+      lastActivityAt: 3,
+      tokensUsed: 20,
+    });
+    expect(database.prepare("SELECT count(*) AS count FROM deferred_audit").get()).toEqual({
+      count: 1,
+    });
+    database.close();
+  });
+
+  it("fails closed when the SQLite database is corrupt", async () => {
+    const { directory, path } = await temporaryState();
+    const databasePath = join(directory, "custom.sqlite");
+    await writeFile(databasePath, "not a sqlite database", { mode: 0o600 });
+    await expect(new StateStore(path, { databasePath }).load()).rejects.toThrow();
+  });
+
+  it("compacts terminal workspace baselines without losing lifecycle details", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    const workspace = state.threadMeta.parent.teamOrchestration.tasks.task.workspace;
+    workspace.lifecycle = "discarded";
+    workspace.changedPaths = ["apps/server/src/api.ts"];
+    workspace.error = "cleanup will retry";
+    await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.view().threadMeta.parent?.teamOrchestration?.tasks.task?.workspace).toEqual(
+      expect.objectContaining({
+        lifecycle: "discarded",
+        baseline: {},
+        changedPaths: ["apps/server/src/api.ts"],
+        error: "cleanup will retry",
+      }),
+    );
+  });
+
+  it("handles hon-scale state with targeted writes from eight concurrent sessions", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    const baseline: Record<string, unknown> = {};
+    for (let index = 0; index < 8_500; index += 1) {
+      baseline[`src/generated/file-${index}.ts`] = {
+        type: "file",
+        mode: 0o644,
+        digest: index.toString(16).padStart(64, "0"),
+      };
+    }
+    const task = state.threadMeta.parent.teamOrchestration.tasks.task;
+    task.status = "running";
+    task.workspace.baseline = baseline;
+    for (let index = 0; index < 582; index += 1) {
+      state.threadMeta[`thread-${index}`] = {
+        pinned: false,
+        lastReadUpdatedAt: index,
+        ...(index < 8
+          ? {
+              teamOrchestration: {
+                tasks: {
+                  [`task-${index}`]: {
+                    id: `task-${index}`,
+                    childThreadId: `child-${index}`,
+                    title: `Session ${index}`,
+                    prompt: `Run session ${index}.`,
+                    status: "running",
+                    createdAt: index + 10,
+                    lastActivityAt: index + 10,
+                  },
+                },
+              },
+            }
+          : {}),
+      };
+    }
+    await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+
+    const startedAt = performance.now();
+    const store = new StateStore(path, { deferredFlushMs: 25 });
+    await store.load();
+    const loadMs = performance.now() - startedAt;
+    expect(Object.keys(store.view().threadMeta)).toHaveLength(583);
+    expect(loadMs).toBeLessThan(1_000);
+
+    const updateStartedAt = performance.now();
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        store.updateDeferred((draft) => {
+          const managed =
+            draft.threadMeta[`thread-${index}`]!.teamOrchestration!.tasks[`task-${index}`]!;
+          managed.lastActivityAt = 1_000 + index;
+          managed.tokensUsed = 10_000 + index;
+        }),
+      ),
+    );
+    await store.flushed();
+    expect(performance.now() - updateStartedAt).toBeLessThan(1_000);
+
+    const fullJsonBytes = Buffer.byteLength(JSON.stringify(store.snapshot()));
+    const walBytes = (await stat(`${store.databasePath}-wal`)).size;
+    expect(walBytes).toBeLessThan(fullJsonBytes * 0.1);
+    const database = new DatabaseSync(store.databasePath, { readOnly: true });
+    expect(database.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    database.close();
+  }, 10_000);
+
   it("reloads an externally rotated verifier and emits revocation", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
+    const database = new DatabaseSync(store.databasePath);
+    database.exec(`
+      CREATE TABLE auth_audit (namespace TEXT NOT NULL, entry_key TEXT NOT NULL);
+      CREATE TRIGGER audit_auth_rotation AFTER UPDATE ON state_entries BEGIN
+        INSERT INTO auth_audit(namespace, entry_key) VALUES (NEW.namespace, NEW.entry_key);
+      END;
+    `);
     const rotated = store.snapshot();
     rotated.auth.tokenSha256 = "a".repeat(64);
     await writeFile(path, JSON.stringify(rotated), { mode: 0o600 });
@@ -803,5 +1100,9 @@ describe("StateStore", () => {
     await expect(store.refreshAuthVerifier()).resolves.toBe(true);
     await revoked;
     expect(store.snapshot().auth.tokenSha256).toBe("a".repeat(64));
+    expect(database.prepare("SELECT namespace, entry_key FROM auth_audit").all()).toEqual([
+      { namespace: "root", entry_key: "auth" },
+    ]);
+    database.close();
   });
 });

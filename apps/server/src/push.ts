@@ -20,7 +20,7 @@ export class PushNotifier {
 
   async send(threadId: string, eventType: "completed" | "failed" | "attention"): Promise<void> {
     if (!this.credentialPath) return;
-    const state = this.store.snapshot();
+    const state = this.store.view();
     if (eventType !== "attention" && state.threadMeta[threadId]?.managedParent) return;
     await this.initialize();
     const registrations = Object.entries(state.devices);

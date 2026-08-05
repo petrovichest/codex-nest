@@ -76,6 +76,7 @@ codexnest_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/codexnest"
 codexnest_config="$codexnest_config_root/server.env"
 codexnest_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/codexnest"
 codexnest_state="$codexnest_state_root/state.json"
+codexnest_database="$codexnest_state_root/state.sqlite"
 codexnest_service_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 mkdir -p "$codexnest_root" "$codexnest_releases" "$codexnest_runtime" \
@@ -179,6 +180,7 @@ if [[ ! -f "$codexnest_config" ]]; then
     printf 'CODEXNEST_PORT=4310\n'
     printf 'CODEXNEST_ALLOWED_ORIGINS=http://localhost\n'
     printf 'CODEXNEST_STATE_PATH=%s\n' "$codexnest_state"
+    printf 'CODEXNEST_DATABASE_PATH=%s\n' "$codexnest_database"
     printf 'CODEXNEST_CODEX_BIN=%s\n' "$codexnest_codex_bin"
     printf 'CODEXNEST_CODEX_MANAGEMENT_BIN=%s\n' "$codexnest_codex_bin"
     printf 'CODEXNEST_CODEX_TRANSPORT=daemon\n'
@@ -213,6 +215,7 @@ codexnest_ensure_env_value CODEXNEST_HOST 0.0.0.0
 codexnest_ensure_env_value CODEXNEST_PORT 4310
 codexnest_ensure_env_value CODEXNEST_ALLOWED_ORIGINS http://localhost
 codexnest_ensure_env_value CODEXNEST_STATE_PATH "$codexnest_state"
+codexnest_ensure_env_value CODEXNEST_DATABASE_PATH "$codexnest_database"
 codexnest_ensure_env_value CODEXNEST_CODEX_BIN "$codexnest_codex_bin"
 codexnest_ensure_env_value CODEXNEST_CODEX_MANAGEMENT_BIN "$codexnest_codex_bin"
 codexnest_ensure_env_value CODEXNEST_CODEX_TRANSPORT daemon

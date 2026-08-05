@@ -114,7 +114,7 @@ describe("AppProjection", () => {
     ).toEqual({ filesChanged: 2, additions: 2, deletions: 1 });
   });
 
-  it("reuses one state snapshot while materializing thread views", async () => {
+  it("reuses one zero-copy state view while materializing thread views", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -139,30 +139,30 @@ describe("AppProjection", () => {
       new AttentionManager(),
       false,
     );
-    const stateSnapshots = vi.spyOn(store, "snapshot");
+    const stateViews = vi.spyOn(store, "view");
 
     projection.upsertThread(thread("one", "/work", 1));
-    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+    expect(stateViews).toHaveBeenCalledTimes(1);
 
-    stateSnapshots.mockClear();
+    stateViews.mockClear();
     projection.upsertThread({ ...thread("empty", "/work", 2), preview: "" });
-    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+    expect(stateViews).toHaveBeenCalledTimes(1);
 
-    stateSnapshots.mockClear();
+    stateViews.mockClear();
     expect(projection.snapshot().threads.map((candidate) => candidate.id)).toEqual([
       "empty",
       "one",
     ]);
-    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+    expect(stateViews).toHaveBeenCalledTimes(1);
 
-    stateSnapshots.mockClear();
+    stateViews.mockClear();
     expect(projection.emptyThreadCandidates("root")).toEqual([
       {
         thread: expect.objectContaining({ id: "empty", projectId: "root" }),
         knownUnmaterialized: true,
       },
     ]);
-    expect(stateSnapshots).toHaveBeenCalledTimes(1);
+    expect(stateViews).toHaveBeenCalledTimes(1);
   });
 
   it("does not reactivate a turn after its completion notification wins the response race", async () => {

@@ -25,6 +25,7 @@ import type {
   ModelOption,
   MoveProjectRequest,
   PermissionPreset,
+  Project,
   QueueMessageRequest,
   QueuedMessage,
   RefreshThreadResponse,
@@ -113,6 +114,8 @@ import {
 } from "./message-queue";
 import type {
   CodexNestState,
+  CodexNestStateView,
+  DeepReadonly,
   ManagedTeamTaskAccessState,
   ManagedTeamTaskResultArtifact,
   ManagedTeamTaskResultCheck,
@@ -154,9 +157,13 @@ const TEAM_MAX_ACTIVE_TASKS = 10;
 const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
 const TEAM_WATCHDOG_MS = 10 * 60_000;
-const TEAM_ACTIVITY_PERSIST_MS = 60_000;
+const TEAM_ACTIVITY_PERSIST_MS = 1_000;
 const TEAM_CHILD_MODEL_ID = "gpt-5.6-sol";
 const TEAM_SANDBOX_MOUNTPOINTS = [".agents", ".codex"] as const;
+
+type ManagedTeamTaskView = DeepReadonly<ManagedTeamTaskState>;
+type ManagedTeamTaskMapView = DeepReadonly<Record<string, ManagedTeamTaskState>>;
+type TeamToolOperationView = DeepReadonly<TeamToolOperationState>;
 const TEAM_CONTINUATION_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
 const TEAM_SESSION_UPGRADE_MESSAGE =
@@ -464,7 +471,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     goal = false,
   ): Promise<TurnStartResult> => {
     if (clientMessageId) {
-      const receipt = store.snapshot().messageReceipts?.[clientMessageId];
+      const receipt = store.view().messageReceipts?.[clientMessageId];
       if (receipt) {
         if (
           receipt.threadId !== threadId ||
@@ -489,7 +496,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
     if (
       summary.settings.collaborationMode === "team" &&
-      store.snapshot().threadMeta[threadId]?.managedTeamToolsAvailable !== true
+      store.view().threadMeta[threadId]?.managedTeamToolsAvailable !== true
     ) {
       throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
     }
@@ -645,7 +652,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
     for (const candidate of projection.emptyThreadCandidates(projectId)) {
-      if (store.snapshot().threadMeta[candidate.thread.id]?.managedTeamToolsAvailable !== true) {
+      if (store.view().threadMeta[candidate.thread.id]?.managedTeamToolsAvailable !== true) {
         continue;
       }
       if (candidate.knownUnmaterialized) return candidate.thread;
@@ -666,7 +673,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const existing = await findReusableProjectThread(projectId);
       if (existing) return projection.setSettings(existing.id, projection.newSessionSettings);
       codexManager?.assertTurnsAllowed();
-      const project = store.snapshot().projects.find((candidate) => candidate.id === projectId);
+      const project = store.view().projects.find((candidate) => candidate.id === projectId);
       if (!project) throw new ProjectNotFoundError("Project not found");
       const settings = projection.newSessionSettings;
       const started = parseThreadStart(
@@ -874,7 +881,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             const summary = projection.summary(threadId);
             if (stoppedTeamParents.has(threadId)) {
               const tasks = Object.values(
-                store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
+                store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {},
               );
               const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
               if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
@@ -954,7 +961,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (teamContinuationsPaused) return;
     if (
       notification.method === "turn/completed" &&
-      Object.values(store.snapshot().teamToolOperations ?? {}).some(
+      Object.values(store.view().teamToolOperations ?? {}).some(
         (operation) =>
           operation.status === "applied" &&
           operation.threadId === notification.params.threadId &&
@@ -969,7 +976,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     const childThreadId = notificationThreadId(notification);
     const managed = childThreadId
-      ? managedTaskForNotification(store.snapshot(), notification)
+      ? managedTaskForNotification(store.view(), notification)
       : undefined;
     if (childThreadId && managed) {
       managedActivity.set(childThreadId, Date.now());
@@ -1014,7 +1021,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const parent =
         projection.summary(caller)?.relation.kind === "session"
           ? caller
-          : managedTaskForChild(store.snapshot(), caller)?.parentThreadId;
+          : managedTaskForChild(store.view(), caller)?.parentThreadId;
       const operation = () => handleManagedTeamToolCall(request, bridge, store, projection);
       const pending = withKeyLock(teamToolOperationLocks, operationKey, () =>
         parent ? withKeyLock(teamParentLocks, parent, operation) : operation(),
@@ -1134,7 +1141,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await queue.recover();
         await pruneCompletedTeamToolOperations(bridge, store);
         const threadIds = new Set<string>();
-        const parentThreadIds = Object.entries(store.snapshot().threadMeta)
+        const parentThreadIds = Object.entries(store.view().threadMeta)
           .filter(([, meta]) => Boolean(meta.teamOrchestration))
           .map(([threadId]) => threadId);
         for (const parentThreadId of parentThreadIds) {
@@ -1144,7 +1151,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           for (const threadId of reconciled) threadIds.add(threadId);
         }
         if (
-          Object.values(store.snapshot().threadMeta).some((meta) =>
+          Object.values(store.view().threadMeta).some((meta) =>
             Object.values(meta.teamOrchestration?.tasks ?? {}).some(
               (task) => task.recoveryMisses === 1,
             ),
@@ -1280,7 +1287,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     )
       return;
     const token = bearerToken(request);
-    if (!token || !verifyToken(token, store.snapshot().auth.tokenSha256)) {
+    if (!token || !verifyToken(token, store.view().auth.tokenSha256)) {
       return apiError(reply, 401, "unauthorized", "Invalid or missing bearer token");
     }
   });
@@ -1323,7 +1330,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       throw error;
     }
-    const snapshot = store.snapshot();
+    const snapshot = store.view();
     const activeTurnCount = projection
       .snapshot()
       .threads.filter((thread) => thread.currentTurnId !== null).length;
@@ -1389,7 +1396,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.get("/api/v1/summary", async () => ({
     threadCount: projection.threadCount,
-    projectCount: store.snapshot().projects.length,
+    projectCount: store.view().projects.length,
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
   }));
@@ -1532,7 +1539,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (selectionStart === null || selectionEnd === null || selectionEnd < selectionStart) {
         return apiError(reply, 400, "validation_failed", "Voice selection is invalid");
       }
-      const inputLength = store.snapshot().threadMeta[request.params.id]?.draft?.input.length ?? 0;
+      const inputLength = store.view().threadMeta[request.params.id]?.draft?.input.length ?? 0;
       if (selectionStart > inputLength || selectionEnd > inputLength) {
         return apiError(reply, 400, "validation_failed", "Voice selection is outside the draft");
       }
@@ -1541,7 +1548,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           ? null
           : parseNonNegativeInteger(request.query.draftUpdatedAt);
       const currentDraftUpdatedAt =
-        store.snapshot().threadMeta[request.params.id]?.draft?.updatedAt ?? null;
+        store.view().threadMeta[request.params.id]?.draft?.updatedAt ?? null;
       if (
         expectedDraftUpdatedAt === null
           ? request.query.draftUpdatedAt !== "none" || currentDraftUpdatedAt !== null
@@ -1640,7 +1647,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.get("/api/v1/settings/task-defaults", async (): Promise<TaskDefaults> => {
-    return store.snapshot().taskDefaults ?? {};
+    return store.view().taskDefaults ?? {};
   });
 
   app.put<{ Body: UpdateTaskDefaultsRequest }>(
@@ -1774,7 +1781,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 400, "validation_failed", "path is required");
     }
     const canonical = await canonicalProjectPath(body.path, services.projectRoot);
-    const existing = store.snapshot().projects;
+    const existing = store.view().projects;
     assertUniqueProjectPath(existing, canonical);
     const project = createProject(body.path, canonical);
     await store.update((state) => {
@@ -1789,7 +1796,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/projects/:id",
     async (request, reply) => {
       const body = requireRecord<UpdateProjectRequest>(request.body);
-      const state = store.snapshot();
+      const state = store.view();
       const current = state.projects.find((project) => project.id === request.params.id);
       if (!current) return apiError(reply, 404, "not_found", "Project not found");
       if (body.path !== undefined && typeof body.path !== "string") {
@@ -1835,8 +1842,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (hasDirection && body.direction !== "up" && body.direction !== "down") {
         return apiError(reply, 400, "validation_failed", "direction must be up or down");
       }
-      const projects = store.snapshot().projects;
-      const index = projects.findIndex((project) => project.id === request.params.id);
+      const currentProjects = store.view().projects;
+      const index = currentProjects.findIndex((project) => project.id === request.params.id);
       if (index < 0) return apiError(reply, 404, "not_found", "Project not found");
       let targetIndex: number;
       if (hasTargetIndex) {
@@ -1856,11 +1863,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       } else {
         targetIndex = body.direction === "up" ? index - 1 : index + 1;
       }
-      if (hasTargetIndex && targetIndex >= projects.length) {
+      if (hasTargetIndex && targetIndex >= currentProjects.length) {
         return apiError(reply, 400, "validation_failed", "targetIndex is outside the project list");
       }
-      if (targetIndex < 0 || targetIndex >= projects.length) return projects;
-      if (targetIndex === index) return projects;
+      if (targetIndex < 0 || targetIndex >= currentProjects.length) {
+        return cloneView<Project[]>(currentProjects);
+      }
+      if (targetIndex === index) return cloneView<Project[]>(currentProjects);
 
       const updated = await store.update((state) => {
         const currentIndex = state.projects.findIndex(
@@ -1870,15 +1879,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const [project] = state.projects.splice(currentIndex, 1);
         state.projects.splice(targetIndex, 0, project!);
       });
-      projection.publishProjectsReordered(updated.projects);
-      return updated.projects;
+      const projects = cloneView<Project[]>(updated.projects);
+      projection.publishProjectsReordered(projects);
+      return projects;
     },
   );
 
   app.delete<{ Params: { id: string } }>("/api/v1/projects/:id", async (request, reply) => {
-    const project = store
-      .snapshot()
-      .projects.find((candidate) => candidate.id === request.params.id);
+    const project = store.view().projects.find((candidate) => candidate.id === request.params.id);
     if (!project) {
       return apiError(reply, 404, "not_found", "Project not found");
     }
@@ -1910,7 +1918,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
 
   app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
-    if (!store.snapshot().projects.some((project) => project.id === request.params.id)) {
+    if (!store.view().projects.some((project) => project.id === request.params.id)) {
       return apiError(reply, 404, "not_found", "Project not found");
     }
     const thread = await getOrCreateProjectThread(request.params.id);
@@ -2134,7 +2142,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const body = validateThreadBody(request.body, reply);
       if (!body) return;
       if (body.clientMessageId) {
-        const receipt = store.snapshot().messageReceipts?.[body.clientMessageId];
+        const receipt = store.view().messageReceipts?.[body.clientMessageId];
         if (receipt) {
           if (
             receipt.contentHash !==
@@ -2155,9 +2163,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           });
         }
       }
-      const project = store
-        .snapshot()
-        .projects.find((candidate) => candidate.id === body.projectId);
+      const project = store.view().projects.find((candidate) => candidate.id === body.projectId);
       if (!project) return apiError(reply, 404, "not_found", "Project not found");
       const settings = mergeSettings(
         projection.newSessionSettings,
@@ -2244,7 +2250,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       await bridge.request("thread/goal/clear", { threadId: forked.id });
       await bridge.request("thread/name/set", { threadId: forked.id, name: title });
 
-      const sourceMeta = store.snapshot().threadMeta[source.id];
+      const sourceMeta = store.view().threadMeta[source.id];
       await store.update((state) => {
         state.threadMeta[forked.id] = {
           pinned: false,
@@ -2342,7 +2348,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (
         settings.collaborationMode === "team" &&
         summary.settings.collaborationMode !== "team" &&
-        store.snapshot().threadMeta[request.params.id]?.managedTeamToolsAvailable !== true
+        store.view().threadMeta[request.params.id]?.managedTeamToolsAvailable !== true
       ) {
         throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
       }
@@ -2543,7 +2549,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         return apiError(reply, 400, "validation_failed", "turnId must be a string");
       }
       const requestedTurnId = summary.currentTurnId ?? body.turnId;
-      const orchestration = store.snapshot().threadMeta[request.params.id]?.teamOrchestration;
+      const orchestration = store.view().threadMeta[request.params.id]?.teamOrchestration;
       if (!requestedTurnId && !orchestration) {
         return apiError(reply, 400, "validation_failed", "There is no running task to stop");
       }
@@ -2566,7 +2572,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           if (interrupted && interrupted !== requestedTurnId) interruptedTurnIds.push(interrupted);
         }
         const tasks = Object.values(
-          store.snapshot().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
+          store.view().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
         );
         const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
         if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
@@ -2751,7 +2757,7 @@ async function handleManagedTeamToolCall(
   };
 
   if (tool === "submit_result") {
-    const managed = managedTaskForChild(store.snapshot(), threadId);
+    const managed = managedTaskForChild(store.view(), threadId);
     if (!managed) return finish(dynamicToolError("This thread is not a managed Team task"));
     const summary = requiredToolString(args, "summary");
     const details = optionalToolString(args, "details");
@@ -2806,7 +2812,7 @@ async function handleManagedTeamToolCall(
     const title = requiredToolString(args, "title");
     const prompt = requiredToolString(args, "prompt");
     const options = managedTaskOptions(args, parent.settings, projection.availableModels);
-    const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const tasks = store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
     const missing = options.dependsOn.filter((dependency) => !tasks[dependency]);
     if (missing.length) {
       return finish(dynamicToolError(`Managed task dependencies not found: ${missing.join(", ")}`));
@@ -2814,7 +2820,7 @@ async function handleManagedTeamToolCall(
     const operation = prepared!.operation;
     const taskId = operation.taskId!;
     const childThreadSource = operation.childThreadSource!;
-    let task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+    let task = store.view().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
     if (!task) {
       const recoveredThread = prepared!.created
         ? null
@@ -2870,7 +2876,7 @@ async function handleManagedTeamToolCall(
   }
 
   if (tool === "list_tasks") {
-    const taskMap = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const taskMap = store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
     const tasks = Object.values(taskMap)
       .sort((left, right) => left.createdAt - right.createdAt)
       .map((task) => publicManagedTask(task, taskMap));
@@ -2878,14 +2884,14 @@ async function handleManagedTeamToolCall(
   }
 
   const taskId = requiredToolString(args, "taskId");
-  const task = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
+  const task = store.view().threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
   if (!task) return finish(dynamicToolError("Managed task not found"));
 
   if (tool === "followup_task") {
     if (!isTerminalTask(task) || task.delivery?.status !== "delivered") {
       return finish(dynamicToolError("Only a delivered terminal task can be continued"));
     }
-    const tasks = store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
+    const tasks = store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {};
     const existingFollowup = tasks[prepared!.operation.taskId!];
     if (existingFollowup) {
       return finish(
@@ -2932,7 +2938,9 @@ async function handleManagedTeamToolCall(
       resolvedModel: options.model,
       resolvedReasoningEffort: options.reasoningEffort,
       resolvedServiceTier: options.serviceTier,
-      ...(reusesWorkspace && task.workspace ? { workspace: structuredClone(task.workspace) } : {}),
+      ...(reusesWorkspace && task.workspace
+        ? { workspace: cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(task.workspace) }
+        : {}),
       createdAt: now,
       lastActivityAt: now,
     };
@@ -2976,7 +2984,7 @@ async function handleManagedTeamToolCall(
       return finish(dynamicToolError("This managed task's changes were discarded"));
     }
     if (
-      Object.values(store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
+      Object.values(store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
         (candidate) => candidate.predecessorTaskId === task.id,
       )
     ) {
@@ -3077,7 +3085,7 @@ async function handleManagedTeamToolCall(
       return finish(dynamicToolError("This managed task was already integrated"));
     }
     if (
-      Object.values(store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
+      Object.values(store.view().threadMeta[threadId]?.teamOrchestration?.tasks ?? {}).some(
         (candidate) => candidate.predecessorTaskId === task.id,
       )
     ) {
@@ -3145,7 +3153,7 @@ async function handleManagedTeamToolCall(
       // The persisted coordinator state is still useful when detailed history is unavailable.
     }
     return dynamicToolSuccess({
-      ...publicManagedTask(task, store.snapshot().threadMeta[threadId]?.teamOrchestration?.tasks),
+      ...publicManagedTask(task, store.view().threadMeta[threadId]?.teamOrchestration?.tasks),
       workspacePath:
         task.workspace && !["integrated", "discarded"].includes(task.workspace.lifecycle)
           ? task.workspace.worktreePath
@@ -3247,7 +3255,7 @@ async function createManagedTeamTask(
   recoveredThread: Thread | null,
   options: ManagedTaskOptions,
 ): Promise<ManagedTeamTaskState> {
-  if (store.snapshot().threadMeta[parent.id]?.managedTeamToolsAvailable !== true) {
+  if (store.view().threadMeta[parent.id]?.managedTeamToolsAvailable !== true) {
     throw new ProjectConflictError("This Team session does not have managed tools");
   }
   const started = recoveredThread
@@ -3306,8 +3314,8 @@ async function createManagedTeamTask(
 }
 
 function managedTaskDependencyFailure(
-  task: ManagedTeamTaskState,
-  tasks: Record<string, ManagedTeamTaskState>,
+  task: ManagedTeamTaskView,
+  tasks: ManagedTeamTaskMapView,
 ): string | null {
   for (const dependencyId of task.dependsOn ?? []) {
     const dependency = tasks[dependencyId];
@@ -3326,8 +3334,8 @@ function managedTaskDependencyFailure(
 }
 
 function managedTaskDependenciesReady(
-  task: ManagedTeamTaskState,
-  tasks: Record<string, ManagedTeamTaskState>,
+  task: ManagedTeamTaskView,
+  tasks: ManagedTeamTaskMapView,
 ): boolean {
   return (task.dependsOn ?? []).every((dependencyId) => {
     const dependency = tasks[dependencyId];
@@ -3349,12 +3357,16 @@ function managedTaskDependenciesReady(
 async function prepareManagedTaskWorkspace(
   store: StateStore,
   parentThreadId: string,
-  task: ManagedTeamTaskState,
+  task: ManagedTeamTaskView,
   parentCwd: string,
 ): Promise<ManagedTeamTaskState["workspace"] | null> {
   if (task.access?.mode !== "isolatedWrite") return null;
   if (task.workspace) {
-    const reused = { ...task.workspace, lifecycle: "ready" as const, updatedAt: Date.now() };
+    const reused = {
+      ...cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(task.workspace),
+      lifecycle: "ready" as const,
+      updatedAt: Date.now(),
+    };
     await ensureManagedTaskSandboxMountpoints(reused.worktreePath);
     await store.update((state) => {
       const current = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
@@ -3401,7 +3413,7 @@ async function ensureManagedTaskSandboxMountpoints(worktreePath: string): Promis
 }
 
 async function managedChildRuntime(
-  task: ManagedTeamTaskState,
+  task: ManagedTeamTaskView,
   parentCwd: string,
   workspace: ManagedTeamTaskState["workspace"] | null,
 ): Promise<ManagedChildRuntime> {
@@ -3480,7 +3492,7 @@ async function startQueuedTeamTasks(
   parentThreadId: string,
 ): Promise<void> {
   while (true) {
-    const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+    const orchestration = store.view().threadMeta[parentThreadId]?.teamOrchestration;
     if (!orchestration) return;
     const active = Object.values(orchestration.tasks).filter(
       (task) => task.status === "starting" || task.status === "running",
@@ -3526,7 +3538,7 @@ async function startQueuedTeamTasks(
       if (!parent) throw new Error("Managed task parent is unavailable");
       const model = managedChildModel(projection.availableModels);
       const launchTask: ManagedTeamTaskState = {
-        ...queued,
+        ...cloneView<ManagedTeamTaskState>(queued),
         resolvedModel: model.id,
         resolvedReasoningEffort: compatibleManagedChildEffort(model, [
           queued.resolvedReasoningEffort,
@@ -3646,7 +3658,7 @@ async function handleManagedTeamNotification(
   const affected = new Set<string>();
   const childThreadId = notificationThreadId(notification);
   if (!childThreadId) return affected;
-  const managed = managedTaskForNotification(store.snapshot(), notification);
+  const managed = managedTaskForNotification(store.view(), notification);
   if (!managed || isTerminalTask(managed.task)) return affected;
   const now = activity.get(childThreadId) ?? Date.now();
   const expectedWakeAt = managedSleepExpectedWakeAt(notification);
@@ -3662,7 +3674,7 @@ async function handleManagedTeamNotification(
       persistedAt: shouldPersist ? now : previousUsage.persistedAt,
     });
     if (shouldPersist) {
-      await store.update((state) => {
+      await store.updateDeferred((state) => {
         const task =
           state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
         if (!task || isTerminalTask(task)) return;
@@ -3671,11 +3683,7 @@ async function handleManagedTeamNotification(
       });
     }
   }
-  if (
-    expectedWakeAt !== null ||
-    sleepCompleted ||
-    now - managed.task.lastActivityAt >= TEAM_ACTIVITY_PERSIST_MS
-  ) {
+  if (expectedWakeAt !== null || sleepCompleted) {
     await store.update((state) => {
       const task =
         state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
@@ -3687,6 +3695,14 @@ async function handleManagedTeamNotification(
       } else if (sleepCompleted) {
         delete task.expectedWakeAt;
       }
+    });
+  } else if (now - managed.task.lastActivityAt >= TEAM_ACTIVITY_PERSIST_MS) {
+    await store.updateDeferred((state) => {
+      const task =
+        state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+      if (!task || isTerminalTask(task)) return;
+      task.lastActivityAt = now;
+      delete task.watchdog;
     });
   }
 
@@ -3786,7 +3802,7 @@ async function finalizeManagedTask(
   result: ManagedTeamTaskResult,
   expectedTaskId?: string,
 ): Promise<boolean> {
-  const managed = managedTaskForChild(store.snapshot(), childThreadId, expectedTaskId);
+  const managed = managedTaskForChild(store.view(), childThreadId, expectedTaskId);
   if (!managed || isTerminalTask(managed.task)) return false;
   let workspaceUpdate: ManagedTeamTaskState["workspace"] | undefined;
   let changedPathCount = managed.task.workspace?.changedPaths?.length ?? 0;
@@ -3800,14 +3816,14 @@ async function finalizeManagedTask(
       if (!delta.changedPaths.length) {
         await discardTeamWorkspace(managed.task.workspace);
         workspaceUpdate = {
-          ...managed.task.workspace,
+          ...cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(managed.task.workspace),
           lifecycle: "discarded",
           changedPaths: [],
           updatedAt: Date.now(),
         };
       } else {
         workspaceUpdate = {
-          ...managed.task.workspace,
+          ...cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(managed.task.workspace),
           lifecycle: "ready",
           changedPaths: delta.changedPaths,
           conflictPaths: undefined,
@@ -3817,7 +3833,7 @@ async function finalizeManagedTask(
       }
     } catch (error) {
       workspaceUpdate = {
-        ...managed.task.workspace,
+        ...cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(managed.task.workspace),
         lifecycle: "recoveryRequired",
         error: safeError(error).message,
         updatedAt: Date.now(),
@@ -3880,7 +3896,7 @@ async function claimTeamResults(
           terminalTurnId: task.terminalTurnId,
           outcome: task.status,
           title: task.title,
-          result: task.result,
+          result: JSON.parse(JSON.stringify(task.result)) as ManagedTeamTaskResult,
         });
       }
       if (task.watchdog?.status === "pending") {
@@ -4007,7 +4023,7 @@ function cleanupTeamOrchestration(state: CodexNestState, parentThreadId: string)
 }
 
 function hasPendingTeamContinuation(store: StateStore, parentThreadId: string): boolean {
-  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  const orchestration = store.view().threadMeta[parentThreadId]?.teamOrchestration;
   return Boolean(
     orchestration &&
     Object.values(orchestration.tasks).some(
@@ -4022,7 +4038,7 @@ function hasPendingTeamContinuation(store: StateStore, parentThreadId: string): 
 }
 
 function hasClaimedTeamContinuation(store: StateStore, parentThreadId: string): boolean {
-  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  const orchestration = store.view().threadMeta[parentThreadId]?.teamOrchestration;
   return Boolean(
     orchestration &&
     Object.values(orchestration.tasks).some(
@@ -4032,7 +4048,7 @@ function hasClaimedTeamContinuation(store: StateStore, parentThreadId: string): 
 }
 
 function pendingTeamParents(store: StateStore): string[] {
-  const state = store.snapshot();
+  const state = store.view();
   return Object.entries(state.threadMeta)
     .filter(([, meta]) => Boolean(meta.teamOrchestration))
     .map(([threadId]) => threadId);
@@ -4043,7 +4059,7 @@ function teamContinuationContext(
   parentThreadId: string,
   claim: TeamResultClaim,
 ): string {
-  const state = store.snapshot();
+  const state = store.view();
   const active = Object.values(state.threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {})
     .filter((task) => task.status === "starting" || task.status === "running")
     .map((task) => `${task.title} [${task.id}]`);
@@ -4106,7 +4122,7 @@ function teamContinuationContext(
 async function reconcileManagedTaskWorkspace(
   store: StateStore,
   parentThreadId: string,
-  task: ManagedTeamTaskState,
+  task: ManagedTeamTaskView,
 ): Promise<void> {
   const workspace = task.workspace;
   if (!workspace) return;
@@ -4199,9 +4215,9 @@ function activeSharedWriteTask(
   store: StateStore,
   parentThreadId: string,
   excludedTaskId: string,
-): ManagedTeamTaskState | undefined {
+): ManagedTeamTaskView | undefined {
   return Object.values(
-    store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {},
+    store.view().threadMeta[parentThreadId]?.teamOrchestration?.tasks ?? {},
   ).find(
     (candidate) =>
       candidate.id !== excludedTaskId &&
@@ -4236,7 +4252,7 @@ async function reconcileTeamOrchestration(
   onlyParentThreadId?: string,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
-  const state = store.snapshot();
+  const state = store.view();
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     if (onlyParentThreadId && parentThreadId !== onlyParentThreadId) continue;
     const orchestration = meta.teamOrchestration;
@@ -4267,7 +4283,7 @@ async function reconcileTeamOrchestration(
             terminalTurnId: task.terminalTurnId,
             outcome: task.status,
             title: task.title,
-            result: task.result,
+            result: cloneView<ManagedTeamTaskResult>(task.result),
           });
         }
         claim.markerId ??= task.delivery.markerId ?? null;
@@ -4470,8 +4486,7 @@ async function recordTeamNotice(
     parentTurnId,
     results.map((result) => {
       const child = projection.summary(result.childThreadId);
-      const task =
-        store.snapshot().threadMeta[parentThreadId]?.teamOrchestration?.tasks[result.taskId];
+      const task = store.view().threadMeta[parentThreadId]?.teamOrchestration?.tasks[result.taskId];
       return {
         threadId: result.childThreadId,
         title: result.title,
@@ -4509,7 +4524,7 @@ function turnOutcome(turn: Turn): ThreadOutcome {
 }
 
 function isManagedTeamNotification(notification: ServerNotification, store: StateStore): boolean {
-  return Boolean(managedTaskForNotification(store.snapshot(), notification));
+  return Boolean(managedTaskForNotification(store.view(), notification));
 }
 
 export async function triggerTeamWatchdogs(
@@ -4518,7 +4533,7 @@ export async function triggerTeamWatchdogs(
   now: number,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
-  const state = store.snapshot();
+  const state = store.view();
   const due: Array<{ parentThreadId: string; taskId: string; lastActivityAt: number }> = [];
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
@@ -4559,15 +4574,15 @@ function managedSleepExpectedWakeAt(notification: ServerNotification): number | 
   return notification.params.startedAtMs + durationMs;
 }
 
-function teamWatchdogIsPaused(task: ManagedTeamTaskState, now: number): boolean {
+function teamWatchdogIsPaused(task: ManagedTeamTaskView, now: number): boolean {
   return task.expectedWakeAt !== undefined && now - task.expectedWakeAt < TEAM_WATCHDOG_MS;
 }
 
 function managedTaskForChild(
-  state: CodexNestState,
+  state: CodexNestStateView,
   childThreadId: string,
   expectedTaskId?: string,
-): { parentThreadId: string; task: ManagedTeamTaskState } | null {
+): { parentThreadId: string; task: ManagedTeamTaskView } | null {
   if (expectedTaskId) {
     for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
       const task = meta.teamOrchestration?.tasks[expectedTaskId];
@@ -4593,9 +4608,9 @@ function managedTaskForChild(
 }
 
 function managedTaskForNotification(
-  state: CodexNestState,
+  state: CodexNestStateView,
   notification: ServerNotification,
-): { parentThreadId: string; task: ManagedTeamTaskState } | null {
+): { parentThreadId: string; task: ManagedTeamTaskView } | null {
   const childThreadId = notificationThreadId(notification);
   if (!childThreadId) return null;
   const turnId = notificationTurnId(notification);
@@ -4625,7 +4640,7 @@ function notificationTurnId(notification: ServerNotification): string | null {
   return typeof params.turnId === "string" ? params.turnId : null;
 }
 
-function submittedManagedResult(task: ManagedTeamTaskState): ManagedTeamTaskResult {
+function submittedManagedResult(task: ManagedTeamTaskView): ManagedTeamTaskResult {
   const candidate = task.resultCandidate;
   if (!candidate) {
     return {
@@ -4638,9 +4653,13 @@ function submittedManagedResult(task: ManagedTeamTaskState): ManagedTeamTaskResu
     summary: candidate.summary,
     ...(candidate.details ? { details: candidate.details } : {}),
     ...(candidate.outcome ? { outcome: candidate.outcome } : {}),
-    ...(candidate.checks ? { checks: candidate.checks } : {}),
-    ...(candidate.risks ? { risks: candidate.risks } : {}),
-    ...(candidate.artifacts ? { artifacts: candidate.artifacts } : {}),
+    ...(candidate.checks
+      ? { checks: cloneView<ManagedTeamTaskResultCheck[]>(candidate.checks) }
+      : {}),
+    ...(candidate.risks ? { risks: [...candidate.risks] } : {}),
+    ...(candidate.artifacts
+      ? { artifacts: cloneView<ManagedTeamTaskResultArtifact[]>(candidate.artifacts) }
+      : {}),
     source: "submitted",
   };
 }
@@ -4683,15 +4702,15 @@ function firstResultParagraph(text: string): string {
   return paragraph.length <= 500 ? paragraph : `${paragraph.slice(0, 499).trimEnd()}…`;
 }
 
-function isTerminalTask(
-  task: ManagedTeamTaskState,
-): task is ManagedTeamTaskState & { status: ThreadOutcome } {
+function isTerminalTask<Task extends { readonly status: ManagedTeamTaskState["status"] }>(
+  task: Task,
+): task is Task & { readonly status: ThreadOutcome } {
   return task.status === "completed" || task.status === "failed" || task.status === "interrupted";
 }
 
 function publicManagedTask(
-  task: ManagedTeamTaskState,
-  tasks?: Record<string, ManagedTeamTaskState>,
+  task: ManagedTeamTaskView,
+  tasks?: ManagedTeamTaskMapView,
 ): Record<string, unknown> {
   const dependencies = (task.dependsOn ?? []).map((dependency) => tasks?.[dependency]);
   const queueReason =
@@ -4794,7 +4813,7 @@ async function prepareTeamToolOperation(
     const existing = state.teamToolOperations[key];
     if (existing) {
       conflict = existing.argumentsHash !== argumentsHash;
-      operation = structuredClone(existing);
+      operation = JSON.parse(JSON.stringify(existing)) as TeamToolOperationState;
       return;
     }
     const now = Date.now();
@@ -4859,8 +4878,8 @@ async function pruneCompletedTeamToolOperations(
   bridge: CodexBridge,
   store: StateStore,
 ): Promise<void> {
-  const grouped = new Map<string, TeamToolOperationState[]>();
-  for (const operation of Object.values(store.snapshot().teamToolOperations ?? {})) {
+  const grouped = new Map<string, TeamToolOperationView[]>();
+  for (const operation of Object.values(store.view().teamToolOperations ?? {})) {
     if (operation.status !== "applied") continue;
     const operations = grouped.get(operation.threadId) ?? [];
     operations.push(operation);
@@ -5015,10 +5034,12 @@ function optionalToolStringArray(
 
 function managedTaskAccess(
   args: Record<string, unknown>,
-  inherited?: ManagedTeamTaskAccessState,
+  inherited?: DeepReadonly<ManagedTeamTaskAccessState>,
 ): ManagedTeamTaskAccessState {
   const raw = args.access;
-  if (raw === undefined) return structuredClone(inherited ?? { mode: "readOnly", network: false });
+  if (raw === undefined) {
+    return cloneView<ManagedTeamTaskAccessState>(inherited ?? { mode: "readOnly", network: false });
+  }
   if (!isObjectRecord(raw)) throw new ProjectValidationError("access must be an object");
   const mode = raw.mode === undefined ? "readOnly" : raw.mode;
   if (!(["readOnly", "isolatedWrite", "sharedWrite"] as const).includes(mode as never)) {
@@ -5050,7 +5071,7 @@ function managedTaskOptions(
   args: Record<string, unknown>,
   settings: SessionSettings,
   models: ModelOption[],
-  inherited?: ManagedTeamTaskState,
+  inherited?: ManagedTeamTaskView,
 ): ManagedTaskOptions {
   const model = managedChildModel(models);
   const requestedEffort = optionalToolString(args, "reasoningEffort");
@@ -5284,7 +5305,7 @@ function teamRuntimeConfig(): Record<string, unknown> {
 function managedChildTurnSettings(
   settings: SessionSettings,
   models: ModelOption[],
-  task?: ManagedTeamTaskState,
+  task?: ManagedTeamTaskView,
   runtime?: ManagedChildRuntime,
 ): Record<string, unknown> {
   const model = managedChildModel(models);
@@ -5323,7 +5344,7 @@ function managedChildTurnSettings(
 function managedChildResumeSettings(
   settings: SessionSettings,
   models: ModelOption[],
-  task: ManagedTeamTaskState,
+  task: ManagedTeamTaskView,
 ): Record<string, unknown> {
   const model = managedChildModel(models);
   return compact({
@@ -5345,11 +5366,11 @@ async function markTeamToolsAvailable(store: StateStore, threadId: string): Prom
 }
 
 function teamOrchestrationHasWork(store: StateStore, parentThreadId: string): boolean {
-  const orchestration = store.snapshot().threadMeta[parentThreadId]?.teamOrchestration;
+  const orchestration = store.view().threadMeta[parentThreadId]?.teamOrchestration;
   return Boolean(orchestration && Object.values(orchestration.tasks).some(managedTeamTaskHasWork));
 }
 
-function managedTeamTaskHasWork(task: ManagedTeamTaskState): boolean {
+function managedTeamTaskHasWork(task: ManagedTeamTaskView): boolean {
   return Boolean(
     !isTerminalTask(task) ||
     task.delivery?.status !== "delivered" ||
@@ -5358,7 +5379,7 @@ function managedTeamTaskHasWork(task: ManagedTeamTaskState): boolean {
   );
 }
 
-function managedTaskHasPendingWorkspace(task: ManagedTeamTaskState): boolean {
+function managedTaskHasPendingWorkspace(task: ManagedTeamTaskView): boolean {
   const workspace = task.workspace;
   return Boolean(
     workspace &&
@@ -5436,7 +5457,7 @@ function withTranscriptionTiming(
   return {
     ...config,
     timingEstimate: transcriptionTimingEstimate(
-      profile ? store.snapshot().transcriptionTimings?.[profile] : undefined,
+      profile ? store.view().transcriptionTimings?.[profile] : undefined,
     ),
   };
 }
@@ -5555,6 +5576,10 @@ function assertWritableThread(summary: ThreadSummary): void {
 
 function compact(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
+}
+
+function cloneView<T>(value: DeepReadonly<T>): T {
+  return structuredClone(value) as T;
 }
 
 function isLoopbackAddress(value: string): boolean {

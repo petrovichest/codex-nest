@@ -96,7 +96,7 @@ export function createProject(selectedPath: string, canonicalPath: string): Proj
 }
 
 export function assertUniqueProjectPath(
-  projects: Project[],
+  projects: readonly Project[],
   path: string,
   exceptId?: string,
 ): void {
@@ -105,7 +105,7 @@ export function assertUniqueProjectPath(
   }
 }
 
-export function projectForCwd(projects: Project[], cwd: string): Project | undefined {
+export function projectForCwd(projects: readonly Project[], cwd: string): Project | undefined {
   const normalized = resolve(cwd);
   return projects
     .filter((project) => pathContains(project.path, normalized))

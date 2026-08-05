@@ -10,6 +10,19 @@ describe("loadConfig", () => {
     expect(loadConfig().codexTransport).toBe("stdio");
   });
 
+  it("places SQLite beside the legacy state path unless explicitly overridden", () => {
+    vi.stubEnv("CODEXNEST_DATABASE_PATH", "");
+    expect(loadConfig({ statePath: "/srv/codexnest/state.json" })).toMatchObject({
+      statePath: "/srv/codexnest/state.json",
+      databasePath: "/srv/codexnest/state.sqlite",
+    });
+
+    vi.stubEnv("CODEXNEST_DATABASE_PATH", "/data/codexnest/custom.sqlite");
+    expect(loadConfig({ statePath: "/srv/codexnest/state.json" }).databasePath).toBe(
+      "/data/codexnest/custom.sqlite",
+    );
+  });
+
   it("accepts the persistent daemon transport", () => {
     vi.stubEnv("CODEXNEST_CODEX_TRANSPORT", "daemon");
     expect(loadConfig().codexTransport).toBe("daemon");

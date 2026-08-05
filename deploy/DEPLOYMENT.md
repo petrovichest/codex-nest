@@ -385,7 +385,8 @@ accept-all certificate handler). Android-клиент доверяет сист�
 | `CODEXNEST_HOST`                 | Адрес прослушивания                               | `127.0.0.1`                                   |
 | `CODEXNEST_PORT`                 | HTTP/API порт                                     | `4310`                                        |
 | `CODEXNEST_ALLOWED_ORIGINS`      | Разрешённые browser/Android origins через запятую | локальные origins для разработки              |
-| `CODEXNEST_STATE_PATH`           | Файл состояния и verifier токена                  | `~/.local/state/codexnest/state.json`         |
+| `CODEXNEST_STATE_PATH`           | Rollback JSON и внешний verifier токена           | `~/.local/state/codexnest/state.json`         |
+| `CODEXNEST_DATABASE_PATH`        | Основная SQLite-база состояния                    | `state.sqlite` рядом с `CODEXNEST_STATE_PATH` |
 | `CODEXNEST_CODEX_BIN`            | Полный путь к Codex CLI                           | `codex` из `PATH`                             |
 | `CODEXNEST_CODEX_MANAGEMENT_BIN` | Путь к fail-closed wrapper для doctor/update      | `~/bin/codex`                                 |
 | `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
@@ -597,17 +598,21 @@ curl --fail --silent --show-error http://127.0.0.1:4310/api/v1/health
 
 ## 8. Резервная копия
 
-Остановите сервис и скопируйте файл `CODEXNEST_STATE_PATH`:
+Остановите сервис, чтобы завершить checkpoint, и скопируйте SQLite-базу вместе с
+rollback JSON:
 
 ```bash
 systemctl --user stop codexnest.service
 cp "$HOME/.local/state/codexnest/state.json" <КАТАЛОГ-РЕЗЕРВНЫХ-КОПИЙ>/state.json
+cp "$HOME/.local/state/codexnest/state.sqlite" <КАТАЛОГ-РЕЗЕРВНЫХ-КОПИЙ>/state.sqlite
 systemctl --user start codexnest.service
 ```
 
-В нём находятся verifier токена, список проектов, read/pin/outcome metadata и
-регистрации FCM. Промпты, ответы и вывод команд там не хранятся. История Codex
-остаётся в `~/.codex` и должна резервироваться отдельно.
+Основным источником состояния служит `state.sqlite`; `state.json` экспортируется
+при штатной остановке для rollback на предыдущую версию. В них находятся verifier
+токена, список проектов, read/pin/outcome metadata и регистрации FCM. Промпты,
+ответы и вывод команд там не хранятся. История Codex остаётся в `~/.codex` и должна
+резервироваться отдельно.
 
 ## 9. Типовые проблемы
 

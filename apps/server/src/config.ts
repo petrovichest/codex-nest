@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 const releaseDirectory = basename(process.cwd());
 export const SERVER_VERSION = /^v\d+\.\d+\.\d+$/.test(releaseDirectory)
@@ -10,6 +10,7 @@ export interface AppConfig {
   host: string;
   port: number;
   statePath: string;
+  databasePath: string;
   codexBin: string;
   codexManagementBin: string;
   codexProxyEnvFile: string;
@@ -41,6 +42,10 @@ function env(name: string): string | undefined {
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const stateRoot = env("XDG_STATE_HOME") ?? resolve(homedir(), ".local/state");
+  const statePath =
+    overrides.statePath ??
+    env("CODEXNEST_STATE_PATH") ??
+    resolve(stateRoot, "codexnest/state.json");
   const port = Number(env("CODEXNEST_PORT") ?? 4310);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("CODEXNEST_PORT must be an integer from 1 to 65535");
@@ -80,7 +85,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
     port,
-    statePath: env("CODEXNEST_STATE_PATH") ?? resolve(stateRoot, "codexnest/state.json"),
+    statePath,
+    databasePath: env("CODEXNEST_DATABASE_PATH") ?? resolve(dirname(statePath), "state.sqlite"),
     codexBin: env("CODEXNEST_CODEX_BIN") ?? "codex",
     codexManagementBin: env("CODEXNEST_CODEX_MANAGEMENT_BIN") ?? resolve(homedir(), "bin/codex"),
     codexProxyEnvFile:

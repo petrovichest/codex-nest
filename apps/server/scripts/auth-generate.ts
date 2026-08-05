@@ -6,7 +6,7 @@ import { StateStore } from "../src/state/store";
 
 const { values } = parseArgs({ options: { rotate: { type: "boolean", default: false } } });
 const config = loadConfig();
-const store = new StateStore(config.statePath);
+const store = new StateStore(config.statePath, { databasePath: config.databasePath });
 await store.load();
 const current = store.snapshot().auth.tokenSha256;
 if (current && !values.rotate) {
@@ -16,4 +16,5 @@ const token = generateToken();
 await store.update((state) => {
   state.auth.tokenSha256 = hashToken(token);
 });
+await store.checkpoint();
 process.stdout.write(`${token}\n`);

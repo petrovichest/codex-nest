@@ -86,7 +86,7 @@ export function registerEventsWebSocket(
       if (!authenticated) {
         if (
           frame.type !== "authenticate" ||
-          !verifyToken(frame.token, store.snapshot().auth.tokenSha256)
+          !verifyToken(frame.token, store.view().auth.tokenSha256)
         ) {
           socket.close(1008, "Unauthorized");
           return;

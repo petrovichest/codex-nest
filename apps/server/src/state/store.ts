@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, normalize, relative } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import { chmod, copyFile, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, normalize, relative } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import type {
   ActivityItem,
@@ -263,6 +265,21 @@ export interface CodexNestState {
   voiceReceipts?: Record<string, VoiceReceiptState>;
 }
 
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+export type CodexNestStateView = DeepReadonly<CodexNestState>;
+
+export interface StateStoreOptions {
+  databasePath?: string;
+  deferredFlushMs?: number;
+}
+
 export function emptyState(): CodexNestState {
   return {
     schemaVersion: 1,
@@ -282,84 +299,258 @@ export function emptyState(): CodexNestState {
 export class StateStore extends EventEmitter {
   private state = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
+  private database?: DatabaseSync;
+  private persistedEntries = new Map<string, string>();
+  private persistedState = this.state;
+  private deferredDirty = false;
+  private deferredTimer?: NodeJS.Timeout;
   private loaded = false;
 
-  constructor(public readonly path: string) {
+  public readonly databasePath: string;
+  private readonly deferredFlushMs: number;
+
+  constructor(
+    public readonly path: string,
+    options: StateStoreOptions = {},
+  ) {
     super();
+    this.databasePath = options.databasePath ?? join(dirname(path), "state.sqlite");
+    this.deferredFlushMs = options.deferredFlushMs ?? 1_000;
   }
 
   async load(): Promise<CodexNestState> {
-    try {
-      const serialized = await readFile(this.path, "utf8");
-      const parsed: unknown = JSON.parse(serialized);
-      this.state = validateState(parsed);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      this.state = emptyState();
-      await this.persist(this.state);
+    if (this.loaded) throw new Error("StateStore.load() may only be called once");
+    await mkdir(dirname(this.databasePath), { recursive: true, mode: 0o700 });
+
+    if (await pathExists(this.databasePath)) {
+      this.database = openStateDatabase(this.databasePath);
+      await chmod(this.databasePath, 0o600);
+      this.state = loadDatabaseState(this.database);
+      this.persistedEntries = serializeStateEntries(this.state);
+    } else {
+      const legacy = await this.loadLegacyState();
+      this.state = legacy.state;
+      await this.migrateToDatabase(legacy.exists);
     }
+    this.persistedState = this.state;
+
+    const legacyAuth = await readLegacyAuth(this.path);
+    if (legacyAuth.exists && legacyAuth.auth.tokenSha256 !== this.state.auth.tokenSha256) {
+      const next = validateState({ ...this.state, auth: structuredClone(legacyAuth.auth) });
+      await this.persistDatabase(next);
+      this.state = next;
+    }
+
     this.loaded = true;
     return this.snapshot();
   }
 
-  snapshot(): CodexNestState {
+  view(): CodexNestStateView {
     if (!this.loaded) throw new Error("StateStore.load() must be called first");
-    return structuredClone(this.state);
+    return this.state;
   }
 
-  update(mutator: (draft: CodexNestState) => void | Promise<void>): Promise<CodexNestState> {
+  snapshot(): CodexNestState {
+    if (!this.loaded) throw new Error("StateStore.load() must be called first");
+    try {
+      return structuredClone(this.state);
+    } catch (error) {
+      throw new Error(
+        `CodexNest state contains an uncloneable value at ${uncloneablePath(this.state)}`,
+        {
+          cause: error,
+        },
+      );
+    }
+  }
+
+  update(mutator: (draft: CodexNestState) => void | Promise<void>): Promise<CodexNestStateView> {
+    return this.enqueueUpdate(mutator, true);
+  }
+
+  updateDeferred(
+    mutator: (draft: CodexNestState) => void | Promise<void>,
+  ): Promise<CodexNestStateView> {
+    return this.enqueueUpdate(mutator, false);
+  }
+
+  async flushed(): Promise<void> {
+    await this.enqueueFlush(false);
+  }
+
+  async checkpoint(): Promise<void> {
+    await this.enqueueFlush(true);
+  }
+
+  async refreshAuthVerifier(): Promise<boolean> {
+    let changed = false;
     const task = this.writeQueue.then(async () => {
       if (!this.loaded) throw new Error("StateStore.load() must be called first");
-      const draft = structuredClone(this.state);
-      const originalVerifier = this.state.auth.tokenSha256;
-      await mutator(draft);
-      if (draft.auth.tokenSha256 === originalVerifier) {
-        try {
-          const disk = validateState(JSON.parse(await readFile(this.path, "utf8")) as unknown);
-          if (disk.auth.tokenSha256 !== originalVerifier) draft.auth = structuredClone(disk.auth);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        }
-      }
-      const validated = validateState(draft);
-      await this.persist(validated);
+      const legacy = await readLegacyAuth(this.path);
+      if (!legacy.exists || legacy.auth.tokenSha256 === this.state.auth.tokenSha256) return;
+      const next = validateState({ ...this.state, auth: structuredClone(legacy.auth) });
+      await this.persistDatabase(next);
+      this.state = next;
+      this.deferredDirty = false;
+      this.clearDeferredTimer();
+      changed = true;
+      this.emit("authRotated");
+    });
+    this.writeQueue = task.catch(() => undefined);
+    await task;
+    return changed;
+  }
+
+  private enqueueUpdate(
+    mutator: (draft: CodexNestState) => void | Promise<void>,
+    durable: boolean,
+  ): Promise<CodexNestStateView> {
+    const task = this.writeQueue.then(async () => {
+      if (!this.loaded) throw new Error("StateStore.load() must be called first");
+      const draft = createCopyOnWriteDraft(this.state);
+      await mutator(draft.value);
+      if (!draft.changed()) return;
+      const validated = validateState(draft.finish());
       const verifierChanged = validated.auth.tokenSha256 !== this.state.auth.tokenSha256;
+      if (durable) {
+        await this.persistDatabase(validated);
+        this.deferredDirty = false;
+        this.clearDeferredTimer();
+      } else {
+        this.deferredDirty = true;
+        this.scheduleDeferredFlush();
+      }
       this.state = validated;
       if (verifierChanged) this.emit("authRotated");
     });
     this.writeQueue = task.catch(() => undefined);
-    return task.then(() => this.snapshot());
+    return task.then(() => this.view());
   }
 
-  async flushed(): Promise<void> {
-    await this.writeQueue;
-  }
-
-  async checkpoint(): Promise<void> {
+  private async enqueueFlush(exportLegacy: boolean): Promise<void> {
     const task = this.writeQueue.then(async () => {
       if (!this.loaded) throw new Error("StateStore.load() must be called first");
-      await this.persist(this.state);
+      this.clearDeferredTimer();
+      if (this.deferredDirty) {
+        await this.persistDatabase(this.state);
+        this.deferredDirty = false;
+      }
+      if (exportLegacy) {
+        await this.persistLegacy(this.state);
+        this.databaseOrThrow().exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      }
     });
     this.writeQueue = task.catch(() => undefined);
     await task;
   }
 
-  async refreshAuthVerifier(): Promise<boolean> {
-    await this.writeQueue;
-    const parsed = validateState(JSON.parse(await readFile(this.path, "utf8")) as unknown);
-    if (parsed.auth.tokenSha256 === this.state.auth.tokenSha256) return false;
-    this.state.auth = structuredClone(parsed.auth);
-    this.emit("authRotated");
+  private scheduleDeferredFlush(): void {
+    if (this.deferredTimer) return;
+    this.deferredTimer = setTimeout(() => {
+      this.deferredTimer = undefined;
+      void this.enqueueFlush(false).catch((error: unknown) => {
+        process.stderr.write(
+          `CodexNest deferred state flush failed (${error instanceof Error ? error.name : "Error"})\n`,
+        );
+      });
+    }, this.deferredFlushMs);
+    this.deferredTimer.unref();
+  }
+
+  private clearDeferredTimer(): void {
+    if (this.deferredTimer) clearTimeout(this.deferredTimer);
+    this.deferredTimer = undefined;
+  }
+
+  private async loadLegacyState(): Promise<{ exists: boolean; state: CodexNestState }> {
+    try {
+      return {
+        exists: true,
+        state: validateState(JSON.parse(await readFile(this.path, "utf8")) as unknown),
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return { exists: false, state: emptyState() };
+    }
+  }
+
+  private async migrateToDatabase(legacyExists: boolean): Promise<void> {
+    const temporary = `${this.databasePath}.${process.pid}.${randomUUID()}.tmp`;
+    let database: DatabaseSync | undefined;
+    try {
+      if (legacyExists) await backupLegacyState(this.path);
+      const temporaryHandle = await open(temporary, "wx", 0o600);
+      await temporaryHandle.close();
+      database = createStateDatabase(temporary, false);
+      const expectedEntries = serializeStateEntries(this.state);
+      writeAllStateEntries(database, expectedEntries);
+      const migrated = loadDatabaseState(database);
+      if (!stateEntriesEqual(expectedEntries, serializeStateEntries(migrated))) {
+        throw new Error("CodexNest SQLite migration verification failed");
+      }
+      database.close();
+      database = undefined;
+      await chmod(temporary, 0o600);
+      await rename(temporary, this.databasePath);
+      await syncDirectory(dirname(this.databasePath));
+      this.database = openStateDatabase(this.databasePath);
+      this.persistedEntries = serializeStateEntries(this.state);
+    } catch (error) {
+      database?.close();
+      await unlink(temporary).catch(() => undefined);
+      await unlink(`${temporary}-journal`).catch(() => undefined);
+      await unlink(`${temporary}-wal`).catch(() => undefined);
+      await unlink(`${temporary}-shm`).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async persistDatabase(next: CodexNestState): Promise<boolean> {
+    const { entries, changed, removed } = changedStateEntries(
+      this.persistedState,
+      next,
+      this.persistedEntries,
+    );
+    if (!changed.length && !removed.length) {
+      this.persistedState = next;
+      return false;
+    }
+
+    const database = this.databaseOrThrow();
+    const upsert = database.prepare(
+      "INSERT INTO state_entries(namespace, entry_key, json) VALUES (?, ?, ?) " +
+        "ON CONFLICT(namespace, entry_key) DO UPDATE SET json = excluded.json",
+    );
+    const remove = database.prepare(
+      "DELETE FROM state_entries WHERE namespace = ? AND entry_key = ?",
+    );
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const composite of removed) {
+        const [namespace, key] = splitEntryKey(composite);
+        remove.run(namespace, key);
+      }
+      for (const [composite, json] of changed) {
+        const [namespace, key] = splitEntryKey(composite);
+        upsert.run(namespace, key, json);
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    this.persistedEntries = entries;
+    this.persistedState = next;
     return true;
   }
 
-  private async persist(next: CodexNestState): Promise<void> {
+  private async persistLegacy(next: CodexNestState): Promise<void> {
     const parent = dirname(this.path);
     await mkdir(parent, { recursive: true, mode: 0o700 });
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     const handle = await open(temporary, "wx", 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(next, null, 2)}\n`, "utf8");
+      await handle.writeFile(`${JSON.stringify(next)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -383,6 +574,396 @@ export class StateStore extends EventEmitter {
       await unlink(temporary).catch(() => undefined);
       throw error;
     }
+  }
+
+  private databaseOrThrow(): DatabaseSync {
+    if (!this.database) throw new Error("CodexNest state database is not open");
+    return this.database;
+  }
+}
+
+interface CopyOnWriteDraft<T> {
+  value: T;
+  changed(): boolean;
+  finish(): T;
+}
+
+interface DraftNode {
+  base: DraftContainer;
+  copy?: DraftContainer;
+  parent?: DraftNode;
+  parentKey?: PropertyKey;
+  children: Map<PropertyKey, DraftNode>;
+  proxy: DraftContainer;
+}
+
+type DraftContainer = Record<PropertyKey, unknown> | unknown[];
+
+function createCopyOnWriteDraft<T extends object>(base: T): CopyOnWriteDraft<T> {
+  const proxyNodes = new WeakMap<object, DraftNode>();
+  const assignedContainers = new Set<DraftContainer>();
+
+  const finishNode = (node: DraftNode): DraftContainer => node.copy ?? node.base;
+
+  const materialize = (value: unknown): unknown => {
+    if (!isDraftContainer(value)) return value;
+    const node = proxyNodes.get(value);
+    if (node) return materialize(finishNode(node));
+    assignedContainers.add(value);
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        value[index] = materialize(value[index]);
+      }
+      return value;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      Reflect.set(value, key, materialize(child));
+    }
+    return value;
+  };
+
+  const ensureCopy = (node: DraftNode): DraftContainer => {
+    if (node.copy) return node.copy;
+    node.copy = Array.isArray(node.base) ? [...node.base] : { ...node.base };
+    if (node.parent && node.parentKey !== undefined) {
+      const parentCopy = ensureCopy(node.parent);
+      Reflect.set(parentCopy, node.parentKey, node.copy);
+    }
+    return node.copy;
+  };
+
+  const createNode = (
+    value: DraftContainer,
+    parent?: DraftNode,
+    parentKey?: PropertyKey,
+  ): DraftNode => {
+    const node = {
+      base: value,
+      parent,
+      parentKey,
+      children: new Map<PropertyKey, DraftNode>(),
+    } as DraftNode;
+    node.proxy = new Proxy(value, {
+      get(_target, key) {
+        const current = Reflect.get(node.copy ?? node.base, key);
+        if (!isDraftContainer(current)) return current;
+        let child = node.children.get(key);
+        if (!child || finishNode(child) !== current) {
+          child = createNode(current, node, key);
+          node.children.set(key, child);
+        }
+        return child.proxy;
+      },
+      set(_target, key, valueToSet) {
+        const source = node.copy ?? node.base;
+        const current = Reflect.get(source, key);
+        const next = materialize(valueToSet);
+        if (Object.is(current, next)) return true;
+        node.children.delete(key);
+        return Reflect.set(ensureCopy(node), key, next);
+      },
+      deleteProperty(_target, key) {
+        if (!Reflect.has(node.copy ?? node.base, key)) return true;
+        node.children.delete(key);
+        return Reflect.deleteProperty(ensureCopy(node), key);
+      },
+      has(_target, key) {
+        return Reflect.has(node.copy ?? node.base, key);
+      },
+      ownKeys() {
+        return Reflect.ownKeys(node.copy ?? node.base);
+      },
+      getOwnPropertyDescriptor(_target, key) {
+        return Reflect.getOwnPropertyDescriptor(node.copy ?? node.base, key);
+      },
+    });
+    proxyNodes.set(node.proxy, node);
+    return node;
+  };
+
+  const root = createNode(base as DraftContainer);
+  return {
+    value: root.proxy as T,
+    changed: () => root.copy !== undefined,
+    finish: () => {
+      for (const assigned of assignedContainers) materialize(assigned);
+      return finishNode(root) as T;
+    },
+  };
+}
+
+function isDraftContainer(value: unknown): value is DraftContainer {
+  return value !== null && typeof value === "object";
+}
+
+function uncloneablePath(value: unknown, path = "state"): string {
+  try {
+    structuredClone(value);
+    return path;
+  } catch {
+    if (!isDraftContainer(value)) return path;
+    for (const [key, child] of Object.entries(value)) {
+      try {
+        structuredClone(child);
+      } catch {
+        return uncloneablePath(child, `${path}.${key}`);
+      }
+    }
+    return path;
+  }
+}
+
+const ROOT_NAMESPACE = "root";
+const MAP_NAMESPACES = [
+  "threadMeta",
+  "devices",
+  "transcriptionTimings",
+  "messageQueues",
+  "messageReceipts",
+  "teamToolOperations",
+  "voiceTranscriptions",
+  "voiceReceipts",
+] as const;
+const MAP_NAMESPACE_SET = new Set<string>(MAP_NAMESPACES);
+const ROOT_KEYS = [
+  "schemaVersion",
+  "auth",
+  "projects",
+  "dismissedProjectPaths",
+  "uiLanguage",
+  "defaultReasoningEffort",
+  "taskDefaults",
+] as const;
+const REQUIRED_ROOT_KEYS = new Set(["schemaVersion", "auth", "projects", "uiLanguage"]);
+
+interface StateEntryRow {
+  namespace: string;
+  entry_key: string;
+  json: string;
+}
+
+function serializeStateEntries(state: CodexNestState): Map<string, string> {
+  const entries = new Map<string, string>();
+  for (const key of ROOT_KEYS) {
+    const value = state[key];
+    if (value !== undefined) entries.set(entryKey(ROOT_NAMESPACE, key), JSON.stringify(value));
+  }
+  for (const namespace of MAP_NAMESPACES) {
+    const values = state[namespace] ?? {};
+    for (const [key, value] of Object.entries(values)) {
+      entries.set(entryKey(namespace, key), JSON.stringify(value));
+    }
+  }
+  return entries;
+}
+
+function changedStateEntries(
+  previous: CodexNestState,
+  next: CodexNestState,
+  persisted: Map<string, string>,
+): { entries: Map<string, string>; changed: Array<[string, string]>; removed: string[] } {
+  const entries = new Map(persisted);
+  const changed: Array<[string, string]> = [];
+  const removed: string[] = [];
+  const updateEntry = (namespace: string, key: string, value: unknown): void => {
+    const composite = entryKey(namespace, key);
+    if (value === undefined) {
+      if (entries.delete(composite)) removed.push(composite);
+      return;
+    }
+    const json = JSON.stringify(value);
+    if (entries.get(composite) === json) return;
+    entries.set(composite, json);
+    changed.push([composite, json]);
+  };
+
+  for (const key of ROOT_KEYS) {
+    if (!Object.is(previous[key], next[key])) updateEntry(ROOT_NAMESPACE, key, next[key]);
+  }
+  for (const namespace of MAP_NAMESPACES) {
+    const previousValues = previous[namespace] ?? {};
+    const nextValues = next[namespace] ?? {};
+    if (previousValues === nextValues) continue;
+    const keys = new Set([...Object.keys(previousValues), ...Object.keys(nextValues)]);
+    for (const key of keys) {
+      if (!Object.is(previousValues[key], nextValues[key])) {
+        updateEntry(namespace, key, nextValues[key]);
+      }
+    }
+  }
+  return { entries, changed, removed };
+}
+
+function stateEntriesEqual(left: Map<string, string>, right: Map<string, string>): boolean {
+  return left.size === right.size && [...left].every(([key, value]) => right.get(key) === value);
+}
+
+function loadDatabaseState(database: DatabaseSync): CodexNestState {
+  const rows = database
+    .prepare("SELECT namespace, entry_key, json FROM state_entries ORDER BY namespace, entry_key")
+    .all() as unknown as StateEntryRow[];
+  const state: Record<string, unknown> = {
+    threadMeta: {},
+    devices: {},
+    transcriptionTimings: {},
+    messageQueues: {},
+    messageReceipts: {},
+    teamToolOperations: {},
+    voiceTranscriptions: {},
+    voiceReceipts: {},
+  };
+  const foundRootKeys = new Set<string>();
+  for (const row of rows) {
+    let value: unknown;
+    try {
+      value = JSON.parse(row.json) as unknown;
+    } catch {
+      throw new Error(`Corrupt JSON in CodexNest SQLite entry ${row.namespace}/${row.entry_key}`);
+    }
+    if (row.namespace === ROOT_NAMESPACE) {
+      if (!(ROOT_KEYS as readonly string[]).includes(row.entry_key)) {
+        throw new Error(`Unknown CodexNest SQLite root key ${row.entry_key}`);
+      }
+      state[row.entry_key] = value;
+      foundRootKeys.add(row.entry_key);
+      continue;
+    }
+    if (!MAP_NAMESPACE_SET.has(row.namespace)) {
+      throw new Error(`Unknown CodexNest SQLite namespace ${row.namespace}`);
+    }
+    (state[row.namespace] as Record<string, unknown>)[row.entry_key] = value;
+  }
+  if ([...REQUIRED_ROOT_KEYS].some((key) => !foundRootKeys.has(key))) {
+    throw new Error("Corrupt CodexNest SQLite state: required root entry is missing");
+  }
+  return validateState(state);
+}
+
+function writeAllStateEntries(database: DatabaseSync, entries: Map<string, string>): void {
+  const insert = database.prepare(
+    "INSERT INTO state_entries(namespace, entry_key, json) VALUES (?, ?, ?)",
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const [composite, json] of entries) {
+      const [namespace, key] = splitEntryKey(composite);
+      insert.run(namespace, key, json);
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function createStateDatabase(path: string, wal = true): DatabaseSync {
+  const database = new DatabaseSync(path);
+  database.exec(`
+    PRAGMA busy_timeout = 5000;
+    PRAGMA synchronous = FULL;
+    CREATE TABLE state_entries (
+      namespace TEXT NOT NULL,
+      entry_key TEXT NOT NULL,
+      json TEXT NOT NULL,
+      PRIMARY KEY(namespace, entry_key)
+    ) WITHOUT ROWID;
+    PRAGMA user_version = 1;
+  `);
+  if (wal) database.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;");
+  return database;
+}
+
+function openStateDatabase(path: string): DatabaseSync {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec("PRAGMA busy_timeout = 5000");
+    const version = database.prepare("PRAGMA user_version").get() as
+      { user_version?: number } | undefined;
+    if (version?.user_version !== 1) {
+      throw new Error(`Unsupported CodexNest SQLite schema version ${version?.user_version ?? 0}`);
+    }
+    const quickCheck = database.prepare("PRAGMA quick_check").get() as
+      { quick_check?: string } | undefined;
+    if (quickCheck?.quick_check !== "ok") {
+      throw new Error(`Corrupt CodexNest SQLite database: ${quickCheck?.quick_check ?? "unknown"}`);
+    }
+    database.exec(
+      "PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL; " +
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;",
+    );
+    database.prepare("SELECT namespace, entry_key, json FROM state_entries LIMIT 1").get();
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
+function entryKey(namespace: string, key: string): string {
+  return `${namespace}\0${key}`;
+}
+
+function splitEntryKey(composite: string): [string, string] {
+  const separator = composite.indexOf("\0");
+  if (separator < 0) throw new Error("Invalid CodexNest SQLite entry key");
+  return [composite.slice(0, separator), composite.slice(separator + 1)];
+}
+
+async function backupLegacyState(path: string): Promise<void> {
+  const backup = `${path}.pre-sqlite`;
+  try {
+    await copyFile(path, backup, fsConstants.COPYFILE_EXCL);
+    await chmod(backup, 0o600);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const [source, existing] = await Promise.all([readFile(path), readFile(backup)]);
+    if (!source.equals(existing)) {
+      throw new Error("CodexNest legacy state backup exists but does not match state.json");
+    }
+  }
+}
+
+async function readLegacyAuth(
+  path: string,
+): Promise<
+  { exists: false; auth: Record<string, never> } | { exists: true; auth: CodexNestState["auth"] }
+> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isRecord(value) || !isRecord(value.auth)) {
+      throw new Error("Corrupt auth control data in CodexNest legacy state");
+    }
+    const verifier = value.auth.tokenSha256;
+    if (
+      verifier !== undefined &&
+      (typeof verifier !== "string" || !/^[a-f\d]{64}$/iu.test(verifier))
+    ) {
+      throw new Error("Corrupt token verifier in CodexNest legacy state");
+    }
+    return { exists: true, auth: verifier === undefined ? {} : { tokenSha256: verifier } };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false, auth: {} };
+    throw error;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
   }
 }
 
@@ -484,6 +1065,7 @@ function validateState(value: unknown): CodexNestState {
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
+    compactTerminalWorkspaceBaselines(meta as unknown as ThreadMetaState);
   }
   for (const device of Object.values(value.devices)) {
     if (
@@ -546,6 +1128,17 @@ function validateState(value: unknown): CodexNestState {
     ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
     ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
   };
+}
+
+function compactTerminalWorkspaceBaselines(meta: ThreadMetaState): void {
+  for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
+    if (
+      task.workspace &&
+      (task.workspace.lifecycle === "integrated" || task.workspace.lifecycle === "discarded")
+    ) {
+      task.workspace.baseline = {};
+    }
+  }
 }
 
 function retireActiveManagedTaskBudgets(value: unknown): void {

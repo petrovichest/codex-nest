@@ -29,7 +29,7 @@ export class MessageQueue {
   ) {}
 
   list(threadId: string): QueuedMessage[] {
-    return this.store.snapshot().messageQueues?.[threadId] ?? [];
+    return structuredClone(this.store.view().messageQueues?.[threadId] ?? []) as QueuedMessage[];
   }
 
   count(threadId: string): number {
@@ -117,7 +117,7 @@ export class MessageQueue {
         throw new MessageQueuePausedError("Codex maintenance is in progress");
       const message = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!message) {
-        const receipt = this.store.snapshot().messageReceipts?.[messageId];
+        const receipt = this.store.view().messageReceipts?.[messageId];
         if (receipt?.threadId === threadId && receipt.turnId) return receipt.turnId;
         throw new MessageQueueNotFoundError("Queued message not found");
       }
@@ -173,7 +173,7 @@ export class MessageQueue {
   }
 
   async recover(): Promise<void> {
-    const queues = this.store.snapshot().messageQueues ?? {};
+    const queues = this.store.view().messageQueues ?? {};
     for (const [threadId, messages] of Object.entries(queues)) {
       await this.withLock(threadId, async () => {
         for (const message of messages.filter((candidate) => candidate.status === "dispatching")) {
@@ -205,7 +205,7 @@ export class MessageQueue {
 
   async resume(): Promise<void> {
     this.suspended = false;
-    const threadIds = Object.keys(this.store.snapshot().messageQueues ?? {});
+    const threadIds = Object.keys(this.store.view().messageQueues ?? {});
     await Promise.all(threadIds.map((threadId) => this.drain(threadId).catch(() => undefined)));
   }
 
@@ -219,7 +219,7 @@ export class MessageQueue {
   }
 
   async removeThread(threadId: string): Promise<void> {
-    if (!this.store.snapshot().messageQueues?.[threadId]) return;
+    if (!this.store.view().messageQueues?.[threadId]) return;
     await this.store.update((state) => {
       if (state.messageQueues) delete state.messageQueues[threadId];
     });
@@ -318,7 +318,7 @@ export class MessageQueue {
   }
 }
 
-export function messageContentHash(text: string, images: string[], goal: boolean): string {
+export function messageContentHash(text: string, images: readonly string[], goal: boolean): string {
   return createHash("sha256")
     .update(JSON.stringify([text.trim(), images, goal]))
     .digest("hex");

@@ -19,7 +19,7 @@ import { TranscriptionService } from "./transcription";
 import { TranscriptRefiner } from "./transcript-refiner";
 
 const config = loadConfig();
-const store = new StateStore(config.statePath);
+const store = new StateStore(config.statePath, { databasePath: config.databasePath });
 await store.load();
 let authRefreshTimer: NodeJS.Timeout | undefined;
 const stateWatcher = watch(dirname(config.statePath), { persistent: false }, (_event, filename) => {
