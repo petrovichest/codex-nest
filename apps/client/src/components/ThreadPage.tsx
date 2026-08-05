@@ -139,6 +139,16 @@ type QueuedMessageView = QueuedMessage & {
   confirmed: boolean;
 };
 
+type SubmittedMessageIdentity = {
+  text: string;
+  images: readonly string[];
+  goal: boolean;
+};
+
+type GoalAwareOptimisticMessage = OptimisticMessage & {
+  goal?: boolean;
+};
+
 type VoiceUploadState = {
   mode: VoiceTranscriptionMode;
   startedAt: number;
@@ -161,6 +171,21 @@ function composerDraftHasContent(value: UpdateThreadDraftRequest): boolean {
     value.goalMode ||
     value.annotations.length > 0
   );
+}
+
+function submittedMessageFingerprint(identity: SubmittedMessageIdentity): string {
+  return JSON.stringify([identity.text.trim(), identity.images, identity.goal]);
+}
+
+function latestRootUserMessage(detail: ThreadDetail | undefined): ActivityItem | null {
+  for (let turnIndex = (detail?.turns.length ?? 0) - 1; turnIndex >= 0; turnIndex -= 1) {
+    const items = detail!.turns[turnIndex]!.items;
+    for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = items[itemIndex]!;
+      if (item.type === "userMessage") return item;
+    }
+  }
+  return null;
 }
 
 function normalizeNewSessionDraft(value: UpdateThreadDraftRequest): UpdateThreadDraftRequest {
@@ -403,6 +428,10 @@ export function ThreadPage({
   const activePreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
   const claimedPreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
   const earlySubmissionRef = useRef<EarlySubmission | null>(null);
+  const messageClaimsRef = useRef(new Set<string>());
+  const activeMessageFingerprintsRef = useRef(new Set<string>());
+  const submittedGoalMessageIdsRef = useRef(new Set<string>());
+  const planAcceptanceInFlightRef = useRef(false);
   const composerEditRevisionRef = useRef(0);
   const createdInWorkspaceRef = useRef<string | null>(null);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] =
@@ -533,6 +562,52 @@ export function ThreadPage({
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
   );
+  const activeMessageFingerprints = new Set<string>();
+  const addActiveMessage = (identity: SubmittedMessageIdentity) => {
+    activeMessageFingerprints.add(submittedMessageFingerprint(identity));
+  };
+  for (const message of optimisticMessages) {
+    addActiveMessage({
+      text: message.text,
+      images: message.images,
+      goal:
+        submittedGoalMessageIdsRef.current.has(message.id) ||
+        Boolean((message as GoalAwareOptimisticMessage).goal),
+    });
+  }
+  for (const message of detail?.queuedMessages ?? []) {
+    addActiveMessage({
+      text: message.text,
+      images: message.images ?? [],
+      goal: Boolean(message.goal),
+    });
+  }
+  const activeTurn = summary?.currentTurnId
+    ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)
+    : null;
+  for (const item of activeTurn?.items ?? []) {
+    if (item.type !== "userMessage") continue;
+    addActiveMessage({
+      text: item.text,
+      images: item.images,
+      goal: submittedGoalMessageIdsRef.current.has(item.id),
+    });
+  }
+  if (
+    summary?.settings.collaborationMode === "team" &&
+    summary.state === "running" &&
+    !summary.currentTurnId
+  ) {
+    const message = latestRootUserMessage(detail);
+    if (message?.type === "userMessage") {
+      addActiveMessage({
+        text: message.text,
+        images: message.images,
+        goal: submittedGoalMessageIdsRef.current.has(message.id),
+      });
+    }
+  }
+  activeMessageFingerprintsRef.current = activeMessageFingerprints;
   const groupedTurnActivities = useMemo(
     () =>
       new Map(
@@ -1769,6 +1844,36 @@ export function ThreadPage({
     }
   }
 
+  function claimSubmittedMessage(
+    identity: SubmittedMessageIdentity,
+    messageId: string,
+  ): string | null {
+    const key = submittedMessageFingerprint(identity);
+    if (activeMessageFingerprintsRef.current.has(key) || messageClaimsRef.current.has(key)) {
+      setError(t("Это сообщение уже отправлено"));
+      return null;
+    }
+    messageClaimsRef.current.add(key);
+    if (identity.goal) submittedGoalMessageIdsRef.current.add(messageId);
+    return key;
+  }
+
+  function moveSubmittedMessageClaim(
+    currentKey: string,
+    identity: SubmittedMessageIdentity,
+  ): string {
+    const nextKey = submittedMessageFingerprint(identity);
+    if (nextKey === currentKey) return currentKey;
+    messageClaimsRef.current.delete(currentKey);
+    messageClaimsRef.current.add(nextKey);
+    return nextKey;
+  }
+
+  function releaseSubmittedMessageClaim(key: string, messageId?: string): void {
+    messageClaimsRef.current.delete(key);
+    if (messageId) submittedGoalMessageIdsRef.current.delete(messageId);
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (preparationRef.current.active && newSessionProject) {
@@ -1794,11 +1899,19 @@ export function ThreadPage({
     }
     const submittedEditRevision = composerEditRevisionRef.current;
     const clientMessageId = createClientMessageId();
-    const optimisticMessage: OptimisticMessage = {
+    const submittedIdentity: SubmittedMessageIdentity = {
+      text: submittedInput,
+      images: submittedDraft.images.map((image) => image.url),
+      goal: submittedDraft.goalMode,
+    };
+    const messageClaimKey = claimSubmittedMessage(submittedIdentity, clientMessageId);
+    if (!messageClaimKey) return;
+    const optimisticMessage: GoalAwareOptimisticMessage = {
       id: clientMessageId,
       threadId: targetThreadId,
       text: submittedInput.trim(),
-      images: submittedDraft.images.map((image) => image.url),
+      images: [...submittedIdentity.images],
+      goal: submittedIdentity.goal,
       createdAt: Date.now(),
       destination: "queue",
       turnId: null,
@@ -1808,8 +1921,8 @@ export function ThreadPage({
     scrollTargetMessageId.current = clientMessageId;
     dispatch({ type: "optimistic.add", message: optimisticMessage });
     replaceComposerDraft(emptyComposerDraft(), false);
-    await flushDraft(targetThreadId);
     try {
+      await flushDraft(targetThreadId);
       await sendReliable(targetThreadId, {
         input: submittedInput,
         ...(submittedDraft.images.length
@@ -1818,7 +1931,9 @@ export function ThreadPage({
         ...(submittedDraft.goalMode ? { goal: true } : {}),
         clientMessageId,
       });
+      releaseSubmittedMessageClaim(messageClaimKey);
     } catch (caught) {
+      releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
       dispatch({ type: "optimistic.remove", threadId: targetThreadId, messageId: clientMessageId });
       const restore =
         composerEditRevisionRef.current === submittedEditRevision
@@ -1860,6 +1975,10 @@ export function ThreadPage({
   async function submitPreparingSession(activeProject: Project): Promise<void> {
     const generation = preparationGenerationRef.current;
     assertPreparationGeneration(generation);
+    if (preparationClaimedForSubmitRef.current) {
+      setError(t("Это сообщение уже отправлено"));
+      return;
+    }
     const submittedDraft = structuredClone(preparationRef.current.value);
     const submittedInput = formatAnnotatedMessage(
       submittedDraft.input,
@@ -1876,6 +1995,15 @@ export function ThreadPage({
     }
 
     const clientMessageId = createClientMessageId();
+    let messageClaimKey = claimSubmittedMessage(
+      {
+        text: submittedInput,
+        images: submittedDraft.images.map((image) => image.url),
+        goal: submittedDraft.goalMode,
+      },
+      clientMessageId,
+    );
+    if (!messageClaimKey) return;
     earlySubmitRef.current = true;
     preparationClaimedForSubmitRef.current = true;
     preparationDraftTransferGenerationRef.current += 1;
@@ -1914,16 +2042,23 @@ export function ThreadPage({
         completeDraft.annotations,
         language,
       );
+      const completeIdentity: SubmittedMessageIdentity = {
+        text: completeInput,
+        images: completeDraft.images.map((image) => image.url),
+        goal: completeDraft.goalMode,
+      };
+      messageClaimKey = moveSubmittedMessageClaim(messageClaimKey, completeIdentity);
       let thread = await ensureCreatedThread(activeProject, generation);
       assertPreparationGeneration(generation);
       thread = await applyPendingSettings(thread, generation);
       assertPreparationGeneration(generation);
       preparationRef.current = { ...preparationRef.current, thread };
-      const optimisticMessage: OptimisticMessage = {
+      const optimisticMessage: GoalAwareOptimisticMessage = {
         id: clientMessageId,
         threadId: thread.id,
         text: completeInput.trim(),
-        images: completeDraft.images.map((image) => image.url),
+        images: [...completeIdentity.images],
+        goal: completeIdentity.goal,
         createdAt: Date.now(),
         destination: "queue",
         turnId: null,
@@ -1942,6 +2077,7 @@ export function ThreadPage({
         clientMessageId,
       });
       accepted = true;
+      releaseSubmittedMessageClaim(messageClaimKey);
       await waitForPendingAttachments();
       const staleServerWrite = await settleClaimedPreparationDraftTransfer();
       await waitForPendingAttachments();
@@ -1988,6 +2124,7 @@ export function ThreadPage({
       }
     } catch (caught) {
       if (accepted) return;
+      releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
       if (caught === PREPARATION_SUPERSEDED) return;
       await waitForPendingAttachments();
       const targetThreadId = activatedThreadId ?? preparationRef.current.threadId;
@@ -2038,19 +2175,30 @@ export function ThreadPage({
       targetMode === "team"
         ? t("Да, реализуй этот план в режиме оркестратора")
         : t("Да, реализуй этот план");
+    if (planAcceptanceInFlightRef.current) {
+      setError(t("Это сообщение уже отправлено"));
+      return;
+    }
+    const clientMessageId = createClientMessageId();
+    const messageClaimKey = claimSubmittedMessage(
+      { text: implementationMessage, images: [], goal: false },
+      clientMessageId,
+    );
+    if (!messageClaimKey) return;
+    planAcceptanceInFlightRef.current = true;
     setBusy(true);
     setError(null);
     setTeamUpgradeRequired(false);
     let changedMode = false;
-    let clientMessageId: string | null = null;
+    let optimisticAdded = false;
     try {
       const thread = await api.updateThreadSettings(threadId, {
         collaborationMode: targetMode,
       });
       changedMode = true;
       dispatch({ type: "thread", thread });
-      clientMessageId = createClientMessageId();
       scrollTargetMessageId.current = clientMessageId;
+      optimisticAdded = true;
       dispatch({
         type: "optimistic.add",
         message: {
@@ -2073,8 +2221,10 @@ export function ThreadPage({
         messageId: clientMessageId,
         turnId: result.turnId,
       });
+      releaseSubmittedMessageClaim(messageClaimKey);
     } catch (caught) {
-      if (clientMessageId) {
+      releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
+      if (optimisticAdded) {
         dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
       }
       if (changedMode) {
@@ -2091,6 +2241,7 @@ export function ThreadPage({
             : t("Не удалось начать реализацию плана"),
       );
     } finally {
+      planAcceptanceInFlightRef.current = false;
       setBusy(false);
     }
   }

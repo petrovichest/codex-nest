@@ -1049,6 +1049,171 @@ describe("Activity", () => {
     expect(api.archive).toHaveBeenCalledWith("thread", true);
   });
 
+  it("blocks an exact duplicate of the active turn user message and preserves the draft", async () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "active-turn" };
+    mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "active-turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            {
+              type: "userMessage",
+              id: "active-message",
+              status: "completed",
+              text: "Повтори проверку",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.change(textarea, { target: { value: "  Повтори проверку  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
+
+    expect(await screen.findByText("Это сообщение уже отправлено")).toBeInTheDocument();
+    expect(textarea).toHaveValue("  Повтори проверку  ");
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(api.enqueue).not.toHaveBeenCalled();
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+  });
+
+  it("treats the latest root user message as active while a Team parent runs between turns", async () => {
+    const api = threadApi();
+    const teamParent = {
+      ...summary,
+      state: "running" as const,
+      settings: { collaborationMode: "team" as const },
+    };
+    mockThreadConnection(api, teamParent, {
+      turns: [
+        {
+          id: "root-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "userMessage",
+              id: "root-message",
+              status: "completed",
+              text: "Оркестрируй задачу",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.change(textarea, { target: { value: "Оркестрируй задачу" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
+
+    expect(await screen.findByText("Это сообщение уже отправлено")).toBeInTheDocument();
+    expect(textarea).toHaveValue("Оркестрируй задачу");
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(api.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(["queued", "optimistic"] as const)(
+    "blocks an exact duplicate of an active %s message",
+    async (source) => {
+      const api = threadApi();
+      const context = mockThreadConnection(api, summary, {
+        queuedMessages:
+          source === "queued"
+            ? [
+                {
+                  id: "queued-message",
+                  threadId: "thread",
+                  text: "Не дублируй",
+                  images: [],
+                  createdAt: 1,
+                  status: "queued",
+                },
+              ]
+            : [],
+      });
+      if (source === "optimistic") {
+        context.state.optimisticMessages.thread = [
+          {
+            id: "optimistic-message",
+            threadId: "thread",
+            text: "Не дублируй",
+            images: [],
+            createdAt: 1,
+            destination: "queue",
+            turnId: null,
+          },
+        ];
+      }
+      renderThread();
+      const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+      fireEvent.change(textarea, { target: { value: "Не дублируй" } });
+
+      fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+      expect(await screen.findByText("Это сообщение уже отправлено")).toBeInTheDocument();
+      expect(api.startTurn).not.toHaveBeenCalled();
+      expect(textarea).toHaveValue("Не дублируй");
+    },
+  );
+
+  it("allows a completed message to be sent again", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "completed-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "userMessage",
+              id: "completed-message",
+              status: "completed",
+              text: "Запусти снова",
+              images: [],
+              timestamp: 1,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Запусти снова" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({ input: "Запусти снова" }),
+      ),
+    );
+  });
+
   it("acknowledges the thread notification as soon as its route opens", async () => {
     mockThreadConnection(threadApi(), summary);
 
@@ -2244,6 +2409,92 @@ describe("Activity", () => {
         clientMessageId: expect.any(String),
       }),
     );
+  });
+
+  it("lets only one completed-plan implementation button start at a time", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    let resolveSettings: ((thread: ThreadSummary) => void) | undefined;
+    api.updateThreadSettings.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSettings = resolve;
+        }),
+    );
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+    const defaultButton = screen.getByRole("button", { name: "Да, реализуй этот план" });
+    const teamButton = screen.getByRole("button", { name: "Запустить в режиме оркестратора" });
+
+    act(() => {
+      defaultButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      teamButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(api.updateThreadSettings).toHaveBeenCalledTimes(1);
+    expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
+      collaborationMode: "default",
+    });
+    expect(screen.getByText("Это сообщение уже отправлено")).toBeInTheDocument();
+
+    resolveSettings?.({ ...planThread, settings: { collaborationMode: "default" } });
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledOnce());
+  });
+
+  it("does not mutate Plan settings when its implementation message is already active", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    const context = mockThreadConnection(api, planThread, completedPlanDetail());
+    context.state.optimisticMessages.thread = [
+      {
+        id: "active-plan-acceptance",
+        threadId: "thread",
+        text: "Да, реализуй этот план",
+        images: [],
+        createdAt: 3,
+        destination: "turn",
+        turnId: null,
+      },
+    ];
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Да, реализуй этот план" }));
+
+    expect(await screen.findByText("Это сообщение уже отправлено")).toBeInTheDocument();
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+    expect(api.startTurn).not.toHaveBeenCalled();
+  });
+
+  it("releases a failed completed-plan claim so acceptance can be retried", async () => {
+    const api = threadApi();
+    api.startTurn.mockRejectedValueOnce(new Error("Codex недоступен"));
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+    const button = screen.getByRole("button", { name: "Да, реализуй этот план" });
+
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenNthCalledWith(2, "thread", {
+        collaborationMode: "plan",
+      }),
+    );
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(2));
+    expect(api.updateThreadSettings).toHaveBeenNthCalledWith(3, "thread", {
+      collaborationMode: "default",
+    });
   });
 
   it("starts a completed plan in orchestrator mode", async () => {

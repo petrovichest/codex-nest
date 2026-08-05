@@ -27,6 +27,9 @@ describe("interface localization", () => {
 
   it("translates variables and changes the document language", () => {
     expect(translate("en", "Показать ещё {{count}}", { count: 3 })).toBe("Show 3 more");
+    expect(translate("en", "Это сообщение уже отправлено")).toBe(
+      "This message has already been sent",
+    );
 
     render(
       <I18nProvider>
