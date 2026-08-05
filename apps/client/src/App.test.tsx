@@ -1310,6 +1310,175 @@ describe("App routing and navigation", () => {
     expect(view.container.querySelector(".project-list")).not.toHaveClass("project-list-dragging");
   });
 
+  it("drags a project after holding its title with one finger for one second", () => {
+    vi.useFakeTimers();
+    try {
+      const secondProject = testProject("second", "Второй");
+      const thirdProject = testProject("third", "Третий");
+      const projects = [defaultProject(), secondProject, thirdProject];
+      const api = mockConnection(snapshot([baseThread], projects));
+      api.moveProject.mockResolvedValue([secondProject, thirdProject, defaultProject()]);
+
+      const view = renderApp("/threads/newer");
+      setProjectDragBounds(view.container, [80, 120, 160]);
+      const toggle = screen.getByRole("button", { name: "Проект" });
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 7 }],
+      });
+      expect(fireEvent.contextMenu(toggle)).toBe(false);
+      act(() => vi.advanceTimersByTime(999));
+
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+
+      act(() => vi.advanceTimersByTime(1));
+
+      expect(view.container.querySelector(".project-list")).toHaveClass("project-list-dragging");
+      fireEvent.touchMove(window, {
+        touches: [{ clientX: 12, clientY: 180, identifier: 7 }],
+      });
+      expect(screen.getByRole("button", { name: "Третий" }).closest(".project-group")).toHaveClass(
+        "project-drop-after",
+      );
+
+      fireEvent.touchEnd(window, {
+        changedTouches: [{ clientX: 12, clientY: 180, identifier: 7 }],
+        touches: [],
+      });
+
+      expect(api.moveProject).toHaveBeenCalledWith("project", { targetIndex: 2 });
+      expect(api.moveProject).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps short project-title touches as taps and cancels a hold when scrolling starts", () => {
+    vi.useFakeTimers();
+    try {
+      const secondProject = testProject("second", "Второй");
+      const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+
+      const view = renderApp("/threads/newer");
+      setProjectDragBounds(view.container, [80, 120]);
+      const toggle = screen.getByRole("button", { name: "Проект" });
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 8 }],
+      });
+      act(() => vi.advanceTimersByTime(999));
+      fireEvent.touchEnd(window, {
+        changedTouches: [{ clientX: 12, clientY: 90, identifier: 8 }],
+        touches: [],
+      });
+      fireEvent.click(toggle);
+
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 9 }],
+      });
+      expect(
+        fireEvent.touchMove(window, {
+          touches: [{ clientX: 12, clientY: 100, identifier: 9 }],
+        }),
+      ).toBe(true);
+      act(() => vi.advanceTimersByTime(1_000));
+
+      expect(api.moveProject).not.toHaveBeenCalled();
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("consumes a long project-title hold without reordering at the original position", () => {
+    vi.useFakeTimers();
+    try {
+      const secondProject = testProject("second", "Второй");
+      const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+
+      const view = renderApp("/threads/newer");
+      setProjectDragBounds(view.container, [80, 120]);
+      const toggle = screen.getByRole("button", { name: "Проект" });
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 10 }],
+      });
+      act(() => vi.advanceTimersByTime(1_000));
+      fireEvent.touchEnd(window, {
+        changedTouches: [{ clientX: 12, clientY: 90, identifier: 10 }],
+        touches: [],
+      });
+      fireEvent.click(toggle);
+
+      expect(api.moveProject).not.toHaveBeenCalled();
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a project-title hold for multitouch and touch cancellation", () => {
+    vi.useFakeTimers();
+    try {
+      const secondProject = testProject("second", "Второй");
+      const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+
+      const view = renderApp("/threads/newer");
+      setProjectDragBounds(view.container, [80, 120]);
+      const toggle = screen.getByRole("button", { name: "Проект" });
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 11 }],
+      });
+      fireEvent.touchStart(window, {
+        touches: [
+          { clientX: 12, clientY: 90, identifier: 11 },
+          { clientX: 30, clientY: 90, identifier: 12 },
+        ],
+      });
+      act(() => vi.advanceTimersByTime(1_000));
+
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+
+      fireEvent.touchStart(toggle, {
+        touches: [{ clientX: 12, clientY: 90, identifier: 13 }],
+      });
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(view.container.querySelector(".project-list")).toHaveClass("project-list-dragging");
+
+      fireEvent.touchCancel(window, {
+        changedTouches: [{ clientX: 12, clientY: 90, identifier: 13 }],
+        touches: [],
+      });
+
+      expect(api.moveProject).not.toHaveBeenCalled();
+      expect(view.container.querySelector(".project-list")).not.toHaveClass(
+        "project-list-dragging",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps touch dragging in a bottom-up list back to server order", async () => {
     localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
     localStorage.setItem("codexnest.projectListDirection", "bottom-up");

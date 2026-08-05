@@ -1,6 +1,7 @@
 import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  type TouchEvent as ReactTouchEvent,
   useCallback,
   useEffect,
   useRef,
@@ -67,6 +68,8 @@ const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
 const LAYOUT_DEFAULTS_VERSION = "1";
 const NOTIFICATION_PROMPT_DISMISSED_KEY = "codexnest.notificationPromptDismissed";
 const PROJECT_DRAG_START_DISTANCE = 6;
+const PROJECT_LONG_PRESS_DELAY = 1_000;
+const PROJECT_LONG_PRESS_MOVE_TOLERANCE = 10;
 const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
@@ -85,11 +88,14 @@ type ProjectDragGesture = {
   displayProjectIds: string[];
   element: HTMLElement;
   frameId: number | null;
+  holdTimerId: number | null;
   insertionIndex: number;
   pointerId: number;
   projectId: string;
+  source: "handle" | "long-press";
   startX: number;
   startY: number;
+  touchCleanup: (() => void) | null;
 };
 
 type ProjectDragView = {
@@ -642,6 +648,8 @@ function Sidebar({
     message: string;
   } | null>(null);
   const projectDragRef = useRef<ProjectDragGesture | null>(null);
+  const suppressedProjectToggleRef = useRef<string | null>(null);
+  const suppressedProjectToggleTimerRef = useRef<number | undefined>(undefined);
   const noticeTimerRef = useRef<number | undefined>(undefined);
   const threadNavRef = useRef<HTMLElement>(null);
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
@@ -712,10 +720,11 @@ function Sidebar({
   useEffect(
     () => () => {
       if (noticeTimerRef.current !== undefined) window.clearTimeout(noticeTimerRef.current);
-      const gesture = projectDragRef.current;
-      if (gesture?.frameId !== null && gesture?.frameId !== undefined) {
-        window.cancelAnimationFrame(gesture.frameId);
+      if (suppressedProjectToggleTimerRef.current !== undefined) {
+        window.clearTimeout(suppressedProjectToggleTimerRef.current);
       }
+      const gesture = projectDragRef.current;
+      if (gesture) releaseProjectDragResources(gesture);
       projectDragRef.current = null;
     },
     [],
@@ -726,12 +735,7 @@ function Sidebar({
       if (event.key !== "Escape") return;
       const gesture = projectDragRef.current;
       if (!gesture) return;
-      if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
-      if (gesture.element.hasPointerCapture?.(gesture.pointerId)) {
-        gesture.element.releasePointerCapture(gesture.pointerId);
-      }
-      projectDragRef.current = null;
-      setProjectDrag(null);
+      clearProjectDragGesture(gesture);
     }
 
     window.addEventListener("keydown", cancelWithEscape);
@@ -741,16 +745,34 @@ function Sidebar({
   useEffect(() => {
     const gesture = projectDragRef.current;
     if (!gesture) return;
-    if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
-    if (gesture.element.hasPointerCapture?.(gesture.pointerId)) {
-      gesture.element.releasePointerCapture(gesture.pointerId);
-    }
-    projectDragRef.current = null;
-    setProjectDrag(null);
+    clearProjectDragGesture(gesture);
   }, [projectOrderKey]);
 
   function toggleCollapsed(key: string) {
     setSidebarTree((current) => toggleSidebarTreeEntry(current, "collapsedProjectIds", key));
+  }
+
+  function toggleProjectFromClick(projectId: string, key: string) {
+    if (suppressedProjectToggleRef.current === projectId) {
+      suppressedProjectToggleRef.current = null;
+      if (suppressedProjectToggleTimerRef.current !== undefined) {
+        window.clearTimeout(suppressedProjectToggleTimerRef.current);
+        suppressedProjectToggleTimerRef.current = undefined;
+      }
+      return;
+    }
+    toggleCollapsed(key);
+  }
+
+  function suppressProjectToggleClick(projectId: string) {
+    if (suppressedProjectToggleTimerRef.current !== undefined) {
+      window.clearTimeout(suppressedProjectToggleTimerRef.current);
+    }
+    suppressedProjectToggleRef.current = projectId;
+    suppressedProjectToggleTimerRef.current = window.setTimeout(() => {
+      suppressedProjectToggleRef.current = null;
+      suppressedProjectToggleTimerRef.current = undefined;
+    }, 0);
   }
 
   function toggleProjectList(key: string, total: number, initial: number) {
@@ -932,7 +954,15 @@ function Sidebar({
   }
 
   function beginProjectDrag(event: ReactPointerEvent<HTMLElement>, projectId: string) {
-    if (movingProjectId || deletingProjectId || !event.isPrimary || event.button !== 0) return;
+    if (
+      movingProjectId ||
+      deletingProjectId ||
+      projectDragRef.current ||
+      !event.isPrimary ||
+      event.button !== 0
+    ) {
+      return;
+    }
     const displayIndex = displayedProjectIds.indexOf(projectId);
     if (displayIndex < 0) return;
     event.preventDefault();
@@ -944,18 +974,23 @@ function Sidebar({
       displayProjectIds: displayedProjectIds,
       element: event.currentTarget,
       frameId: null,
+      holdTimerId: null,
       insertionIndex: displayIndex,
       pointerId: event.pointerId,
       projectId,
+      source: "handle",
       startX: event.clientX,
       startY: event.clientY,
+      touchCleanup: null,
     };
     setProjectNotice(null);
   }
 
   function moveProjectDrag(event: ReactPointerEvent<HTMLElement>) {
     const gesture = projectDragRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (!gesture || gesture.source !== "handle" || gesture.pointerId !== event.pointerId) {
+      return;
+    }
     gesture.clientY = event.clientY;
     if (!gesture.active) {
       const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
@@ -971,25 +1006,45 @@ function Sidebar({
     scheduleProjectDragFrame(gesture);
   }
 
-  function clearProjectDrag(event: ReactPointerEvent<HTMLElement>) {
-    const gesture = projectDragRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return null;
-    if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
-    if (event.currentTarget.hasPointerCapture?.(gesture.pointerId)) {
-      event.currentTarget.releasePointerCapture(gesture.pointerId);
+  function releaseProjectDragResources(gesture: ProjectDragGesture) {
+    if (gesture.holdTimerId !== null) {
+      window.clearTimeout(gesture.holdTimerId);
+      gesture.holdTimerId = null;
     }
+    if (gesture.frameId !== null) window.cancelAnimationFrame(gesture.frameId);
+    gesture.frameId = null;
+    gesture.touchCleanup?.();
+    gesture.touchCleanup = null;
+    if (gesture.source === "handle" && gesture.element.hasPointerCapture?.(gesture.pointerId)) {
+      gesture.element.releasePointerCapture(gesture.pointerId);
+    }
+  }
+
+  function clearProjectDragGesture(gesture: ProjectDragGesture) {
+    if (projectDragRef.current !== gesture) return null;
     projectDragRef.current = null;
+    releaseProjectDragResources(gesture);
     setProjectDrag(null);
     return gesture;
   }
 
   function cancelProjectDrag(event: ReactPointerEvent<HTMLElement>) {
-    clearProjectDrag(event);
+    const gesture = projectDragRef.current;
+    if (gesture?.source === "handle" && gesture.pointerId === event.pointerId) {
+      clearProjectDragGesture(gesture);
+    }
   }
 
   function finishProjectDrag(event: ReactPointerEvent<HTMLElement>) {
-    const gesture = clearProjectDrag(event);
-    if (!gesture?.active) return;
+    const gesture = projectDragRef.current;
+    if (!gesture || gesture.source !== "handle" || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    completeProjectDrag(gesture);
+  }
+
+  function completeProjectDrag(gesture: ProjectDragGesture) {
+    if (!clearProjectDragGesture(gesture)?.active) return;
     const remainingIds = gesture.displayProjectIds.filter((id) => id !== gesture.projectId);
     const desiredDisplayIds = [...remainingIds];
     desiredDisplayIds.splice(gesture.insertionIndex, 0, gesture.projectId);
@@ -999,6 +1054,109 @@ function Sidebar({
     const targetIndex = desiredServerIds.indexOf(gesture.projectId);
     if (targetIndex < 0) return;
     void moveProject(gesture.projectId, { targetIndex }, null);
+  }
+
+  function beginProjectLongPress(event: ReactTouchEvent<HTMLElement>, projectId: string) {
+    if (
+      movingProjectId ||
+      deletingProjectId ||
+      projectDragRef.current ||
+      event.touches.length !== 1
+    ) {
+      return;
+    }
+    const displayIndex = displayedProjectIds.indexOf(projectId);
+    const touch = event.touches[0];
+    if (displayIndex < 0 || !touch) return;
+
+    const gesture: ProjectDragGesture = {
+      active: false,
+      clientY: touch.clientY,
+      direction: projectListDirection,
+      displayProjectIds: displayedProjectIds,
+      element: event.currentTarget,
+      frameId: null,
+      holdTimerId: null,
+      insertionIndex: displayIndex,
+      pointerId: touch.identifier,
+      projectId,
+      source: "long-press",
+      startX: touch.clientX,
+      startY: touch.clientY,
+      touchCleanup: null,
+    };
+
+    const matchingTouch = (touches: TouchList) => {
+      for (let index = 0; index < touches.length; index += 1) {
+        const candidate = touches[index];
+        if (candidate?.identifier === gesture.pointerId) return candidate;
+      }
+      return null;
+    };
+    const cancelForAdditionalTouch = (touchEvent: TouchEvent) => {
+      if (touchEvent.touches.length === 1) return;
+      if (gesture.active) touchEvent.preventDefault();
+      clearProjectDragGesture(gesture);
+    };
+    const moveTouch = (touchEvent: TouchEvent) => {
+      if (projectDragRef.current !== gesture) return;
+      if (touchEvent.touches.length !== 1) {
+        if (gesture.active) touchEvent.preventDefault();
+        clearProjectDragGesture(gesture);
+        return;
+      }
+      const currentTouch = matchingTouch(touchEvent.touches);
+      if (!currentTouch) {
+        clearProjectDragGesture(gesture);
+        return;
+      }
+      gesture.clientY = currentTouch.clientY;
+      if (!gesture.active) {
+        const distance = Math.hypot(
+          currentTouch.clientX - gesture.startX,
+          currentTouch.clientY - gesture.startY,
+        );
+        if (distance < PROJECT_LONG_PRESS_MOVE_TOLERANCE) return;
+        clearProjectDragGesture(gesture);
+        return;
+      }
+      touchEvent.preventDefault();
+      updateProjectDragTarget(gesture);
+      scheduleProjectDragFrame(gesture);
+    };
+    const endTouch = (touchEvent: TouchEvent) => {
+      if (projectDragRef.current !== gesture) return;
+      if (!matchingTouch(touchEvent.changedTouches)) return;
+      if (gesture.active) {
+        touchEvent.preventDefault();
+        suppressProjectToggleClick(gesture.projectId);
+        completeProjectDrag(gesture);
+      } else {
+        clearProjectDragGesture(gesture);
+      }
+    };
+    const cancelTouch = () => clearProjectDragGesture(gesture);
+    gesture.touchCleanup = () => {
+      window.removeEventListener("touchstart", cancelForAdditionalTouch);
+      window.removeEventListener("touchmove", moveTouch);
+      window.removeEventListener("touchend", endTouch);
+      window.removeEventListener("touchcancel", cancelTouch);
+    };
+
+    projectDragRef.current = gesture;
+    window.addEventListener("touchstart", cancelForAdditionalTouch, { passive: false });
+    window.addEventListener("touchmove", moveTouch, { passive: false });
+    window.addEventListener("touchend", endTouch, { passive: false });
+    window.addEventListener("touchcancel", cancelTouch);
+    gesture.holdTimerId = window.setTimeout(() => {
+      if (projectDragRef.current !== gesture || gesture.active) return;
+      gesture.holdTimerId = null;
+      gesture.active = true;
+      setProjectNotice(null);
+      setProjectDrag({ projectId: gesture.projectId, insertionIndex: gesture.insertionIndex });
+      updateProjectDragTarget(gesture);
+      scheduleProjectDragFrame(gesture);
+    }, PROJECT_LONG_PRESS_DELAY);
   }
 
   function openNewSession(projectId: string) {
@@ -1153,7 +1311,25 @@ function Sidebar({
                   aria-expanded={!groupCollapsed}
                   className="project-toggle"
                   type="button"
-                  onClick={() => toggleCollapsed(key)}
+                  onClick={() =>
+                    group.project
+                      ? toggleProjectFromClick(group.project.id, key)
+                      : toggleCollapsed(key)
+                  }
+                  onContextMenu={(event) => {
+                    const gesture = projectDragRef.current;
+                    if (
+                      gesture?.source === "long-press" &&
+                      gesture.projectId === group.project?.id
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onTouchStart={
+                    group.project
+                      ? (event) => beginProjectLongPress(event, group.project!.id)
+                      : undefined
+                  }
                 >
                   {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
                   <FolderIcon />

@@ -426,6 +426,8 @@ pre {
   color: inherit;
   background: transparent;
   font: inherit;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .project-toggle:hover:not(:disabled),
