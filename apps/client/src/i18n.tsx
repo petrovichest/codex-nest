@@ -16,6 +16,7 @@ const LEGACY_INSTALLATION_KEYS = [
   "codexnest.theme",
   "codexnest.sidebarSide",
   "codexnest.projectListDirection",
+  "codexnest.sessionListMode",
   "codexnest.layoutDefaultsVersion",
   "codexnest.notificationPromptDismissed",
 ];
@@ -57,6 +58,10 @@ const ENGLISH: Record<string, string> = {
   "Доступно обновление CodexNest": "CodexNest update available",
   Настройки: "Settings",
   "Добавить проект": "Add project",
+  Проекты: "Projects",
+  Активные: "Active",
+  "Режим списка сессий": "Session list mode",
+  "Нет активных сессий": "No active sessions",
   Задачи: "Tasks",
   "Без проекта": "No project",
   "Перетащить проект {{project}}": "Drag project {{project}}",

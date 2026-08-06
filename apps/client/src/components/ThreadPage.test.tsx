@@ -1671,6 +1671,38 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Закончить" })).toBeNull();
   });
 
+  it("keeps a failed session pending until the user finishes it", () => {
+    const api = threadApi();
+    mockThreadConnection(
+      api,
+      {
+        ...summary,
+        state: "failed",
+        unread: true,
+        updatedAt: 123,
+      },
+      {
+        turns: [
+          {
+            id: "failed-turn",
+            status: "failed",
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            progress: progress(),
+            items: [],
+          },
+        ],
+      },
+    );
+
+    renderThread();
+
+    expect(api.markRead).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Закончить" }));
+    expect(api.markRead).toHaveBeenCalledWith("thread", { observedUpdatedAt: 123 });
+  });
+
   it("keeps the finish action available when marking the session fails", async () => {
     const api = threadApi();
     api.markRead.mockRejectedValue(new Error("Сервер недоступен"));

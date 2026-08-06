@@ -74,8 +74,10 @@ const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
+const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
 
 type ListExpansion = number | "all";
+type SessionListMode = "projects" | "active";
 
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
@@ -487,6 +489,14 @@ function emptySidebarTreeState(): SidebarTreeState {
   };
 }
 
+function readSessionListMode(): SessionListMode {
+  try {
+    return localStorage.getItem(SESSION_LIST_MODE_KEY) === "active" ? "active" : "projects";
+  } catch {
+    return "projects";
+  }
+}
+
 function sidebarTreeStateStorageKey(serverBaseUrl: string): string {
   const normalizedBaseUrl = serverBaseUrl.replace(/\/+$/u, "");
   return `${SIDEBAR_TREE_STATE_KEY_PREFIX}${encodeURIComponent(normalizedBaseUrl)}`;
@@ -633,6 +643,7 @@ function Sidebar({
   const [sidebarTree, setSidebarTree] = useState<SidebarTreeState>(() =>
     readSidebarTreeState(serverBaseUrl),
   );
+  const [sessionListMode, setSessionListMode] = useState<SessionListMode>(readSessionListMode);
   const [projectListExpansions, setProjectListExpansions] = useState<Map<string, ListExpansion>>(
     () => new Map(),
   );
@@ -664,6 +675,10 @@ function Sidebar({
   const childrenByParent = childThreadsByParent(allThreads);
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
+  const activeFeedRoots = sortActiveFeedThreads(activeRoots.filter(isActiveFeedEligible));
+  const projectNames = new Map(
+    (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
+  );
   const displayedProjectIds = orderedGroups.flatMap((group) =>
     group.project ? [group.project.id] : [],
   );
@@ -672,6 +687,14 @@ function Sidebar({
   useEffect(() => {
     writeSidebarTreeState(serverBaseUrl, sidebarTree);
   }, [serverBaseUrl, sidebarTree]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_LIST_MODE_KEY, sessionListMode);
+    } catch {
+      return;
+    }
+  }, [sessionListMode]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -714,8 +737,11 @@ function Sidebar({
     if (!snapshotReady) return;
     const navigation = threadNavRef.current;
     if (!navigation) return;
-    navigation.scrollTop = projectListDirection === "bottom-up" ? navigation.scrollHeight : 0;
-  }, [projectListDirection, snapshotReady]);
+    navigation.scrollTop =
+      sessionListMode === "projects" && projectListDirection === "bottom-up"
+        ? navigation.scrollHeight
+        : 0;
+  }, [projectListDirection, sessionListMode, snapshotReady]);
 
   useEffect(
     () => () => {
@@ -1257,259 +1283,296 @@ function Sidebar({
           {t("Добавить проект")}
         </button>
       </div>
+      <div className="session-list-mode" role="group" aria-label={t("Режим списка сессий")}>
+        <button
+          aria-pressed={sessionListMode === "projects"}
+          onClick={() => setSessionListMode("projects")}
+          type="button"
+        >
+          {t("Проекты")}
+        </button>
+        <button
+          aria-pressed={sessionListMode === "active"}
+          onClick={() => setSessionListMode("active")}
+          type="button"
+        >
+          {t("Активные")}
+        </button>
+      </div>
       <nav
         className={`thread-nav ${projectListDirection}`}
         aria-label={t("Задачи")}
         ref={threadNavRef}
       >
-        <div className={`project-list${projectDrag ? " project-list-dragging" : ""}`}>
-          {projectListDirection === "bottom-up" && archive}
-          {orderedGroups.map((group) => {
-            const key = group.project?.id ?? "ungrouped";
-            const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
-            const alwaysVisibleThreads = group.threads.filter(hasAlwaysVisibleThreadStatus);
-            const collapsibleThreads = group.threads.filter(
-              (thread) => !hasAlwaysVisibleThreadStatus(thread),
-            );
-            const initialCollapsibleLimit = Math.max(
-              0,
-              THREAD_PREVIEW_LIMIT - alwaysVisibleThreads.length,
-            );
-            const projectListExpansion = projectListExpansions.get(key);
-            const requestedCollapsibleLimit =
-              projectListExpansion === "all"
-                ? collapsibleThreads.length
-                : (projectListExpansion ?? initialCollapsibleLimit);
-            const collapsibleLimit = Math.max(initialCollapsibleLimit, requestedCollapsibleLimit);
-            const groupShowsAll =
-              collapsibleThreads.length > initialCollapsibleLimit &&
-              collapsibleLimit >= collapsibleThreads.length;
-            const isBottomUp = projectListDirection === "bottom-up";
-            const visibleCollapsibleIds = new Set(
-              collapsibleThreads.slice(0, collapsibleLimit).map((thread) => thread.id),
-            );
-            const visible = group.threads.filter(
-              (thread) =>
-                hasAlwaysVisibleThreadStatus(thread) || visibleCollapsibleIds.has(thread.id),
-            );
-            const projectThreads = group.project
-              ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ?? [])
-              : [];
-            const sessionsId = `project-sessions-${key}`;
-            const projectIndex = group.project
-              ? (snapshot?.projects.findIndex((project) => project.id === group.project!.id) ?? -1)
-              : -1;
-            const lastProjectIndex = (snapshot?.projects.length ?? 0) - 1;
-            const moveAboveDirection = isBottomUp ? "down" : "up";
-            const moveBelowDirection = isBottomUp ? "up" : "down";
-            const cannotMoveAbove = projectIndex === (isBottomUp ? lastProjectIndex : 0);
-            const cannotMoveBelow = projectIndex === (isBottomUp ? 0 : lastProjectIndex);
-            const projectHeader = (
-              <div className="project-title">
-                <button
-                  aria-controls={sessionsId}
-                  aria-expanded={!groupCollapsed}
-                  className="project-toggle"
-                  type="button"
-                  onClick={() =>
-                    group.project
-                      ? toggleProjectFromClick(group.project.id, key)
-                      : toggleCollapsed(key)
-                  }
-                  onContextMenu={(event) => {
-                    const gesture = projectDragRef.current;
-                    if (
-                      gesture?.source === "long-press" &&
-                      gesture.projectId === group.project?.id
-                    ) {
-                      event.preventDefault();
+        {sessionListMode === "active" ? (
+          <div className="active-session-list">
+            {activeFeedRoots.map((thread) => (
+              <ActiveThreadBranch
+                thread={thread}
+                childrenByParent={childrenByParent}
+                key={thread.id}
+                onNavigate={onClose}
+                projectLabel={
+                  (thread.projectId ? projectNames.get(thread.projectId) : null) ?? t("Без проекта")
+                }
+              />
+            ))}
+            {!activeFeedRoots.length && (
+              <div className="active-session-empty">{t("Нет активных сессий")}</div>
+            )}
+          </div>
+        ) : (
+          <div className={`project-list${projectDrag ? " project-list-dragging" : ""}`}>
+            {projectListDirection === "bottom-up" && archive}
+            {orderedGroups.map((group) => {
+              const key = group.project?.id ?? "ungrouped";
+              const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
+              const alwaysVisibleThreads = group.threads.filter(hasAlwaysVisibleThreadStatus);
+              const collapsibleThreads = group.threads.filter(
+                (thread) => !hasAlwaysVisibleThreadStatus(thread),
+              );
+              const initialCollapsibleLimit = Math.max(
+                0,
+                THREAD_PREVIEW_LIMIT - alwaysVisibleThreads.length,
+              );
+              const projectListExpansion = projectListExpansions.get(key);
+              const requestedCollapsibleLimit =
+                projectListExpansion === "all"
+                  ? collapsibleThreads.length
+                  : (projectListExpansion ?? initialCollapsibleLimit);
+              const collapsibleLimit = Math.max(initialCollapsibleLimit, requestedCollapsibleLimit);
+              const groupShowsAll =
+                collapsibleThreads.length > initialCollapsibleLimit &&
+                collapsibleLimit >= collapsibleThreads.length;
+              const isBottomUp = projectListDirection === "bottom-up";
+              const visibleCollapsibleIds = new Set(
+                collapsibleThreads.slice(0, collapsibleLimit).map((thread) => thread.id),
+              );
+              const visible = group.threads.filter(
+                (thread) =>
+                  hasAlwaysVisibleThreadStatus(thread) || visibleCollapsibleIds.has(thread.id),
+              );
+              const projectThreads = group.project
+                ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ??
+                  [])
+                : [];
+              const sessionsId = `project-sessions-${key}`;
+              const projectIndex = group.project
+                ? (snapshot?.projects.findIndex((project) => project.id === group.project!.id) ??
+                  -1)
+                : -1;
+              const lastProjectIndex = (snapshot?.projects.length ?? 0) - 1;
+              const moveAboveDirection = isBottomUp ? "down" : "up";
+              const moveBelowDirection = isBottomUp ? "up" : "down";
+              const cannotMoveAbove = projectIndex === (isBottomUp ? lastProjectIndex : 0);
+              const cannotMoveBelow = projectIndex === (isBottomUp ? 0 : lastProjectIndex);
+              const projectHeader = (
+                <div className="project-title">
+                  <button
+                    aria-controls={sessionsId}
+                    aria-expanded={!groupCollapsed}
+                    className="project-toggle"
+                    type="button"
+                    onClick={() =>
+                      group.project
+                        ? toggleProjectFromClick(group.project.id, key)
+                        : toggleCollapsed(key)
                     }
-                  }}
-                  onTouchStart={
-                    group.project
-                      ? (event) => beginProjectLongPress(event, group.project!.id)
-                      : undefined
-                  }
-                >
-                  {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
-                  <FolderIcon />
-                  <span>{group.project?.displayName ?? t("Без проекта")}</span>
-                </button>
-                {group.project && (
-                  <>
-                    <span
-                      aria-hidden="true"
-                      className="project-drag-handle"
-                      data-project-drag-handle
-                      onLostPointerCapture={cancelProjectDrag}
-                      onPointerCancel={cancelProjectDrag}
-                      onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
-                      onPointerMove={moveProjectDrag}
-                      onPointerUp={finishProjectDrag}
-                      title={t("Перетащить проект {{project}}", {
-                        project: group.project.displayName,
-                      })}
-                    >
-                      <GripVerticalIcon />
-                    </span>
-                    <details className="project-action-menu" data-dismiss-on-outside-click>
-                      <summary
-                        aria-label={t("Действия с проектом {{project}}", {
+                    onContextMenu={(event) => {
+                      const gesture = projectDragRef.current;
+                      if (
+                        gesture?.source === "long-press" &&
+                        gesture.projectId === group.project?.id
+                      ) {
+                        event.preventDefault();
+                      }
+                    }}
+                    onTouchStart={
+                      group.project
+                        ? (event) => beginProjectLongPress(event, group.project!.id)
+                        : undefined
+                    }
+                  >
+                    {groupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                    <FolderIcon />
+                    <span>{group.project?.displayName ?? t("Без проекта")}</span>
+                  </button>
+                  {group.project && (
+                    <>
+                      <span
+                        aria-hidden="true"
+                        className="project-drag-handle"
+                        data-project-drag-handle
+                        onLostPointerCapture={cancelProjectDrag}
+                        onPointerCancel={cancelProjectDrag}
+                        onPointerDown={(event) => beginProjectDrag(event, group.project!.id)}
+                        onPointerMove={moveProjectDrag}
+                        onPointerUp={finishProjectDrag}
+                        title={t("Перетащить проект {{project}}", {
+                          project: group.project.displayName,
+                        })}
+                      >
+                        <GripVerticalIcon />
+                      </span>
+                      <details className="project-action-menu" data-dismiss-on-outside-click>
+                        <summary
+                          aria-label={t("Действия с проектом {{project}}", {
+                            project: group.project.displayName,
+                          })}
+                          className="project-icon-action"
+                        >
+                          <MoreIcon />
+                        </summary>
+                        <div className="project-action-popover">
+                          <button
+                            type="button"
+                            onClick={(event) =>
+                              void copyProjectPath(
+                                group.project!.id,
+                                group.project!.path,
+                                event.currentTarget.closest("details"),
+                              )
+                            }
+                          >
+                            <CopyIcon /> {t("Копировать путь")}
+                          </button>
+                          <button
+                            disabled={
+                              cannotMoveAbove ||
+                              movingProjectId !== null ||
+                              deletingProjectId !== null
+                            }
+                            type="button"
+                            onClick={(event) =>
+                              void moveProject(
+                                group.project!.id,
+                                { direction: moveAboveDirection },
+                                event.currentTarget.closest("details"),
+                              )
+                            }
+                          >
+                            <ArrowUpIcon /> {t("Переместить выше")}
+                          </button>
+                          <button
+                            disabled={
+                              cannotMoveBelow ||
+                              movingProjectId !== null ||
+                              deletingProjectId !== null
+                            }
+                            type="button"
+                            onClick={(event) =>
+                              void moveProject(
+                                group.project!.id,
+                                { direction: moveBelowDirection },
+                                event.currentTarget.closest("details"),
+                              )
+                            }
+                          >
+                            <ArrowDownIcon /> {t("Переместить ниже")}
+                          </button>
+                          <button
+                            className="danger"
+                            disabled={deletingProjectId !== null}
+                            type="button"
+                            onClick={(event) =>
+                              void deleteProject(
+                                group.project!,
+                                projectThreads,
+                                event.currentTarget.closest("details"),
+                              )
+                            }
+                          >
+                            <TrashIcon />{" "}
+                            {deletingProjectId === group.project.id
+                              ? t("Удаляем…")
+                              : t("Удалить проект")}
+                          </button>
+                        </div>
+                      </details>
+                      <button
+                        aria-label={t("Создать новую сессию в проекте {{project}}", {
                           project: group.project.displayName,
                         })}
                         className="project-icon-action"
+                        disabled={deletingProjectId !== null}
+                        type="button"
+                        onClick={() => openNewSession(group.project!.id)}
                       >
-                        <MoreIcon />
-                      </summary>
-                      <div className="project-action-popover">
-                        <button
-                          type="button"
-                          onClick={(event) =>
-                            void copyProjectPath(
-                              group.project!.id,
-                              group.project!.path,
-                              event.currentTarget.closest("details"),
-                            )
-                          }
-                        >
-                          <CopyIcon /> {t("Копировать путь")}
-                        </button>
-                        <button
-                          disabled={
-                            cannotMoveAbove ||
-                            movingProjectId !== null ||
-                            deletingProjectId !== null
-                          }
-                          type="button"
-                          onClick={(event) =>
-                            void moveProject(
-                              group.project!.id,
-                              { direction: moveAboveDirection },
-                              event.currentTarget.closest("details"),
-                            )
-                          }
-                        >
-                          <ArrowUpIcon /> {t("Переместить выше")}
-                        </button>
-                        <button
-                          disabled={
-                            cannotMoveBelow ||
-                            movingProjectId !== null ||
-                            deletingProjectId !== null
-                          }
-                          type="button"
-                          onClick={(event) =>
-                            void moveProject(
-                              group.project!.id,
-                              { direction: moveBelowDirection },
-                              event.currentTarget.closest("details"),
-                            )
-                          }
-                        >
-                          <ArrowDownIcon /> {t("Переместить ниже")}
-                        </button>
-                        <button
-                          className="danger"
-                          disabled={deletingProjectId !== null}
-                          type="button"
-                          onClick={(event) =>
-                            void deleteProject(
-                              group.project!,
-                              projectThreads,
-                              event.currentTarget.closest("details"),
-                            )
-                          }
-                        >
-                          <TrashIcon />{" "}
-                          {deletingProjectId === group.project.id
-                            ? t("Удаляем…")
-                            : t("Удалить проект")}
-                        </button>
-                      </div>
-                    </details>
-                    <button
-                      aria-label={t("Создать новую сессию в проекте {{project}}", {
-                        project: group.project.displayName,
-                      })}
-                      className="project-icon-action"
-                      disabled={deletingProjectId !== null}
-                      type="button"
-                      onClick={() => openNewSession(group.project!.id)}
+                        <PlusIcon />
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+              const feedback = (
+                <>
+                  {projectNotice && projectNotice.projectId === group.project?.id && (
+                    <div
+                      className={`project-action-notice ${projectNotice.kind}`}
+                      role={projectNotice.kind === "error" ? "alert" : "status"}
                     >
-                      <PlusIcon />
+                      {projectNotice.message}
+                    </div>
+                  )}
+                </>
+              );
+              const sessions = (
+                <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
+                  {visible.map((thread) => (
+                    <ThreadBranch
+                      branchHistoryExpansions={branchHistoryExpansions}
+                      thread={thread}
+                      childrenByParent={childrenByParent}
+                      key={thread.id}
+                      onNavigate={onClose}
+                      onToggleHistory={toggleBranchHistory}
+                    />
+                  ))}
+                  {collapsibleThreads.length > initialCollapsibleLimit && (
+                    <button
+                      className="show-more"
+                      onClick={() =>
+                        toggleProjectList(key, collapsibleThreads.length, initialCollapsibleLimit)
+                      }
+                    >
+                      {groupShowsAll
+                        ? t("Показать меньше")
+                        : t("Показать ещё {{count}}", {
+                            count: Math.min(
+                              THREAD_PREVIEW_LIMIT,
+                              collapsibleThreads.length - collapsibleLimit,
+                            ),
+                          })}
                     </button>
-                  </>
-                )}
-              </div>
-            );
-            const feedback = (
-              <>
-                {projectNotice && projectNotice.projectId === group.project?.id && (
-                  <div
-                    className={`project-action-notice ${projectNotice.kind}`}
-                    role={projectNotice.kind === "error" ? "alert" : "status"}
-                  >
-                    {projectNotice.message}
-                  </div>
-                )}
-              </>
-            );
-            const sessions = (
-              <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
-                {visible.map((thread) => (
-                  <ThreadBranch
-                    branchHistoryExpansions={branchHistoryExpansions}
-                    thread={thread}
-                    childrenByParent={childrenByParent}
-                    key={thread.id}
-                    onNavigate={onClose}
-                    onToggleHistory={toggleBranchHistory}
-                  />
-                ))}
-                {collapsibleThreads.length > initialCollapsibleLimit && (
-                  <button
-                    className="show-more"
-                    onClick={() =>
-                      toggleProjectList(key, collapsibleThreads.length, initialCollapsibleLimit)
-                    }
-                  >
-                    {groupShowsAll
-                      ? t("Показать меньше")
-                      : t("Показать ещё {{count}}", {
-                          count: Math.min(
-                            THREAD_PREVIEW_LIMIT,
-                            collapsibleThreads.length - collapsibleLimit,
-                          ),
-                        })}
-                  </button>
-                )}
-                {!group.threads.length && (
-                  <span className="project-empty">{t("Пока нет задач")}</span>
-                )}
-              </div>
-            );
-            const projectGroupClasses = [
-              "project-group",
-              group.project?.id === projectDrag?.projectId ? "project-group-dragging" : "",
-              group.project?.id === dropBeforeProjectId ? "project-drop-before" : "",
-              group.project?.id === dropAfterProjectId ? "project-drop-after" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
-            return (
-              <section
-                className={projectGroupClasses}
-                data-project-id={group.project?.id}
-                key={key}
-              >
-                {projectHeader}
-                {feedback}
-                {sessions}
-              </section>
-            );
-          })}
-          {projectListDirection === "top-down" && archive}
-        </div>
+                  )}
+                  {!group.threads.length && (
+                    <span className="project-empty">{t("Пока нет задач")}</span>
+                  )}
+                </div>
+              );
+              const projectGroupClasses = [
+                "project-group",
+                group.project?.id === projectDrag?.projectId ? "project-group-dragging" : "",
+                group.project?.id === dropBeforeProjectId ? "project-drop-before" : "",
+                group.project?.id === dropAfterProjectId ? "project-drop-after" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <section
+                  className={projectGroupClasses}
+                  data-project-id={group.project?.id}
+                  key={key}
+                >
+                  {projectHeader}
+                  {feedback}
+                  {sessions}
+                </section>
+              );
+            })}
+            {projectListDirection === "top-down" && archive}
+          </div>
+        )}
       </nav>
     </aside>
   );
@@ -1575,7 +1638,52 @@ function ThreadBranch({
   );
 }
 
-function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(): void }) {
+function ActiveThreadBranch({
+  thread,
+  childrenByParent,
+  onNavigate,
+  projectLabel,
+}: {
+  thread: ThreadSummary;
+  childrenByParent: Map<string, ThreadSummary[]>;
+  onNavigate(): void;
+  projectLabel?: string;
+}) {
+  const children = sortActiveFeedThreads(
+    (childrenByParent.get(thread.id) ?? []).filter(isActiveFeedEligible),
+  );
+
+  return (
+    <div className="thread-branch">
+      <div className="thread-branch-row">
+        <span className="thread-branch-spacer" />
+        <ThreadLink thread={thread} onNavigate={onNavigate} secondaryLabel={projectLabel} />
+      </div>
+      {children.length > 0 && (
+        <div className="thread-branch-children">
+          {children.map((child) => (
+            <ActiveThreadBranch
+              thread={child}
+              childrenByParent={childrenByParent}
+              key={child.id}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadLink({
+  thread,
+  onNavigate,
+  secondaryLabel,
+}: {
+  thread: ThreadSummary;
+  onNavigate(): void;
+  secondaryLabel?: string;
+}) {
   const { language } = useI18n();
   const location = useLocation();
   const title = localizeKnownServerText(language, thread.title) ?? thread.title;
@@ -1602,7 +1710,14 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
         }
       }}
     >
-      <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+      {secondaryLabel ? (
+        <span className="thread-link-copy">
+          <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+          <span className="thread-link-project">{secondaryLabel}</span>
+        </span>
+      ) : (
+        <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+      )}
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );
@@ -1610,6 +1725,23 @@ function ThreadLink({ thread, onNavigate }: { thread: ThreadSummary; onNavigate(
 
 function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
   return threads.filter((thread) => thread.relation.kind === "session");
+}
+
+function isActiveFeedEligible(thread: ThreadSummary): boolean {
+  return (
+    !thread.archived && (hasAlwaysVisibleThreadStatus(thread) || thread.queuedMessageCount > 0)
+  );
+}
+
+function sortActiveFeedThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  return [...threads].sort((a, b) => {
+    const activeTier = Number(isBlueActiveThread(b)) - Number(isBlueActiveThread(a));
+    return activeTier || b.updatedAt - a.updatedAt;
+  });
+}
+
+function isBlueActiveThread(thread: ThreadSummary): boolean {
+  return thread.state === "running" || thread.state === "queued" || thread.queuedMessageCount > 0;
 }
 
 function childThreadsByParent(threads: ThreadSummary[]): Map<string, ThreadSummary[]> {

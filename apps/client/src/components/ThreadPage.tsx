@@ -1661,12 +1661,6 @@ export function ThreadPage({
     });
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
-  useEffect(() => {
-    if (summary?.unread && detail && summary.state === "failed") {
-      void api.markRead(threadId, { observedUpdatedAt: summary.updatedAt }).catch(() => undefined);
-    }
-  }, [api, detail, summary, threadId]);
-
   function pauseTailFollowing() {
     if (!followsTail.current) return;
     followsTail.current = false;
@@ -2839,7 +2833,7 @@ export function ThreadPage({
                 {!isSubagent &&
                   !activeVoiceJob &&
                   !voiceUpload &&
-                  ["completed", "interrupted"].includes(workspaceSummary.state) &&
+                  ["completed", "failed", "interrupted"].includes(workspaceSummary.state) &&
                   workspaceSummary.unread && (
                     <button
                       className="finish-thread-action"

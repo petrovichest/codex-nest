@@ -223,11 +223,12 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("orders the fixed controls above the project list", () => {
+  it("defaults to projects and orders the display switch above the project list", () => {
     mockConnection(snapshot([baseThread]));
 
     const view = renderApp("/threads/newer");
     const controls = view.container.querySelector(".sidebar-controls");
+    const modeSwitch = screen.getByRole("group", { name: "Режим списка сессий" });
 
     expect(controls).not.toBeNull();
     expect(Array.from(controls!.children).map((element) => element.textContent?.trim())).toEqual([
@@ -236,7 +237,269 @@ describe("App routing and navigation", () => {
       "Лимиты Codex",
       "Добавить проект",
     ]);
-    expect(controls?.nextElementSibling).toHaveClass("thread-nav");
+    expect(controls?.nextElementSibling).toBe(modeSwitch);
+    expect(modeSwitch.nextElementSibling).toHaveClass("thread-nav");
+    expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Активные" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(view.container.querySelector(".project-list")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Проект" })).toBeInTheDocument();
+  });
+
+  it("switches modes, persists globally, keeps project collapse state, and falls back from invalid storage", async () => {
+    mockConnection(snapshot([{ ...baseThread, state: "running" }]));
+
+    const firstView = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Проект" }));
+    expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Активные" }));
+    await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("active"));
+    expect(screen.queryByRole("button", { name: "Проект" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
+    expect(screen.getByRole("button", { name: "Проект" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Активные" }));
+    firstView.unmount();
+
+    const restoredView = renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Активные" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    restoredView.unmount();
+
+    localStorage.setItem("codexnest.sessionListMode", "unknown");
+    renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("projects"));
+  });
+
+  it("renders a flat unlimited cross-project active feed in blue-first recency order", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const secondProject = testProject("second-project", "Второй");
+    const threads = (
+      [
+        {
+          ...baseThread,
+          id: "attention-newest",
+          title: "Внимание 100",
+          projectId: null,
+          state: "needsAttention",
+          updatedAt: 100,
+        },
+        {
+          ...baseThread,
+          id: "unread-missing-project",
+          title: "Результат 90",
+          projectId: "missing-project",
+          state: "completed",
+          unread: true,
+          updatedAt: 90,
+        },
+        {
+          ...baseThread,
+          id: "attention-80",
+          title: "Внимание 80",
+          state: "needsAttention",
+          updatedAt: 80,
+        },
+        {
+          ...baseThread,
+          id: "attention-70",
+          title: "Внимание 70",
+          projectId: secondProject.id,
+          state: "needsAttention",
+          updatedAt: 70,
+        },
+        {
+          ...baseThread,
+          id: "attention-60",
+          title: "Внимание 60",
+          state: "needsAttention",
+          updatedAt: 60,
+        },
+        {
+          ...baseThread,
+          id: "running",
+          title: "Запущена 30",
+          projectId: secondProject.id,
+          state: "running",
+          updatedAt: 30,
+        },
+        {
+          ...baseThread,
+          id: "queued-message",
+          title: "Очередь 10",
+          state: "idle",
+          queuedMessageCount: 1,
+          updatedAt: 10,
+        },
+      ] satisfies ThreadSummary[]
+    ).map((thread): ThreadSummary => ({
+      ...thread,
+      relation: { kind: "session", sessionId: `${thread.id}-session` },
+    }));
+    mockConnection(snapshot(threads, [defaultProject(), secondProject]));
+
+    const view = renderApp("/threads/running");
+    const activeList = view.container.querySelector(".active-session-list") as HTMLElement;
+    const rootTitles = Array.from(
+      activeList.querySelectorAll(
+        ":scope > .thread-branch > .thread-branch-row .thread-link-title",
+      ),
+    ).map((element) => element.textContent);
+    const projectLabels = Array.from(
+      activeList.querySelectorAll(
+        ":scope > .thread-branch > .thread-branch-row .thread-link-project",
+      ),
+    ).map((element) => element.textContent);
+
+    expect(rootTitles).toEqual([
+      "Запущена 30",
+      "Очередь 10",
+      "Внимание 100",
+      "Результат 90",
+      "Внимание 80",
+      "Внимание 70",
+      "Внимание 60",
+    ]);
+    expect(projectLabels).toEqual([
+      "Второй",
+      "Проект",
+      "Без проекта",
+      "Без проекта",
+      "Проект",
+      "Второй",
+      "Проект",
+    ]);
+    expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(7);
+    expect(activeList.querySelector(".show-more")).toBeNull();
+  });
+
+  it("includes only eligible non-archived roots in active mode", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const threads = (
+      [
+        { ...baseThread, id: "eligible", title: "Выполняется", state: "running" },
+        {
+          ...baseThread,
+          id: "queued-defensively",
+          title: "Есть очередь",
+          state: "idle",
+          queuedMessageCount: 2,
+        },
+        { ...baseThread, id: "gray", title: "Обычная история", state: "idle" },
+        { ...baseThread, id: "finished-error", title: "Законченная ошибка", state: "failed" },
+        {
+          ...baseThread,
+          id: "archived-active",
+          title: "Активная в архиве",
+          state: "running",
+          archived: true,
+        },
+      ] satisfies ThreadSummary[]
+    ).map((thread): ThreadSummary => ({
+      ...thread,
+      relation: { kind: "session", sessionId: `${thread.id}-session` },
+    }));
+    mockConnection(snapshot(threads));
+
+    const view = renderApp("/threads/eligible");
+
+    expect(screen.getByRole("link", { name: /Выполняется/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Есть очередь/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Обычная история/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Законченная ошибка/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Активная в архиве/ })).not.toBeInTheDocument();
+    expect(view.container.querySelector(".project-title")).toBeNull();
+    expect(view.container.querySelector(".project-action-menu")).toBeNull();
+    expect(view.container.querySelector(".archive-group")).toBeNull();
+  });
+
+  it("shows a localized empty active feed", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    mockConnection(snapshot([baseThread]));
+
+    renderApp("/threads/newer");
+
+    expect(screen.getByText("Нет активных сессий")).toBeInTheDocument();
+  });
+
+  it("shows only eligible nested children in active mode with root-only project labels", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const root = { ...baseThread, state: "running" } satisfies ThreadSummary;
+    const child = (
+      id: string,
+      title: string,
+      overrides: Partial<ThreadSummary>,
+    ): ThreadSummary => ({
+      ...baseThread,
+      id,
+      title,
+      ...overrides,
+      relation: {
+        kind: "subagent",
+        sessionId: `${id}-session`,
+        parentThreadId: root.id,
+        nickname: id,
+        role: "worker",
+      },
+    });
+    const children = [
+      child("queued-child", "Очередь 20", { state: "queued", updatedAt: 20 }),
+      child("message-child", "Сообщение 10", {
+        state: "idle",
+        queuedMessageCount: 1,
+        updatedAt: 10,
+      }),
+      child("attention-child", "Внимание 100", {
+        state: "needsAttention",
+        updatedAt: 100,
+      }),
+      child("unread-child", "Результат 90", {
+        state: "completed",
+        unread: true,
+        updatedAt: 90,
+      }),
+      child("history-child", "Серая история", { state: "idle", updatedAt: 110 }),
+      child("archived-child", "Архивный субагент", {
+        state: "running",
+        archived: true,
+        updatedAt: 120,
+      }),
+    ];
+    mockConnection(snapshot([...children, root]));
+
+    const view = renderApp("/threads/newer");
+    const rootBranch = screen
+      .getByRole("link", { name: /Новая задача в истории/ })
+      .closest(".thread-branch") as HTMLElement;
+    const nested = rootBranch.querySelector(":scope > .thread-branch-children") as HTMLElement;
+    const nestedTitles = Array.from(
+      nested.querySelectorAll(":scope > .thread-branch > .thread-branch-row .thread-link-title"),
+    ).map((element) => element.textContent);
+
+    expect(nestedTitles).toEqual([
+      "queued-child · Очередь 20",
+      "message-child · Сообщение 10",
+      "attention-child · Внимание 100",
+      "unread-child · Результат 90",
+    ]);
+    expect(screen.queryByRole("link", { name: /Серая история/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Архивный субагент/ })).not.toBeInTheDocument();
+    expect(
+      view.container.querySelectorAll(".active-session-list .thread-link-project"),
+    ).toHaveLength(1);
+    expect(view.container.querySelector(".active-session-list .show-more")).toBeNull();
   });
 
   it.each([
@@ -695,7 +958,13 @@ describe("App routing and navigation", () => {
           state: "completed",
           unread: true,
         },
-        { ...baseThread, id: "failed-1", title: "Ошибка", state: "failed" },
+        {
+          ...baseThread,
+          id: "failed-1",
+          title: "Неподтверждённая ошибка",
+          state: "failed",
+          unread: true,
+        },
         {
           ...baseThread,
           id: "interrupted-unread",

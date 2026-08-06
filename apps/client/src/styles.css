@@ -575,6 +575,41 @@ pre {
   white-space: nowrap;
 }
 
+.thread-link-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.thread-link-copy .thread-link-title {
+  flex: 0 1 auto;
+}
+
+.thread-link-project {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-session-list {
+  padding-top: 8px;
+}
+
+.active-session-list > .thread-branch > .thread-branch-row .thread-link {
+  min-height: 42px;
+}
+
+.active-session-empty {
+  padding: 18px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
 .thread-branch-row {
   display: flex;
   align-items: center;
@@ -635,8 +670,8 @@ pre {
 }
 
 .status-queued {
-  background: #8d929b;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #8d929b 15%, transparent);
+  background: #86b7d9;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #86b7d9 16%, transparent);
 }
 
 .status-needsAttention {
@@ -667,6 +702,7 @@ pre {
   background: #9974db;
 }
 
+.status-failed-read,
 .status-interrupted-read {
   background: #a0a39d;
 }
@@ -754,6 +790,40 @@ pre {
   flex: 0 0 auto;
   padding: 8px 10px 9px;
   border-bottom: 1px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+}
+
+.session-list-mode {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: 8px 10px 0;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 72%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--sidebar-hover) 58%, transparent);
+}
+
+.session-list-mode button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-list-mode button:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--text);
+}
+
+.session-list-mode button[aria-pressed="true"] {
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  box-shadow: 0 1px 3px color-mix(in srgb, #000 12%, transparent);
 }
 
 .sidebar-control-action {
