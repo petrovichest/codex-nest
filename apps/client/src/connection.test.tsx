@@ -1182,6 +1182,7 @@ describe("ConnectionProvider", () => {
       <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
         <SnapshotProbe />
         <ForegroundProbe />
+        <AppActiveProbe />
       </ConnectionProvider>,
     );
     await waitFor(() =>
@@ -1191,9 +1192,11 @@ describe("ConnectionProvider", () => {
     act(() => appStateListener?.({ isActive: false }));
     expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(false);
     expect(screen.getByText("foreground:0")).toBeInTheDocument();
+    expect(screen.getByText("active:false")).toBeInTheDocument();
     act(() => appStateListener?.({ isActive: true }));
     expect(setNativeNotificationAppActive).toHaveBeenLastCalledWith(true);
     expect(await screen.findByText("foreground:1")).toBeInTheDocument();
+    expect(screen.getByText("active:true")).toBeInTheDocument();
 
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
     const resumed = FakeWebSocket.instances[1]!;
@@ -1208,6 +1211,27 @@ describe("ConnectionProvider", () => {
     );
     view.unmount();
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  });
+
+  it("tracks whether the web app is actually visible", () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <AppActiveProbe />
+      </ConnectionProvider>,
+    );
+    expect(screen.getByText("active:true")).toBeInTheDocument();
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(screen.getByText("active:false")).toBeInTheDocument();
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(screen.getByText("active:true")).toBeInTheDocument();
+    view.unmount();
   });
 
   it("starts a current-generation detail read immediately on native resume", async () => {
@@ -1413,6 +1437,11 @@ function SnapshotProbe() {
 function ForegroundProbe() {
   const { foregroundEpoch } = useConnection();
   return <span>foreground:{foregroundEpoch}</span>;
+}
+
+function AppActiveProbe() {
+  const { appActive } = useConnection();
+  return <span>active:{String(appActive)}</span>;
 }
 
 function ThreadTitleProbe() {

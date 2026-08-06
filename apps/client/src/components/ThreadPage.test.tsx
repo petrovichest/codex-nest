@@ -3188,6 +3188,76 @@ describe("Activity", () => {
     expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
   });
 
+  it("marks an unseen open thread as viewed only while the app is active", async () => {
+    const api = threadApi();
+    const unseen = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      unseen: true,
+      updatedAt: 123,
+    };
+    const context = mockThreadConnection(api, unseen);
+    context.appActive = false;
+    const view = renderThread();
+
+    expect(api.markViewed).not.toHaveBeenCalled();
+    context.appActive = true;
+    view.rerender(threadRoute());
+
+    await waitFor(() =>
+      expect(api.markViewed).toHaveBeenCalledWith("thread", { observedUpdatedAt: 123 }),
+    );
+  });
+
+  it("deduplicates viewed marks per thread version and marks a newer outcome", async () => {
+    const api = threadApi();
+    const unseen = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      unseen: true,
+      updatedAt: 123,
+    };
+    const context = mockThreadConnection(api, unseen);
+    const view = renderThread();
+    await waitFor(() => expect(api.markViewed).toHaveBeenCalledTimes(1));
+
+    view.rerender(threadRoute());
+    expect(api.markViewed).toHaveBeenCalledTimes(1);
+
+    const newer = { ...unseen, updatedAt: 456 };
+    context.state.snapshot.threads = [newer];
+    context.state.details.thread = { ...context.state.details.thread, summary: newer };
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.markViewed).toHaveBeenCalledTimes(2));
+    expect(api.markViewed).toHaveBeenLastCalledWith("thread", { observedUpdatedAt: 456 });
+  });
+
+  it("retries a failed viewed mark after the connection recovers", async () => {
+    const api = threadApi();
+    api.markViewed.mockRejectedValueOnce(new Error("offline"));
+    const unseen = {
+      ...summary,
+      state: "completed" as const,
+      unread: true,
+      unseen: true,
+      updatedAt: 123,
+    };
+    const context = mockThreadConnection(api, unseen);
+    const view = renderThread();
+    await waitFor(() => expect(api.markViewed).toHaveBeenCalledTimes(1));
+    await act(async () => Promise.resolve());
+
+    context.state.network = "offline";
+    view.rerender(threadRoute());
+    context.state.network = "connected";
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.markViewed).toHaveBeenCalledTimes(2));
+  });
+
   it("retries one completed chat read when only a plan is available", () => {
     vi.useFakeTimers();
     try {
@@ -3889,6 +3959,7 @@ function threadApi() {
     ),
     archive: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
+    markViewed: vi.fn().mockResolvedValue(undefined),
     readGitChanges: vi
       .fn()
       .mockResolvedValue({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }),
@@ -3954,6 +4025,7 @@ function mockThreadConnection(
   };
   const value = {
     api,
+    appActive: true,
     foregroundEpoch: 0,
     state: {
       snapshot: {

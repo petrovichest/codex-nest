@@ -1668,8 +1668,56 @@ describe("thread settings", () => {
 
     const viewed = await app.inject({ url: "/api/v1/threads/viewed", headers });
     expect(viewed.statusCode).toBe(200);
-    expect(viewed.json().summary).toMatchObject({ unread: true, unseen: false });
+    expect(viewed.json().summary).toMatchObject({ unread: true, unseen: true });
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
+
+    const refreshedViewed = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/viewed/refresh",
+      headers,
+    });
+    expect(refreshedViewed.statusCode).toBe(200);
+    expect(refreshedViewed.json().detail.summary).toMatchObject({ unread: true, unseen: true });
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
+
+    const viewedChanges = await app.inject({
+      url: "/api/v1/threads/viewed/changes?cursor=cursor&anchorTurnId=turn&anchorRevision=revision",
+      headers,
+    });
+    expect(viewedChanges.statusCode).toBe(200);
+    expect(viewedChanges.json().summary).toMatchObject({ unread: true, unseen: true });
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
+
+    const markedViewed = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/viewed/viewed",
+      headers,
+      payload: { observedUpdatedAt: 2_000 },
+    });
+    expect(markedViewed.statusCode).toBe(204);
+    expect(projection.summary("viewed")).toMatchObject({ unread: true, unseen: false });
     expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBe(2_000);
+
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/threads/viewed/viewed",
+          headers,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/threads/missing/viewed",
+          headers,
+          payload: { observedUpdatedAt: 2_000 },
+        })
+      ).statusCode,
+    ).toBe(404);
 
     projection.upsertThread({
       ...testThread("viewed"),
@@ -1683,6 +1731,19 @@ describe("thread settings", () => {
       headers,
     });
     expect(olderViewed.statusCode).toBe(200);
+    expect(projection.summary("viewed")?.unseen).toBe(true);
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBe(2_000);
+
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/threads/viewed/viewed",
+          headers,
+          payload: { observedUpdatedAt: 2_000 },
+        })
+      ).statusCode,
+    ).toBe(204);
     expect(projection.summary("viewed")?.unseen).toBe(true);
     expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBe(2_000);
 

@@ -810,6 +810,10 @@ export type MarkReadRequest = {
   observedUpdatedAt: number;
 };
 
+export type MarkViewedRequest = {
+  observedUpdatedAt: number;
+};
+
 export type DeviceRegistrationRequest = {
   fcmToken: string;
 };

@@ -22,6 +22,7 @@ import type {
   GlobalPermissionSettings,
   InterruptTurnRequest,
   MarkReadRequest,
+  MarkViewedRequest,
   ModelOption,
   MoveProjectRequest,
   PermissionPreset,
@@ -1941,15 +1942,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         typeof request.query.cursor === "string" && request.query.cursor.length
           ? request.query.cursor
           : null;
-      const detail = await projection.readThread(request.params.id, cursor);
-      if (cursor === null && observed.unseen) {
-        await projection.markViewed(request.params.id, observed.updatedAt);
-        return {
-          ...detail,
-          summary: projection.summary(request.params.id) ?? detail.summary,
-        };
-      }
-      return detail;
+      return projection.readThread(request.params.id, cursor);
     },
   );
 
@@ -1958,15 +1951,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
     await projection.invalidateHistory(request.params.id);
     const detail = await projection.readThread(request.params.id);
-    if (observed.unseen) {
-      await projection.markViewed(request.params.id, observed.updatedAt);
-    }
     return {
       snapshot: projection.snapshot(),
-      detail: {
-        ...detail,
-        summary: projection.summary(request.params.id) ?? detail.summary,
-      },
+      detail,
     } satisfies RefreshThreadResponse;
   });
 
@@ -2008,19 +1995,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 400, "validation_failed", "A valid thread sync point is required");
     }
     const syncPoint: ThreadSyncPoint = { cursor, anchorTurnId, anchorRevision };
-    const changes = await projection.readThreadChanges(
-      request.params.id,
-      syncPoint,
-      continuationCursor ?? null,
-    );
-    if (observed.unseen) {
-      await projection.markViewed(request.params.id, observed.updatedAt);
-      return {
-        ...changes,
-        summary: projection.summary(request.params.id) ?? changes.summary,
-      };
-    }
-    return changes;
+    return projection.readThreadChanges(request.params.id, syncPoint, continuationCursor ?? null);
   });
 
   app.put<{ Params: { id: string }; Body: UpdateThreadDraftRequest }>(
@@ -2614,6 +2589,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!projection.summary(request.params.id))
         return apiError(reply, 404, "not_found", "Thread not found");
       await projection.markRead(request.params.id, body.observedUpdatedAt);
+      return reply.code(204).send();
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: MarkViewedRequest }>(
+    "/api/v1/threads/:id/viewed",
+    async (request, reply) => {
+      const body = requireRecord<MarkViewedRequest>(request.body);
+      if (typeof body.observedUpdatedAt !== "number")
+        return apiError(reply, 400, "validation_failed", "observedUpdatedAt is required");
+      if (!projection.summary(request.params.id))
+        return apiError(reply, 404, "not_found", "Thread not found");
+      await projection.markViewed(request.params.id, body.observedUpdatedAt);
       return reply.code(204).send();
     },
   );

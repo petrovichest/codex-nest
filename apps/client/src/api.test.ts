@@ -46,6 +46,29 @@ describe("ApiClient", () => {
     );
   });
 
+  it("marks an encoded thread as viewed and retries an ambiguous failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection lost"))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    const request = api.markViewed("thread/id", { observedUpdatedAt: 123 });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(request).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/viewed"),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ observedUpdatedAt: 123 }),
+      }),
+    );
+  });
+
   it("posts an inclusive fork point to the encoded thread endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ thread: { id: "fork" } }), {

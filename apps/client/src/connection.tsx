@@ -78,6 +78,7 @@ type VoiceRecordingUpload = Omit<
 interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
+  appActive: boolean;
   foregroundEpoch: number;
   dispatch: Dispatch<ClientAction>;
   refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
@@ -105,6 +106,7 @@ export function ConnectionProvider({
   const languageRef = useRef(language);
   const [generation, setGeneration] = useState(0);
   const [foregroundEpoch, setForegroundEpoch] = useState(0);
+  const [appActive, setAppActive] = useState(() => document.visibilityState === "visible");
   const generationRef = useRef(0);
   const streamSequence = useRef<number | null>(null);
   const appliedSequence = useRef<number | null>(null);
@@ -738,13 +740,16 @@ export function ConnectionProvider({
       foregroundRefresh.current = request;
     };
     const foreground = () => {
-      if (document.visibilityState === "visible") refresh();
+      const active = document.visibilityState === "visible";
+      setAppActive(active);
+      if (active) refresh();
     };
     let removeNativeListener: (() => Promise<void>) | undefined;
     if (Capacitor.isNativePlatform()) {
       setNativeNotificationAppActive(true);
       void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
         setNativeNotificationAppActive(isActive);
+        setAppActive(isActive);
         if (isActive) {
           setForegroundEpoch((current) => current + 1);
           refresh();
@@ -766,6 +771,7 @@ export function ConnectionProvider({
     () => ({
       api,
       state,
+      appActive,
       foregroundEpoch,
       dispatch,
       refreshDetail,
@@ -779,6 +785,7 @@ export function ConnectionProvider({
     [
       api,
       state,
+      appActive,
       foregroundEpoch,
       refreshDetail,
       forceRefreshDetail,

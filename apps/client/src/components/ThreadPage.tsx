@@ -364,6 +364,7 @@ export function ThreadPage({
   const {
     api,
     state,
+    appActive,
     foregroundEpoch,
     dispatch,
     refreshDetail,
@@ -375,6 +376,7 @@ export function ThreadPage({
   } = useConnection();
   const activeThreadIdRef = useRef(threadId);
   activeThreadIdRef.current = threadId;
+  const viewedThreadVersionRef = useRef<string | null>(null);
   const availableProjects = projects ?? state.snapshot?.projects ?? [];
   const newSessionProject =
     availableProjects.find(
@@ -1587,6 +1589,16 @@ export function ThreadPage({
       });
     }
   }, [foregroundEpoch, threadId, refreshDetail]);
+
+  useEffect(() => {
+    if (!threadId || !summary?.unseen || !appActive || state.network !== "connected") return;
+    const key = `${threadId}:${summary.updatedAt}`;
+    if (viewedThreadVersionRef.current === key) return;
+    viewedThreadVersionRef.current = key;
+    void api.markViewed(threadId, { observedUpdatedAt: summary.updatedAt }).catch(() => {
+      if (viewedThreadVersionRef.current === key) viewedThreadVersionRef.current = null;
+    });
+  }, [api, appActive, state.network, summary?.unseen, summary?.updatedAt, threadId]);
 
   useEffect(() => {
     const latestTurn = detail?.turns.at(-1);

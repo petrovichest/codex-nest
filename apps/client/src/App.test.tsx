@@ -3263,6 +3263,7 @@ function mockConnection(
   const api = {
     settings: { baseUrl: "https://codexnest.example", token: "token" },
     markRead: vi.fn().mockResolvedValue(undefined),
+    markViewed: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
     archive: vi.fn().mockResolvedValue(undefined),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
@@ -3338,6 +3339,7 @@ function mockConnection(
   };
   connection.mockReturnValue({
     api,
+    appActive: true,
     foregroundEpoch: 0,
     state: {
       snapshot: appSnapshot,

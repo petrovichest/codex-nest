@@ -18,6 +18,7 @@ import type {
   GlobalPermissionSettings,
   HealthResponse,
   MarkReadRequest,
+  MarkViewedRequest,
   MoveProjectRequest,
   Project,
   QueuedMessage,
@@ -426,6 +427,14 @@ export class ApiClient {
 
   markRead(id: string, body: MarkReadRequest): Promise<void> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/read`, { method: "PUT", body });
+  }
+
+  markViewed(id: string, body: MarkViewedRequest): Promise<void> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/viewed`, {
+      method: "PUT",
+      body,
+      retry: true,
+    });
   }
 
   respond(attentionId: string, body: AttentionResponse): Promise<void> {
