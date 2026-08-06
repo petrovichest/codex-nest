@@ -1728,9 +1728,7 @@ function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
 }
 
 function isActiveFeedEligible(thread: ThreadSummary): boolean {
-  return (
-    !thread.archived && (hasAlwaysVisibleThreadStatus(thread) || thread.queuedMessageCount > 0)
-  );
+  return !thread.archived && isBlueActiveThread(thread);
 }
 
 function sortActiveFeedThreads(threads: ThreadSummary[]): ThreadSummary[] {

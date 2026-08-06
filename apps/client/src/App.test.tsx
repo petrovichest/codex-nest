@@ -283,7 +283,7 @@ describe("App routing and navigation", () => {
     await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("projects"));
   });
 
-  it("renders a flat unlimited cross-project active feed in blue-first recency order", () => {
+  it("renders a flat unlimited cross-project blue-only active feed in recency order", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const secondProject = testProject("second-project", "Второй");
     const threads = (
@@ -307,6 +307,14 @@ describe("App routing and navigation", () => {
         },
         {
           ...baseThread,
+          id: "failed-unread",
+          title: "Ошибка 85",
+          state: "failed",
+          unread: true,
+          updatedAt: 85,
+        },
+        {
+          ...baseThread,
           id: "attention-80",
           title: "Внимание 80",
           state: "needsAttention",
@@ -319,6 +327,14 @@ describe("App routing and navigation", () => {
           projectId: secondProject.id,
           state: "needsAttention",
           updatedAt: 70,
+        },
+        {
+          ...baseThread,
+          id: "interrupted-unread",
+          title: "Прервана 65",
+          state: "interrupted",
+          unread: true,
+          updatedAt: 65,
         },
         {
           ...baseThread,
@@ -363,25 +379,9 @@ describe("App routing and navigation", () => {
       ),
     ).map((element) => element.textContent);
 
-    expect(rootTitles).toEqual([
-      "Запущена 30",
-      "Очередь 10",
-      "Внимание 100",
-      "Результат 90",
-      "Внимание 80",
-      "Внимание 70",
-      "Внимание 60",
-    ]);
-    expect(projectLabels).toEqual([
-      "Второй",
-      "Проект",
-      "Без проекта",
-      "Без проекта",
-      "Проект",
-      "Второй",
-      "Проект",
-    ]);
-    expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(7);
+    expect(rootTitles).toEqual(["Запущена 30", "Очередь 10"]);
+    expect(projectLabels).toEqual(["Второй", "Проект"]);
+    expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(2);
     expect(activeList.querySelector(".show-more")).toBeNull();
   });
 
@@ -488,12 +488,9 @@ describe("App routing and navigation", () => {
       nested.querySelectorAll(":scope > .thread-branch > .thread-branch-row .thread-link-title"),
     ).map((element) => element.textContent);
 
-    expect(nestedTitles).toEqual([
-      "queued-child · Очередь 20",
-      "message-child · Сообщение 10",
-      "attention-child · Внимание 100",
-      "unread-child · Результат 90",
-    ]);
+    expect(nestedTitles).toEqual(["queued-child · Очередь 20", "message-child · Сообщение 10"]);
+    expect(screen.queryByRole("link", { name: /Внимание 100/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Результат 90/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Серая история/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Архивный субагент/ })).not.toBeInTheDocument();
     expect(
