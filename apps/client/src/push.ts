@@ -1,6 +1,6 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { NavigateFunction } from "react-router";
 import type { AppSnapshot, ServerEvent, UiLanguage } from "@codexnest/protocol";
 
@@ -63,11 +63,17 @@ export function usePushNotifications(
   navigate: NavigateFunction,
   language: UiLanguage,
   snapshot: AppSnapshot | null = null,
-): void {
+): () => void {
   const initialLanguage = useRef(language);
   const languageInitialized = useRef(false);
+  const navigateRef = useRef(navigate);
+  const manualNavigationGenerationRef = useRef(0);
   const snapshotRef = useRef(snapshot);
+  navigateRef.current = navigate;
   snapshotRef.current = snapshot;
+  const markManualNavigationIntent = useCallback(() => {
+    manualNavigationGenerationRef.current += 1;
+  }, []);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -83,23 +89,33 @@ export function usePushNotifications(
     let active = true;
     let handle: { remove(): Promise<void> } | undefined;
 
+    const navigateFromNativeIntent = (threadId: string, manualNavigationGeneration: number) => {
+      if (!active) return;
+      if (manualNavigationGenerationRef.current !== manualNavigationGeneration) {
+        void removeMatchingPendingThread(threadId).catch(() => undefined);
+        return;
+      }
+      navigateRef.current(`/threads/${encodeURIComponent(threadId)}`);
+    };
+
     void SelfHostedNotifications.addListener("notificationActionPerformed", ({ threadId }) => {
       if (!active || !threadId) return;
+      const manualNavigationGeneration = manualNavigationGenerationRef.current;
       void Preferences.set({ key: PENDING_THREAD_KEY, value: threadId })
         .catch(() => undefined)
         .then(() => {
-          if (active) navigate(`/threads/${encodeURIComponent(threadId)}`);
+          navigateFromNativeIntent(threadId, manualNavigationGeneration);
         });
     })
       .then((value) => {
-        handle = value;
+        if (active) handle = value;
+        else void value.remove();
       })
       .catch(() => undefined);
     void (async () => {
+      const manualNavigationGeneration = manualNavigationGenerationRef.current;
       const pending = await Preferences.get({ key: PENDING_THREAD_KEY });
-      if (active && pending.value) {
-        navigate(`/threads/${encodeURIComponent(pending.value)}`);
-      }
+      if (pending.value) navigateFromNativeIntent(pending.value, manualNavigationGeneration);
     })().catch(() => undefined);
     void (async () => {
       await SelfHostedNotifications.setLanguage({ language: initialLanguage.current }).catch(
@@ -119,18 +135,16 @@ export function usePushNotifications(
       active = false;
       void handle?.remove();
     };
-  }, [navigate]);
+  }, []);
+
+  return markManualNavigationIntent;
 }
 
 export async function acknowledgePendingThread(threadId: string): Promise<void> {
   if (!Capacitor.isNativePlatform() || !threadId) return;
   await Promise.allSettled([
     SelfHostedNotifications.acknowledgeThread({ threadId }),
-    Preferences.get({ key: PENDING_THREAD_KEY }).then((pending) =>
-      pending.value === threadId
-        ? Preferences.remove({ key: PENDING_THREAD_KEY })
-        : Promise.resolve(),
-    ),
+    removeMatchingPendingThread(threadId),
   ]);
 }
 
@@ -141,4 +155,9 @@ export async function releaseActiveThread(threadId: string): Promise<void> {
 
 export async function stopPushNotifications(): Promise<void> {
   if (Capacitor.isNativePlatform()) await SelfHostedNotifications.stop();
+}
+
+async function removeMatchingPendingThread(threadId: string): Promise<void> {
+  const pending = await Preferences.get({ key: PENDING_THREAD_KEY });
+  if (pending.value === threadId) await Preferences.remove({ key: PENDING_THREAD_KEY });
 }

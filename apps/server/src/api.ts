@@ -2274,27 +2274,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.delete<{ Params: { id: string } }>("/api/v1/threads/:id", async (request, reply) => {
-    const summary = projection.summary(request.params.id);
-    if (!summary) {
-      return apiError(reply, 404, "not_found", "Thread not found");
-    }
-    assertWritableThread(summary);
-    if (teamOrchestrationHasWork(store, request.params.id)) {
-      throw new ProjectConflictError(
-        "Managed Team tasks must finish or be cancelled before deleting the parent session",
-      );
-    }
-    await bridge.request("thread/delete", { threadId: request.params.id });
-    await voiceTranscriptions?.cancelThread(request.params.id);
-    await queue.removeThread(request.params.id);
-    await projection.invalidateHistory(request.params.id).catch(() => undefined);
-    await store.update((state) => {
-      delete state.threadMeta[request.params.id];
-    });
-    return reply.code(204).send();
-  });
-
   app.patch<{ Params: { id: string }; Body: UpdateThreadSettingsRequest }>(
     "/api/v1/threads/:id/settings",
     async (request, reply) => {
@@ -2576,6 +2555,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
       await bridge.request(method, { threadId: request.params.id });
+      await projection.setArchived(request.params.id, route === "archive");
       return reply.code(204).send();
     });
   }

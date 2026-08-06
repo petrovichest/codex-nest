@@ -163,7 +163,7 @@ export function App({
     side: sidebarSide,
     setOpen: setDrawer,
   });
-  usePushNotifications(navigate, language, state.snapshot);
+  const markManualNavigationIntent = usePushNotifications(navigate, language, state.snapshot);
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
   const acceptAppUpdateStatus = useCallback((next: AppUpdateStatus) => {
@@ -324,6 +324,7 @@ export function App({
         key={settings.baseUrl}
         containerRef={sidebarRef}
         drawer={drawer}
+        onManualNavigationIntent={markManualNavigationIntent}
         onClose={() => setDrawer(false)}
         onNewProject={() => setNewProject(true)}
         projectListDirection={projectListDirection}
@@ -622,6 +623,7 @@ function HomeRoute({
 function Sidebar({
   containerRef,
   drawer,
+  onManualNavigationIntent,
   onClose,
   onNewProject,
   projectListDirection,
@@ -630,6 +632,7 @@ function Sidebar({
 }: {
   containerRef: RefObject<HTMLElement | null>;
   drawer: boolean;
+  onManualNavigationIntent(): void;
   onClose(): void;
   onNewProject(): void;
   projectListDirection: ProjectListDirection;
@@ -1302,6 +1305,21 @@ function Sidebar({
       <nav
         className={`thread-nav ${projectListDirection}`}
         aria-label={t("Задачи")}
+        onClickCapture={(event) => {
+          if (
+            !(event.target instanceof Element) ||
+            !event.target.closest("a.thread-link") ||
+            event.defaultPrevented ||
+            event.button !== 0 ||
+            event.metaKey ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.shiftKey
+          ) {
+            return;
+          }
+          onManualNavigationIntent();
+        }}
         ref={threadNavRef}
       >
         {sessionListMode === "active" ? (
@@ -1695,6 +1713,7 @@ function ThreadLink({
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
+      end
       to={target}
       onClick={(event) => {
         if (

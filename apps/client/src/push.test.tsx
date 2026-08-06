@@ -79,6 +79,103 @@ describe("native push navigation", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/threads/thread%2Fid"));
   });
 
+  it("keeps one native lifecycle across route renders and uses the latest navigate function", async () => {
+    let listener: ((event: { threadId?: string }) => void) | undefined;
+    const remove = vi.fn().mockResolvedValue(undefined);
+    plugin.addListener.mockImplementation(async (_event, callback) => {
+      listener = callback;
+      return { remove };
+    });
+    const firstNavigate = vi.fn();
+    const secondNavigate = vi.fn();
+    const view = renderHook(
+      ({ navigate }: { navigate: typeof firstNavigate }) => usePushNotifications(navigate, "ru"),
+      { initialProps: { navigate: firstNavigate } },
+    );
+    await waitFor(() => expect(listener).toBeDefined());
+    await waitFor(() => expect(plugin.start).toHaveBeenCalledOnce());
+
+    view.rerender({ navigate: secondNavigate });
+    act(() => listener?.({ threadId: "new-thread" }));
+
+    await waitFor(() => expect(secondNavigate).toHaveBeenCalledWith("/threads/new-thread"));
+    expect(firstNavigate).not.toHaveBeenCalled();
+    expect(plugin.addListener).toHaveBeenCalledOnce();
+    expect(preferences.get).toHaveBeenCalledOnce();
+    expect(plugin.start).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("does not let delayed pending recovery override a newer manual session selection", async () => {
+    let resolvePending: ((value: { value: string | null }) => void) | undefined;
+    preferences.get.mockImplementationOnce(
+      () =>
+        new Promise<{ value: string | null }>((resolve) => {
+          resolvePending = resolve;
+        }),
+    );
+    preferences.get.mockResolvedValue({ value: "old-thread" });
+    const navigate = vi.fn();
+    const view = renderHook(() => usePushNotifications(navigate, "ru"));
+    await waitFor(() => expect(resolvePending).toBeDefined());
+
+    act(() => view.result.current());
+    await act(async () => resolvePending?.({ value: "old-thread" }));
+
+    expect(navigate).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(preferences.remove).toHaveBeenCalledWith({ key: "codexnest.pendingThreadId" }),
+    );
+  });
+
+  it("does not let delayed notification persistence override a newer manual selection", async () => {
+    let listener: ((event: { threadId?: string }) => void) | undefined;
+    let resolveStored: (() => void) | undefined;
+    plugin.addListener.mockImplementation(async (_event, callback) => {
+      listener = callback;
+      return { remove: vi.fn().mockResolvedValue(undefined) };
+    });
+    preferences.set.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveStored = resolve;
+        }),
+    );
+    preferences.get
+      .mockResolvedValueOnce({ value: null })
+      .mockResolvedValue({ value: "notification-thread" });
+    const navigate = vi.fn();
+    const view = renderHook(() => usePushNotifications(navigate, "ru"));
+    await waitFor(() => expect(listener).toBeDefined());
+
+    act(() => listener?.({ threadId: "notification-thread" }));
+    act(() => view.result.current());
+    await act(async () => resolveStored?.());
+
+    expect(navigate).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(preferences.remove).toHaveBeenCalledWith({ key: "codexnest.pendingThreadId" }),
+    );
+  });
+
+  it("removes a native listener that finishes registering after unmount", async () => {
+    let resolveListener: ((handle: { remove(): Promise<void> }) => void) | undefined;
+    const remove = vi.fn().mockResolvedValue(undefined);
+    plugin.addListener.mockImplementation(
+      () =>
+        new Promise<{ remove(): Promise<void> }>((resolve) => {
+          resolveListener = resolve;
+        }),
+    );
+    const view = renderHook(() => usePushNotifications(vi.fn(), "ru"));
+    await waitFor(() => expect(resolveListener).toBeDefined());
+
+    view.unmount();
+    await act(async () => resolveListener?.({ remove }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledOnce());
+  });
+
   it("reopens a pending target and clears only its matching acknowledgement", async () => {
     preferences.get.mockResolvedValue({ value: "pending-thread" });
     const navigate = vi.fn();

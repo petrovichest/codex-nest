@@ -557,9 +557,11 @@ pre {
   color: var(--muted-strong);
 }
 
-.thread-link:hover {
-  color: var(--text);
-  background: var(--sidebar-hover);
+@media (hover: hover) and (pointer: fine) {
+  .thread-link:hover {
+    color: var(--text);
+    background: var(--sidebar-hover);
+  }
 }
 
 .thread-link.active {

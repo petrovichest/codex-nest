@@ -15,6 +15,7 @@ import { App } from "./App";
 import { I18nProvider } from "./i18n";
 
 const connection = vi.hoisted(() => vi.fn());
+const manualNavigationIntent = vi.hoisted(() => vi.fn());
 const saveLocalDraft = vi.hoisted(() =>
   vi.fn(
     async (
@@ -50,7 +51,7 @@ vi.mock("./push", () => ({
   acknowledgePendingThread: vi.fn().mockResolvedValue(undefined),
   releaseActiveThread: vi.fn().mockResolvedValue(undefined),
   stopPushNotifications: vi.fn().mockResolvedValue(undefined),
-  usePushNotifications: vi.fn(),
+  usePushNotifications: vi.fn(() => manualNavigationIntent),
 }));
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
@@ -2946,12 +2947,14 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Новая задача в истории" })).toBeVisible();
     expect(screen.getByText("Ошибка старой сессии")).toBeInTheDocument();
     expect(sidebar).toHaveClass("open");
+    expect(manualNavigationIntent).toHaveBeenCalledOnce();
 
     fireEvent.click(otherLink);
 
     expect(await screen.findByRole("heading", { level: 1, name: "Другая задача" })).toBeVisible();
     expect(screen.queryByText("Ошибка старой сессии")).not.toBeInTheDocument();
     expect(sidebar).not.toHaveClass("open");
+    expect(manualNavigationIntent).toHaveBeenCalledTimes(2);
     expect(view.container.querySelectorAll(".thread-link.active")).toHaveLength(1);
     expect(screen.getByRole("link", { name: "Другая задача" })).toHaveClass("active");
   });

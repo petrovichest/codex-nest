@@ -17,6 +17,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
+import { ApiClientError } from "../api";
 import type { OptimisticMessage } from "../state";
 import {
   Activity,
@@ -1722,18 +1723,13 @@ describe("Activity", () => {
     expect(api.interrupt).not.toHaveBeenCalled();
   });
 
-  it("deletes an empty unnamed session after confirmation", async () => {
+  it("does not expose permanent session deletion", () => {
     const api = threadApi();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     mockThreadConnection(api, { ...summary, title: "Без названия", preview: "" });
     renderThread();
 
     fireEvent.click(screen.getByLabelText("Действия с задачей"));
-    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
-
-    expect(confirm).toHaveBeenCalledWith("Удалить эту сессию? Это действие нельзя отменить.");
-    await waitFor(() => expect(api.deleteThread).toHaveBeenCalledWith("thread"));
-    confirm.mockRestore();
+    expect(screen.queryByRole("button", { name: "Удалить" })).toBeNull();
   });
 
   it("shows a subagent transcript as read-only and links back to its parent", () => {
@@ -2046,6 +2042,23 @@ describe("Activity", () => {
         name: "Принудительно обновить сессию",
       }),
     ).toBeEnabled();
+  });
+
+  it("keeps a known session after a refresh returns not found", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    context.forceRefreshDetail.mockRejectedValue(
+      new ApiClientError("not_found", "Thread not found", 404),
+    );
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Принудительно обновить сессию" }));
+
+    await waitFor(() => expect(context.forceRefreshDetail).toHaveBeenCalledWith("thread"));
+    expect(context.dispatch).not.toHaveBeenCalledWith({
+      type: "thread.remove",
+      threadId: "thread",
+    });
+    expect(screen.getByText("Тестовая задача")).toBeInTheDocument();
   });
 
   it("refreshes Git changes when the active turn diff changes", async () => {
@@ -3950,7 +3963,6 @@ function threadApi() {
     steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
-    deleteThread: vi.fn().mockResolvedValue(undefined),
     updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>
       Promise.resolve({
         ...summary,

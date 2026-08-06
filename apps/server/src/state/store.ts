@@ -184,6 +184,17 @@ export interface TeamToolOperationState {
   };
 }
 
+export interface SessionSnapshotState {
+  sessionId: string;
+  name: string | null;
+  preview: string;
+  cwd: string;
+  createdAt: number;
+  updatedAt: number;
+  archived: boolean;
+  currentTurnId: string | null;
+}
+
 export interface ThreadMetaState {
   pinned: boolean;
   lastReadUpdatedAt: number;
@@ -202,6 +213,7 @@ export interface ThreadMetaState {
   };
   unmaterialized?: boolean;
   draft?: ThreadDraft;
+  sessionSnapshot?: SessionSnapshotState;
 }
 
 export interface DeviceState {
@@ -1063,7 +1075,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.managedTeamToolsAvailable !== undefined && meta.managedTeamToolsAvailable !== true) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
-      (meta.draft !== undefined && !isThreadDraft(meta.draft))
+      (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||
+      (meta.sessionSnapshot !== undefined && !isSessionSnapshot(meta.sessionSnapshot))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
@@ -1130,6 +1143,24 @@ function validateState(value: unknown): CodexNestState {
     ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
     ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
   };
+}
+
+function isSessionSnapshot(value: unknown): value is SessionSnapshotState {
+  return (
+    isRecord(value) &&
+    typeof value.sessionId === "string" &&
+    value.sessionId.length > 0 &&
+    (value.name === null || typeof value.name === "string") &&
+    typeof value.preview === "string" &&
+    typeof value.cwd === "string" &&
+    isAbsolute(value.cwd) &&
+    typeof value.createdAt === "number" &&
+    Number.isFinite(value.createdAt) &&
+    typeof value.updatedAt === "number" &&
+    Number.isFinite(value.updatedAt) &&
+    typeof value.archived === "boolean" &&
+    (value.currentTurnId === null || typeof value.currentTurnId === "string")
+  );
 }
 
 function compactTerminalWorkspaceBaselines(meta: ThreadMetaState): void {

@@ -835,6 +835,9 @@ describe("AppProjection", () => {
       if (method === "thread/read" && params.threadId === "child") {
         return { thread: child };
       }
+      if (method === "thread/resume" && params.threadId === "parent") {
+        return { thread: parent };
+      }
       if (method === "model/list") return { data: [], nextCursor: null };
       throw new Error(`Unexpected ${method}`);
     });
@@ -967,6 +970,159 @@ describe("AppProjection", () => {
         ([method, params]) => method === "thread/resume" && params.threadId === "omitted",
       ),
     ).toHaveLength(1);
+  });
+
+  it("hydrates user sessions from durable snapshots before app-server sync", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const statePath = join(directory, "state.json");
+    const store = new StateStore(statePath);
+    await store.load();
+    const projection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(
+      thread("persistent", "/work", 8, { type: "active", activeFlags: [] }, [
+        testTurn("live", "inProgress"),
+      ]),
+    );
+    projection.upsertThread(thread("archived", "/work", 7));
+    await projection.setArchived("archived", true);
+    await store.flushed();
+
+    const reloadedStore = new StateStore(statePath);
+    await reloadedStore.load();
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/list") {
+        return { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const reloaded = new AppProjection(
+      bridge as unknown as CodexBridge,
+      reloadedStore,
+      new AttentionManager(),
+      false,
+    );
+
+    expect(reloaded.summary("persistent")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      title: "persistent",
+    });
+    expect(reloaded.summary("archived")?.archived).toBe(true);
+
+    await reloaded.sync();
+
+    expect(reloaded.summary("persistent")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+    });
+    expect(reloaded.summary("archived")?.archived).toBe(true);
+  });
+
+  it("keeps a user session when app-server closes its in-memory thread", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 10_000,
+      };
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    const removed: string[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "thread.removed") removed.push(event.threadId);
+    });
+
+    bridge.emit("notification", {
+      method: "thread/closed",
+      params: { threadId: "one" },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.sessionSnapshot?.currentTurnId).toBeNull(),
+    );
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      unread: true,
+      currentTurnId: null,
+    });
+    expect(removed).toEqual([]);
+  });
+
+  it("retries loaded-session recovery after a transient app-server failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      const bridge = new FakeBridge();
+      let loadedReads = 0;
+      const omitted = thread("retry", "/work", 6, { type: "notLoaded" });
+      const resumed = {
+        ...thread("retry", "/work", 6, { type: "active", activeFlags: [] }),
+        turns: [testTurn("live", "inProgress")],
+      };
+      bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+        if (method === "thread/list") {
+          return { data: [], nextCursor: null, backwardsCursor: null };
+        }
+        if (method === "thread/loaded/list") {
+          loadedReads += 1;
+          if (loadedReads === 1) throw new Error("Thread index is warming up");
+          return { data: ["retry"], nextCursor: null };
+        }
+        if (method === "thread/read" && params.threadId === "retry") {
+          return { thread: omitted };
+        }
+        if (method === "thread/resume" && params.threadId === "retry") {
+          return { thread: resumed };
+        }
+        if (method === "thread/goal/get") return { goal: null };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        throw new Error(`Unexpected ${method}`);
+      });
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+        false,
+      );
+
+      await projection.sync();
+      expect(projection.summary("retry")).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(projection.summary("retry")).toMatchObject({
+        state: "running",
+        currentTurnId: "live",
+      });
+      expect(loadedReads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resumes only loaded listed sessions whose status is notLoaded", async () => {
@@ -1120,6 +1276,9 @@ describe("AppProjection", () => {
       if (method === "thread/read" && params.threadId === "child") {
         return { thread: child };
       }
+      if (method === "thread/resume" && params.threadId === "parent") {
+        return { thread: parent };
+      }
       if (method === "thread/resume" && params.threadId === "child") {
         return { thread: child };
       }
@@ -1263,7 +1422,7 @@ describe("AppProjection", () => {
     }
   });
 
-  it("recovers a referenced managed parent until its own metadata is removed", async () => {
+  it("keeps a recovered user parent after its managed metadata is removed", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -1319,7 +1478,7 @@ describe("AppProjection", () => {
     });
     await projection.sync();
 
-    expect(projection.summary("parent")).toBeUndefined();
+    expect(projection.summary("parent")?.id).toBe("parent");
     expect(
       bridge.request.mock.calls.filter(
         ([method, params]) => method === "thread/read" && params.threadId === "parent",

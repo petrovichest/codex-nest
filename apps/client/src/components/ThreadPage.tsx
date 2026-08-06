@@ -475,7 +475,6 @@ export function ThreadPage({
   const [forking, setForking] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
@@ -1583,7 +1582,6 @@ export function ThreadPage({
     if (threadId && createdInWorkspaceRef.current !== threadId) {
       void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
         if (caught instanceof ApiClientError && caught.status === 404) {
-          dispatch({ type: "thread.remove", threadId });
           setThreadMissing(true);
         }
       });
@@ -2377,7 +2375,6 @@ export function ThreadPage({
       if (inspectorOpen) await loadGitChanges();
     } catch (caught) {
       if (caught instanceof ApiClientError && caught.status === 404) {
-        dispatch({ type: "thread.remove", threadId });
         setThreadMissing(true);
       } else {
         setError(
@@ -2393,24 +2390,6 @@ export function ThreadPage({
 
   const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
   const toggleArchive = () => void api.archive(threadId, !summary!.archived);
-
-  async function deleteThread() {
-    if (!window.confirm(t("Удалить эту сессию? Это действие нельзя отменить."))) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      await api.deleteThread(threadId);
-      dispatch({ type: "thread.remove", threadId });
-      navigate("/", { replace: true });
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? localizeKnownServerText(language, caught.message)
-          : t("Не удалось удалить сессию"),
-      );
-      setDeleting(false);
-    }
-  }
 
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
     if (preparationRef.current.active) {
@@ -2597,13 +2576,6 @@ export function ThreadPage({
                       <button onClick={toggleArchive}>
                         <ArchiveIcon />{" "}
                         {workspaceSummary.archived ? t("Вернуть из архива") : t("Архивировать")}
-                      </button>
-                      <button
-                        className="danger"
-                        disabled={deleting}
-                        onClick={() => void deleteThread()}
-                      >
-                        <TrashIcon /> {deleting ? t("Удаляем…") : t("Удалить")}
                       </button>
                     </div>
                   </details>

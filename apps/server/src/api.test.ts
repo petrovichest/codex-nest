@@ -1422,6 +1422,16 @@ describe("session forks", () => {
         reasoningEffort: "low",
       },
       managedTeamToolsAvailable: true,
+      sessionSnapshot: {
+        sessionId: "fork",
+        name: "Готовая реализация",
+        preview: "Thread",
+        cwd: "/work",
+        createdAt: 3,
+        updatedAt: 4,
+        archived: false,
+        currentTurnId: null,
+      },
     });
     expect(harness.store.snapshot().messageQueues?.fork).toBeUndefined();
     expect(harness.projection.summary("fork")).toEqual(response.json().thread);
@@ -1794,7 +1804,6 @@ describe("thread settings", () => {
         url: "/api/v1/threads/child/turns",
         payload: { input: "Нет" },
       },
-      { method: "DELETE", url: "/api/v1/threads/child" },
     ]) {
       const response = await app.inject({ ...request, headers });
       expect(response.statusCode).toBe(409);
@@ -2567,9 +2576,9 @@ describe("thread settings", () => {
       url: "/api/v1/threads/thread",
       headers,
     });
-    expect(deleted.statusCode).toBe(204);
-    expect(bridge.request).toHaveBeenCalledWith("thread/delete", { threadId: "thread" });
-    expect(store.snapshot().threadMeta.thread).toBeUndefined();
+    expect(deleted.statusCode).toBe(404);
+    expect(bridge.request).not.toHaveBeenCalledWith("thread/delete", { threadId: "thread" });
+    expect(store.snapshot().threadMeta.thread).toBeDefined();
     await app.close();
   });
 
@@ -4044,7 +4053,7 @@ describe("Team orchestration", () => {
         url: "/api/v1/threads/thread",
         headers,
       });
-      expect(deletion.statusCode).toBe(409);
+      expect(deletion.statusCode).toBe(404);
       const disableTeam = await app.inject({
         method: "PATCH",
         url: "/api/v1/threads/thread/settings",

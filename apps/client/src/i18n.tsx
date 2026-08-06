@@ -561,7 +561,6 @@ const ENGLISH: Record<string, string> = {
   "Не удалось скопировать": "Failed to copy",
   "Не удалось скопировать блок": "Failed to copy block",
   "Не удалось сохранить черновик": "Failed to save the draft",
-  "Не удалось удалить сессию": "Failed to delete the session",
   "Не удалось удалить сообщение из очереди": "Failed to delete the queued message",
   "Несовместимое событие": "Unsupported event",
   "Нет доступа к микрофону. Разрешите его в настройках приложения или браузера":
@@ -612,8 +611,6 @@ const ENGLISH: Record<string, string> = {
   "Удалить сообщение из очереди": "Delete queued message",
   "Удалить аннотацию": "Delete annotation",
   "Удалить изображение {{name}}": "Delete image {{name}}",
-  "Удалить эту сессию? Это действие нельзя отменить.":
-    "Delete this session? This action cannot be undone.",
   "Удаляем…": "Deleting…",
   "Текст сообщения в очереди": "Queued message text",
   "Ход работы": "Progress",
