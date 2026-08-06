@@ -1650,7 +1650,7 @@ function ActiveThreadBranch({
   projectLabel?: string;
 }) {
   const children = sortActiveFeedThreads(
-    (childrenByParent.get(thread.id) ?? []).filter(isActiveFeedEligible),
+    (childrenByParent.get(thread.id) ?? []).filter(isActiveChildFeedEligible),
   );
 
   return (
@@ -1728,7 +1728,17 @@ function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
 }
 
 function isActiveFeedEligible(thread: ThreadSummary): boolean {
-  return !thread.archived && isBlueActiveThread(thread);
+  return (
+    !thread.archived && (hasAlwaysVisibleThreadStatus(thread) || thread.queuedMessageCount > 0)
+  );
+}
+
+function isActiveChildFeedEligible(thread: ThreadSummary): boolean {
+  return (
+    isActiveFeedEligible(thread) &&
+    (thread.queuedMessageCount > 0 ||
+      (thread.state !== "completed" && thread.state !== "failed" && thread.state !== "interrupted"))
+  );
 }
 
 function sortActiveFeedThreads(threads: ThreadSummary[]): ThreadSummary[] {

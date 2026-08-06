@@ -283,7 +283,7 @@ describe("App routing and navigation", () => {
     await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("projects"));
   });
 
-  it("renders a flat unlimited cross-project blue-only active feed in recency order", () => {
+  it("renders a flat unlimited cross-project active feed in blue-first recency order", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const secondProject = testProject("second-project", "Второй");
     const threads = (
@@ -379,9 +379,29 @@ describe("App routing and navigation", () => {
       ),
     ).map((element) => element.textContent);
 
-    expect(rootTitles).toEqual(["Запущена 30", "Очередь 10"]);
-    expect(projectLabels).toEqual(["Второй", "Проект"]);
-    expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(2);
+    expect(rootTitles).toEqual([
+      "Запущена 30",
+      "Очередь 10",
+      "Внимание 100",
+      "Результат 90",
+      "Ошибка 85",
+      "Внимание 80",
+      "Внимание 70",
+      "Прервана 65",
+      "Внимание 60",
+    ]);
+    expect(projectLabels).toEqual([
+      "Второй",
+      "Проект",
+      "Без проекта",
+      "Без проекта",
+      "Проект",
+      "Проект",
+      "Второй",
+      "Проект",
+      "Проект",
+    ]);
+    expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(9);
     expect(activeList.querySelector(".show-more")).toBeNull();
   });
 
@@ -470,6 +490,16 @@ describe("App routing and navigation", () => {
         unread: true,
         updatedAt: 90,
       }),
+      child("failed-child", "Ошибка 80", {
+        state: "failed",
+        unread: true,
+        updatedAt: 80,
+      }),
+      child("interrupted-child", "Прервана 70", {
+        state: "interrupted",
+        unread: true,
+        updatedAt: 70,
+      }),
       child("history-child", "Серая история", { state: "idle", updatedAt: 110 }),
       child("archived-child", "Архивный субагент", {
         state: "running",
@@ -488,9 +518,14 @@ describe("App routing and navigation", () => {
       nested.querySelectorAll(":scope > .thread-branch > .thread-branch-row .thread-link-title"),
     ).map((element) => element.textContent);
 
-    expect(nestedTitles).toEqual(["queued-child · Очередь 20", "message-child · Сообщение 10"]);
-    expect(screen.queryByRole("link", { name: /Внимание 100/ })).not.toBeInTheDocument();
+    expect(nestedTitles).toEqual([
+      "queued-child · Очередь 20",
+      "message-child · Сообщение 10",
+      "attention-child · Внимание 100",
+    ]);
     expect(screen.queryByRole("link", { name: /Результат 90/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Ошибка 80/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Прервана 70/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Серая история/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Архивный субагент/ })).not.toBeInTheDocument();
     expect(
