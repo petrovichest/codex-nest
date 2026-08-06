@@ -49,4 +49,20 @@ describe("thread status presentation", () => {
     );
     expect(threadStatusClasses({ ...thread, state: "failed" })).toContain("status-failed-read");
   });
+
+  it("pulses only unseen completions and sessions needing attention", () => {
+    expect(
+      threadStatusClasses({ ...thread, state: "completed", unread: true, unseen: true }),
+    ).toContain("status-pulsing");
+    expect(
+      threadStatusClasses({ ...thread, state: "completed", unread: true, unseen: false }),
+    ).not.toContain("status-pulsing");
+    expect(threadStatusClasses({ ...thread, state: "needsAttention" })).toContain("status-pulsing");
+
+    for (const state of ["running", "queued", "failed", "interrupted"] as const) {
+      expect(threadStatusClasses({ ...thread, state, unread: true, unseen: true })).not.toContain(
+        "status-pulsing",
+      );
+    }
+  });
 });

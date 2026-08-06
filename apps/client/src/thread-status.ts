@@ -19,7 +19,10 @@ export function threadStatusClasses(
   thread: Pick<ThreadSummary, "state" | "unread" | "unseen" | "queuedMessageCount">,
 ): string {
   const stateClass = threadStatusClass(thread);
-  return `status ${stateClass}${thread.unseen ? " status-unseen" : ""}`;
+  const pulsing =
+    thread.state === "needsAttention" ||
+    (thread.state === "completed" && thread.unread && thread.unseen);
+  return `status ${stateClass}${thread.unseen ? " status-unseen" : ""}${pulsing ? " status-pulsing" : ""}`;
 }
 
 function threadStatusClass(

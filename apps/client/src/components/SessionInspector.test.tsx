@@ -66,10 +66,10 @@ describe("SessionInspector", () => {
     expect(screen.queryByText("Локальный сервер готов")).not.toBeInTheDocument();
   });
 
-  it("uses the same pulsing outcome status as the session list", () => {
+  it("uses the same completed-result pulse as the session list", () => {
     const unseen = {
       ...summary,
-      state: "interrupted" as const,
+      state: "completed" as const,
       unread: true,
       unseen: true,
     };
@@ -79,8 +79,9 @@ describe("SessionInspector", () => {
     );
 
     expect(view.container.querySelector(".status")).toHaveClass(
-      "status-interrupted",
+      "status-completed-unread",
       "status-unseen",
+      "status-pulsing",
     );
 
     view.rerender(
@@ -94,8 +95,11 @@ describe("SessionInspector", () => {
         onArchive={vi.fn()}
       />,
     );
-    expect(view.container.querySelector(".status")).toHaveClass("status-interrupted");
-    expect(view.container.querySelector(".status")).not.toHaveClass("status-unseen");
+    expect(view.container.querySelector(".status")).toHaveClass("status-completed-unread");
+    expect(view.container.querySelector(".status")).not.toHaveClass(
+      "status-unseen",
+      "status-pulsing",
+    );
   });
 });
 

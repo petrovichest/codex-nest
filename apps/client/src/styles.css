@@ -666,17 +666,19 @@ pre {
 .status-running,
 .connection-dot.connecting {
   background: #4b9ce8;
+}
+
+.connection-dot.connecting {
   box-shadow: 0 0 0 3px color-mix(in srgb, #4b9ce8 16%, transparent);
 }
 
 .status-queued {
   background: #86b7d9;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #86b7d9 16%, transparent);
 }
 
 .status-needsAttention {
+  --status-pulse-color: #e5a62b;
   background: #e5a62b;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #e5a62b 18%, transparent);
 }
 
 .status-completed-unread,
@@ -693,12 +695,7 @@ pre {
   background: var(--danger);
 }
 
-.status-failed {
-  --status-pulse-color: var(--danger);
-}
-
 .status-interrupted {
-  --status-pulse-color: #9974db;
   background: #9974db;
 }
 
@@ -707,7 +704,7 @@ pre {
   background: #a0a39d;
 }
 
-.status-unseen {
+.status-pulsing {
   animation: status-pulse 1.4s ease-in-out infinite;
 }
 
@@ -725,7 +722,7 @@ pre {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status-unseen {
+  .status-pulsing {
     animation: none;
   }
 }

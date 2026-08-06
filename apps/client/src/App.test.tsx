@@ -758,13 +758,20 @@ describe("App routing and navigation", () => {
 
     expect(statusFor("Прочитана")).toHaveClass("status-completed");
     expect(statusFor("Ответ просмотрен")).toHaveClass("status-completed-unread");
-    expect(statusFor("Ответ просмотрен")).not.toHaveClass("status-unseen");
-    expect(statusFor("Новый результат")).toHaveClass("status-completed-unread", "status-unseen");
+    expect(statusFor("Ответ просмотрен")).not.toHaveClass("status-unseen", "status-pulsing");
+    expect(statusFor("Новый результат")).toHaveClass(
+      "status-completed-unread",
+      "status-unseen",
+      "status-pulsing",
+    );
     expect(statusFor("Ошибка")).toHaveClass("status-failed", "status-unseen");
+    expect(statusFor("Ошибка")).not.toHaveClass("status-pulsing");
     expect(statusFor("Прервана")).toHaveClass("status-interrupted", "status-unseen");
+    expect(statusFor("Прервана")).not.toHaveClass("status-pulsing");
     expect(statusFor("Прерывание прочитано")).toHaveClass("status-interrupted-read");
     expect(statusFor("Выполняется")).toHaveClass("status-running");
-    expect(statusFor("Нужно внимание")).toHaveClass("status-needsAttention");
+    expect(statusFor("Выполняется")).not.toHaveClass("status-pulsing");
+    expect(statusFor("Нужно внимание")).toHaveClass("status-needsAttention", "status-pulsing");
     expect(container.querySelectorAll(".thread-link .status")).toHaveLength(8);
     expect(container.querySelector(".unread")).toBeNull();
   });
