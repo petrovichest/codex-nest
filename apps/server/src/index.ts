@@ -114,7 +114,8 @@ bridge.on("state", (state) => {
 const pushedTerminal = new Map<string, string>();
 projection.on("event", (_sequence, event) => {
   if (event.type === "attention.upserted" && event.attention.threadId) {
-    void push.send(event.attention.threadId, "attention").catch(() => undefined);
+    const thread = projection.summary(event.attention.threadId);
+    if (thread) void push.send(thread, "attention").catch(() => undefined);
   }
   if (
     event.type === "thread.upserted" &&
@@ -125,7 +126,7 @@ projection.on("event", (_sequence, event) => {
     const pushKey = `${event.thread.state}:${event.thread.updatedAt}`;
     if (pushedTerminal.get(event.thread.id) !== pushKey) {
       pushedTerminal.set(event.thread.id, pushKey);
-      void push.send(event.thread.id, event.thread.state).catch(() => undefined);
+      void push.send(event.thread, event.thread.state).catch(() => undefined);
     }
   }
 });

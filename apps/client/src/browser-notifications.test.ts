@@ -116,6 +116,41 @@ describe("BrowserNotificationTracker", () => {
     });
   });
 
+  it("never notifies child sessions from live events or reconnect snapshots", () => {
+    const tracker = new BrowserNotificationTracker();
+    const child = childThread("running", 10);
+    tracker.acceptSnapshot(snapshot([child]));
+
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...child, state: "completed", unread: true, updatedAt: 20 },
+    });
+    tracker.acceptEvent({
+      type: "attention.upserted",
+      attention: attentionRequest(21, child.id),
+    });
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...child, state: "needsAttention", updatedAt: 22 },
+    });
+    tracker.acceptEvent({
+      type: "attention.upserted",
+      attention: attentionRequest(23, "unknown"),
+    });
+    tracker.acceptEvent({
+      type: "attention.upserted",
+      attention: attentionRequest(24, null),
+    });
+    tracker.acceptSnapshot(
+      snapshot(
+        [{ ...child, state: "failed", unread: true, updatedAt: 30 }],
+        [attentionRequest(31, child.id)],
+      ),
+    );
+
+    expect(notifications).toHaveLength(0);
+  });
+
   it("does not display system notifications while the page is visible", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     const tracker = new BrowserNotificationTracker();
@@ -202,10 +237,24 @@ function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary
   };
 }
 
-function attentionRequest(createdAt: number): AttentionRequest {
+function childThread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary {
   return {
-    id: "attention",
-    threadId: "thread",
+    ...thread(state, updatedAt),
+    id: "child",
+    relation: {
+      kind: "subagent",
+      sessionId: "child-session",
+      parentThreadId: "thread",
+      nickname: null,
+      role: null,
+    },
+  };
+}
+
+function attentionRequest(createdAt: number, threadId: string | null = "thread"): AttentionRequest {
+  return {
+    id: `attention-${createdAt}`,
+    threadId,
     turnId: "turn",
     itemId: "item",
     createdAt,

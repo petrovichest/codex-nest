@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 
+import type { ThreadSummary } from "@codexnest/protocol";
+
 import type { StateStore } from "./state/store";
 
 export class PushNotifier {
@@ -18,17 +20,19 @@ export class PushNotifier {
     return !!this.credentialPath;
   }
 
-  async send(threadId: string, eventType: "completed" | "failed" | "attention"): Promise<void> {
-    if (!this.credentialPath) return;
+  async send(
+    thread: Pick<ThreadSummary, "id" | "relation">,
+    eventType: "completed" | "failed" | "attention",
+  ): Promise<void> {
+    if (!this.credentialPath || thread.relation.kind !== "session") return;
     const state = this.store.view();
-    if (eventType !== "attention" && state.threadMeta[threadId]?.managedParent) return;
     await this.initialize();
     const registrations = Object.entries(state.devices);
     if (!registrations.length) return;
     const english = state.uiLanguage === "en";
     const result = await getMessaging().sendEachForMulticast({
       tokens: registrations.map(([, device]) => device.fcmToken),
-      data: { threadId, eventType },
+      data: { threadId: thread.id, eventType },
       notification: {
         title:
           eventType === "attention"

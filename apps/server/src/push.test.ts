@@ -25,6 +25,22 @@ vi.mock("firebase-admin/messaging", () => ({
 import { PushNotifier } from "./push";
 import { StateStore } from "./state/store";
 
+const parentThread = {
+  id: "thread",
+  relation: { kind: "session", sessionId: "session" },
+} as const;
+
+const childThread = {
+  id: "child",
+  relation: {
+    kind: "subagent",
+    sessionId: "child-session",
+    parentThreadId: "thread",
+    nickname: null,
+    role: null,
+  },
+} as const;
+
 const directories: string[] = [];
 
 beforeEach(() => {
@@ -63,7 +79,7 @@ describe("PushNotifier", () => {
     );
 
     const notifier = new PushNotifier(store, credentialPath);
-    await notifier.send("thread", "completed");
+    await notifier.send(parentThread, "completed");
 
     expect(firebase.sendEachForMulticast).toHaveBeenCalledOnce();
     expect(firebase.sendEachForMulticast).toHaveBeenCalledWith(
@@ -80,7 +96,7 @@ describe("PushNotifier", () => {
     await store.update((state) => {
       state.uiLanguage = "ru";
     });
-    await notifier.send("thread", "failed");
+    await notifier.send(parentThread, "failed");
     expect(firebase.sendEachForMulticast).toHaveBeenLastCalledWith(
       expect.objectContaining({
         notification: {
@@ -90,23 +106,17 @@ describe("PushNotifier", () => {
       }),
     );
 
-    await store.update((state) => {
-      state.threadMeta.child = {
-        pinned: false,
-        lastReadUpdatedAt: 0,
-        managedParent: { parentThreadId: "thread", taskId: "task" },
-      };
-    });
     firebase.sendEachForMulticast.mockClear();
-    await notifier.send("child", "completed");
-    await notifier.send("child", "failed");
+    await notifier.send(childThread, "completed");
+    await notifier.send(childThread, "failed");
+    await notifier.send(childThread, "attention");
     expect(firebase.sendEachForMulticast).not.toHaveBeenCalled();
 
-    await notifier.send("child", "attention");
+    await notifier.send(parentThread, "attention");
     expect(firebase.sendEachForMulticast).toHaveBeenCalledOnce();
     expect(firebase.sendEachForMulticast).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { threadId: "child", eventType: "attention" },
+        data: { threadId: "thread", eventType: "attention" },
       }),
     );
   });

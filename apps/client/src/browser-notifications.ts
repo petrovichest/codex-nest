@@ -21,6 +21,7 @@ export async function requestBrowserNotificationPermission(): Promise<BrowserNot
 export class BrowserNotificationTracker {
   private readonly threadStates = new Map<string, string>();
   private readonly threadTitles = new Map<string, string>();
+  private readonly parentThreadIds = new Set<string>();
   private readonly attentionThreads = new Map<string, string | null>();
   private serviceWorkerRegistration: Promise<ServiceWorkerRegistration> | null = null;
   private lastObservedAt = 0;
@@ -39,6 +40,7 @@ export class BrowserNotificationTracker {
     let newest = cutoff;
     this.threadStates.clear();
     this.threadTitles.clear();
+    this.parentThreadIds.clear();
     this.attentionThreads.clear();
     const missedThreads: AppSnapshot["threads"] = [];
     const missedAttention: AppSnapshot["attention"] = [];
@@ -46,9 +48,11 @@ export class BrowserNotificationTracker {
     for (const thread of snapshot.threads) {
       this.threadStates.set(thread.id, thread.state);
       this.threadTitles.set(thread.id, thread.title);
+      if (thread.relation.kind === "session") this.parentThreadIds.add(thread.id);
       newest = Math.max(newest, thread.updatedAt);
       if (
         !firstConnection &&
+        this.parentThreadIds.has(thread.id) &&
         thread.updatedAt > cutoff &&
         (thread.unread || thread.state === "needsAttention")
       ) {
@@ -59,7 +63,12 @@ export class BrowserNotificationTracker {
     for (const attention of snapshot.attention) {
       this.attentionThreads.set(attention.id, attention.threadId);
       newest = Math.max(newest, attention.createdAt);
-      if (!firstConnection && attention.createdAt > cutoff) {
+      if (
+        !firstConnection &&
+        attention.threadId !== null &&
+        this.parentThreadIds.has(attention.threadId) &&
+        attention.createdAt > cutoff
+      ) {
         missedAttention.push(attention);
       }
     }
@@ -84,6 +93,11 @@ export class BrowserNotificationTracker {
       const previous = this.threadStates.get(event.thread.id);
       this.threadStates.set(event.thread.id, event.thread.state);
       this.threadTitles.set(event.thread.id, event.thread.title);
+      if (event.thread.relation.kind === "session") {
+        this.parentThreadIds.add(event.thread.id);
+      } else {
+        this.parentThreadIds.delete(event.thread.id);
+      }
       if (previous !== event.thread.state) {
         this.showThreadState(event.thread.state, event.thread.id, event.thread.title);
       }
@@ -91,11 +105,13 @@ export class BrowserNotificationTracker {
     } else if (event.type === "thread.removed") {
       this.threadStates.delete(event.threadId);
       this.threadTitles.delete(event.threadId);
+      this.parentThreadIds.delete(event.threadId);
     } else if (event.type === "attention.upserted") {
       if (!this.attentionThreads.has(event.attention.id)) {
         this.attentionThreads.set(event.attention.id, event.attention.threadId);
         if (
-          !event.attention.threadId ||
+          event.attention.threadId !== null &&
+          this.parentThreadIds.has(event.attention.threadId) &&
           this.threadStates.get(event.attention.threadId) !== "needsAttention"
         ) {
           this.show(
@@ -113,6 +129,7 @@ export class BrowserNotificationTracker {
   }
 
   private showThreadState(state: string, threadId: string, threadTitle: string): void {
+    if (!this.parentThreadIds.has(threadId)) return;
     if (state === "completed") {
       this.show(
         translate(this.language, "Задача завершена"),
