@@ -914,15 +914,19 @@ export class AppProjection extends EventEmitter {
         goalStatus: this.threads.get(thread.id)?.goalStatus,
       });
     }
+    const state = this.store.view();
     for (const id of this.threads.keys()) {
       const cached = this.threads.get(id);
+      const parentThreadId = cached
+        ? (cached.thread.parentThreadId ??
+          state.threadMeta[id]?.managedParent?.parentThreadId ??
+          null)
+        : null;
       if (
         !incoming.has(id) &&
         !changedDuringSync(id) &&
         !this.unmaterializedThreads.has(id) &&
-        (!cached ||
-          !isSpawnedSubagent(cached.thread) ||
-          !incoming.has(cached.thread.parentThreadId!))
+        (!cached || !parentThreadId || !incoming.has(parentThreadId))
       ) {
         this.threads.delete(id);
       }
@@ -1100,18 +1104,27 @@ export class AppProjection extends EventEmitter {
   ): Promise<Thread[]> {
     const state = this.store.view();
     const managedParentIds = new Set<string>();
+    const managedChildIds = new Set<string>();
     for (const [threadId, meta] of Object.entries(state.threadMeta)) {
-      if (meta.teamOrchestration !== undefined) managedParentIds.add(threadId);
+      if (meta.teamOrchestration !== undefined) {
+        managedParentIds.add(threadId);
+        for (const task of Object.values(meta.teamOrchestration.tasks)) {
+          managedChildIds.add(task.childThreadId);
+        }
+      }
       const parentThreadId = meta.managedParent?.parentThreadId;
       if (parentThreadId && state.threadMeta[parentThreadId] !== undefined) {
         managedParentIds.add(parentThreadId);
+        managedChildIds.add(threadId);
       }
     }
     const candidates = new Set<string>();
     for (const threadId of loadedThreadIds) {
       if (listedIds.has(threadId)) continue;
       const cached = this.threads.get(threadId);
-      if (!cached || isSpawnedSubagent(cached.thread)) candidates.add(threadId);
+      if (!cached || isSpawnedSubagent(cached.thread) || managedChildIds.has(threadId)) {
+        candidates.add(threadId);
+      }
     }
     for (const threadId of managedParentIds) {
       if (!listedIds.has(threadId)) candidates.add(threadId);
@@ -1126,7 +1139,9 @@ export class AppProjection extends EventEmitter {
               30_000,
             ),
           );
-          return isSpawnedSubagent(response.thread) || managedParentIds.has(threadId)
+          return isSpawnedSubagent(response.thread) ||
+            managedParentIds.has(threadId) ||
+            managedChildIds.has(threadId)
             ? response.thread
             : null;
         } catch (error) {

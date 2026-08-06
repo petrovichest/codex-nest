@@ -889,6 +889,105 @@ describe("AppProjection", () => {
     ).toHaveLength(2);
   });
 
+  it("recovers and retains loaded managed children omitted from thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.parent = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        teamOrchestration: {
+          tasks: {
+            task: {
+              id: "task",
+              childThreadId: "child",
+              title: "Проверить восстановление",
+              prompt: "Продолжить работу после рестарта.",
+              status: "running",
+              createdAt: 1,
+              lastActivityAt: 1,
+            },
+          },
+        },
+      };
+      state.threadMeta.child = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "parent", taskId: "task" },
+      };
+    });
+    const bridge = new FakeBridge();
+    const parent = thread("parent", "/work", 2, { type: "notLoaded" });
+    const child = {
+      ...thread("child", "/work", 3, { type: "active", activeFlags: [] }),
+      name: "Проверить восстановление",
+    };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [parent],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") {
+        return { data: ["parent", "child"], nextCursor: null };
+      }
+      if (method === "thread/read" && params.threadId === "child") {
+        return { thread: child };
+      }
+      if (method === "thread/resume" && params.threadId === "child") {
+        return { thread: child };
+      }
+      if (method === "thread/goal/get" && params.threadId === "child") {
+        return { goal: null };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("child")).toMatchObject({
+      state: "running",
+      relation: {
+        kind: "subagent",
+        parentThreadId: "parent",
+      },
+    });
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(1);
+
+    await projection.sync();
+
+    expect(projection.summary("child")).toMatchObject({
+      state: "running",
+      relation: {
+        kind: "subagent",
+        parentThreadId: "parent",
+      },
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/loaded/list"),
+    ).toHaveLength(1);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "child",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("recovers a referenced managed parent until its own metadata is removed", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
