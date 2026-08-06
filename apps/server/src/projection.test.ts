@@ -889,6 +889,188 @@ describe("AppProjection", () => {
     ).toHaveLength(2);
   });
 
+  it("recovers and retains a loaded user session omitted from thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const omitted = thread("omitted", "/work", 7, { type: "notLoaded" });
+    const resumed = {
+      ...thread("omitted", "/work", 7, { type: "active", activeFlags: [] }),
+      turns: [testTurn("live", "inProgress")],
+    };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      if (method === "thread/loaded/list") {
+        return { data: ["omitted"], nextCursor: null };
+      }
+      if (method === "thread/read" && params.threadId === "omitted") {
+        return { thread: omitted };
+      }
+      if (method === "thread/resume" && params.threadId === "omitted") {
+        return { thread: resumed };
+      }
+      if (method === "thread/goal/get" && params.threadId === "omitted") {
+        return { goal: null };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("omitted")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+      relation: { kind: "session", sessionId: "omitted" },
+    });
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/read" && params.threadId === "omitted",
+      ),
+    ).toHaveLength(1);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/resume" && params.threadId === "omitted",
+      ),
+    ).toHaveLength(1);
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "omitted", turn: testTurn("live", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(projection.summary("omitted")).toMatchObject({
+        state: "completed",
+        unread: true,
+        currentTurnId: null,
+      }),
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("omitted")).toMatchObject({ state: "completed", unread: true });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/loaded/list"),
+    ).toHaveLength(1);
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) => method === "thread/resume" && params.threadId === "omitted",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("resumes only loaded listed sessions whose status is notLoaded", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.idle = {
+        pinned: false,
+        lastReadUpdatedAt: 4_000,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 4_000,
+        awaitingPlanResponse: false,
+      };
+    });
+    const bridge = new FakeBridge();
+    const notLoaded = thread("not-loaded", "/work", 5, { type: "notLoaded" });
+    const idle = thread("idle", "/work", 4);
+    const resumed = {
+      ...thread("not-loaded", "/work", 5, { type: "active", activeFlags: [] }),
+      turns: [testTurn("live", "inProgress")],
+    };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [notLoaded, idle],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") {
+        return { data: ["not-loaded", "idle"], nextCursor: null };
+      }
+      if (method === "thread/resume" && params.threadId === "not-loaded") {
+        return { thread: resumed };
+      }
+      if (method === "thread/goal/get" && params.threadId === "not-loaded") {
+        return { goal: null };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("not-loaded")).toMatchObject({
+      state: "running",
+      currentTurnId: "live",
+    });
+    expect(projection.summary("idle")).toMatchObject({ state: "completed", unread: false });
+    expect(
+      bridge.request.mock.calls
+        .filter(([method]) => method === "thread/resume")
+        .map(([, params]) => params.threadId),
+    ).toEqual(["not-loaded"]);
+  });
+
+  it("does not recover loaded internal sessions omitted from thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const execThread = { ...thread("exec", "/work", 3), source: "exec" as const };
+    const ephemeralThread = { ...thread("ephemeral", "/work", 4), ephemeral: true };
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      if (method === "thread/loaded/list") {
+        return { data: ["exec", "ephemeral"], nextCursor: null };
+      }
+      if (method === "thread/read" && params.threadId === "exec") {
+        return { thread: execThread };
+      }
+      if (method === "thread/read" && params.threadId === "ephemeral") {
+        return { thread: ephemeralThread };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await projection.sync();
+
+    expect(projection.summary("exec")).toBeUndefined();
+    expect(projection.summary("ephemeral")).toBeUndefined();
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      0,
+    );
+  });
+
   it("recovers and retains loaded managed children omitted from thread/list", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

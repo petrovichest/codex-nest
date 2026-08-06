@@ -878,14 +878,17 @@ export class AppProjection extends EventEmitter {
         : Promise.resolve([]),
     ]);
     const listedIds = new Set([...listedActive, ...archived].map((thread) => thread.id));
+    const loadedIds = new Set(loadedThreadIds);
     const recoveredThreads = await this.readThreadsOmittedFromList(loadedThreadIds, listedIds);
     const activeCandidates = [...listedActive, ...recoveredThreads];
     const active = await Promise.all(
       activeCandidates.map(async (thread) => {
         const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
+        const recoverLoadedThread =
+          shouldRecoverLoaded && loadedIds.has(thread.id) && thread.status.type === "notLoaded";
         const [resumedThread, restoredGoalStatus] = await Promise.all([
-          this.rejoinActiveThread(thread),
-          thread.status.type === "active" &&
+          this.rejoinActiveThread(thread, recoverLoadedThread),
+          (thread.status.type === "active" || recoverLoadedThread) &&
           !isSpawnedSubagent(thread) &&
           cachedGoalStatus === undefined
             ? this.readThreadGoalStatus(thread.id)
@@ -933,6 +936,7 @@ export class AppProjection extends EventEmitter {
         !incoming.has(id) &&
         !changedDuringSync(id) &&
         !this.unmaterializedThreads.has(id) &&
+        !this.subscribedThreads.has(id) &&
         (!cached || !parentThreadId || !incoming.has(parentThreadId))
       ) {
         this.threads.delete(id);
@@ -1076,10 +1080,10 @@ export class AppProjection extends EventEmitter {
     })();
   }
 
-  private async rejoinActiveThread(thread: Thread): Promise<Thread> {
+  private async rejoinActiveThread(thread: Thread, recoverLoaded = false): Promise<Thread> {
     if (
       isSpawnedSubagent(thread) ||
-      thread.status.type !== "active" ||
+      (thread.status.type !== "active" && !recoverLoaded) ||
       this.subscribedThreads.has(thread.id)
     ) {
       return thread;
@@ -1191,10 +1195,7 @@ export class AppProjection extends EventEmitter {
     const candidates = new Set<string>();
     for (const threadId of loadedThreadIds) {
       if (listedIds.has(threadId)) continue;
-      const cached = this.threads.get(threadId);
-      if (!cached || isSpawnedSubagent(cached.thread) || managedChildIds.has(threadId)) {
-        candidates.add(threadId);
-      }
+      candidates.add(threadId);
     }
     for (const threadId of managedParentIds) {
       if (!listedIds.has(threadId)) candidates.add(threadId);
@@ -1210,6 +1211,7 @@ export class AppProjection extends EventEmitter {
             ),
           );
           return isSpawnedSubagent(response.thread) ||
+            isRecoverableUserSession(response.thread) ||
             managedParentIds.has(threadId) ||
             managedChildIds.has(threadId)
             ? response.thread
@@ -1916,6 +1918,14 @@ function notificationThreadId(notification: ServerNotification): string | undefi
 
 function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
+}
+
+function isRecoverableUserSession(thread: Thread): boolean {
+  return (
+    !thread.ephemeral &&
+    !isSpawnedSubagent(thread) &&
+    (thread.source === "cli" || thread.source === "vscode" || thread.source === "appServer")
+  );
 }
 
 function managedThreadIds(state: CodexNestStateView): Set<string> {
