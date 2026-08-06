@@ -203,6 +203,26 @@ describe("Activity", () => {
     expect(view.container.querySelector(".markdown-table-scroll")).not.toBeNull();
   });
 
+  it("preserves horizontal table scroll while a message is streaming", () => {
+    const item = {
+      type: "agentMessage" as const,
+      id: "streaming-markdown",
+      status: "inProgress" as const,
+      text: "| Поле | Значение |\n| --- | --- |\n| Статус | Готово |\n\nНачало ответа",
+      images: [],
+      timestamp: null,
+      phase: "commentary" as const,
+    };
+    const view = render(<Activity item={item} />);
+    const tableScroll = view.container.querySelector<HTMLDivElement>(".markdown-table-scroll")!;
+    tableScroll.scrollLeft = 180;
+
+    view.rerender(<Activity item={{ ...item, text: `${item.text}\n\nНовый фрагмент` }} />);
+
+    expect(view.container.querySelector(".markdown-table-scroll")).toBe(tableScroll);
+    expect(tableScroll.scrollLeft).toBe(180);
+  });
+
   it("renders submitted questions and answers as one user message", () => {
     render(
       <Activity
@@ -3050,6 +3070,65 @@ describe("Activity", () => {
     scroll.scrollTop = 400;
     fireEvent.scroll(scroll);
     expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
+  });
+
+  it("stops following a streamed response when the user scrolls upward", () => {
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const item = {
+      type: "agentMessage" as const,
+      id: "streaming-answer",
+      status: "inProgress" as const,
+      text: "Первая часть ответа",
+      images: [],
+      timestamp: 1,
+      phase: "commentary" as const,
+    };
+    const context = mockThreadConnection(threadApi(), running, {
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [item],
+        },
+      ],
+    });
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    scroll.scrollTop = 500;
+    fireEvent.scroll(scroll);
+
+    fireEvent.touchStart(scroll, { touches: [{ clientX: 100, clientY: 200 }] });
+    fireEvent.touchMove(scroll, { touches: [{ clientX: 102, clientY: 230 }] });
+    scroll.scrollTop = 470;
+    fireEvent.scroll(scroll);
+
+    expect(
+      screen.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
+    ).toBeInTheDocument();
+
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [
+        {
+          ...context.state.details.thread.turns[0],
+          items: [{ ...item, text: `${item.text}. Продолжение` }],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(scroll.scrollTop).toBe(470);
   });
 
   it("does not reload the open chat for a reconnect snapshot epoch", async () => {

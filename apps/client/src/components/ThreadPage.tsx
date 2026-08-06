@@ -304,6 +304,7 @@ function pendingThreadSummary(project: Project, settings: SessionSettings): Thre
 const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
 const COMPLETED_CHAT_RETRY_MS = 500;
 const TAIL_FOLLOW_THRESHOLD_PX = 120;
+const SCROLL_GESTURE_THRESHOLD_PX = 6;
 const DRAFT_SAVE_DELAY_MS = 500;
 
 function readVoiceInputMode(): VoiceInputMode {
@@ -492,6 +493,7 @@ export function ThreadPage({
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
+  const scrollTouchOrigin = useRef<{ x: number; y: number } | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
   const detailReconcileKey = useRef<string | null>(null);
   const completedChatRetry = useRef<{
@@ -1665,6 +1667,12 @@ export function ThreadPage({
     }
   }, [api, detail, summary, threadId]);
 
+  function pauseTailFollowing() {
+    if (!followsTail.current) return;
+    followsTail.current = false;
+    setShowScrollToBottom(true);
+  }
+
   useLayoutEffect(() => {
     if (initialScrollThread.current === threadId) return;
     followsTail.current = true;
@@ -2613,10 +2621,35 @@ export function ThreadPage({
         <div
           className="conversation-scroll"
           ref={scrollRef}
+          onWheel={(event) => {
+            if (event.deltaY < 0) pauseTailFollowing();
+          }}
+          onTouchStart={(event) => {
+            const touch = event.touches[0];
+            scrollTouchOrigin.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
+          }}
+          onTouchMove={(event) => {
+            const origin = scrollTouchOrigin.current;
+            const touch = event.touches[0];
+            if (!origin || !touch) return;
+            const deltaX = touch.clientX - origin.x;
+            const deltaY = touch.clientY - origin.y;
+            if (deltaY > SCROLL_GESTURE_THRESHOLD_PX && deltaY > Math.abs(deltaX)) {
+              pauseTailFollowing();
+            }
+          }}
+          onTouchEnd={() => {
+            scrollTouchOrigin.current = null;
+          }}
+          onTouchCancel={() => {
+            scrollTouchOrigin.current = null;
+          }}
           onScroll={(event) => {
             const node = event.currentTarget;
-            followsTail.current =
-              node.scrollHeight - node.scrollTop - node.clientHeight < TAIL_FOLLOW_THRESHOLD_PX;
+            const distanceFromTail = node.scrollHeight - node.scrollTop - node.clientHeight;
+            followsTail.current = followsTail.current
+              ? distanceFromTail < TAIL_FOLLOW_THRESHOLD_PX
+              : distanceFromTail <= 1;
             setShowScrollToBottom(!followsTail.current);
             if (node.scrollTop < 160) void loadOlder();
           }}
@@ -3135,6 +3168,14 @@ function createClientMessageId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
+function MarkdownTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="markdown-table-scroll">
+      <table>{children}</table>
+    </div>
+  );
+}
+
 function MarkdownContent({
   text,
   cwd,
@@ -3151,13 +3192,7 @@ function MarkdownContent({
         pre({ children }) {
           return <CopyableCodeBlock>{children}</CopyableCodeBlock>;
         },
-        table({ children }) {
-          return (
-            <div className="markdown-table-scroll">
-              <table>{children}</table>
-            </div>
-          );
-        },
+        table: MarkdownTable,
         a({ href, children, title }) {
           const path = cwd ? localDownloadPath(href, cwd) : null;
           return path && onDownload ? (

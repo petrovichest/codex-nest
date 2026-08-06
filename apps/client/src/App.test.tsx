@@ -2833,7 +2833,7 @@ describe("App routing and navigation", () => {
 
 function renderApp(path: string, onDisconnected = () => undefined, baseUrl = "https://pi.local") {
   return render(
-    <MemoryRouter initialEntries={[path]}>
+    <MemoryRouter initialEntries={[path]} useTransitions={false}>
       <App settings={{ baseUrl, token: "secret" }} onDisconnected={onDisconnected} />
     </MemoryRouter>,
   );

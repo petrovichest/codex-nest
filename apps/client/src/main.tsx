@@ -21,7 +21,8 @@ function Root() {
   if (!settings) return <SetupScreen onConnected={setSettings} />;
   return (
     <ConnectionProvider settings={settings}>
-      <BrowserRouter>
+      {/* Live session events must not starve user-initiated route changes. */}
+      <BrowserRouter useTransitions={false}>
         <App settings={settings} onDisconnected={() => setSettings(null)} />
       </BrowserRouter>
     </ConnectionProvider>
