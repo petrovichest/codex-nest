@@ -62,6 +62,7 @@ interface CachedThread {
 }
 
 const THREAD_TURN_PAGE_SIZE = 20;
+const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 
 export class AppProjection extends EventEmitter {
   private readonly threads = new Map<string, CachedThread>();
@@ -79,6 +80,8 @@ export class AppProjection extends EventEmitter {
   private syncedAt: string | null = null;
   private syncPromise?: Promise<void>;
   private recoverLoadedThreads = true;
+  private managedRecoveryAttempt = 0;
+  private managedRecoveryTimer?: NodeJS.Timeout;
   private readonly historyCache: HistoryCache;
 
   constructor(
@@ -91,6 +94,9 @@ export class AppProjection extends EventEmitter {
     this.historyCache = new HistoryCache(store.path);
     bridge.on("state", (state) => {
       if (state !== "ready") {
+        if (this.managedRecoveryTimer) clearTimeout(this.managedRecoveryTimer);
+        this.managedRecoveryTimer = undefined;
+        this.managedRecoveryAttempt = 0;
         this.subscribedThreads.clear();
         this.hiddenThreads.clear();
         this.pendingSubagentTitles.clear();
@@ -98,6 +104,7 @@ export class AppProjection extends EventEmitter {
         for (const cached of this.threads.values()) cached.goalStatus = undefined;
       } else {
         this.recoverLoadedThreads = true;
+        this.managedRecoveryAttempt = 0;
       }
       this.publish({ type: "connection.changed", connection: this.connection });
     });
@@ -947,12 +954,75 @@ export class AppProjection extends EventEmitter {
     this.publish({ type: "models.changed", models });
     this.publish({ type: "resync.required" });
     this.backfillSubagentTitles();
+    this.scheduleMissingManagedThreadRecovery();
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 1_000) {
       process.stderr.write(
         `CodexNest projection sync slow (${durationMs}ms, ${listedActive.length} active, ${archived.length} archived)\n`,
       );
     }
+  }
+
+  private scheduleMissingManagedThreadRecovery(): void {
+    if (this.managedRecoveryTimer || this.bridge.state !== "ready") return;
+    const missing = this.missingManagedThreadIds();
+    if (!missing.length) {
+      this.managedRecoveryAttempt = 0;
+      return;
+    }
+    const delay = MANAGED_RECOVERY_DELAYS_MS[this.managedRecoveryAttempt];
+    if (delay === undefined) return;
+    this.managedRecoveryAttempt += 1;
+    this.managedRecoveryTimer = setTimeout(() => {
+      this.managedRecoveryTimer = undefined;
+      void this.recoverMissingManagedThreads(missing).catch((error: unknown) => {
+        this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+        this.scheduleMissingManagedThreadRecovery();
+      });
+    }, delay);
+    this.managedRecoveryTimer.unref();
+  }
+
+  private missingManagedThreadIds(): string[] {
+    const referenced = managedThreadIds(this.store.view());
+    return [...referenced].filter((threadId) => !this.threads.has(threadId));
+  }
+
+  private async recoverMissingManagedThreads(threadIds: readonly string[]): Promise<void> {
+    if (this.bridge.state !== "ready") return;
+    const stillReferenced = managedThreadIds(this.store.view());
+    const recovered = await Promise.all(
+      threadIds.map(async (threadId): Promise<Thread | null> => {
+        if (this.threads.has(threadId) || !stillReferenced.has(threadId)) return null;
+        try {
+          const response = parseThreadRead(
+            await this.bridge.request<unknown>(
+              "thread/read",
+              { threadId, includeTurns: false },
+              30_000,
+            ),
+          );
+          return response.thread;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    let changed = false;
+    for (const rawThread of recovered) {
+      if (!rawThread || this.threads.has(rawThread.id)) continue;
+      const thread = await this.rejoinActiveThread(rawThread);
+      if (this.threads.has(thread.id)) continue;
+      this.threads.set(thread.id, {
+        thread,
+        archived: false,
+        currentTurnId: activeTurnId(thread),
+      });
+      this.hydrateLiveTurn(thread);
+      changed = true;
+    }
+    if (changed) this.publish({ type: "resync.required" });
+    this.scheduleMissingManagedThreadRecovery();
   }
 
   private backfillSubagentTitles(): void {
@@ -1846,6 +1916,23 @@ function notificationThreadId(notification: ServerNotification): string | undefi
 
 function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
+}
+
+function managedThreadIds(state: CodexNestStateView): Set<string> {
+  const threadIds = new Set<string>();
+  for (const [threadId, meta] of Object.entries(state.threadMeta)) {
+    if (meta.teamOrchestration !== undefined) {
+      threadIds.add(threadId);
+      for (const task of Object.values(meta.teamOrchestration.tasks)) {
+        threadIds.add(task.childThreadId);
+      }
+    }
+    if (meta.managedParent && state.threadMeta[meta.managedParent.parentThreadId] !== undefined) {
+      threadIds.add(threadId);
+      threadIds.add(meta.managedParent.parentThreadId);
+    }
+  }
+  return threadIds;
 }
 
 function hasSubagentTranscript(

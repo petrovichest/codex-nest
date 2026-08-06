@@ -988,6 +988,99 @@ describe("AppProjection", () => {
     ).toHaveLength(1);
   });
 
+  it("retries persisted managed threads that are temporarily unavailable during sync", async () => {
+    vi.useFakeTimers();
+    try {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      await store.update((state) => {
+        state.threadMeta.parent = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          teamOrchestration: {
+            tasks: {
+              task: {
+                id: "task",
+                childThreadId: "child",
+                title: "Продолжить после рестарта",
+                prompt: "Восстановить временно отсутствующую задачу.",
+                status: "running",
+                createdAt: 1,
+                lastActivityAt: 1,
+              },
+            },
+          },
+        };
+        state.threadMeta.child = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          managedParent: { parentThreadId: "parent", taskId: "task" },
+        };
+      });
+      const bridge = new FakeBridge();
+      const reads = new Map<string, number>();
+      bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+        if (method === "thread/list") {
+          return { data: [], nextCursor: null, backwardsCursor: null };
+        }
+        if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+        if (method === "thread/read") {
+          const threadId = String(params.threadId);
+          const count = (reads.get(threadId) ?? 0) + 1;
+          reads.set(threadId, count);
+          if (count === 1) throw new Error("Thread index is still warming up");
+          return {
+            thread: {
+              ...thread(threadId, "/work", threadId === "parent" ? 2 : 3),
+              name: threadId === "parent" ? "Основная сессия" : "Дочерняя сессия",
+            },
+          };
+        }
+        if (method === "model/list") return { data: [], nextCursor: null };
+        throw new Error(`Unexpected ${method}`);
+      });
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+        false,
+      );
+
+      await projection.sync();
+
+      expect(projection.summary("parent")).toBeUndefined();
+      expect(projection.summary("child")).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(projection.summary("parent")).toMatchObject({
+        title: "Основная сессия",
+        relation: { kind: "session", sessionId: "parent" },
+      });
+      expect(projection.summary("child")).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(projection.summary("child")).toMatchObject({
+        title: "Дочерняя сессия",
+        state: "running",
+        relation: { kind: "subagent", parentThreadId: "parent" },
+      });
+      expect(reads).toEqual(
+        new Map([
+          ["parent", 2],
+          ["child", 2],
+        ]),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers a referenced managed parent until its own metadata is removed", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
