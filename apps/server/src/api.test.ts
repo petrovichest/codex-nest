@@ -2148,7 +2148,11 @@ describe("thread settings", () => {
       .at(-1)?.[1] as {
       dynamicTools?: Array<{
         type: string;
-        tools?: Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+        tools?: Array<{
+          name: string;
+          description: string;
+          inputSchema: { properties?: Record<string, unknown> };
+        }>;
       }>;
     };
     const managedTools = teamThreadStart.dynamicTools?.find(
@@ -2174,7 +2178,7 @@ describe("thread settings", () => {
         "codexnest.team": {
           kind: "application",
           value: expect.stringMatching(
-            /may perform any part.*inspecting.*analyzing.*editing.*testing.*Delegate only.*materially useful.*codexnest managed-task tools.*never use native subagent tools.*smallest sufficient solution.*concrete, confirmed risk.*Before calling codexnest\.spawn_task.*necessary to achieve the user's original goal.*Honor an explicit user request.*main session.*Do not create managed tasks for optional improvements.*checks without a concrete target.*asks to stop or cancel subagents.*codexnest\.list_tasks.*codexnest\.cancel_task.*queued, starting, or running.*Do not create replacement tasks.*After every meaningful stage.*reassess the remaining plan.*only with steps that are still necessary.*Every test, command run, and checklist item.*specific product risk or an observed defect.*Omit it otherwise.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Once work is delegated.*do not duplicate the same scope.*Never call sleep.*shell sleep.*list_tasks.*inspect_task.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*finish the turn instead of waiting.*automatically notifies.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
+            /may perform any part.*inspecting.*analyzing.*editing.*testing.*Delegate only.*materially useful.*codexnest managed-task tools.*never use native subagent tools.*smallest sufficient solution.*concrete, confirmed risk.*Before calling codexnest\.spawn_task.*necessary to achieve the user's original goal.*Honor an explicit user request.*main session.*Do not create managed tasks for optional improvements.*checks without a concrete target.*asks to stop or cancel subagents.*codexnest\.list_tasks.*codexnest\.cancel_task.*queued, starting, or running.*Do not create replacement tasks.*After every meaningful stage.*reassess the remaining plan.*only with steps that are still necessary.*Every test, command run, and checklist item.*specific product risk or an observed defect.*Omit it otherwise.*full conversation and complete plan only in the root coordinator's context.*only the single assigned plan step and the minimum task-specific context.*Never copy or summarize the conversation.*Once work is delegated.*do not duplicate the same scope.*fixed delay.*start, initial health check, sleep, and final inspection.*never wait in the parent.*codexnest\.inspect_task.*steer_task.*cancel_task.*prompts and steering messages in English.*task titles.*user's language/is,
           ),
         },
       },
@@ -2184,6 +2188,27 @@ describe("thread settings", () => {
         additionalContext?: Record<string, { value?: unknown }>;
       }
     ).additionalContext?.["codexnest.team"]?.value;
+    expect(teamContext).toEqual(
+      expect.stringMatching(
+        /^This session is in CodexNest Team mode\..*Managed tasks are event-driven:.*automatically delivers its result and resumes this parent session\./s,
+      ),
+    );
+    expect(teamContext).toEqual(
+      expect.stringMatching(
+        /Never keep the parent turn open.*queued or running.*never call tools merely to keep the turn alive.*finishing all independent parent work.*immediately finish the turn\./s,
+      ),
+    );
+    expect(teamContext).toEqual(
+      expect.stringMatching(
+        /Never call sleep.*codexnest\.list_tasks.*codexnest\.inspect_task.*check whether a child is done.*waiting loop.*polling\./s,
+      ),
+    );
+    expect(managedTools?.find((tool) => tool.name === "list_tasks")?.description).toMatch(
+      /one-time snapshot.*explicit status request.*cancellation.*coordination decision.*Never use this tool to wait or poll.*completion automatically resumes the parent/i,
+    );
+    expect(managedTools?.find((tool) => tool.name === "inspect_task")?.description).toMatch(
+      /explicit status request.*watchdog investigation.*corrective action.*terminal-result workspace review.*Never use this tool to monitor progress, wait, or poll.*completion automatically resumes the parent/i,
+    );
     expect(teamContext).toEqual(
       expect.stringContaining(
         "set access.network to true in that case and leave it false for local-only work",

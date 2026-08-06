@@ -170,6 +170,9 @@ const TEAM_SESSION_UPGRADE_MESSAGE =
   "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.";
 const TEAM_MODE_CONTEXT = [
   "This session is in CodexNest Team mode. You are the root agent and may perform any part of the user's task directly, including inspecting, analyzing, editing, and testing code.",
+  "Managed tasks are event-driven: when a child finishes, CodexNest automatically delivers its result and resumes this parent session.",
+  "Never keep the parent turn open merely because managed tasks are queued or running, and never call tools merely to keep the turn alive. After scheduling ready tasks and finishing all independent parent work, immediately finish the turn.",
+  "Never call sleep, run shell sleep commands, or call codexnest.list_tasks or codexnest.inspect_task merely to check whether a child is done; repeated status checks and any other waiting loop are polling.",
   "Delegate only when you judge that a managed child is materially useful. Use only the codexnest managed-task tools for delegation and never use native subagent tools.",
   "Use the smallest sufficient solution that resolves the user's main problem. Add complexity only to address a concrete, confirmed risk.",
   "Before calling codexnest.spawn_task, confirm that the task is necessary to achieve the user's original goal.",
@@ -182,10 +185,7 @@ const TEAM_MODE_CONTEXT = [
   "In each managed child prompt, include only the single assigned plan step and the minimum task-specific context needed to complete it: its objective, relevant constraints, affected scope, and expected result.",
   "Never copy or summarize the conversation, the full plan, unrelated plan steps, or prior agent messages in a subagent prompt.",
   "Once work is delegated, do not duplicate the same scope in the parent session unless integration or repair requires it.",
-  "CodexNest may end the current parent turn and automatically start a continuation turn when a child result arrives.",
-  "Never call sleep, run shell sleep commands, repeatedly call list_tasks or inspect_task, or otherwise poll to wait for managed tasks.",
   "When a task explicitly requires checking results after a fixed delay or deadline, delegate the complete start, initial health check, sleep, and final inspection cycle to one managed child; never wait in the parent.",
-  "After scheduling all tasks that are ready now, finish the turn instead of waiting; child completion automatically notifies and resumes this parent session.",
   "On a CodexNest orchestration continuation, process the named child results and continue reasoning about the original task before deciding the next action.",
   "If an explicit user message is present, answer it first without forgetting any active or newly completed subagents.",
   "Grant network access only when a managed task requires external access such as documentation, package downloads, remote APIs, or health checks; set access.network to true in that case and leave it false for local-only work.",
@@ -316,14 +316,18 @@ const TEAM_ROOT_DYNAMIC_TOOLS = [
         required: ["taskId", "prompt"],
         additionalProperties: false,
       }),
-      dynamicTool("list_tasks", "List this parent's managed tasks.", {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      }),
+      dynamicTool(
+        "list_tasks",
+        "Get a one-time snapshot of managed tasks for an explicit status request, cancellation, or a concrete coordination decision. Never use this tool to wait or poll; task completion automatically resumes the parent.",
+        {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      ),
       dynamicTool(
         "inspect_task",
-        "Inspect one managed task and obtain its isolated workspace path for review or synthesis.",
+        "Inspect one managed task for an explicit status request, watchdog investigation, corrective action, or terminal-result workspace review and synthesis. Never use this tool to monitor progress, wait, or poll; task completion automatically resumes the parent.",
         {
           type: "object",
           properties: { taskId: { type: "string" } },
