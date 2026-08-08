@@ -2820,6 +2820,7 @@ describe("App routing and navigation", () => {
 
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
     expect(api.readPermissionSettings).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("tab", { name: "Подключение" }));
     fireEvent.click(screen.getByRole("button", { name: "Сменить сервер" }));
 
     await waitFor(() => expect(onDisconnected).toHaveBeenCalledOnce());
