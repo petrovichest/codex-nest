@@ -39,7 +39,13 @@ import type {
   VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
-import { artifactDescriptor, type ArtifactDescriptor } from "../artifacts";
+import {
+  artifactDescriptor,
+  collectSessionArtifacts,
+  type ArtifactDescriptor,
+  type SessionArtifact,
+  localDownloadPath,
+} from "../artifacts";
 import {
   type AnnotationDraft,
   formatAnnotatedMessage,
@@ -89,7 +95,13 @@ import {
   XIcon,
 } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
-import { NewSessionInspector, SessionInspector, type GitChangesView } from "./SessionInspector";
+import {
+  type ArtifactHistoryState,
+  type GitChangesView,
+  type InspectorTab,
+  NewSessionInspector,
+  SessionInspector,
+} from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
 type ComposerDraftState = {
@@ -457,6 +469,12 @@ export function ThreadPage({
     newSessionProject ??
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ??
     null;
+  const artifactCwd = summary?.cwd ?? project?.path ?? "";
+  const sessionArtifacts = useMemo(
+    () => (artifactCwd ? collectSessionArtifacts(detail?.turns ?? [], artifactCwd) : []),
+    [artifactCwd, detail?.turns],
+  );
+  const artifactHistoryComplete = detail?.olderTurnsCursor === null;
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
     value: detail?.draft
@@ -512,11 +530,22 @@ export function ThreadPage({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderError, setOlderError] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
+  const [artifactHistoryState, setArtifactHistoryState] = useState<ArtifactHistoryState>("idle");
+  const artifactHistoryRun = useRef(0);
   const [artifactViewer, setArtifactViewer] = useState<{
     artifact: ArtifactDescriptor;
     opener: HTMLButtonElement;
+    returnToInspector: boolean;
   } | null>(null);
-  useEffect(() => setArtifactViewer(null), [threadId]);
+  const artifactViewerRef = useRef(artifactViewer);
+  artifactViewerRef.current = artifactViewer;
+  useEffect(() => {
+    artifactHistoryRun.current += 1;
+    setArtifactHistoryState("idle");
+    setArtifactViewer(null);
+    setInspectorTab("overview");
+  }, [threadId]);
   const [gitChangesState, setGitChangesState] = useState<{
     threadId: string;
     value: GitChangesView;
@@ -701,9 +730,24 @@ export function ThreadPage({
 
   const openArtifact = useCallback((artifact: ArtifactDescriptor, opener: HTMLButtonElement) => {
     setInspectorOpen(false);
-    setArtifactViewer({ artifact, opener });
+    setArtifactViewer({ artifact, opener, returnToInspector: false });
   }, []);
-  const closeArtifact = useCallback(() => setArtifactViewer(null), []);
+  const openInspectorArtifact = useCallback(
+    (artifact: SessionArtifact, opener: HTMLButtonElement) => {
+      if (!artifact.preview) return;
+      setInspectorOpen(false);
+      setArtifactViewer({ artifact: artifact.preview, opener, returnToInspector: true });
+    },
+    [],
+  );
+  const closeArtifact = useCallback(() => {
+    const returnToInspector = artifactViewerRef.current?.returnToInspector ?? false;
+    setArtifactViewer(null);
+    if (returnToInspector) {
+      setInspectorTab("artifacts");
+      setInspectorOpen(true);
+    }
+  }, []);
 
   const loadArtifact = useCallback(
     async (artifact: ArtifactDescriptor): Promise<ArtifactLoadResult> => {
@@ -1769,6 +1813,55 @@ export function ThreadPage({
       setLoadingOlder(false);
     }
   }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, threadId]);
+
+  const loadArtifactHistory = useCallback(async () => {
+    if (artifactHistoryState === "loading") return;
+    let cursor = detail?.olderTurnsCursor;
+    if (!cursor) {
+      setArtifactHistoryState("idle");
+      return;
+    }
+    const run = ++artifactHistoryRun.current;
+    const seen = new Set<string>();
+    setArtifactHistoryState("loading");
+    try {
+      while (
+        cursor &&
+        artifactHistoryRun.current === run &&
+        activeThreadIdRef.current === threadId
+      ) {
+        if (seen.has(cursor)) throw new Error("Repeated thread history cursor");
+        seen.add(cursor);
+        const page = await loadOlderDetail(threadId, cursor);
+        cursor = page.olderTurnsCursor;
+      }
+      if (artifactHistoryRun.current === run && activeThreadIdRef.current === threadId) {
+        setArtifactHistoryState("idle");
+      }
+    } catch {
+      if (artifactHistoryRun.current === run && activeThreadIdRef.current === threadId) {
+        setArtifactHistoryState("error");
+      }
+    }
+  }, [artifactHistoryState, detail?.olderTurnsCursor, loadOlderDetail, threadId]);
+
+  useEffect(() => {
+    if (
+      !inspectorOpen ||
+      inspectorTab !== "artifacts" ||
+      artifactHistoryComplete ||
+      artifactHistoryState !== "idle"
+    ) {
+      return;
+    }
+    void loadArtifactHistory();
+  }, [
+    artifactHistoryComplete,
+    artifactHistoryState,
+    inspectorOpen,
+    inspectorTab,
+    loadArtifactHistory,
+  ]);
 
   function persistAnnotations(next: PendingAnnotation[]): boolean {
     composerEditRevisionRef.current += 1;
@@ -3039,6 +3132,7 @@ export function ThreadPage({
             onClose={closeArtifact}
             onDownload={downloadFile}
             onLoad={loadArtifact}
+            returnToArtifacts={artifactViewer.returnToInspector}
           />
         </>
       )}
@@ -3054,10 +3148,17 @@ export function ThreadPage({
           summary={workspaceSummary}
           project={project}
           gitChanges={gitChangesState?.threadId === threadId ? gitChangesState.value : null}
+          activeTab={inspectorTab}
+          artifacts={sessionArtifacts}
+          artifactHistoryComplete={artifactHistoryComplete}
+          artifactHistoryState={artifactHistoryState}
           onClose={() => setInspectorOpen(false)}
-          onPin={togglePin}
-          onArchive={toggleArchive}
-          readOnly={isSubagent}
+          onTabChange={setInspectorTab}
+          onArtifactOpen={openInspectorArtifact}
+          onArtifactDownload={downloadFile}
+          onArtifactRetry={() => {
+            setArtifactHistoryState("idle");
+          }}
         />
       )}
       {inspectorOpen && (
@@ -3428,19 +3529,6 @@ function DownloadLink({
       )}
     </span>
   );
-}
-
-function localDownloadPath(href: string | undefined, cwd: string): string | null {
-  if (!href?.startsWith("/")) return null;
-  let path: string;
-  try {
-    path = decodeURI(href);
-  } catch {
-    return null;
-  }
-  const root = cwd.replace(/\/+$/, "") || "/";
-  if (root === "/" || path === root || path.startsWith(`${root}/`)) return path;
-  return null;
 }
 
 export function Activity({

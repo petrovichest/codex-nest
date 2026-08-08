@@ -2121,6 +2121,131 @@ describe("Activity", () => {
     expect(screen.getByLabelText("Сведения о задаче")).toBeInTheDocument();
   });
 
+  it("loads the full history only after the artifacts tab is selected", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, {
+      olderTurnsCursor: "older-1",
+      turns: [
+        {
+          id: "latest",
+          status: "completed",
+          startedAt: 30,
+          completedAt: 40,
+          durationMs: 10,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "latest-answer",
+              status: "completed",
+              text: "[Свежий отчёт](/work/project/reports/latest.md)",
+              images: [],
+              timestamp: 40,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    context.loadOlderDetail.mockImplementation(async (_threadId, cursor) => {
+      const current = context.state.details.thread;
+      const page = {
+        ...current,
+        turns: [
+          {
+            id: cursor,
+            status: "completed" as const,
+            startedAt: cursor === "older-1" ? 20 : 10,
+            completedAt: cursor === "older-1" ? 21 : 11,
+            durationMs: 1,
+            progress: progress(),
+            items:
+              cursor === "older-2"
+                ? [
+                    {
+                      type: "agentMessage" as const,
+                      id: "old-answer",
+                      status: "completed" as const,
+                      text: "[Старый файл](/work/project/archive/old.pdf)",
+                      images: [],
+                      timestamp: 11,
+                      phase: "final_answer" as const,
+                    },
+                  ]
+                : [],
+          },
+        ],
+        olderTurnsCursor: cursor === "older-1" ? "older-2" : null,
+      };
+      context.state.details.thread = {
+        ...current,
+        turns: [...page.turns, ...current.turns],
+        olderTurnsCursor: page.olderTurnsCursor,
+      };
+      return page;
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    expect(context.loadOlderDetail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Артефакты" }));
+
+    await waitFor(() => expect(context.loadOlderDetail).toHaveBeenCalledTimes(2));
+    expect(context.loadOlderDetail).toHaveBeenNthCalledWith(1, "thread", "older-1");
+    expect(context.loadOlderDetail).toHaveBeenNthCalledWith(2, "thread", "older-2");
+    const inspector = screen.getByLabelText("Сведения о задаче");
+    expect(within(inspector).getByText("reports/latest.md")).toBeInTheDocument();
+    expect(within(inspector).getByText("archive/old.pdf")).toBeInTheDocument();
+    expect(within(inspector).getByRole("tab", { name: "Артефакты, 2" })).toBeInTheDocument();
+  });
+
+  it("returns from an inspector artifact preview to the artifact shelf", async () => {
+    const api = threadApi();
+    api.createDownload.mockResolvedValueOnce({
+      downloadUrl: "/downloads/ticket/report.md",
+      expiresAt: 61_000,
+      fileName: "report.md",
+      size: 8,
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("# Report", { status: 200 })));
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "answer",
+              status: "completed",
+              text: "[Отчёт](/work/project/report.md)",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Артефакты, 1" }));
+    const inspector = screen.getByLabelText("Сведения о задаче");
+    fireEvent.click(within(inspector).getByRole("button", { name: "Открыть report.md" }));
+
+    expect(await screen.findByRole("heading", { name: "Report" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Вернуться к артефактам" }));
+
+    const reopened = await screen.findByLabelText("Сведения о задаче");
+    const artifactButton = within(reopened).getByRole("button", { name: "Открыть report.md" });
+    await waitFor(() => expect(artifactButton).toHaveFocus());
+  });
+
   it("forces an authoritative session refresh from the header", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     renderThread();

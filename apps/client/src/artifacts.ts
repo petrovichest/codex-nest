@@ -1,3 +1,8 @@
+import type { TurnView } from "@codexnest/protocol";
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
+
 export type ArtifactPreviewKind = "html" | "image" | "markdown" | "pdf" | "text";
 
 export type ArtifactDescriptor = {
@@ -8,12 +13,22 @@ export type ArtifactDescriptor = {
   path: string;
 };
 
+export type SessionArtifact = {
+  path: string;
+  fileName: string;
+  relativePath: string;
+  format: string;
+  linkedAt: number;
+  preview: ArtifactDescriptor | null;
+};
+
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
 const IMAGE_PREVIEW_LIMIT = 25 * 1024 * 1024;
 const PDF_PREVIEW_LIMIT = 50 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS = new Set(["avif", "gif", "jpeg", "jpg", "png", "webp"]);
 const TEXT_EXTENSIONS = new Set(["csv", "json", "log", "text", "txt", "yaml", "yml"]);
+const markdownParser = unified().use(remarkParse).use(remarkGfm);
 
 export function artifactDescriptor(path: string): ArtifactDescriptor | null {
   const fileName = path.split("/").at(-1) || path;
@@ -48,6 +63,89 @@ export function artifactDescriptor(path: string): ArtifactDescriptor | null {
     };
   }
   return null;
+}
+
+export function localDownloadPath(href: string | undefined, cwd: string): string | null {
+  if (!href?.startsWith("/")) return null;
+  let path: string;
+  try {
+    path = decodeURI(href);
+  } catch {
+    return null;
+  }
+  if (path.split("/").some((segment) => segment === "." || segment === "..")) return null;
+  const root = cwd.replace(/\/+$/, "") || "/";
+  if (root === "/" || path === root || path.startsWith(`${root}/`)) return path;
+  return null;
+}
+
+export function collectSessionArtifacts(turns: TurnView[], cwd: string): SessionArtifact[] {
+  const artifacts = new Map<string, SessionArtifact>();
+  const root = cwd.replace(/\/+$/, "") || "/";
+
+  for (const turn of turns) {
+    for (const item of turn.items) {
+      if (!isAgentMarkdown(item)) continue;
+      const linkedAt = item.timestamp ?? turn.completedAt ?? turn.startedAt ?? 0;
+
+      for (const href of markdownLinks(item.text)) {
+        const path = localDownloadPath(href, cwd);
+        if (!path) continue;
+        const existing = artifacts.get(path);
+        if (existing && existing.linkedAt >= linkedAt) continue;
+
+        const fileName = path.split("/").at(-1) ?? "";
+        const preview = artifactDescriptor(path);
+        artifacts.set(path, {
+          path,
+          fileName,
+          relativePath:
+            root === "/" ? path.slice(1) : path === root ? "" : path.slice(root.length + 1),
+          format: preview?.format ?? downloadFormat(fileName),
+          linkedAt,
+          preview,
+        });
+      }
+    }
+  }
+
+  return [...artifacts.values()].sort((left, right) => {
+    if (left.linkedAt !== right.linkedAt) return right.linkedAt - left.linkedAt;
+    return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+  });
+}
+
+function isAgentMarkdown(item: TurnView["items"][number]): item is TurnView["items"][number] & {
+  type: "agentMessage" | "reasoning" | "plan";
+  text: string;
+  timestamp: number | null;
+} {
+  return item.type === "agentMessage" || item.type === "reasoning" || item.type === "plan";
+}
+
+function markdownLinks(markdown: string): string[] {
+  const links: string[] = [];
+
+  function walk(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const markdownNode = node as { type?: unknown; url?: unknown; children?: unknown };
+    if (markdownNode.type === "link" && typeof markdownNode.url === "string") {
+      links.push(markdownNode.url);
+    }
+    if (Array.isArray(markdownNode.children)) {
+      for (const child of markdownNode.children) walk(child);
+    }
+  }
+
+  walk(markdownParser.parse(markdown));
+  return links;
+}
+
+function downloadFormat(fileName: string): string {
+  const extensionAt = fileName.lastIndexOf(".");
+  return extensionAt >= 0 && extensionAt < fileName.length - 1
+    ? fileName.slice(extensionAt + 1).toUpperCase()
+    : "FILE";
 }
 
 function extensionLabel(extension: string): string {

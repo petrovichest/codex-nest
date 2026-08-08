@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Project, ThreadSummary } from "@codexnest/protocol";
 
+import type { SessionArtifact } from "../artifacts";
 import { NewSessionInspector, SessionInspector, type GitChangesView } from "./SessionInspector";
 
 const summary: ThreadSummary = {
@@ -30,6 +31,21 @@ const project: Project = {
   path: "/work/project",
   createdAt: "2026-01-01",
   updatedAt: "2026-01-01",
+};
+
+const artifact: SessionArtifact = {
+  path: "/work/project/reports/result.md",
+  fileName: "result.md",
+  relativePath: "reports/result.md",
+  format: "Markdown",
+  linkedAt: 100,
+  preview: {
+    path: "/work/project/reports/result.md",
+    fileName: "result.md",
+    format: "Markdown",
+    kind: "markdown",
+    maxBytes: 2 * 1024 * 1024,
+  },
 };
 
 describe("SessionInspector", () => {
@@ -90,9 +106,15 @@ describe("SessionInspector", () => {
         summary={{ ...unseen, unseen: false }}
         project={project}
         gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
+        activeTab="overview"
+        artifacts={[]}
+        artifactHistoryComplete
+        artifactHistoryState="idle"
         onClose={() => undefined}
-        onPin={vi.fn()}
-        onArchive={vi.fn()}
+        onTabChange={vi.fn()}
+        onArtifactOpen={vi.fn()}
+        onArtifactDownload={vi.fn()}
+        onArtifactRetry={vi.fn()}
       />,
     );
     expect(view.container.querySelector(".status")).toHaveClass("status-completed-unread");
@@ -100,6 +122,60 @@ describe("SessionInspector", () => {
       "status-unseen",
       "status-pulsing",
     );
+  });
+
+  it("switches to the artifact shelf and exposes the exact count", () => {
+    const onTabChange = vi.fn();
+    const onArtifactOpen = vi.fn();
+    const view = render(
+      <SessionInspector
+        open
+        summary={summary}
+        project={project}
+        gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
+        activeTab="artifacts"
+        artifacts={[artifact]}
+        artifactHistoryComplete
+        artifactHistoryState="idle"
+        onClose={vi.fn()}
+        onTabChange={onTabChange}
+        onArtifactOpen={onArtifactOpen}
+        onArtifactDownload={vi.fn()}
+        onArtifactRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: "Артефакты, 1" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("reports/result.md")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Открыть result.md" }));
+    expect(onArtifactOpen).toHaveBeenCalledWith(artifact, expect.any(HTMLButtonElement));
+    expect(view.container.querySelector(".inspector-actions")).not.toBeInTheDocument();
+  });
+
+  it("shows progress instead of a false empty state while older history loads", () => {
+    render(
+      <SessionInspector
+        open
+        summary={summary}
+        project={project}
+        gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
+        activeTab="artifacts"
+        artifacts={[]}
+        artifactHistoryComplete={false}
+        artifactHistoryState="loading"
+        onClose={vi.fn()}
+        onTabChange={vi.fn()}
+        onArtifactOpen={vi.fn()}
+        onArtifactDownload={vi.fn()}
+        onArtifactRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ищем файлы во всей истории…")).toBeInTheDocument();
+    expect(screen.queryByText("В этой сессии пока нет артефактов")).not.toBeInTheDocument();
   });
 });
 
@@ -110,9 +186,15 @@ function renderInspector(gitChanges: GitChangesView, thread = summary) {
       summary={thread}
       project={project}
       gitChanges={gitChanges}
+      activeTab="overview"
+      artifacts={[]}
+      artifactHistoryComplete
+      artifactHistoryState="idle"
       onClose={() => undefined}
-      onPin={vi.fn()}
-      onArchive={vi.fn()}
+      onTabChange={vi.fn()}
+      onArtifactOpen={vi.fn()}
+      onArtifactDownload={vi.fn()}
+      onArtifactRetry={vi.fn()}
     />,
   );
 }

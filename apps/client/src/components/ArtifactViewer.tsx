@@ -7,7 +7,7 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 
 import { type ArtifactDescriptor, formatArtifactSize, safeArtifactHtml } from "../artifacts";
 import { useI18n } from "../i18n";
-import { ArrowDownIcon, FileIcon, RefreshIcon, XIcon } from "./Icons";
+import { ArrowDownIcon, ArrowLeftIcon, FileIcon, RefreshIcon, XIcon } from "./Icons";
 
 export type ArtifactLoadResult =
   | { state: "ready"; data: ArrayBuffer; fileName: string; size: number }
@@ -19,12 +19,14 @@ export function ArtifactViewer({
   onClose,
   onDownload,
   onLoad,
+  returnToArtifacts = false,
 }: {
   artifact: ArtifactDescriptor;
   opener: HTMLButtonElement | null;
   onClose(): void;
   onDownload(path: string): Promise<void>;
   onLoad(artifact: ArtifactDescriptor): Promise<ArtifactLoadResult>;
+  returnToArtifacts?: boolean;
 }) {
   const { t } = useI18n();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -56,13 +58,17 @@ export function ArtifactViewer({
       window.setTimeout(() => {
         const target = opener?.isConnected
           ? opener
-          : [...document.querySelectorAll<HTMLButtonElement>(".artifact-link-open")].find(
-              (button) => button.dataset.artifactPath === artifact.path,
-            );
+          : [
+              ...document.querySelectorAll<HTMLButtonElement>(
+                returnToArtifacts
+                  ? ".inspector-artifact-open[data-artifact-path]"
+                  : ".artifact-link-open[data-artifact-path]",
+              ),
+            ].find((button) => button.dataset.artifactPath === artifact.path);
         target?.focus();
       }, 0);
     };
-  }, [artifact.path, opener]);
+  }, [artifact.path, opener, returnToArtifacts]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -142,10 +148,10 @@ export function ArtifactViewer({
             ref={closeButtonRef}
             type="button"
             className="icon-button"
-            aria-label={t("Закрыть предпросмотр")}
+            aria-label={returnToArtifacts ? t("Вернуться к артефактам") : t("Закрыть предпросмотр")}
             onClick={onClose}
           >
-            <XIcon />
+            {returnToArtifacts ? <ArrowLeftIcon /> : <XIcon />}
           </button>
         </span>
       </header>
