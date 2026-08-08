@@ -24,6 +24,7 @@
     "@capacitor/core": "8.0.0",
     "@capacitor/preferences": "8.0.0",
     "@codexnest/protocol": "*",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",

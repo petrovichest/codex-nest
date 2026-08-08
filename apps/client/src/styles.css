@@ -977,6 +977,7 @@ pre {
 }
 
 .thread-workspace {
+  position: relative;
   width: 100%;
   height: 100dvh;
   display: flex;
@@ -1765,6 +1766,269 @@ pre {
   line-height: 1.35;
 }
 
+.artifact-link-container {
+  max-width: 100%;
+  display: inline-grid;
+  gap: 2px;
+  margin: 4px 2px;
+  vertical-align: middle;
+}
+
+.artifact-link {
+  min-width: 220px;
+  max-width: min(100%, 520px);
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: 0 1px 2px rgb(28 30 27 / 5%);
+}
+
+.artifact-link button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.artifact-link-open {
+  min-width: 0;
+  min-height: 54px;
+  flex: 1;
+  justify-content: flex-start;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.artifact-link-download {
+  width: 42px;
+  min-width: 42px;
+  min-height: 54px;
+  padding: 0;
+  border-left: 1px solid var(--line) !important;
+  color: var(--muted-strong);
+}
+
+.artifact-link-icon,
+.artifact-viewer-file-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--muted-strong);
+}
+
+.artifact-link-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+
+.artifact-link-copy,
+.artifact-viewer-title {
+  min-width: 0;
+  display: grid;
+}
+
+.artifact-link-copy strong,
+.artifact-viewer-title strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-link-copy > span,
+.artifact-viewer-title > span {
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.artifact-viewer-backdrop {
+  display: none;
+}
+
+.artifact-viewer {
+  width: clamp(420px, 45vw, 760px);
+  min-width: 420px;
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 12px 12px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+
+.artifact-viewer-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 9px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.artifact-viewer-file-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+
+.artifact-viewer-title {
+  flex: 1;
+}
+
+.artifact-viewer-title strong {
+  font-size: 13px;
+}
+
+.artifact-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.artifact-viewer-actions .icon-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+}
+
+.artifact-viewer-stage {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 24px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 26%, transparent) 1px, transparent 1px) 0
+      0 / 24px 24px,
+    linear-gradient(color-mix(in srgb, var(--line) 26%, transparent) 1px, transparent 1px) 0 0 /
+      24px 24px,
+    var(--surface-muted);
+}
+
+.artifact-viewer-state {
+  min-height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 30px;
+  color: var(--muted-strong);
+  text-align: center;
+}
+
+.artifact-viewer-state strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.artifact-viewer-state > span:not(.spinner) {
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.artifact-document,
+.artifact-html-frame {
+  width: min(100%, 900px);
+  min-height: 100%;
+  display: block;
+  margin: 0 auto;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent);
+  border-radius: 3px;
+  background: #fff;
+  color: #222;
+  box-shadow: 0 12px 34px rgb(28 30 27 / 10%);
+}
+
+.artifact-document {
+  padding: clamp(24px, 5vw, 58px);
+}
+
+.artifact-markdown {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.artifact-markdown > :first-child {
+  margin-top: 0;
+}
+
+.artifact-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.artifact-markdown img {
+  max-width: 100%;
+}
+
+.artifact-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.artifact-html-frame {
+  height: 100%;
+  min-height: 640px;
+}
+
+.artifact-viewer-image {
+  display: grid;
+  place-items: center;
+}
+
+.artifact-image {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  margin: auto;
+  border-radius: 5px;
+  background: #fff;
+  box-shadow: 0 12px 34px rgb(28 30 27 / 12%);
+  object-fit: contain;
+}
+
+.artifact-pdf-pages {
+  display: grid;
+  justify-items: center;
+  gap: 20px;
+}
+
+.artifact-pdf-page {
+  max-width: 100%;
+  height: auto !important;
+  display: block;
+  background: #fff;
+  box-shadow: 0 12px 34px rgb(28 30 27 / 12%);
+}
+
+.artifact-pdf-page-error {
+  width: min(100%, 620px);
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--danger);
+}
+
 .message.userMessage {
   width: fit-content;
   max-width: min(78%, 680px);
@@ -2525,6 +2789,8 @@ pre {
   width: 100%;
   min-width: 0;
   display: grid;
+  justify-content: stretch;
+  justify-items: stretch;
   gap: 4px;
   padding: 9px 10px;
   border: 0;
@@ -3954,6 +4220,30 @@ pre {
 }
 
 @media (max-width: 1279px) {
+  .artifact-viewer-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 68;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+    background: rgb(16 17 15 / 26%);
+    backdrop-filter: blur(2px);
+  }
+
+  .artifact-viewer {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
+    z-index: 70;
+    width: min(720px, calc(100% - 24px));
+    min-width: 0;
+    margin: 0;
+  }
+
   .session-inspector {
     position: fixed;
     top: 72px;
@@ -3999,6 +4289,29 @@ pre {
     box-shadow: var(--shadow);
     transition: transform 180ms ease;
     will-change: transform;
+  }
+
+  .artifact-viewer {
+    inset: 0;
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .artifact-viewer-header {
+    min-height: var(--header-height);
+    padding-top: env(safe-area-inset-top);
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(12px, env(safe-area-inset-left));
+  }
+
+  .artifact-viewer-stage {
+    padding: 14px max(10px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom))
+      max(10px, env(safe-area-inset-left));
+  }
+
+  .artifact-viewer-backdrop {
+    display: none;
   }
 
   .sidebar.open {

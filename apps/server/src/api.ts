@@ -2146,10 +2146,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       const ticket = randomBytes(24).toString("base64url");
       const expiresAt = now + DOWNLOAD_TICKET_TTL_MS;
-      downloadTickets.set(ticket, { ...file, expiresAt });
+      downloadTickets.set(ticket, {
+        root: file.root,
+        path: file.path,
+        fileName: file.fileName,
+        expiresAt,
+      });
       return reply.code(201).send({
         downloadUrl: `/downloads/${ticket}/${encodeURIComponent(file.fileName)}`,
         expiresAt,
+        fileName: file.fileName,
+        size: file.size,
       });
     },
   );
@@ -5637,7 +5644,15 @@ async function listSkillsForCwd(
   );
   const entry = response.data.find((candidate) => candidate.cwd === cwd);
   if (!entry) throw new ProtocolShapeError("skills/list requested cwd");
-  return entry;
+  return {
+    ...entry,
+    skills: entry.skills.filter(isSupportedSkill),
+  };
+}
+
+function isSupportedSkill(skill: SkillMetadata): boolean {
+  // Default artifact templates depend on capabilities CodexNest does not expose.
+  return !skill.name.startsWith("openai-templates:");
 }
 
 function publicSkillsCatalog(entry: SkillsListEntry): SkillsCatalogResponse {
@@ -6271,7 +6286,7 @@ function validInstallationId(value: string): boolean {
 async function resolveDownloadFile(
   input: string,
   cwd: string,
-): Promise<{ root: string; path: string; fileName: string }> {
+): Promise<{ root: string; path: string; fileName: string; size: number }> {
   if (!isAbsolute(input) || input.includes("\0")) {
     throw new ProjectValidationError("File path must be absolute");
   }
@@ -6292,7 +6307,7 @@ async function resolveDownloadFile(
     throwDownloadFilesystemError(error);
   }
   if (!info.isFile()) throw new ProjectValidationError("Path must point to a regular file");
-  return { root, path, fileName: basename(input) };
+  return { root, path, fileName: basename(input), size: info.size };
 }
 
 function throwDownloadFilesystemError(error: unknown): never {

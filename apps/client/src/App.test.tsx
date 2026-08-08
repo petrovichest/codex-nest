@@ -3130,6 +3130,24 @@ describe("App routing and navigation", () => {
     expect(sidebar).not.toHaveClass("open");
   });
 
+  it("leaves Android Back to an open viewer layer before toggling the drawer", async () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    mockConnection(snapshot([baseThread]));
+    mockMobileViewport();
+
+    const view = renderApp("/threads/newer");
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    await waitFor(() => expect(capacitor.addListener).toHaveBeenCalledOnce());
+    const layer = document.createElement("div");
+    layer.dataset.androidBackLayer = "";
+    document.body.append(layer);
+
+    act(() => capacitor.backHandler?.());
+
+    expect(sidebar).not.toHaveClass("open");
+    layer.remove();
+  });
+
   it("leaves Android Back to Capacitor outside a session", async () => {
     capacitor.getPlatform.mockReturnValue("android");
     mockConnection(snapshot([baseThread]));

@@ -1028,13 +1028,113 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const link = screen.getByRole("link", { name: "Скачать файл" });
-    fireEvent.click(link);
+    const downloadButton = screen.getByRole("button", { name: "Скачать file.txt" });
+    fireEvent.click(downloadButton);
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скачать файл");
 
-    fireEvent.click(link);
+    fireEvent.click(downloadButton);
     await waitFor(() => expect(openDownloadUrl).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("opens a supported agent file in the artifact viewer without scanning the workspace", async () => {
+    const api = threadApi();
+    api.createDownload.mockResolvedValueOnce({
+      downloadUrl: "/downloads/ticket/report.md",
+      expiresAt: 61_000,
+      fileName: "report.md",
+      size: 18,
+    });
+    const fetchFile = vi.fn().mockResolvedValue(
+      new Response("# Artifact report", {
+        status: 200,
+        headers: { "Content-Type": "application/octet-stream" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchFile);
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: "[Готовый отчёт](/work/project/output/report.md)",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    const open = screen.getByRole("button", { name: "Открыть report.md" });
+    fireEvent.click(open);
+
+    expect(await screen.findByRole("heading", { name: "Artifact report" })).toBeInTheDocument();
+    expect(api.createDownload).toHaveBeenCalledWith("thread", "/work/project/output/report.md");
+    expect(fetchFile).toHaveBeenCalledWith(
+      new URL("https://codex.home.arpa/downloads/ticket/report.md"),
+      { cache: "no-store" },
+    );
+    expect(openDownloadUrl).not.toHaveBeenCalled();
+
+    const viewer = screen.getByLabelText("Просмотр файла report.md");
+    fireEvent.click(within(viewer).getByRole("button", { name: "Закрыть предпросмотр" }));
+    expect(screen.queryByRole("heading", { name: "Artifact report" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Открыть report.md" })).toHaveFocus(),
+    );
+  });
+
+  it("does not fetch an artifact that exceeds its preview limit", async () => {
+    const api = threadApi();
+    api.createDownload.mockResolvedValueOnce({
+      downloadUrl: "/downloads/ticket/report.txt",
+      expiresAt: 61_000,
+      fileName: "report.txt",
+      size: 2 * 1024 * 1024 + 1,
+    });
+    const fetchFile = vi.fn();
+    vi.stubGlobal("fetch", fetchFile);
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: "[Большой отчёт](/work/project/report.txt)",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть report.txt" }));
+
+    expect(await screen.findByText("Файл слишком большой для предпросмотра")).toBeInTheDocument();
+    expect(fetchFile).not.toHaveBeenCalled();
   });
 
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {

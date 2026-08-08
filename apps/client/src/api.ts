@@ -563,6 +563,8 @@ export class ApiClient {
 export interface DownloadTicketResponse {
   downloadUrl: string;
   expiresAt: number;
+  fileName: string;
+  size: number;
 }
 
 export class ApiClientError extends Error {

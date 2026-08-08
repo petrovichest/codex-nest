@@ -770,6 +770,9 @@ describe("skills API and explicit invocation", () => {
         enabled: true,
       }),
     );
+    expect(listed.json().skills).not.toContainEqual(
+      expect.objectContaining({ name: "openai-templates:artifact-template-analytics-dashboard" }),
+    );
 
     const updated = await harness.app.inject({
       method: "PUT",
@@ -1388,6 +1391,8 @@ describe("file downloads", () => {
     expect(issued.json()).toMatchObject({
       downloadUrl: expect.stringMatching(/^\/downloads\/[A-Za-z0-9_-]+\/app-debug\.apk$/),
       expiresAt: expect.any(Number),
+      fileName: "app-debug.apk",
+      size: 4,
     });
     expect(issued.json().downloadUrl).not.toContain("correct");
     expect(issued.json().downloadUrl).not.toContain(taskRoot);
@@ -4652,6 +4657,13 @@ class SettingsBridge extends EventEmitter {
       path: "/skills/disabled/SKILL.md",
       scope: "system",
       enabled: false,
+    },
+    {
+      name: "openai-templates:artifact-template-analytics-dashboard",
+      description: "Create a spreadsheet from the default Analytics Dashboard template",
+      path: "/plugins/openai-templates/skills/artifact-template-analytics-dashboard/SKILL.md",
+      scope: "user",
+      enabled: true,
     },
   ];
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {

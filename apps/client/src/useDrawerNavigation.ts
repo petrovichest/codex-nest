@@ -192,6 +192,7 @@ export function useDrawerNavigation({
     let disposed = false;
     let removeListener: (() => Promise<void>) | undefined;
     void CapacitorApp.addListener("backButton", () => {
+      if (document.querySelector("[data-android-back-layer]")) return;
       if (open) setOpen(false);
       else if (threadActive) setOpen(true);
     }).then((handle) => {
