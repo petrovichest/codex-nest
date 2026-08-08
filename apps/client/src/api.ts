@@ -26,6 +26,7 @@ import type {
   RefreshThreadResponse,
   StartTurnRequest,
   SteerTurnRequest,
+  SkillsCatalogResponse,
   SummaryResponse,
   ThreadDetail,
   ThreadChanges,
@@ -43,6 +44,8 @@ import type {
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateQueuedMessageRequest,
+  UpdateSkillConfigRequest,
+  UpdateSkillConfigResponse,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
@@ -213,6 +216,15 @@ export class ApiClient {
   listDirectories(path?: string): Promise<DirectoryListing> {
     const query = path === undefined ? "" : `?${new URLSearchParams({ path })}`;
     return this.request(`/api/v1/directories${query}`);
+  }
+
+  listSkills(cwd: string, forceReload = false): Promise<SkillsCatalogResponse> {
+    const query = new URLSearchParams({ cwd, forceReload: String(forceReload) });
+    return this.request(`/api/v1/skills?${query}`);
+  }
+
+  updateSkillConfig(body: UpdateSkillConfigRequest): Promise<UpdateSkillConfigResponse> {
+    return this.request("/api/v1/skills/config", { method: "PUT", body });
   }
 
   createDirectory(body: CreateDirectoryRequest): Promise<DirectoryListing> {

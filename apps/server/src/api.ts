@@ -30,7 +30,10 @@ import type {
   QueueMessageRequest,
   QueuedMessage,
   RefreshThreadResponse,
+  ServerEvent,
   SessionSettings,
+  SkillCatalogItem,
+  SkillsCatalogResponse,
   StartTurnRequest,
   SteerTurnRequest,
   TaskDefaults,
@@ -48,6 +51,8 @@ import type {
   UpdateCodexProxyRequest,
   UpdateProjectRequest,
   UpdateQueuedMessageRequest,
+  UpdateSkillConfigRequest,
+  UpdateSkillConfigResponse,
   UpdateTaskDefaultsRequest,
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
@@ -66,19 +71,25 @@ import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import type {
   DynamicToolCallResponse,
+  SkillMetadata,
+  SkillsListEntry,
   Thread,
   ThreadItem,
   ThreadResumeResponse,
   Turn,
+  UserInput,
 } from "./codex/generated/v2/index";
 import {
   parseAccountRateLimits,
+  parseSkillsConfigWrite,
+  parseSkillsList,
   parseThreadList,
   parseThreadRead,
   parseThreadStart,
   parseTurnsList,
   parseTurnStart,
   parseTurnSteer,
+  ProtocolShapeError,
 } from "./codex/guards";
 import { RpcError, type JsonlTransport } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
@@ -447,6 +458,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const teamParentLocks = new Map<string, Promise<unknown>>();
   const teamToolOperationLocks = new Map<string, Promise<unknown>>();
   const stoppedTeamParents = new Set<string>();
+  const skillsByCwd = new Map<string, SkillsListEntry>();
+  projection.on("event", (_sequence: number, event: ServerEvent) => {
+    if (event.type === "skills.changed") skillsByCwd.clear();
+  });
   app.addContentTypeParser(/^audio\//i, { parseAs: "buffer" }, (_request, body, done) => {
     done(null, body);
   });
@@ -555,7 +570,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const startParams = {
         threadId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
-        input: messageInput(turnInput, images),
+        input: skillAwareMessageInput(skillsByCwd.get(summary.cwd), turnInput, images, goal),
         ...turnSettings(
           summary.settings,
           projection.availableModels,
@@ -713,8 +728,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
+    const summary = projection.summary(threadId);
+    if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    const structuredInput = skillAwareMessageInput(
+      skillsByCwd.get(summary.cwd),
+      input,
+      images,
+      false,
+    );
+    const hasRecognizedSkills = structuredInput.some((item) => item.type === "skill");
     const userInput = pendingUserInput(threadId, turnId);
-    if (userInput) {
+    if (userInput && !hasRecognizedSkills) {
       const firstQuestion = userInput.questions[0];
       const response: AttentionResponse = {
         kind: "userInput",
@@ -730,7 +754,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
     }
     const teamClaim =
-      projection.summary(threadId)?.settings.collaborationMode === "team"
+      summary.settings.collaborationMode === "team"
         ? await claimTeamResults(store, threadId)
         : null;
     const teamMarkerId = teamClaim
@@ -752,7 +776,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId,
           expectedTurnId: turnId,
           clientUserMessageId: teamMarkerId ?? clientMessageId,
-          input: messageInput(input, images),
+          input: structuredInput,
           ...(teamClaim
             ? {
                 additionalContext: {
@@ -1395,6 +1419,61 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     pendingAttentionCount: attention.list().length,
     syncedAt: projection.lastSyncedAt,
   }));
+
+  app.get<{
+    Querystring: { cwd?: unknown; forceReload?: unknown } & Record<string, unknown>;
+  }>("/api/v1/skills", async (request): Promise<SkillsCatalogResponse> => {
+    const query = request.query;
+    if (Object.keys(query).some((key) => !["cwd", "forceReload"].includes(key))) {
+      throw new ProjectValidationError("Unknown skills query field");
+    }
+    if (typeof query.cwd !== "string" || !query.cwd) {
+      throw new ProjectValidationError("cwd is required");
+    }
+    if (
+      query.forceReload !== undefined &&
+      query.forceReload !== "true" &&
+      query.forceReload !== "false"
+    ) {
+      throw new ProjectValidationError("forceReload must be true or false");
+    }
+    assertSkillsCwdAllowed(query.cwd, store, projection);
+    const entry = await listSkillsForCwd(bridge, query.cwd, query.forceReload === "true");
+    skillsByCwd.set(query.cwd, entry);
+    return publicSkillsCatalog(entry);
+  });
+
+  app.put<{ Body: UpdateSkillConfigRequest }>(
+    "/api/v1/skills/config",
+    async (request): Promise<UpdateSkillConfigResponse> => {
+      const body = requireRecord<UpdateSkillConfigRequest>(request.body);
+      if (Object.keys(body).some((key) => !["cwd", "path", "enabled"].includes(key))) {
+        throw new ProjectValidationError("Unknown skill config field");
+      }
+      if (typeof body.cwd !== "string" || !body.cwd) {
+        throw new ProjectValidationError("cwd is required");
+      }
+      if (typeof body.path !== "string" || !body.path) {
+        throw new ProjectValidationError("path is required");
+      }
+      if (typeof body.enabled !== "boolean") {
+        throw new ProjectValidationError("enabled must be boolean");
+      }
+      assertSkillsCwdAllowed(body.cwd, store, projection);
+      const entry = skillsByCwd.get(body.cwd) ?? (await listSkillsForCwd(bridge, body.cwd, false));
+      skillsByCwd.set(body.cwd, entry);
+      const skill = entry.skills.find((candidate) => candidate.path === body.path);
+      if (!skill) throw new ProjectNotFoundError("Skill not found");
+      const result = parseSkillsConfigWrite(
+        await bridge.request<unknown>("skills/config/write", {
+          path: body.path,
+          enabled: body.enabled,
+        }),
+      );
+      skill.enabled = result.effectiveEnabled;
+      return { path: body.path, enabled: result.effectiveEnabled };
+    },
+  );
 
   app.get("/api/v1/transcriptions/config", async (): Promise<TranscriptionConfigResponse> => {
     return withTranscriptionTiming(
@@ -5548,13 +5627,101 @@ function isLoopbackAddress(value: string): boolean {
   return value === "127.0.0.1" || value === "::1" || value.startsWith("::ffff:127.");
 }
 
-function messageInput(
+async function listSkillsForCwd(
+  bridge: CodexBridge,
+  cwd: string,
+  forceReload: boolean,
+): Promise<SkillsListEntry> {
+  const response = parseSkillsList(
+    await bridge.request<unknown>("skills/list", { cwds: [cwd], forceReload }),
+  );
+  const entry = response.data.find((candidate) => candidate.cwd === cwd);
+  if (!entry) throw new ProtocolShapeError("skills/list requested cwd");
+  return entry;
+}
+
+function publicSkillsCatalog(entry: SkillsListEntry): SkillsCatalogResponse {
+  return {
+    cwd: entry.cwd,
+    skills: entry.skills.map(publicSkill),
+    errors: entry.errors.map(({ path, message }) => ({ path, message })),
+  };
+}
+
+function publicSkill(skill: SkillMetadata): SkillCatalogItem {
+  const skillInterface: unknown = skill.interface;
+  const displayName =
+    isRecord(skillInterface) && typeof skillInterface.displayName === "string"
+      ? skillInterface.displayName
+      : skill.name;
+  const interfaceShortDescription =
+    isRecord(skillInterface) && typeof skillInterface.shortDescription === "string"
+      ? skillInterface.shortDescription
+      : null;
+  return {
+    name: skill.name,
+    displayName,
+    description: skill.description,
+    shortDescription:
+      interfaceShortDescription ??
+      (typeof skill.shortDescription === "string" ? skill.shortDescription : null),
+    path: skill.path,
+    scope: skill.scope,
+    enabled: skill.enabled,
+  };
+}
+
+function assertSkillsCwdAllowed(cwd: string, store: StateStore, projection: AppProjection): void {
+  if (
+    store.view().projects.some((project) => project.path === cwd) ||
+    projection.snapshot().threads.some((thread) => thread.cwd === cwd)
+  ) {
+    return;
+  }
+  throw new ProjectForbiddenError("cwd is not a configured project or visible session path");
+}
+
+function skillAwareMessageInput(
+  entry: SkillsListEntry | undefined,
   text: string,
   images: string[],
-): Array<{ type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }> {
-  const result: Array<
-    { type: "text"; text: string; text_elements: [] } | { type: "image"; url: string }
-  > = [];
+  goal: boolean,
+): UserInput[] {
+  const input = messageInput(text, images);
+  if (goal || !entry || !/(?:^|\s)\$[\p{L}\p{N}_.:-]+/u.test(text)) return input;
+  input.push(...explicitSkillItems(text, entry.skills));
+  return input;
+}
+
+function explicitSkillItems(
+  text: string,
+  catalog: SkillMetadata[],
+): Array<Extract<UserInput, { type: "skill" }>> {
+  const enabledByName = new Map<string, SkillMetadata>();
+  for (const skill of catalog) {
+    if (skill.enabled && !enabledByName.has(skill.name)) enabledByName.set(skill.name, skill);
+  }
+  const seen = new Set<string>();
+  const result: Array<Extract<UserInput, { type: "skill" }>> = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const marker = text.indexOf("$", cursor);
+    if (marker < 0) break;
+    cursor = marker + 1;
+    if (marker > 0 && !/\s/u.test(text[marker - 1]!)) continue;
+    let end = marker + 1;
+    while (end < text.length && /[\p{L}\p{N}_.:-]/u.test(text[end]!)) end += 1;
+    const name = text.slice(marker + 1, end);
+    const skill = enabledByName.get(name);
+    if (!skill || seen.has(name)) continue;
+    seen.add(name);
+    result.push({ type: "skill", name: skill.name, path: skill.path });
+  }
+  return result;
+}
+
+function messageInput(text: string, images: string[]): UserInput[] {
+  const result: UserInput[] = [];
   if (text.trim()) result.push({ type: "text", text: text.trim(), text_elements: [] });
   result.push(...images.map((url) => ({ type: "image" as const, url })));
   return result;

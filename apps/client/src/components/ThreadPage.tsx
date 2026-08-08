@@ -2854,6 +2854,8 @@ export function ThreadPage({
             }
             input={input}
             onInput={setInput}
+            cwd={workspaceSummary.cwd}
+            skillsEpoch={state.skillsEpoch}
             images={images}
             onImagesChange={setImages}
             attachmentScope={attachmentScope}

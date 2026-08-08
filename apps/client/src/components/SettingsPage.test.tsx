@@ -200,6 +200,7 @@ describe("SettingsPage", () => {
     ).toEqual([
       "Обновление CodexNest",
       "Codex CLI",
+      "Скиллы",
       "Аварийное восстановление",
       "Новые задачи",
       "Разрешения Codex",

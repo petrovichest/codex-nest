@@ -149,6 +149,14 @@ export const SlidersIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const SkillsIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M8 4h8a2 2 0 0 1 2 2v14H6V6a2 2 0 0 1 2-2Z" />
+    <path d="M9 9h6M9 13h4" />
+    <path d="m17.5 2 .45 1.05L19 3.5l-1.05.45L17.5 5l-.45-1.05L16 3.5l1.05-.45Z" />
+  </Icon>
+);
+
 export const ShieldIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6Z" />

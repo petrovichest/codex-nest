@@ -2,6 +2,8 @@ import type {
   GetAccountRateLimitsResponse,
   Model,
   ModelListResponse,
+  SkillsConfigWriteResponse,
+  SkillsListResponse,
   Thread,
   ThreadItemsListResponse,
   ThreadListResponse,
@@ -89,6 +91,32 @@ export function parseTurnSteer(value: unknown): { turnId: string } {
   if (!isRecord(value) || typeof value.turnId !== "string")
     throw new ProtocolShapeError("turn/steer");
   return { turnId: value.turnId };
+}
+
+export function parseSkillsList(value: unknown): SkillsListResponse {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.data) ||
+    !value.data.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.cwd === "string" &&
+        Array.isArray(entry.skills) &&
+        entry.skills.every(isSkillMetadata) &&
+        Array.isArray(entry.errors) &&
+        entry.errors.every(isSkillError),
+    )
+  ) {
+    throw new ProtocolShapeError("skills/list");
+  }
+  return value as unknown as SkillsListResponse;
+}
+
+export function parseSkillsConfigWrite(value: unknown): SkillsConfigWriteResponse {
+  if (!isRecord(value) || typeof value.effectiveEnabled !== "boolean") {
+    throw new ProtocolShapeError("skills/config/write");
+  }
+  return value as unknown as SkillsConfigWriteResponse;
 }
 
 export function parseAccountRateLimits(value: unknown): AccountRateLimitsView {
@@ -181,6 +209,21 @@ function isModel(value: unknown): value is Model {
       (tier) => isRecord(tier) && typeof tier.id === "string" && typeof tier.name === "string",
     )
   );
+}
+
+function isSkillMetadata(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.description === "string" &&
+    typeof value.path === "string" &&
+    ["user", "repo", "system", "admin"].includes(String(value.scope)) &&
+    typeof value.enabled === "boolean"
+  );
+}
+
+function isSkillError(value: unknown): boolean {
+  return isRecord(value) && typeof value.path === "string" && typeof value.message === "string";
 }
 
 function isRateLimitSnapshot(value: unknown): value is GetAccountRateLimitsResponse["rateLimits"] {

@@ -26,6 +26,7 @@ import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import { RecoverySettingsCard } from "./RecoverySettingsCard";
+import { SkillsSettingsCard } from "./SkillsSettingsCard";
 
 export type SidebarSide = "left" | "right";
 export type ProjectListDirection = "bottom-up" | "top-down";
@@ -247,6 +248,11 @@ export function SettingsPage({
             />
 
             <CodexSettingsCard />
+
+            <SkillsSettingsCard
+              projects={state?.snapshot?.projects ?? []}
+              skillsEpoch={state?.skillsEpoch ?? 0}
+            />
 
             <RecoverySettingsCard appStatus={appUpdateStatus} codexStatus={codexManagementStatus} />
 

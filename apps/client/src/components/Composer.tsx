@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -13,6 +14,7 @@ import type {
   ModelOption,
   Project,
   SessionSettings,
+  SkillCatalogItem,
   ThreadGoal,
   TranscriptionConfigResponse,
   TranscriptionProvider,
@@ -23,6 +25,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
+import { useSkillsCatalog } from "../useSkillsCatalog";
 import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, VoiceSendIcon, XIcon } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
@@ -82,6 +85,8 @@ export function Composer({
   models,
   projects,
   projectId,
+  cwd = null,
+  skillsEpoch = 0,
   onProjectChange,
   onNewProject,
   onStop,
@@ -124,6 +129,8 @@ export function Composer({
   models: ModelOption[];
   projects?: Project[];
   projectId?: string;
+  cwd?: string | null;
+  skillsEpoch?: number;
   onProjectChange?(projectId: string): void;
   onNewProject?(): void;
   onStop?(): void;
@@ -163,6 +170,11 @@ export function Composer({
   const transcriptionStartedAtRef = useRef(0);
   const transcriptionTimerRef = useRef<number | undefined>(undefined);
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
+  const [skillCaret, setSkillCaret] = useState<number | null>(null);
+  const [skillDismissedToken, setSkillDismissedToken] = useState<string | null>(null);
+  const [requestedSkillsCwd, setRequestedSkillsCwd] = useState<string | null>(null);
+  const [activeSkillIndex, setActiveSkillIndex] = useState(0);
+  const [composerFocused, setComposerFocused] = useState(false);
   const pendingAttachmentScopesRef = useRef(new Map<number, number>());
   const attachmentBatchesRef = useRef(new Map<number, Promise<void>>());
   const attachmentImagesRef = useRef(new Map<number, ComposerImage[]>());
@@ -209,6 +221,16 @@ export function Composer({
     localSpeechBusy || voiceUploadPending || voiceInputLocked || Boolean(transcriptionStatus);
   const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
   const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
+  const activeSkillToken =
+    !goalMode && !busy && !speechBusy && composerFocused ? skillTokenAt(input, skillCaret) : null;
+  const activeSkillTokenKey = skillTokenKey(activeSkillToken);
+  const skillMenuOpen =
+    Boolean(cwd && activeSkillToken) && activeSkillTokenKey !== skillDismissedToken;
+  const skills = useSkillsCatalog(cwd, skillsEpoch, Boolean(cwd && requestedSkillsCwd === cwd));
+  const matchingSkills = useMemo(
+    () => filterSkills(skills.catalog?.skills ?? [], activeSkillToken?.query ?? "", language),
+    [activeSkillToken?.query, language, skills.catalog?.skills],
+  );
   const canSubmit =
     hasContent &&
     (!goalMode || Boolean(input.trim())) &&
@@ -283,6 +305,10 @@ export function Composer({
   useEffect(() => {
     if (viewer && viewer.index >= images.length) setViewer(null);
   }, [images.length, viewer]);
+
+  useEffect(() => {
+    if (activeSkillIndex >= matchingSkills.length) setActiveSkillIndex(0);
+  }, [activeSkillIndex, matchingSkills.length]);
 
   useLayoutEffect(() => {
     attachmentImagesRef.current.set(attachmentScope, images);
@@ -367,6 +393,11 @@ export function Composer({
     audioChunksRef.current = [];
     audioBytesRef.current = 0;
     insertionRef.current = null;
+    setSkillCaret(null);
+    setSkillDismissedToken(null);
+    setRequestedSkillsCwd(null);
+    setActiveSkillIndex(0);
+    setComposerFocused(false);
     pendingAttachmentScopesRef.current.clear();
     attachmentBatchesRef.current.clear();
     attachmentImagesRef.current.clear();
@@ -379,6 +410,28 @@ export function Composer({
   }, [sessionIdentity]);
 
   function keyboardSubmit(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (skillMenuOpen && !event.nativeEvent.isComposing) {
+      if (event.key === "ArrowDown" && matchingSkills.length) {
+        event.preventDefault();
+        setActiveSkillIndex((current) => (current + 1) % matchingSkills.length);
+        return;
+      }
+      if (event.key === "ArrowUp" && matchingSkills.length) {
+        event.preventDefault();
+        setActiveSkillIndex((current) => (current <= 0 ? matchingSkills.length - 1 : current - 1));
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && matchingSkills.length) {
+        event.preventDefault();
+        insertSkill(matchingSkills[Math.min(activeSkillIndex, matchingSkills.length - 1)]!);
+        return;
+      }
+      if (event.key === "Escape" && activeSkillTokenKey) {
+        event.preventDefault();
+        setSkillDismissedToken(activeSkillTokenKey);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
@@ -452,6 +505,27 @@ export function Composer({
     insertionRef.current = textarea
       ? { start: textarea.selectionStart, end: textarea.selectionEnd }
       : { start: input.length, end: input.length };
+    const caret = textarea?.selectionStart ?? input.length;
+    setSkillCaret(caret);
+    requestSkillsForToken(input, caret);
+  }
+
+  function requestSkillsForToken(value: string, caret: number) {
+    if (cwd && !goalMode && skillTokenAt(value, caret)) setRequestedSkillsCwd(cwd);
+  }
+
+  function insertSkill(skill: SkillCatalogItem) {
+    if (!activeSkillToken) return;
+    const replacement = replaceSkillToken(input, activeSkillToken, skill.name);
+    onInput(replacement.value);
+    setSkillCaret(replacement.caret);
+    setSkillDismissedToken(skillTokenKey(skillTokenAt(replacement.value, replacement.caret)));
+    insertionRef.current = { start: replacement.caret, end: replacement.caret };
+    window.setTimeout(() => {
+      const textarea = textareaRef.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(replacement.caret, replacement.caret);
+    });
   }
 
   async function startRecording() {
@@ -773,6 +847,16 @@ export function Composer({
       )}
       {children}
       <div className="composer-box">
+        {skillMenuOpen && (
+          <SkillAutocomplete
+            skills={matchingSkills}
+            loading={skills.loading}
+            error={skills.error}
+            activeIndex={activeSkillIndex}
+            onActiveIndexChange={setActiveSkillIndex}
+            onSelect={insertSkill}
+          />
+        )}
         <textarea
           ref={textareaRef}
           autoFocus={autoFocus}
@@ -782,7 +866,30 @@ export function Composer({
           readOnly={speechBusy}
           aria-busy={speechBusy}
           value={input}
-          onChange={(event) => onInput(event.target.value)}
+          aria-autocomplete={skillMenuOpen ? "list" : undefined}
+          aria-controls={skillMenuOpen ? "composer-skill-list" : undefined}
+          aria-expanded={skillMenuOpen || undefined}
+          aria-activedescendant={
+            skillMenuOpen && matchingSkills[activeSkillIndex]
+              ? `composer-skill-${skillOptionId(matchingSkills[activeSkillIndex]!)}`
+              : undefined
+          }
+          onChange={(event) => {
+            const caret = event.currentTarget.selectionStart;
+            setSkillCaret(caret);
+            setActiveSkillIndex(0);
+            setSkillDismissedToken(null);
+            requestSkillsForToken(event.currentTarget.value, caret);
+            onInput(event.currentTarget.value);
+          }}
+          onFocus={(event) => {
+            setComposerFocused(true);
+            setSkillDismissedToken(null);
+            const caret = event.currentTarget.selectionStart;
+            setSkillCaret(caret);
+            requestSkillsForToken(event.currentTarget.value, caret);
+          }}
+          onBlur={() => setComposerFocused(false)}
           onPaste={pasteImages}
           onSelect={captureInsertionPoint}
           onKeyDown={keyboardSubmit}
@@ -1021,6 +1128,136 @@ function clipboardImageFiles(data: DataTransfer): File[] {
 function pastedImageName(mimeType: string, index: number): string {
   const extension = mimeType.split("/")[1]?.replace(/[^a-z0-9.+-]/gi, "") || "png";
   return `pasted-image-${index + 1}.${extension}`;
+}
+
+type SkillToken = {
+  start: number;
+  end: number;
+  query: string;
+};
+
+function SkillAutocomplete({
+  skills,
+  loading,
+  error,
+  activeIndex,
+  onActiveIndexChange,
+  onSelect,
+}: {
+  skills: SkillCatalogItem[];
+  loading: boolean;
+  error: unknown;
+  activeIndex: number;
+  onActiveIndexChange(index: number): void;
+  onSelect(skill: SkillCatalogItem): void;
+}) {
+  const { language, t } = useI18n();
+  const activeOptionRef = useRef<HTMLButtonElement>(null);
+  const errorText =
+    error instanceof Error
+      ? (localizeKnownServerText(language, error.message) ?? error.message)
+      : error
+        ? t("Не удалось загрузить скиллы")
+        : null;
+
+  useEffect(() => {
+    activeOptionRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [activeIndex, skills]);
+
+  return (
+    <div
+      className="skill-autocomplete"
+      id="composer-skill-list"
+      role="listbox"
+      aria-label={t("Доступные скиллы")}
+    >
+      {skills.length ? (
+        skills.map((skill, index) => (
+          <button
+            type="button"
+            id={`composer-skill-${skillOptionId(skill)}`}
+            role="option"
+            aria-selected={index === activeIndex}
+            className={index === activeIndex ? "active" : undefined}
+            ref={index === activeIndex ? activeOptionRef : undefined}
+            key={skill.path}
+            onPointerDown={(event) => event.preventDefault()}
+            onPointerMove={() => onActiveIndexChange(index)}
+            onClick={() => onSelect(skill)}
+          >
+            <span>
+              <strong>${skill.name}</strong>
+              {skill.displayName !== skill.name && <small>{skill.displayName}</small>}
+            </span>
+            <p>{skill.shortDescription || skill.description}</p>
+          </button>
+        ))
+      ) : (
+        <div className="skill-autocomplete-state" role="status">
+          {loading ? t("Загружаем скиллы…") : errorText ? errorText : t("Нет подходящих скиллов")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function skillTokenAt(value: string, caret: number | null): SkillToken | null {
+  if (caret === null || caret < 0 || caret > value.length) return null;
+  let start = caret;
+  while (start > 0 && isSkillNameCharacter(value[start - 1]!)) start -= 1;
+  if (start > 0 && value[start - 1] === "$") start -= 1;
+  if (value[start] !== "$") return null;
+  if (start > 0 && !/\s/u.test(value[start - 1]!)) return null;
+  const query = value.slice(start + 1, caret);
+  if ([...query].some((character) => !isSkillNameCharacter(character))) return null;
+  let end = caret;
+  while (end < value.length && isSkillNameCharacter(value[end]!)) end += 1;
+  return { start, end, query };
+}
+
+function isSkillNameCharacter(value: string): boolean {
+  return /[\p{L}\p{N}_.:-]/u.test(value);
+}
+
+function skillTokenKey(token: SkillToken | null): string | null {
+  return token ? `${token.start}:${token.end}:${token.query}` : null;
+}
+
+function replaceSkillToken(
+  value: string,
+  token: SkillToken,
+  name: string,
+): { value: string; caret: number } {
+  const marker = `$${name}`;
+  const trailingSpace = token.end === value.length ? " " : "";
+  const next = `${value.slice(0, token.start)}${marker}${trailingSpace}${value.slice(token.end)}`;
+  return { value: next, caret: token.start + marker.length + trailingSpace.length };
+}
+
+function filterSkills(
+  catalog: SkillCatalogItem[],
+  query: string,
+  language: string,
+): SkillCatalogItem[] {
+  const normalized = query.toLocaleLowerCase(language);
+  return catalog
+    .filter((skill) => {
+      if (!skill.enabled) return false;
+      if (!normalized) return true;
+      return [skill.name, skill.displayName, skill.description, skill.shortDescription]
+        .filter(Boolean)
+        .some((value) => value!.toLocaleLowerCase(language).includes(normalized));
+    })
+    .sort((left, right) => {
+      const leftStarts = left.name.toLocaleLowerCase(language).startsWith(normalized);
+      const rightStarts = right.name.toLocaleLowerCase(language).startsWith(normalized);
+      if (leftStarts !== rightStarts) return leftStarts ? -1 : 1;
+      return left.name.localeCompare(right.name, language);
+    });
+}
+
+function skillOptionId(skill: SkillCatalogItem): string {
+  return encodeURIComponent(skill.path).replaceAll("%", "");
 }
 
 function formatTranscriptionStatus(

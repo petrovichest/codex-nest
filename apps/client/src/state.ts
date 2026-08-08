@@ -22,6 +22,7 @@ export interface ClientState {
   network: "connecting" | "connected" | "offline";
   error: string | null;
   snapshotEpoch: number;
+  skillsEpoch: number;
 }
 
 export type OptimisticMessage = {
@@ -73,6 +74,7 @@ export const initialState: ClientState = {
   network: "connecting",
   error: null,
   snapshotEpoch: 0,
+  skillsEpoch: 0,
 };
 
 export function clientReducer(state: ClientState, action: ClientAction): ClientState {
@@ -279,6 +281,8 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
     case "uiLanguage.changed":
       snapshot.uiLanguage = event.language;
       break;
+    case "skills.changed":
+      return { ...state, snapshot, skillsEpoch: state.skillsEpoch + 1 };
     case "goal.changed":
       return {
         ...state,

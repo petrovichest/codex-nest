@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseAccountRateLimits,
+  parseSkillsConfigWrite,
+  parseSkillsList,
   parseThreadList,
   parseThreadLoadedList,
   parseThreadRead,
@@ -60,6 +62,43 @@ describe("app-server response guards", () => {
     expect(() => parseThreadLoadedList({ data: [thread], nextCursor: null })).toThrow(
       "Invalid app-server response shape for thread/loaded/list data",
     );
+  });
+
+  it("validates skill discovery and config responses", () => {
+    const response = {
+      data: [
+        {
+          cwd: "/work",
+          skills: [
+            {
+              name: "review",
+              description: "Review changes",
+              path: "/skills/review/SKILL.md",
+              scope: "repo",
+              enabled: true,
+              futureField: true,
+            },
+          ],
+          errors: [],
+        },
+      ],
+    };
+
+    expect(parseSkillsList(response).data[0]?.skills[0]?.name).toBe("review");
+    expect(parseSkillsConfigWrite({ effectiveEnabled: false })).toEqual({
+      effectiveEnabled: false,
+    });
+    expect(() =>
+      parseSkillsList({
+        data: [
+          {
+            cwd: "/work",
+            skills: [{ ...response.data[0]!.skills[0], scope: "future" }],
+            errors: [],
+          },
+        ],
+      }),
+    ).toThrow("Invalid app-server response shape for skills/list");
   });
 
   it("selects the Codex rate-limit bucket and falls back to the compatible bucket", () => {

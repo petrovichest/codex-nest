@@ -106,6 +106,40 @@ export type CodexRateLimitsResponse = {
   secondary: CodexRateLimitWindow | null;
 };
 
+export type SkillScope = "user" | "repo" | "system" | "admin";
+
+export type SkillCatalogItem = {
+  name: string;
+  displayName: string;
+  description: string;
+  shortDescription: string | null;
+  path: string;
+  scope: SkillScope;
+  enabled: boolean;
+};
+
+export type SkillCatalogError = {
+  path: string;
+  message: string;
+};
+
+export type SkillsCatalogResponse = {
+  cwd: string;
+  skills: SkillCatalogItem[];
+  errors: SkillCatalogError[];
+};
+
+export type UpdateSkillConfigRequest = {
+  cwd: string;
+  path: string;
+  enabled: boolean;
+};
+
+export type UpdateSkillConfigResponse = {
+  path: string;
+  enabled: boolean;
+};
+
 export type CodexManagementOperation =
   "idle" | "checking" | "applying_proxy" | "updating" | "restarting";
 
@@ -695,6 +729,7 @@ export type ServerEvent =
   | { type: "attention.upserted"; attention: AttentionRequest }
   | { type: "attention.removed"; attentionId: string }
   | { type: "models.changed"; models: ModelOption[] }
+  | { type: "skills.changed" }
   | { type: "defaultReasoningEffort.changed"; reasoningEffort: string | null }
   | { type: "taskDefaults.changed"; taskDefaults: TaskDefaults }
   | { type: "uiLanguage.changed"; language: UiLanguage }

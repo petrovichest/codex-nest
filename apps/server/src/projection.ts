@@ -1349,6 +1349,7 @@ export class AppProjection extends EventEmitter {
     for (const cached of this.threads.values()) {
       if (cached.thread.status.type !== "idle") continue;
       if (isSpawnedSubagent(cached.thread)) continue;
+      if (this.isUnmaterialized(cached.thread.id)) continue;
       const updatedAt = cached.thread.updatedAt * 1_000;
       const meta = state.threadMeta[cached.thread.id];
       if (meta?.outcomeUpdatedAt === updatedAt && meta.awaitingPlanResponse !== undefined) {
@@ -1409,6 +1410,9 @@ export class AppProjection extends EventEmitter {
     }
     if (threadId) this.bumpHistoryRevision(threadId);
     switch (notification.method) {
+      case "skills/changed":
+        this.publish({ type: "skills.changed" });
+        break;
       case "error": {
         const item: ActivityItem = {
           type: "error",

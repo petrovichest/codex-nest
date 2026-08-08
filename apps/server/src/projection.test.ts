@@ -106,6 +106,29 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("forwards skill catalog invalidations", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+    const events: Array<{ type: string }> = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+
+    bridge.emit("notification", {
+      method: "skills/changed",
+      params: {},
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() => expect(events).toContainEqual({ type: "skills.changed" }));
+  });
+
   it("counts files and changed lines in an aggregated turn diff", () => {
     expect(
       diffStats(
@@ -163,6 +186,34 @@ describe("AppProjection", () => {
       },
     ]);
     expect(stateViews).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips outcome reconciliation for unmaterialized threads during full sync", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        unmaterialized: true,
+      };
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+      false,
+    );
+
+    await expect(projection.sync()).resolves.toBeUndefined();
+
+    const outcomeReads = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/turns/list",
+    );
+    expect(outcomeReads.map(([, params]) => params.threadId)).toEqual(["two"]);
   });
 
   it("does not reactivate a turn after its completion notification wins the response race", async () => {

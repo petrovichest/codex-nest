@@ -10,6 +10,53 @@ describe("ApiClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("lists and updates skills for an encoded workspace", async () => {
+    const catalog = { cwd: "/work/one two", skills: [], errors: [] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(catalog), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ path: "/skill/SKILL.md", enabled: false }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await expect(api.listSkills("/work/one two")).resolves.toEqual(catalog);
+    await expect(
+      api.updateSkillConfig({
+        cwd: "/work/one two",
+        path: "/skill/SKILL.md",
+        enabled: false,
+      }),
+    ).resolves.toEqual({ path: "/skill/SKILL.md", enabled: false });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://codexnest.example/api/v1/skills?cwd=%2Fwork%2Fone+two&forceReload=false"),
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://codexnest.example/api/v1/skills/config"),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          cwd: "/work/one two",
+          path: "/skill/SKILL.md",
+          enabled: false,
+        }),
+      }),
+    );
+  });
+
   it("does not send the server-only draft timestamp back to the draft endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

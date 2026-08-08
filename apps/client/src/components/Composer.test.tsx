@@ -1,10 +1,14 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
 
 import { Composer, type ComposerImage, type ComposerTranscriptionStatus } from "./Composer";
+
+const connection = vi.hoisted(() => vi.fn());
+
+vi.mock("../connection", () => ({ useConnection: connection }));
 
 const models = [
   {
@@ -41,7 +45,117 @@ afterEach(() => {
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
 
+beforeEach(() => {
+  connection.mockReset();
+  connection.mockReturnValue({
+    api: {
+      listSkills: vi.fn().mockResolvedValue({
+        cwd: "/work/project",
+        skills: [
+          {
+            name: "review",
+            displayName: "Review",
+            description: "Review the current changes",
+            shortDescription: null,
+            path: "/skills/review/SKILL.md",
+            scope: "user",
+            enabled: true,
+          },
+          {
+            name: "docs",
+            displayName: "Docs",
+            description: "Write documentation",
+            shortDescription: null,
+            path: "/skills/docs/SKILL.md",
+            scope: "repo",
+            enabled: true,
+          },
+          {
+            name: "disabled",
+            displayName: "Disabled",
+            description: "Not available",
+            shortDescription: null,
+            path: "/skills/disabled/SKILL.md",
+            scope: "system",
+            enabled: false,
+          },
+        ],
+        errors: [],
+      }),
+    },
+  });
+});
+
 describe("Composer", () => {
+  it("opens filtered skill suggestions for a dollar token and inserts with Enter", async () => {
+    const api = connection().api;
+    render(<Harness cwd="/work/project" />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Скиллы" })).toBeNull();
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "$rev" } });
+
+    await waitFor(() => expect(api.listSkills).toHaveBeenCalledWith("/work/project", false));
+    const list = await screen.findByRole("listbox", { name: "Доступные скиллы" });
+    expect(within(list).getAllByRole("option")).toHaveLength(1);
+    expect(within(list).getByRole("option")).toHaveTextContent("$review");
+
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(textarea).toHaveValue("$review "));
+    expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+  });
+
+  it("replaces only the active skill token and preserves following punctuation", async () => {
+    render(<Harness cwd="/work/project" initialInput="$rev, дальше" />);
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(4, 4);
+    fireEvent.select(textarea);
+
+    const list = await screen.findByRole("listbox", { name: "Доступные скиллы" });
+    fireEvent.pointerDown(within(list).getByRole("option"));
+    fireEvent.click(within(list).getByRole("option"));
+
+    await waitFor(() => expect(textarea).toHaveValue("$review, дальше"));
+    expect(textarea.selectionStart).toBe(7);
+    expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+  });
+
+  it("supports keyboard navigation and ignores dollar signs inside words", async () => {
+    render(<Harness cwd="/work/project" />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "price$docs" } });
+    expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+
+    fireEvent.change(textarea, { target: { value: "$" } });
+    const list = await screen.findByRole("listbox", { name: "Доступные скиллы" });
+    expect(within(list).getAllByRole("option")).toHaveLength(2);
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(within(list).getByRole("option", { selected: true })).toHaveTextContent("$review"),
+    );
+    fireEvent.keyDown(textarea, { key: "Tab" });
+    await waitFor(() => expect(textarea).toHaveValue("$review "));
+  });
+
+  it("closes skill suggestions with Escape and reopens after editing", async () => {
+    render(<Harness cwd="/work/project" />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "$r" } });
+    await screen.findByRole("listbox", { name: "Доступные скиллы" });
+
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+    fireEvent.change(textarea, { target: { value: "$re" } });
+    expect(await screen.findByRole("listbox", { name: "Доступные скиллы" })).toBeInTheDocument();
+  });
+
   it("opens model and reasoning effort in one popup", () => {
     render(<Harness />);
     const toggle = screen.getByLabelText("Модель и уровень рассуждений");
@@ -506,6 +620,7 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 
 function Harness({
   busy = false,
+  cwd,
   hasSupplementalContent = false,
   initialInput = "",
   transcriptionConfig: speechConfig,
@@ -515,6 +630,7 @@ function Harness({
   voiceInputLocked = false,
 }: {
   busy?: boolean;
+  cwd?: string;
   hasSupplementalContent?: boolean;
   initialInput?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
@@ -535,6 +651,7 @@ function Harness({
       onImagesChange={setImages}
       onSubmit={(event) => event.preventDefault()}
       busy={busy}
+      cwd={cwd}
       settings={settings}
       onSettingsChange={(patch) =>
         setSettings((current) => {

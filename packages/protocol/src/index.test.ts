@@ -26,6 +26,9 @@ describe("protocol guards", () => {
         event: { type: "projects.reordered", projects: [] },
       }),
     ).toBe(true);
+    expect(isServerFrame({ type: "event", sequence: 3, event: { type: "skills.changed" } })).toBe(
+      true,
+    );
   });
 
   it("formats bearer credentials without putting them in a URL", () => {

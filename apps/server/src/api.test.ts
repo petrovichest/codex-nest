@@ -752,6 +752,99 @@ describe("HTTP authentication", () => {
   });
 });
 
+describe("skills API and explicit invocation", () => {
+  it("lists installed skills for an allowed cwd and toggles a discovered path", async () => {
+    const harness = await createSkillsHarness();
+
+    const listed = await harness.app.inject({
+      url: "/api/v1/skills?cwd=%2Fwork&forceReload=true",
+      headers: harness.headers,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({ cwd: "/work" });
+    expect(listed.json().skills).toContainEqual(
+      expect.objectContaining({
+        name: "review",
+        displayName: "Code Review",
+        path: "/skills/review/SKILL.md",
+        enabled: true,
+      }),
+    );
+
+    const updated = await harness.app.inject({
+      method: "PUT",
+      url: "/api/v1/skills/config",
+      headers: harness.headers,
+      payload: { cwd: "/work", path: "/skills/review/SKILL.md", enabled: false },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toEqual({ path: "/skills/review/SKILL.md", enabled: false });
+    expect(harness.bridge.request).toHaveBeenCalledWith("skills/config/write", {
+      path: "/skills/review/SKILL.md",
+      enabled: false,
+    });
+
+    await harness.app.close();
+  });
+
+  it("enriches dollar markers from the cached catalog without a send-path skills RPC", async () => {
+    const harness = await createSkillsHarness();
+    await harness.app.inject({
+      url: "/api/v1/skills?cwd=%2Fwork&forceReload=false",
+      headers: harness.headers,
+    });
+    const listCalls = harness.bridge.request.mock.calls.filter(
+      ([method]) => method === "skills/list",
+    ).length;
+
+    const started = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload: { input: "$review, this change" },
+    });
+
+    expect(started.statusCode).toBe(201);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "skills/list"),
+    ).toHaveLength(listCalls);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({
+      input: [
+        { type: "text", text: "$review, this change", text_elements: [] },
+        { type: "skill", name: "review", path: "/skills/review/SKILL.md" },
+      ],
+    });
+
+    await harness.app.close();
+  });
+
+  it("keeps an uncached dollar marker as text instead of blocking send on discovery", async () => {
+    const harness = await createSkillsHarness();
+    harness.bridge.request.mockClear();
+
+    const started = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload: { input: "$review immediately" },
+    });
+
+    expect(started.statusCode).toBe(201);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "skills/list"),
+    ).toHaveLength(0);
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({
+      input: [{ type: "text", text: "$review immediately", text_elements: [] }],
+    });
+
+    await harness.app.close();
+  });
+});
+
 describe("project removal", () => {
   it("blocks active work, hides sessions, preserves files, and restores sessions on re-add", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-project-removal-api-test-"));
@@ -4544,6 +4637,23 @@ class SettingsBridge extends EventEmitter {
   managedThreads: Thread[] = [];
   threadTurns = new Map<string, Turn[]>();
   includeManagedModel = true;
+  skills = [
+    {
+      name: "review",
+      description: "Review a change",
+      interface: { displayName: "Code Review", shortDescription: "Review this change" },
+      path: "/skills/review/SKILL.md",
+      scope: "user",
+      enabled: true,
+    },
+    {
+      name: "disabled",
+      description: "Disabled skill",
+      path: "/skills/disabled/SKILL.md",
+      scope: "system",
+      enabled: false,
+    },
+  ];
   request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
     if (method === "thread/list") {
       return params.archived
@@ -4564,6 +4674,21 @@ class SettingsBridge extends EventEmitter {
         ],
         nextCursor: null,
       };
+    }
+    if (method === "skills/list") {
+      return {
+        data: (Array.isArray(params.cwds) ? params.cwds : ["/work"]).map((cwd) => ({
+          cwd,
+          skills: this.skills,
+          errors: [],
+        })),
+      };
+    }
+    if (method === "skills/config/write") {
+      const enabled = Boolean(params.enabled);
+      const skill = this.skills.find((candidate) => candidate.path === params.path);
+      if (skill) skill.enabled = enabled;
+      return { effectiveEnabled: enabled };
     }
     if (method === "thread/start") {
       if (String(params.threadSource).startsWith("codexnest-managed:")) {
@@ -4793,6 +4918,46 @@ class SettingsBridge extends EventEmitter {
     }
     throw new Error(`Unexpected ${method}`);
   });
+}
+
+async function createSkillsHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-skills-api-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  await store.update((state) => {
+    state.auth.tokenSha256 = hashToken("correct");
+    state.projects.push({
+      id: "project",
+      displayName: "Project",
+      path: "/work",
+      createdAt: "2026-01-01",
+      updatedAt: "2026-01-01",
+    });
+  });
+  const bridge = new SettingsBridge();
+  const attention = new AttentionManager();
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  await projection.sync();
+  const app = await buildApp(
+    loadConfig({
+      statePath: store.path,
+      clientDist: join(directory, "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+    }),
+    {
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      push: new PushNotifier(store),
+    },
+  );
+  return {
+    app,
+    bridge,
+    headers: { authorization: "Bearer correct" },
+  };
 }
 
 async function createForkHarness() {

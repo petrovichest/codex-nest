@@ -256,6 +256,20 @@ describe("clientReducer", () => {
     expect(state.snapshotEpoch).toBe(epoch + 1);
   });
 
+  it("increments the skills revision for skills.changed events", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    const epoch = state.skillsEpoch;
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "skills.changed" },
+    });
+
+    expect(state.snapshot?.sequence).toBe(5);
+    expect(state.skillsEpoch).toBe(epoch + 1);
+  });
+
   it("applies task defaults and native goal events without polling", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
