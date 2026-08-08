@@ -630,6 +630,32 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Копировать сообщение" })).toBeInTheDocument();
   });
 
+  it("keeps a fenced code selection after showing annotation actions", async () => {
+    render(
+      <Activity
+        item={{
+          type: "agentMessage",
+          id: "agent",
+          status: "completed",
+          text: "```text\nВыделенный кодовый фрагмент\n```",
+          images: [],
+          timestamp: 1,
+          phase: "final_answer",
+        }}
+        annotationEnabled
+      />,
+    );
+
+    const code = screen.getByText("Выделенный кодовый фрагмент");
+    selectText(code, 0, 10);
+    fireEvent.pointerUp(code);
+
+    expect(await screen.findByRole("button", { name: "Аннотация" })).toBeInTheDocument();
+    expect(screen.getByText("Выделенный кодовый фрагмент")).toBe(code);
+    expect(window.getSelection()?.toString()).toBe("Выделенный");
+    expect(window.getSelection()?.anchorNode?.isConnected).toBe(true);
+  });
+
   it("creates an annotation from an exact text selection", async () => {
     const onCreate = vi.fn().mockReturnValue(true);
     render(

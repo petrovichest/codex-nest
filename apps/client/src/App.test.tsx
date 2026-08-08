@@ -572,9 +572,15 @@ describe("App routing and navigation", () => {
     });
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(indicator).toHaveTextContent("");
+    expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
 
     fireEvent.click(indicator);
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Обслуживание" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Обновление CodexNest" })).toBeVisible();
   });
 
   it("shows the same icon when only the installed rolling APK is outdated", async () => {

@@ -1,5 +1,13 @@
 import { Capacitor } from "@capacitor/core";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useSearchParams } from "react-router";
 
 import type {
   AppUpdateStatus,
@@ -21,7 +29,16 @@ import {
 } from "../browser-notifications";
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n } from "../i18n";
-import { BellIcon, MicrophoneIcon, ServerIcon, ShieldIcon, SlidersIcon } from "./Icons";
+import {
+  BellIcon,
+  MicrophoneIcon,
+  RefreshIcon,
+  ServerIcon,
+  ShieldIcon,
+  SkillsIcon,
+  SlidersIcon,
+  TerminalIcon,
+} from "./Icons";
 import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
@@ -52,6 +69,20 @@ const PRESETS: Array<{
     description: "Неограниченный доступ к интернету и любым файлам пользователя на сервере.",
   },
 ];
+
+const SETTINGS_SECTIONS = [
+  { id: "application", label: "Приложение", Icon: SlidersIcon },
+  { id: "codex", label: "Codex", Icon: TerminalIcon },
+  { id: "skills", label: "Скиллы", Icon: SkillsIcon },
+  { id: "connection", label: "Подключение", Icon: ServerIcon },
+  { id: "maintenance", label: "Обслуживание", Icon: RefreshIcon },
+] as const;
+
+type SettingsSection = (typeof SETTINGS_SECTIONS)[number]["id"];
+
+function isSettingsSection(value: string | null): value is SettingsSection {
+  return SETTINGS_SECTIONS.some((section) => section.id === value);
+}
 
 export function SettingsPage({
   onOpenNavigation,
@@ -84,6 +115,13 @@ export function SettingsPage({
 }) {
   const { api, state } = useConnection();
   const { language, setLanguage, t } = useI18n();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sectionParam = searchParams.get("section");
+  const activeSection: SettingsSection = isSettingsSection(sectionParam)
+    ? sectionParam
+    : "application";
+  const settingsScrollRef = useRef<HTMLElement>(null);
+  const sectionTabRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
   const [settings, setSettings] = useState<GlobalPermissionSettings | null>(null);
@@ -114,6 +152,20 @@ export function SettingsPage({
   useEffect(() => {
     if (initialAppUpdateStatus) setAppUpdateStatus(initialAppUpdateStatus);
   }, [initialAppUpdateStatus]);
+
+  useEffect(() => {
+    if (sectionParam === activeSection) return;
+    const canonicalParams = new URLSearchParams(searchParams);
+    canonicalParams.set("section", activeSection);
+    setSearchParams(canonicalParams, { replace: true });
+  }, [activeSection, searchParams, sectionParam, setSearchParams]);
+
+  useEffect(() => {
+    sectionTabRefs.current[activeSection]?.scrollIntoView?.({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [activeSection]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -232,30 +284,202 @@ export function SettingsPage({
     [onAppUpdateStatusChange],
   );
 
+  const selectSection = useCallback(
+    (section: SettingsSection) => {
+      if (section === activeSection) return;
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("section", section);
+      setSearchParams(nextParams, { replace: true });
+      settingsScrollRef.current?.scrollTo?.({ top: 0 });
+    },
+    [activeSection, searchParams, setSearchParams],
+  );
+
+  function handleSectionKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + SETTINGS_SECTIONS.length) % SETTINGS_SECTIONS.length;
+    } else if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % SETTINGS_SECTIONS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = SETTINGS_SECTIONS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextSection = SETTINGS_SECTIONS[nextIndex].id;
+    selectSection(nextSection);
+    sectionTabRefs.current[nextSection]?.focus();
+  }
+
   return (
     <div className="settings-workspace">
       <WorkspaceHeader
         title={t("Настройки")}
-        subtitle={t("Интерфейс, Codex и подключение")}
+        subtitle={t("Приложение, Codex и сервер")}
         onOpenNavigation={onOpenNavigation}
       />
-      <main className="settings-scroll">
+      <main className="settings-scroll" ref={settingsScrollRef}>
+        <div className="settings-section-shelf">
+          <div aria-label={t("Разделы настроек")} className="settings-section-tabs" role="tablist">
+            {SETTINGS_SECTIONS.map(({ id, label, Icon }, index) => (
+              <button
+                aria-controls={`settings-section-panel-${id}`}
+                aria-selected={activeSection === id}
+                className="settings-section-tab"
+                id={`settings-section-tab-${id}`}
+                key={id}
+                ref={(element) => {
+                  sectionTabRefs.current[id] = element;
+                }}
+                role="tab"
+                tabIndex={activeSection === id ? 0 : -1}
+                type="button"
+                onClick={() => selectSection(id)}
+                onKeyDown={(event) => handleSectionKeyDown(event, index)}
+              >
+                <Icon />
+                <span>{t(label)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
         <CodexSettingsProvider onStatusChange={setCodexManagementStatus}>
-          <div className="settings-stack">
-            <ApplicationSettingsCard
-              initialStatus={initialAppUpdateStatus}
-              onStatusChange={acceptAppUpdateStatus}
+          <div
+            aria-labelledby="settings-section-tab-application"
+            className="settings-stack"
+            hidden={activeSection !== "application"}
+            id="settings-section-panel-application"
+            role="tabpanel"
+          >
+            <section className="settings-card">
+              <div className="settings-card-heading">
+                <span className="settings-card-icon">
+                  <SlidersIcon />
+                </span>
+                <div>
+                  <h2>{t("Интерфейс")}</h2>
+                  <p>
+                    {t(
+                      "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.",
+                    )}
+                  </p>
+                </div>
+              </div>
+              <label className="theme-setting">
+                <span>{t("Язык интерфейса")}</span>
+                <select
+                  aria-label={t("Язык интерфейса")}
+                  disabled={languageSaving}
+                  value={language}
+                  onChange={(event) => void changeLanguage(event.target.value as UiLanguage)}
+                >
+                  <option value="en">English</option>
+                  <option value="ru">Русский</option>
+                </select>
+              </label>
+              {languageError && (
+                <div className="settings-notice danger" role="alert">
+                  {languageError}
+                </div>
+              )}
+              <label className="theme-setting">
+                <span>{t("Тема")}</span>
+                <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
+                  <option value="system">{t("Системная тема")}</option>
+                  <option value="light">{t("Светлая тема")}</option>
+                  <option value="dark">{t("Тёмная тема")}</option>
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>{t("Боковая панель")}</span>
+                <select
+                  value={sidebarSide}
+                  onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
+                >
+                  <option value="left">{t("Слева")}</option>
+                  <option value="right">{t("Справа")}</option>
+                </select>
+              </label>
+              <label className="theme-setting">
+                <span>{t("Порядок проектов")}</span>
+                <select
+                  value={projectListDirection}
+                  onChange={(event) =>
+                    onProjectListDirectionChange(event.target.value as ProjectListDirection)
+                  }
+                >
+                  <option value="top-down">{t("Сверху вниз")}</option>
+                  <option value="bottom-up">{t("Снизу вверх")}</option>
+                </select>
+              </label>
+            </section>
+
+            {!Capacitor.isNativePlatform() && (
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <span className="settings-card-icon">
+                    <BellIcon />
+                  </span>
+                  <div>
+                    <h2>{t("Уведомления браузера")}</h2>
+                    <p>
+                      {t("События приходят напрямую с вашего сервера, без Google и внешнего push.")}
+                    </p>
+                  </div>
+                </div>
+                {notificationPermission === "granted" && (
+                  <div className="settings-notice success" role="status">
+                    {t("Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.")}
+                  </div>
+                )}
+                {notificationPermission === "denied" && (
+                  <div className="settings-notice danger" role="alert">
+                    {t("Уведомления заблокированы. Разрешите их в настройках сайта в браузере.")}
+                  </div>
+                )}
+                {notificationPermission === "unsupported" && (
+                  <div className="settings-notice warning" role="status">
+                    {t(
+                      "Этот браузер не предоставляет системные уведомления для текущего подключения. Некоторые браузеры требуют открыть CodexNest по HTTPS.",
+                    )}
+                  </div>
+                )}
+                {notificationError && (
+                  <div className="settings-notice danger" role="alert">
+                    {notificationError}
+                  </div>
+                )}
+                {notificationPermission === "default" && (
+                  <div className="settings-actions">
+                    <button
+                      className="primary"
+                      disabled={notificationRequesting}
+                      type="button"
+                      onClick={() => void enableBrowserNotifications()}
+                    >
+                      {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
+                    </button>
+                  </div>
+                )}
+              </section>
+            )}
+
+            <TranscriptionSettingsCard
+              config={transcriptionConfig}
+              configError={transcriptionConfigError}
+              onChange={onTranscriptionConfigChange}
             />
+          </div>
 
-            <CodexSettingsCard />
-
-            <SkillsSettingsCard
-              projects={state?.snapshot?.projects ?? []}
-              skillsEpoch={state?.skillsEpoch ?? 0}
-            />
-
-            <RecoverySettingsCard appStatus={appUpdateStatus} codexStatus={codexManagementStatus} />
-
+          <div
+            aria-labelledby="settings-section-tab-codex"
+            className="settings-stack"
+            hidden={activeSection !== "codex"}
+            id="settings-section-panel-codex"
+            role="tabpanel"
+          >
             <form className="settings-card" onSubmit={saveTaskDefaults}>
               <div className="settings-card-heading">
                 <span className="settings-card-icon">
@@ -399,126 +623,28 @@ export function SettingsPage({
                 </button>
               </div>
             </form>
+          </div>
 
-            <TranscriptionSettingsCard
-              config={transcriptionConfig}
-              configError={transcriptionConfigError}
-              onChange={onTranscriptionConfigChange}
+          <div
+            aria-labelledby="settings-section-tab-skills"
+            className="settings-stack"
+            hidden={activeSection !== "skills"}
+            id="settings-section-panel-skills"
+            role="tabpanel"
+          >
+            <SkillsSettingsCard
+              projects={state?.snapshot?.projects ?? []}
+              skillsEpoch={state?.skillsEpoch ?? 0}
             />
+          </div>
 
-            {!Capacitor.isNativePlatform() && (
-              <section className="settings-card">
-                <div className="settings-card-heading">
-                  <span className="settings-card-icon">
-                    <BellIcon />
-                  </span>
-                  <div>
-                    <h2>{t("Уведомления браузера")}</h2>
-                    <p>
-                      {t("События приходят напрямую с вашего сервера, без Google и внешнего push.")}
-                    </p>
-                  </div>
-                </div>
-                {notificationPermission === "granted" && (
-                  <div className="settings-notice success" role="status">
-                    {t("Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.")}
-                  </div>
-                )}
-                {notificationPermission === "denied" && (
-                  <div className="settings-notice danger" role="alert">
-                    {t("Уведомления заблокированы. Разрешите их в настройках сайта в браузере.")}
-                  </div>
-                )}
-                {notificationPermission === "unsupported" && (
-                  <div className="settings-notice warning" role="status">
-                    {t(
-                      "Этот браузер не предоставляет системные уведомления для текущего подключения. Некоторые браузеры требуют открыть CodexNest по HTTPS.",
-                    )}
-                  </div>
-                )}
-                {notificationError && (
-                  <div className="settings-notice danger" role="alert">
-                    {notificationError}
-                  </div>
-                )}
-                {notificationPermission === "default" && (
-                  <div className="settings-actions">
-                    <button
-                      className="primary"
-                      disabled={notificationRequesting}
-                      type="button"
-                      onClick={() => void enableBrowserNotifications()}
-                    >
-                      {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
-                    </button>
-                  </div>
-                )}
-              </section>
-            )}
-
-            <section className="settings-card">
-              <div className="settings-card-heading">
-                <span className="settings-card-icon">
-                  <SlidersIcon />
-                </span>
-                <div>
-                  <h2>{t("Интерфейс")}</h2>
-                  <p>
-                    {t(
-                      "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.",
-                    )}
-                  </p>
-                </div>
-              </div>
-              <label className="theme-setting">
-                <span>{t("Язык интерфейса")}</span>
-                <select
-                  aria-label={t("Язык интерфейса")}
-                  disabled={languageSaving}
-                  value={language}
-                  onChange={(event) => void changeLanguage(event.target.value as UiLanguage)}
-                >
-                  <option value="en">English</option>
-                  <option value="ru">Русский</option>
-                </select>
-              </label>
-              {languageError && (
-                <div className="settings-notice danger" role="alert">
-                  {languageError}
-                </div>
-              )}
-              <label className="theme-setting">
-                <span>{t("Тема")}</span>
-                <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
-                  <option value="system">{t("Системная тема")}</option>
-                  <option value="light">{t("Светлая тема")}</option>
-                  <option value="dark">{t("Тёмная тема")}</option>
-                </select>
-              </label>
-              <label className="theme-setting">
-                <span>{t("Боковая панель")}</span>
-                <select
-                  value={sidebarSide}
-                  onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
-                >
-                  <option value="left">{t("Слева")}</option>
-                  <option value="right">{t("Справа")}</option>
-                </select>
-              </label>
-              <label className="theme-setting">
-                <span>{t("Порядок проектов")}</span>
-                <select
-                  value={projectListDirection}
-                  onChange={(event) =>
-                    onProjectListDirectionChange(event.target.value as ProjectListDirection)
-                  }
-                >
-                  <option value="top-down">{t("Сверху вниз")}</option>
-                  <option value="bottom-up">{t("Снизу вверх")}</option>
-                </select>
-              </label>
-            </section>
-
+          <div
+            aria-labelledby="settings-section-tab-connection"
+            className="settings-stack"
+            hidden={activeSection !== "connection"}
+            id="settings-section-panel-connection"
+            role="tabpanel"
+          >
             <ProxySettingsCard />
 
             <section className="settings-card">
@@ -537,6 +663,21 @@ export function SettingsPage({
                 </button>
               </div>
             </section>
+          </div>
+
+          <div
+            aria-labelledby="settings-section-tab-maintenance"
+            className="settings-stack"
+            hidden={activeSection !== "maintenance"}
+            id="settings-section-panel-maintenance"
+            role="tabpanel"
+          >
+            <ApplicationSettingsCard
+              initialStatus={initialAppUpdateStatus}
+              onStatusChange={acceptAppUpdateStatus}
+            />
+            <CodexSettingsCard />
+            <RecoverySettingsCard appStatus={appUpdateStatus} codexStatus={codexManagementStatus} />
           </div>
         </CodexSettingsProvider>
       </main>

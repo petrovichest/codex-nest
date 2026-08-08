@@ -1261,7 +1261,7 @@ function Sidebar({
               className="app-update-indicator"
               onClick={onClose}
               title={t("Доступно обновление CodexNest")}
-              to="/settings"
+              to="/settings?section=maintenance"
             >
               <ArrowDownIcon />
             </NavLink>

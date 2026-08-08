@@ -999,11 +999,60 @@ pre {
   padding: 42px 24px;
 }
 
+.settings-section-shelf {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: -10px 0 8px;
+  padding: 10px 0;
+  background: var(--bg);
+}
+
+.settings-section-tabs {
+  width: min(760px, 100%);
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  margin: 0 auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.settings-section-tab {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--muted-strong);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.settings-section-tab svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.settings-section-tab[aria-selected="true"],
+.settings-section-tab[aria-selected="true"]:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+
 .settings-stack {
   width: min(680px, 100%);
   display: grid;
   gap: 18px;
   margin: 0 auto;
+}
+
+.settings-stack[hidden] {
+  display: none;
 }
 
 .settings-card {
@@ -4669,6 +4718,28 @@ pre {
 
   .settings-scroll {
     padding: 18px 12px calc(18px + env(safe-area-inset-bottom));
+  }
+
+  .settings-section-shelf {
+    margin-top: -6px;
+    padding-top: 6px;
+  }
+
+  .settings-section-tabs {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-section-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-section-tab {
+    min-width: max-content;
+    min-height: 44px;
+    flex: 0 0 auto;
+    padding: 0 14px;
   }
 
   .settings-card {

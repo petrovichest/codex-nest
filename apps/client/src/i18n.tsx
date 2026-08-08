@@ -127,7 +127,11 @@ const ENGLISH: Record<string, string> = {
     "The Codex configuration changed. Check the value and save again.",
   "Не удалось сохранить настройки": "Failed to save settings",
   "Не удалось сохранить настройки новых задач": "Failed to save new task settings",
-  "Интерфейс, Codex и подключение": "Interface, Codex, and connection",
+  "Приложение, Codex и сервер": "Application, Codex, and server",
+  "Разделы настроек": "Settings sections",
+  Приложение: "Application",
+  Подключение: "Connection",
+  Обслуживание: "Maintenance",
   Скиллы: "Skills",
   "Установленные возможности Codex для выбранного проекта.":
     "Installed Codex capabilities for the selected project.",

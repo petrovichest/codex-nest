@@ -3328,9 +3328,7 @@ function MarkdownContent({
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
-        pre({ children }) {
-          return <CopyableCodeBlock>{children}</CopyableCodeBlock>;
-        },
+        pre: CopyableCodeBlock,
         table: MarkdownTable,
         a({ href, children, title }) {
           const path = cwd ? localDownloadPath(href, cwd) : null;

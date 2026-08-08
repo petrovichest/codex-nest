@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation, useNavigationType } from "react-router";
 import type { ReactNode } from "react";
 
 import type { TranscriptionConfigResponse } from "@codexnest/protocol";
@@ -65,6 +65,7 @@ describe("SettingsPage", () => {
     connection.mockReturnValue({ api: { readPermissionSettings, updatePermissionSettings } });
 
     renderPage();
+    openSection("Codex");
 
     expect(await screen.findAllByRole("radio")).toHaveLength(3);
     expect(screen.getByRole("radio", { name: /Подтверждать автоматически/ })).toBeChecked();
@@ -95,6 +96,7 @@ describe("SettingsPage", () => {
     connection.mockReturnValue({ api: { readPermissionSettings, updatePermissionSettings } });
 
     renderPage();
+    openSection("Codex");
     const fullAccess = await screen.findByRole("radio", { name: /Полный доступ/ });
     fireEvent.click(fullAccess);
 
@@ -122,6 +124,7 @@ describe("SettingsPage", () => {
     });
 
     renderPage();
+    openSection("Codex");
 
     expect(await screen.findByText("Managed by policy")).toBeInTheDocument();
   });
@@ -176,7 +179,55 @@ describe("SettingsPage", () => {
     expect(readPermissionSettings).toHaveBeenCalledOnce();
   });
 
-  it("orders settings by usage frequency in one column", () => {
+  it("routes between grouped settings sections and keeps inactive panels mounted", () => {
+    const readPermissionSettings = vi.fn().mockResolvedValue({
+      preset: "auto",
+      version: "version-1",
+      overridden: false,
+      message: null,
+    });
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings,
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+
+    const view = renderPage();
+
+    expect(screen.getByRole("tablist", { name: "Разделы настроек" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Приложение" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Интерфейс" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Новые задачи" })).not.toBeInTheDocument();
+    expect(panelHeadings(view.container, "application")).toEqual([
+      "Интерфейс",
+      "Уведомления браузера",
+      "Распознавание речи",
+    ]);
+    expect(panelHeadings(view.container, "codex")).toEqual(["Новые задачи", "Разрешения Codex"]);
+    expect(panelHeadings(view.container, "skills")).toEqual(["Скиллы"]);
+    expect(panelHeadings(view.container, "connection")).toEqual(["Прокси", "Сервер"]);
+    expect(panelHeadings(view.container, "maintenance")).toEqual([
+      "Обновление CodexNest",
+      "Codex CLI",
+      "Аварийное восстановление",
+    ]);
+
+    openSection("Подключение");
+
+    expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?section=connection",
+    );
+    expect(screen.getByRole("heading", { name: "Сервер" })).toBeVisible();
+    expect(view.container.querySelector("#settings-section-panel-application")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-navigation-type")).toHaveTextContent("REPLACE");
+    expect(readPermissionSettings).toHaveBeenCalledOnce();
+  });
+
+  it("canonicalizes an invalid section to application", async () => {
     connection.mockReturnValue({
       api: {
         readPermissionSettings: vi.fn().mockResolvedValue({
@@ -189,28 +240,74 @@ describe("SettingsPage", () => {
       },
     });
 
-    const view = renderPage();
-    const stack = view.container.querySelector(".settings-stack");
+    renderPageAt("/settings?section=unknown");
 
-    expect(stack).not.toBeNull();
-    expect(
-      within(stack as HTMLElement)
-        .getAllByRole("heading", { level: 2 })
-        .map((heading) => heading.textContent),
-    ).toEqual([
-      "Обновление CodexNest",
-      "Codex CLI",
-      "Скиллы",
-      "Аварийное восстановление",
-      "Новые задачи",
-      "Разрешения Codex",
-      "Распознавание речи",
-      "Уведомления браузера",
-      "Интерфейс",
-      "Прокси",
-      "Сервер",
-    ]);
-    expect(screen.queryByRole("navigation", { name: "Разделы настроек" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-location")).toHaveTextContent(
+        "/settings?section=application",
+      ),
+    );
+    expect(screen.getByRole("tab", { name: "Приложение" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Интерфейс" })).toBeVisible();
+  });
+
+  it("activates section tabs with roving keyboard navigation", () => {
+    connection.mockReturnValue({
+      api: {
+        readPermissionSettings: vi.fn().mockResolvedValue({
+          preset: "auto",
+          version: "version-1",
+          overridden: false,
+          message: null,
+        }),
+        updatePermissionSettings: vi.fn(),
+      },
+    });
+
+    renderPage();
+    const applicationTab = screen.getByRole("tab", { name: "Приложение" });
+    applicationTab.focus();
+    fireEvent.keyDown(applicationTab, { key: "ArrowRight" });
+
+    const codexTab = screen.getByRole("tab", { name: "Codex" });
+    expect(codexTab).toHaveFocus();
+    expect(codexTab).toHaveAttribute("aria-selected", "true");
+    expect(codexTab).toHaveAttribute("tabindex", "0");
+    expect(applicationTab).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings?section=codex");
+
+    fireEvent.keyDown(codexTab, { key: "End" });
+    expect(screen.getByRole("tab", { name: "Обслуживание" })).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "Обновление CodexNest" })).toBeVisible();
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Обслуживание" }), { key: "Home" });
+    expect(screen.getByRole("tab", { name: "Приложение" })).toHaveFocus();
+  });
+
+  it("preserves unsaved edits while switching sections without reloading settings", async () => {
+    const readPermissionSettings = vi.fn().mockResolvedValue({
+      preset: "auto",
+      version: "version-1",
+      overridden: false,
+      message: null,
+    });
+    connection.mockReturnValue({
+      api: { readPermissionSettings, updatePermissionSettings: vi.fn() },
+    });
+
+    renderPage();
+    openSection("Codex");
+    const fullAccess = await screen.findByRole("radio", { name: /Полный доступ/ });
+    fireEvent.click(fullAccess);
+
+    openSection("Приложение");
+    openSection("Codex");
+
+    expect(screen.getByRole("radio", { name: /Полный доступ/ })).toBeChecked();
+    expect(readPermissionSettings).toHaveBeenCalledOnce();
   });
 
   it("changes the local sidebar side immediately", () => {
@@ -393,6 +490,7 @@ describe("SettingsPage", () => {
     const onSwitchServer = vi.fn();
 
     renderPage("system", vi.fn(), onSwitchServer);
+    openSection("Подключение");
     fireEvent.click(screen.getByRole("button", { name: "Сменить сервер" }));
 
     expect(onSwitchServer).toHaveBeenCalledOnce();
@@ -433,6 +531,7 @@ describe("SettingsPage", () => {
     });
 
     renderPage();
+    openSection("Codex");
     fireEvent.change(screen.getByRole("combobox", { name: "Service tier" }), {
       target: { value: "fast" },
     });
@@ -462,9 +561,10 @@ function renderPage(
     config: TranscriptionConfigResponse;
     onChange(config: TranscriptionConfigResponse): void;
   } | null = null,
+  initialEntry = "/settings",
 ) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <SettingsPage
         onOpenNavigation={() => undefined}
         onSwitchServer={onSwitchServer}
@@ -477,7 +577,44 @@ function renderPage(
         transcriptionConfig={transcription?.config}
         onTranscriptionConfigChange={transcription?.onChange}
       />
+      <LocationProbe />
     </MemoryRouter>,
+  );
+}
+
+function renderPageAt(initialEntry: string) {
+  return renderPage(
+    "system",
+    vi.fn(),
+    vi.fn(),
+    "left",
+    vi.fn(),
+    "top-down",
+    vi.fn(),
+    null,
+    initialEntry,
+  );
+}
+
+function openSection(name: string) {
+  fireEvent.click(screen.getByRole("tab", { name }));
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  return (
+    <>
+      <output data-testid="settings-location">{`${location.pathname}${location.search}`}</output>
+      <output data-testid="settings-navigation-type">{navigationType}</output>
+    </>
+  );
+}
+
+function panelHeadings(container: HTMLElement, section: string) {
+  return Array.from(
+    container.querySelectorAll(`#settings-section-panel-${section} h2`),
+    (heading) => heading.textContent,
   );
 }
 
