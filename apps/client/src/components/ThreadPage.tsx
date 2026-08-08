@@ -703,6 +703,7 @@ export function ThreadPage({
     setInspectorOpen(false);
     setArtifactViewer({ artifact, opener });
   }, []);
+  const closeArtifact = useCallback(() => setArtifactViewer(null), []);
 
   const loadArtifact = useCallback(
     async (artifact: ArtifactDescriptor): Promise<ArtifactLoadResult> => {
@@ -3030,12 +3031,12 @@ export function ThreadPage({
             type="button"
             className="artifact-viewer-backdrop"
             aria-label={t("Закрыть предпросмотр")}
-            onClick={() => setArtifactViewer(null)}
+            onClick={closeArtifact}
           />
           <ArtifactViewer
             artifact={artifactViewer.artifact}
             opener={artifactViewer.opener}
-            onClose={() => setArtifactViewer(null)}
+            onClose={closeArtifact}
             onDownload={downloadFile}
             onLoad={loadArtifact}
           />

@@ -1906,6 +1906,7 @@ pre {
 }
 
 .artifact-viewer-stage {
+  position: relative;
   min-width: 0;
   min-height: 0;
   flex: 1;
@@ -1918,6 +1919,22 @@ pre {
     linear-gradient(color-mix(in srgb, var(--line) 26%, transparent) 1px, transparent 1px) 0 0 /
       24px 24px,
     var(--surface-muted);
+}
+
+.artifact-download-error {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 12px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
+  border-radius: 9px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  box-shadow: var(--shadow);
+  font-size: 12px;
 }
 
 .artifact-viewer-state {

@@ -32,6 +32,7 @@ export function ArtifactViewer({
   const [result, setResult] = useState<ArtifactLoadResult | null>(null);
   const [failed, setFailed] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadFailed, setDownloadFailed] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -90,8 +91,11 @@ export function ArtifactViewer({
   async function download() {
     if (downloading) return;
     setDownloading(true);
+    setDownloadFailed(false);
     try {
       await onDownload(artifact.path);
+    } catch {
+      setDownloadFailed(true);
     } finally {
       setDownloading(false);
     }
@@ -146,6 +150,11 @@ export function ArtifactViewer({
         </span>
       </header>
       <div className={`artifact-viewer-stage artifact-viewer-${artifact.kind}`}>
+        {downloadFailed && (
+          <div className="artifact-download-error" role="alert">
+            {t("Не удалось скачать файл. Нажмите ещё раз.")}
+          </div>
+        )}
         {!result && !failed && <ArtifactState spinner>{t("Загружаем файл…")}</ArtifactState>}
         {failed && (
           <ArtifactState>
@@ -222,9 +231,18 @@ function ArtifactContent({ artifact, data }: { artifact: ArtifactDescriptor; dat
 }
 
 function ImageArtifact({ artifact, data }: { artifact: ArtifactDescriptor; data: ArrayBuffer }) {
-  const source = useMemo(() => URL.createObjectURL(new Blob([data])), [data]);
+  const source = useMemo(
+    () => URL.createObjectURL(new Blob([data], { type: imageMimeType(artifact.path) })),
+    [artifact.path, data],
+  );
   useEffect(() => () => URL.revokeObjectURL(source), [source]);
   return <img className="artifact-image" src={source} alt={artifact.fileName} />;
+}
+
+function imageMimeType(path: string): string {
+  const extension = path.split(".").at(-1)?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  return `image/${extension || "png"}`;
 }
 
 function PdfArtifact({ data }: { data: ArrayBuffer }) {
