@@ -86,6 +86,10 @@ EOF
   cat > "$case_fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *CodexNest-latest.json* ]]; then
+  if [[ "$*" != *'CodexNest-latest.json?cache='* ]]; then
+    printf '%s\n' 'Expected rolling manifest request to bypass caches' >&2
+    exit 2
+  fi
   if [[ -f "$HOME/invalid-manifest" ]]; then
     printf '%s\n' '{"schemaVersion":1,"version":"invalid","commit":"invalid"}'
     exit 0

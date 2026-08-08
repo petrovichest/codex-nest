@@ -131,7 +131,7 @@ codexnest_latest_candidate() {
   [[ -x "$node_bin" ]] || codexnest_die "managed Node.js runtime is missing"
   curl -fsSL \
     -H 'Cache-Control: no-cache' \
-    "$codexnest_rolling_manifest_url" \
+    "$codexnest_rolling_manifest_url?cache=$(date +%s)-$$" \
     | "$node_bin" -e '
         const fs = require("node:fs");
         const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
