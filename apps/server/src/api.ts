@@ -525,6 +525,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ? (clientMessageId ?? teamContinuationMarkerId(teamClaim.claimId))
       : null;
     const automaticTeamContinuation = Boolean(teamClaim && !input.trim() && !images.length);
+    const turnInput = automaticTeamContinuation ? TEAM_CONTINUATION_MARKER_TEXT : input;
     if (teamClaim && teamMarkerId) {
       await markTeamClaimDispatch(
         store,
@@ -554,25 +555,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const startParams = {
         threadId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
-        input: messageInput(input, images),
+        input: messageInput(turnInput, images),
         ...turnSettings(
           summary.settings,
           projection.availableModels,
           teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
         ),
       };
-      let started: unknown;
-      try {
-        started = await bridge.request<unknown>("turn/start", startParams);
-      } catch (error) {
-        if (!(automaticTeamContinuation && error instanceof RpcError && error.code === -32_602)) {
-          throw error;
-        }
-        started = await bridge.request<unknown>("turn/start", {
-          ...startParams,
-          input: messageInput(TEAM_CONTINUATION_MARKER_TEXT, []),
-        });
-      }
+      const started = await bridge.request<unknown>("turn/start", startParams);
       const turn = parseTurnStart(started);
       turnId = turn.turn.id;
     } catch (error) {

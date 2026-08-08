@@ -3246,7 +3246,7 @@ describe("Team orchestration", () => {
     expect(continuation).toMatchObject({
       threadId: "thread",
       clientUserMessageId: expect.stringMatching(/^codexnest-team-claim:/),
-      input: [],
+      input: [{ type: "text", text: TEAM_MARKER_TEXT, text_elements: [] }],
       additionalContext: {
         "codexnest.team.results": {
           kind: "application",

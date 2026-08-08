@@ -484,7 +484,16 @@ function applyActivity(
 ): ClientState {
   const detail = detailForEvent(state, threadId);
   if (!detail) return state;
-  const turns = [...detail.turns];
+  const turns =
+    item.type === "userMessage"
+      ? detail.turns.map((turn) => {
+          if (turn.id === turnId) return turn;
+          const items = turn.items.filter(
+            (candidate) => candidate.type !== "userMessage" || candidate.id !== item.id,
+          );
+          return items.length === turn.items.length ? turn : { ...turn, items };
+        })
+      : [...detail.turns];
   const index = turns.findIndex((turn) => turn.id === turnId);
   if (index < 0) {
     turns.push({

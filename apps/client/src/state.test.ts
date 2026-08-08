@@ -764,6 +764,100 @@ describe("clientReducer", () => {
     expect(state.optimisticMessages.one).toBeUndefined();
   });
 
+  it("moves a confirmed user message to its canonical turn without rendering a duplicate", () => {
+    const message = {
+      type: "userMessage" as const,
+      id: "client-message",
+      status: "completed" as const,
+      text: "Только один раз",
+      images: [],
+      timestamp: 10,
+      phase: null,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: baseThread,
+        turns: [
+          { ...turn("canonical-turn"), items: [] },
+          {
+            ...turn("synthetic-turn"),
+            items: [
+              message,
+              {
+                type: "agentMessage",
+                id: "keep-me",
+                status: "completed",
+                text: "Соседний элемент",
+                images: [],
+                timestamp: 11,
+                phase: "final_answer",
+              },
+            ],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = {
+      ...state,
+      optimisticMessages: {
+        one: [
+          {
+            id: message.id,
+            threadId: "one",
+            text: message.text,
+            images: [],
+            createdAt: message.timestamp,
+            destination: "turn",
+            turnId: "synthetic-turn",
+          },
+        ],
+      },
+      details: {
+        ...state.details,
+        one: {
+          ...state.details.one!,
+          queuedMessages: [
+            {
+              id: message.id,
+              threadId: "one",
+              text: message.text,
+              createdAt: message.timestamp,
+              status: "dispatching",
+            },
+          ],
+        },
+      },
+    };
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "canonical-turn",
+        item: message,
+      },
+    });
+
+    expect(
+      state.details.one?.turns.flatMap((candidate) =>
+        candidate.items.filter((item) => item.type === "userMessage" && item.id === message.id),
+      ),
+    ).toHaveLength(1);
+    expect(state.details.one?.turns[0]?.items).toContainEqual(message);
+    expect(state.details.one?.turns[1]?.items).toContainEqual(
+      expect.objectContaining({ id: "keep-me" }),
+    );
+    expect(state.details.one?.queuedMessages).toEqual([]);
+    expect(state.optimisticMessages.one).toBeUndefined();
+  });
+
   it("does not let a stale detail remove confirmed messages or roll back streamed text", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
