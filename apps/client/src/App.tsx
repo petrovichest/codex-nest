@@ -1790,14 +1790,7 @@ function isActiveChildFeedEligible(thread: ThreadSummary): boolean {
 }
 
 function sortActiveFeedThreads(threads: ThreadSummary[]): ThreadSummary[] {
-  return [...threads].sort((a, b) => {
-    const activeTier = Number(isBlueActiveThread(b)) - Number(isBlueActiveThread(a));
-    return activeTier || b.updatedAt - a.updatedAt;
-  });
-}
-
-function isBlueActiveThread(thread: ThreadSummary): boolean {
-  return thread.state === "running" || thread.state === "queued" || thread.queuedMessageCount > 0;
+  return [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 function childThreadsByParent(threads: ThreadSummary[]): Map<string, ThreadSummary[]> {

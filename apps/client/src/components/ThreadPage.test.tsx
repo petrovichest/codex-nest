@@ -3032,6 +3032,10 @@ describe("Activity", () => {
         node.getAttribute("data-message-id"),
       ),
     ).toEqual(["queued", "second"]);
+    expect(
+      Array.from(queue.querySelectorAll(".queued-message-order")).map((node) => node.textContent),
+    ).toEqual(["01", "02"]);
+    expect(queue.querySelector(".queued-messages-count")).toHaveTextContent("2");
     expect(screen.getAllByText("В очереди")).toHaveLength(2);
     fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
     fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {

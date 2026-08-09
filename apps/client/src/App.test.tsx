@@ -288,7 +288,7 @@ describe("App routing and navigation", () => {
     await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("projects"));
   });
 
-  it("renders a flat unlimited cross-project active feed in blue-first recency order", () => {
+  it("renders a flat unlimited cross-project active feed in recency order", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const secondProject = testProject("second-project", "Второй");
     const threads = (
@@ -385,8 +385,6 @@ describe("App routing and navigation", () => {
     ).map((element) => element.textContent);
 
     expect(rootTitles).toEqual([
-      "Запущена 30",
-      "Очередь 10",
       "Внимание 100",
       "Результат 90",
       "Ошибка 85",
@@ -394,16 +392,18 @@ describe("App routing and navigation", () => {
       "Внимание 70",
       "Прервана 65",
       "Внимание 60",
+      "Запущена 30",
+      "Очередь 10",
     ]);
     expect(projectLabels).toEqual([
-      "Второй",
-      "Проект",
       "Без проекта",
       "Без проекта",
       "Проект",
       "Проект",
       "Второй",
       "Проект",
+      "Проект",
+      "Второй",
       "Проект",
     ]);
     expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(9);
@@ -524,9 +524,9 @@ describe("App routing and navigation", () => {
     ).map((element) => element.textContent);
 
     expect(nestedTitles).toEqual([
+      "attention-child · Внимание 100",
       "queued-child · Очередь 20",
       "message-child · Сообщение 10",
-      "attention-child · Внимание 100",
     ]);
     expect(screen.queryByRole("link", { name: /Результат 90/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Ошибка 80/ })).not.toBeInTheDocument();

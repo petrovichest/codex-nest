@@ -4457,10 +4457,10 @@ function QueuedMessages({
     <section className="queued-messages" aria-label={t("Очередь сообщений")}>
       <header className="queued-messages-header">
         <span>{t("Очередь сообщений")}</span>
-        <span>{messages.length}</span>
+        <span className="queued-messages-count">{messages.length}</span>
       </header>
       <div className="queued-messages-list">
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           const editing = editor?.messageId === message.id;
           const busy = action?.messageId === message.id;
           const actionsDisabled =
@@ -4481,8 +4481,51 @@ function QueuedMessages({
                   : t("В очереди");
           return (
             <article className="queued-message" data-message-id={message.id} key={message.id}>
-              <div className="queued-message-heading">
-                <span>{status}</span>
+              <span className="queued-message-order" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div className="queued-message-content">
+                <div className="queued-message-heading">
+                  <span className="queued-message-status">{status}</span>
+                </div>
+                {editing ? (
+                  <div className="queued-message-editor">
+                    <textarea
+                      autoFocus
+                      aria-label={t("Текст сообщения в очереди")}
+                      rows={3}
+                      value={editValue}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setEditor({ messageId: message.id, value: event.target.value })
+                      }
+                    />
+                    <div className="queued-message-editor-actions">
+                      <button type="button" disabled={busy} onClick={() => setEditor(null)}>
+                        {t("Отмена")}
+                      </button>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !canSave}
+                        onClick={() => {
+                          void onUpdate(message.id, editValue).then((saved) => {
+                            if (saved) setEditor(null);
+                          });
+                        }}
+                      >
+                        {busy ? t("Сохраняем…") : t("Сохранить")}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {message.text && <div className="queued-message-text">{message.text}</div>}
+                    {(message.images?.length ?? 0) > 0 && (
+                      <MessageImages images={message.images ?? []} />
+                    )}
+                  </>
+                )}
                 <div className="queued-message-actions">
                   {!editing && (
                     <button
@@ -4510,48 +4553,11 @@ function QueuedMessages({
                     disabled={actionsDisabled}
                     onClick={() => void onSendNow(message.id)}
                   >
+                    <SendIcon />
                     {t("Отправить сейчас")}
                   </button>
                 </div>
               </div>
-              {editing ? (
-                <div className="queued-message-editor">
-                  <textarea
-                    autoFocus
-                    aria-label={t("Текст сообщения в очереди")}
-                    rows={3}
-                    value={editValue}
-                    disabled={busy}
-                    onChange={(event) =>
-                      setEditor({ messageId: message.id, value: event.target.value })
-                    }
-                  />
-                  <div className="queued-message-editor-actions">
-                    <button type="button" disabled={busy} onClick={() => setEditor(null)}>
-                      {t("Отмена")}
-                    </button>
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={busy || !canSave}
-                      onClick={() => {
-                        void onUpdate(message.id, editValue).then((saved) => {
-                          if (saved) setEditor(null);
-                        });
-                      }}
-                    >
-                      {busy ? t("Сохраняем…") : t("Сохранить")}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  {message.text && <div className="queued-message-text">{message.text}</div>}
-                  {(message.images?.length ?? 0) > 0 && (
-                    <MessageImages images={message.images ?? []} />
-                  )}
-                </>
-              )}
             </article>
           );
         })}

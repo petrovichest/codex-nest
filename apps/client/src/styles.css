@@ -315,7 +315,6 @@
 .thread-link.active {
   color: var(--text-strong);
   background: var(--sidebar-active);
-  font-weight: 550;
 }
 
 .thread-link-title {
@@ -3229,14 +3228,16 @@
 }
 
 .queued-messages {
+  position: relative;
   display: grid;
-  gap: var(--space-2);
+  gap: 2px;
   max-height: min(32dvh, 260px);
   margin: 0 var(--space-1) var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--line);
+  padding: 10px 12px 12px;
+  border: 1px solid color-mix(in srgb, var(--status-queued) 22%, var(--line));
   border-radius: var(--radius-lg);
-  background: var(--color-surface);
+  background: color-mix(in srgb, var(--surface) 92%, var(--status-queued));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--status-queued) 70%, var(--line));
 }
 
 .queued-messages-header,
@@ -3249,17 +3250,30 @@
 
 .queued-messages-header {
   justify-content: space-between;
-  padding: 0 3px;
+  padding: 0 2px 2px 32px;
   color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.queued-messages-count {
+  min-width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--muted-strong);
+  background: color-mix(in srgb, var(--status-queued) 16%, var(--surface-muted));
   font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .queued-messages-list {
   min-height: 0;
   display: grid;
-  gap: 6px;
+  gap: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
@@ -3267,24 +3281,65 @@
 
 .queued-message {
   min-width: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 10px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.queued-message + .queued-message {
+  border-top: 1px solid color-mix(in srgb, var(--status-queued) 18%, var(--line));
+}
+
+.queued-message-order {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--status-queued) 42%, var(--line));
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.queued-message-content {
+  min-width: 0;
 }
 
 .queued-message-heading {
-  justify-content: space-between;
-  gap: 8px;
+  min-height: 22px;
   color: var(--muted);
-  font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.queued-message-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queued-message-status::before {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--status-queued);
+  content: "";
 }
 
 .queued-message-actions {
   min-width: 0;
   justify-content: flex-end;
-  gap: 2px;
+  gap: 4px;
+  margin-top: 8px;
 }
 
 .queued-message-actions .icon-button {
@@ -3292,6 +3347,9 @@
   min-width: 27px;
   height: 27px;
   min-height: 27px;
+  border-color: transparent;
+  color: var(--muted);
+  background: transparent;
 }
 
 .queued-message-actions .icon-button svg {
@@ -3301,16 +3359,23 @@
 
 .queued-message-send {
   min-height: 27px;
-  padding: 0 8px;
-  border-color: transparent;
-  background: var(--surface);
+  margin-left: 2px;
+  padding: 0 9px;
+  border-color: color-mix(in srgb, var(--status-queued) 32%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--status-queued) 10%, var(--surface));
   font-size: 11px;
+}
+
+.queued-message-send svg {
+  width: 13px;
+  height: 13px;
 }
 
 .queued-message-text {
   display: -webkit-box;
   overflow: hidden;
-  margin-top: 5px;
+  margin-top: 2px;
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
@@ -3342,7 +3407,7 @@
 .queued-message-editor {
   display: grid;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .queued-message-editor textarea {

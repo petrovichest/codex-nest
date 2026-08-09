@@ -58,6 +58,22 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT);
     await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
     await expect(page.getByText("Готово. Контраст выровнен", { exact: false })).toBeVisible();
+    const typography = await page.locator("body, body *").evaluateAll((elements) => {
+      const fontFamilies = new Set(elements.map((element) => getComputedStyle(element).fontFamily));
+      const activeThread = elements.find((element) => element.matches(".thread-link.active"));
+      const inactiveThread = elements.find((element) =>
+        element.matches(".thread-link:not(.active)"),
+      );
+      return {
+        activeThreadWeight: activeThread ? getComputedStyle(activeThread).fontWeight : null,
+        fontFamilies: [...fontFamilies],
+        inactiveThreadWeight: inactiveThread ? getComputedStyle(inactiveThread).fontWeight : null,
+      };
+    });
+    expect(typography.fontFamilies).toEqual([
+      'Onest, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    ]);
+    expect(typography.activeThreadWeight).toBe(typography.inactiveThreadWeight);
     const checklistMarker = await page
       .locator(".plan-checklist li")
       .first()
@@ -117,6 +133,21 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-attention", "dark", PHONE_VIEWPORT);
     await expect(page.getByRole("region", { name: "Требуется внимание" })).toBeVisible();
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
+    const queue = page.getByRole("region", { name: "Очередь сообщений" });
+    await expect(queue).toBeVisible();
+    await expect(queue.locator(".queued-messages-count")).toHaveText("1");
+    await expect(queue.locator(".queued-message-order")).toHaveText("01");
+    expect(
+      await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      "mobile queue fits without horizontal scrolling",
+    ).toBe(true);
+    await assertCompactTouchTarget(
+      queue.getByRole("button", { name: "Изменить сообщение в очереди" }),
+    );
+    await assertCompactTouchTarget(
+      queue.getByRole("button", { name: "Удалить сообщение из очереди" }),
+    );
+    await assertCompactTouchTarget(queue.getByRole("button", { name: "Отправить сейчас" }));
     await assertCompactTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
     await assertCompactTouchTarget(page.getByRole("button", { name: "Показать сведения" }));
     const composerOptions = page.locator(".composer-options");
