@@ -186,6 +186,39 @@ test.describe("CodexNest redesign visual contract", () => {
     await expect(page.getByLabel("Адрес сервера")).toHaveValue("http://");
     await expect(page).toHaveScreenshot("08-mobile-dark-setup.png", { fullPage: true });
   });
+
+  test("10 mobile dark Markdown artifact", async ({ browserName, page }) => {
+    await openVisualPage(page, "/threads/session-main", "dark", PHONE_VIEWPORT);
+    await page.getByRole("button", { name: "Показать сведения" }).click();
+    const inspector = page.getByRole("complementary", { name: "Сведения о задаче" });
+    await inspector.getByRole("tab", { name: /^Артефакты/u }).click();
+    await inspector.getByRole("button", { name: "Открыть visual-audit.md" }).click();
+
+    const viewer = page.getByRole("complementary", {
+      name: "Просмотр файла visual-audit.md",
+    });
+    const report = viewer.locator(".artifact-markdown");
+    await expect(report).toBeVisible();
+    await expect(report).toHaveCSS("background-color", "rgb(31, 32, 31)");
+    await expect(report).toHaveCSS("color", "rgb(233, 234, 231)");
+    await expect(report.getByRole("heading", { level: 1 })).toHaveCSS(
+      "color",
+      "rgb(247, 248, 245)",
+    );
+    await expect(report.locator("code")).toHaveCSS("background-color", "rgb(37, 39, 37)");
+    await expect(report.locator("table")).toHaveCSS("color", "rgb(233, 234, 231)");
+    expect(
+      await report.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      "mobile Markdown report fits without horizontal scrolling",
+    ).toBe(true);
+
+    await expect(page).toHaveScreenshot("10-mobile-dark-markdown-artifact.png", {
+      fullPage: true,
+    });
+    if (browserName === "chromium") {
+      await expectA11yClean(page, "mobile Markdown artifact", ".artifact-viewer");
+    }
+  });
 });
 
 async function openVisualPage(

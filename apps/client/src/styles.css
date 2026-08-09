@@ -1799,8 +1799,14 @@
 }
 
 .artifact-markdown {
+  background: var(--color-surface);
+  color: var(--color-ink);
   font-size: 15px;
   line-height: 1.65;
+}
+
+.artifact-markdown code {
+  overflow-wrap: anywhere;
 }
 
 .artifact-markdown > :first-child {

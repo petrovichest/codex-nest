@@ -15,6 +15,22 @@ export const PHONE_VIEWPORT = { width: 390, height: 844 } as const;
 const FIXED_NOW = Date.UTC(2026, 7, 3, 12, 0, 0);
 const SERVER_ORIGIN = "https://codexnest.visual";
 const TOKEN = "visual-test-token";
+const MARKDOWN_ARTIFACT = `# Отчёт по последним 50 транзакциям кошелька
+
+Кошелёк: \`7BNaxx6KdUYrjACNQZ9He26NBFoFxujQMAfNLnArLGH5\`. Снимок зафиксирован и обработан офлайн.
+
+## Общая картина
+
+Срез охватывает 50 канонических PumpSwap-операций. Профиль похож на автоматизированную высокочастотную ротацию.
+
+- Успешные операции: 45
+- Неуспешные операции: 5
+
+| Метрика | Значение |
+| --- | ---: |
+| Уникальные mint | 26 |
+| Среднее удержание | 457,2 секунды |
+`;
 
 const projects: AppSnapshot["projects"] = [
   {
@@ -467,6 +483,13 @@ export async function installVisualFixture(
   );
 
   await page.route(`${SERVER_ORIGIN}/api/v1/**`, mockHttpRoute);
+  await page.route(`${SERVER_ORIGIN}/downloads/**`, (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/markdown; charset=utf-8" },
+      body: MARKDOWN_ARTIFACT,
+    }),
+  );
   await page.routeWebSocket(
     `${SERVER_ORIGIN.replace("https://", "wss://")}/api/v1/events`,
     (ws) => {
@@ -572,6 +595,14 @@ async function mockHttpRoute(route: Route): Promise<void> {
   if (/^\/api\/v1\/threads\/[^/]+\/goal$/u.test(path) && method === "GET") return json(null);
   if (/^\/api\/v1\/threads\/[^/]+\/git-changes$/u.test(path)) {
     return json({ state: "dirty", filesChanged: 3, additions: 148, deletions: 37 });
+  }
+  if (/^\/api\/v1\/threads\/[^/]+\/downloads$/u.test(path) && method === "POST") {
+    return json({
+      downloadUrl: "/downloads/visual-audit.md",
+      expiresAt: FIXED_NOW + 60_000,
+      fileName: "visual-audit.md",
+      size: new TextEncoder().encode(MARKDOWN_ARTIFACT).byteLength,
+    });
   }
   if (/^\/api\/v1\/threads\/[^/]+\/artifacts$/u.test(path)) {
     return json({
