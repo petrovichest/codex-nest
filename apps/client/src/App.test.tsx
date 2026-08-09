@@ -798,7 +798,7 @@ describe("App routing and navigation", () => {
     expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
       "content",
-      "#11171D",
+      "#171817",
     );
 
     fireEvent.change(theme, { target: { value: "light" } });
@@ -807,7 +807,7 @@ describe("App routing and navigation", () => {
     expect(document.documentElement.dataset.resolvedTheme).toBe("light");
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
       "content",
-      "#F5F7F9",
+      "#FFFFFF",
     );
   });
 
@@ -844,7 +844,7 @@ describe("App routing and navigation", () => {
     expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
       "content",
-      "#11171D",
+      "#171817",
     );
   });
 

@@ -53,7 +53,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--color-recessed);
+  background: var(--sidebar);
   border-right: 1px solid var(--color-line-strong);
 }
 
@@ -423,12 +423,12 @@
   flex: 0 0 auto;
   transform: translateY(-50%);
   border-radius: 2px;
-  background: var(--status-idle);
 }
 
 .status-running,
 .connection-dot.connecting {
   background: var(--status-running);
+  --status-pulse-color: var(--status-running);
 }
 
 .connection-dot.connecting {
@@ -437,10 +437,12 @@
 
 .status-queued {
   background: var(--status-queued);
+  --status-pulse-color: var(--status-queued);
 }
 
 .status-needsAttention {
   background: var(--status-attention);
+  --status-pulse-color: var(--status-attention);
 }
 
 .status-completed-unread,
@@ -450,15 +452,18 @@
 
 .status-completed-unread {
   background: var(--status-complete);
+  --status-pulse-color: var(--status-complete);
 }
 
 .status-failed,
 .connection-dot.offline {
-  background: var(--danger);
+  background: var(--status-failed);
+  --status-pulse-color: var(--status-failed);
 }
 
 .status-interrupted {
   background: var(--status-interrupted);
+  --status-pulse-color: var(--status-interrupted);
 }
 
 .status-failed-read,
@@ -473,11 +478,13 @@
 @keyframes status-pulse {
   0%,
   100% {
-    opacity: 1;
+    box-shadow: 0 0 0 1px
+      color-mix(in srgb, var(--status-pulse-color, var(--status-idle)) 36%, transparent);
   }
 
   50% {
-    opacity: 0.42;
+    box-shadow: 0 0 0 4px
+      color-mix(in srgb, var(--status-pulse-color, var(--status-idle)) 12%, transparent);
   }
 }
 

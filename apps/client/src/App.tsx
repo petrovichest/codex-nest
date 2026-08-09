@@ -65,7 +65,7 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
 const THEME_KEY = "codexnest.theme";
 const DARK_THEME_QUERY = "(prefers-color-scheme: dark)";
-const THEME_COLOR = { dark: "#11171D", light: "#F5F7F9" } as const;
+const THEME_COLOR = { dark: "#171817", light: "#FFFFFF" } as const;
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
 const LAYOUT_DEFAULTS_VERSION = "1";

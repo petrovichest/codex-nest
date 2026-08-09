@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#F5F7F9" />
+    <meta name="theme-color" content="#FFFFFF" />
     <meta name="application-name" content="CodexNest" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -32,7 +32,7 @@
           document.documentElement.dataset.resolvedTheme = resolved;
           document
             .querySelector('meta[name="theme-color"]')
-            ?.setAttribute("content", resolved === "dark" ? "#11171D" : "#F5F7F9");
+            ?.setAttribute("content", resolved === "dark" ? "#171817" : "#FFFFFF");
         };
         applyTheme();
         colorScheme.addEventListener("change", applyTheme);

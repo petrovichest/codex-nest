@@ -86,6 +86,15 @@ test.describe("CodexNest redesign visual contract", () => {
     await drawerToggle.click();
     await expect(page.getByRole("link", { name: "Настройки" })).toBeVisible();
     await assertTouchTarget(page.getByRole("link", { name: "Настройки" }));
+    await expect(
+      page.getByRole("link", { name: "Сверка токенов темы" }).locator(".status"),
+    ).toHaveCSS("background-color", "rgb(75, 156, 232)");
+    await expect(
+      page.getByRole("link", { name: "Выбор материала панели" }).locator(".status"),
+    ).toHaveCSS("background-color", "rgb(229, 166, 43)");
+    await expect(
+      page.getByRole("link", { name: "Очередь мобильных правок" }).locator(".status"),
+    ).toHaveCSS("background-color", "rgb(134, 183, 217)");
     await expect(page).toHaveScreenshot("05-mobile-light-drawer.png", { fullPage: true });
   });
 
