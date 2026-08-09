@@ -526,6 +526,8 @@ const ENGLISH: Record<string, string> = {
   "Открыть в браузере": "Open in browser",
   "Открыть изображение {{name}}": "Open image {{name}}",
   "Открыть изображение {{number}}": "Open image {{number}}",
+  "Загружаем изображение…": "Loading image…",
+  "Не удалось загрузить изображение. Повторить": "Could not load image. Retry",
   Отменить: "Cancel",
   "Форма инструмента": "Tool form",
   Отправить: "Submit",

@@ -1024,6 +1024,80 @@ describe("Activity", () => {
     );
   });
 
+  it("loads task-local Markdown images through a download ticket", async () => {
+    const api = threadApi();
+    api.createDownload.mockResolvedValueOnce({
+      downloadUrl: "/downloads/ticket/chart.png",
+      expiresAt: 61_000,
+      fileName: "chart.png",
+      size: 3,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.fn(() => "blob:https://codex.home.arpa/chart");
+    const revokeObjectURL = vi.fn();
+    const ObjectUrl = class extends URL {};
+    Object.defineProperties(ObjectUrl, {
+      createObjectURL: { value: createObjectURL },
+      revokeObjectURL: { value: revokeObjectURL },
+    });
+    vi.stubGlobal("URL", ObjectUrl);
+    mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "agent",
+              status: "completed",
+              text: "![График](</work/project/artifacts/chart.png>)",
+              images: [],
+              timestamp: 2,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+    });
+
+    const view = renderThread();
+
+    await waitFor(() =>
+      expect(api.createDownload).toHaveBeenCalledWith(
+        "thread",
+        "/work/project/artifacts/chart.png",
+      ),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(api.createDownload).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      "https://codex.home.arpa/downloads/ticket/chart.png",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toEqual({ cache: "no-store" });
+    const preview = await screen.findByRole("button", { name: "Открыть изображение График" });
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByRole("img", { name: "График" })).toHaveAttribute(
+      "src",
+      "blob:https://codex.home.arpa/chart",
+    );
+
+    fireEvent.click(preview);
+    expect(await screen.findByRole("dialog", { name: "Просмотр изображений" })).toBeInTheDocument();
+    expect(api.createDownload).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:https://codex.home.arpa/chart");
+  });
+
   it("shows a retryable error when a file ticket cannot be issued", async () => {
     const api = threadApi();
     api.createDownload

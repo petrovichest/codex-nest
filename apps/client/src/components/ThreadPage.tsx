@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, matchPath, Navigate, useLocation, useNavigate, useParams } from "react-router";
 
@@ -40,6 +40,7 @@ import type {
 } from "@codexnest/protocol";
 
 import {
+  artifactDescriptor,
   type ArtifactDescriptor,
   type SessionArtifact,
   localDownloadPath,
@@ -109,6 +110,8 @@ type ComposerDraftState = {
   threadId: string;
   value: UpdateThreadDraftRequest;
 };
+
+type LocalImageLoader = (path: string) => Promise<Blob>;
 
 const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
 
@@ -765,6 +768,32 @@ export function ThreadPage({
       return { state: "ready", data, fileName, size };
     },
     [api, threadId],
+  );
+
+  const localImageLoadsRef = useRef({ threadId, values: new Map<string, Promise<Blob>>() });
+  if (localImageLoadsRef.current.threadId !== threadId) {
+    localImageLoadsRef.current = { threadId, values: new Map() };
+  }
+  const loadLocalImage = useCallback<LocalImageLoader>(
+    (path) => {
+      const cached = localImageLoadsRef.current.values.get(path);
+      if (cached) return cached;
+      const request = (async () => {
+        const descriptor = artifactDescriptor(path);
+        if (descriptor?.kind !== "image") throw new Error("Unsupported local image format");
+        const result = await loadArtifact(descriptor);
+        if (result.state !== "ready") throw new Error("Local image is too large");
+        return new Blob([result.data], { type: localImageMimeType(path) });
+      })();
+      localImageLoadsRef.current.values.set(path, request);
+      void request.catch(() => {
+        if (localImageLoadsRef.current.values.get(path) === request) {
+          localImageLoadsRef.current.values.delete(path);
+        }
+      });
+      return request;
+    },
+    [loadArtifact],
   );
 
   function snapshotPreparation(): NewSessionPreparation {
@@ -2853,6 +2882,7 @@ export function ThreadPage({
                               item={entry}
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
+                              onLoadImage={loadLocalImage}
                               forkAction={
                                 !isSubagent && entry.id === forkResponseId
                                   ? {
@@ -3327,34 +3357,146 @@ function MarkdownContent({
   text,
   cwd,
   onDownload,
+  onLoadImage,
 }: {
   text: string;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onLoadImage?: LocalImageLoader;
 }) {
+  const components = useMemo<MarkdownComponents>(
+    () => ({
+      pre: CopyableCodeBlock,
+      table: MarkdownTable,
+      a({ href, children, title }) {
+        const path = cwd ? localDownloadPath(href, cwd) : null;
+        return path && onDownload ? (
+          <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
+            {children}
+          </DownloadLink>
+        ) : (
+          <a href={href} title={title}>
+            {children}
+          </a>
+        );
+      },
+      img({ src, alt, title }) {
+        return (
+          <MarkdownImage
+            src={src}
+            alt={alt ?? ""}
+            title={title}
+            cwd={cwd}
+            onLoadImage={onLoadImage}
+          />
+        );
+      },
+    }),
+    [cwd, onDownload, onLoadImage],
+  );
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        pre: CopyableCodeBlock,
-        table: MarkdownTable,
-        a({ href, children, title }) {
-          const path = cwd ? localDownloadPath(href, cwd) : null;
-          return path && onDownload ? (
-            <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
-              {children}
-            </DownloadLink>
-          ) : (
-            <a href={href} title={title}>
-              {children}
-            </a>
-          );
-        },
-      }}
-    >
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {text}
     </ReactMarkdown>
   );
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  title,
+  cwd,
+  onLoadImage,
+}: {
+  src?: string;
+  alt: string;
+  title?: string;
+  cwd?: string;
+  onLoadImage?: LocalImageLoader;
+}) {
+  const { t } = useI18n();
+  const path = cwd ? localDownloadPath(src, cwd) : null;
+  const descriptor = path ? artifactDescriptor(path) : null;
+  const localPath = descriptor?.kind === "image" ? path : null;
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<
+    { status: "loading" } | { status: "failed" } | { status: "ready"; source: string }
+  >({ status: "loading" });
+  const [viewer, setViewer] = useState<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!localPath || !onLoadImage) return;
+    let active = true;
+    let source: string | null = null;
+    setState({ status: "loading" });
+    void onLoadImage(localPath)
+      .then((blob) => {
+        source = URL.createObjectURL(blob);
+        if (active) setState({ status: "ready", source });
+        else URL.revokeObjectURL(source);
+      })
+      .catch(() => {
+        if (active) setState({ status: "failed" });
+      });
+    return () => {
+      active = false;
+      if (source) URL.revokeObjectURL(source);
+    };
+  }, [attempt, localPath, onLoadImage]);
+
+  if (!localPath || !onLoadImage) return <img src={src} alt={alt} title={title} />;
+  if (state.status === "loading") {
+    return (
+      <span className="markdown-image-state" role="status">
+        <span className="spinner small" />
+        {t("Загружаем изображение…")}
+      </span>
+    );
+  }
+  if (state.status === "failed") {
+    return (
+      <button
+        type="button"
+        className="markdown-image-state markdown-image-retry"
+        onClick={() => setAttempt((value) => value + 1)}
+      >
+        {t("Не удалось загрузить изображение. Повторить")}
+      </button>
+    );
+  }
+
+  const label =
+    alt ||
+    descriptor?.fileName ||
+    localPath.split("/").at(-1) ||
+    t("Изображение {{number}}", { number: 1 });
+  return (
+    <>
+      <button
+        type="button"
+        className="markdown-image-preview"
+        aria-label={t("Открыть изображение {{name}}", { name: label })}
+        onClick={(event) => setViewer(event.currentTarget)}
+      >
+        <img src={state.source} alt={alt} title={title} />
+      </button>
+      {viewer && (
+        <ImageViewer
+          images={[{ src: state.source, alt: label }]}
+          index={0}
+          opener={viewer}
+          onIndexChange={() => undefined}
+          onClose={() => setViewer(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function localImageMimeType(path: string): string {
+  const extension = path.split(".").at(-1)?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  return `image/${extension || "png"}`;
 }
 
 function CopyableCodeBlock({ children }: { children?: React.ReactNode }) {
@@ -3468,6 +3610,7 @@ export function Activity({
   item,
   cwd,
   onDownload,
+  onLoadImage,
   forkAction,
   annotations = [],
   annotationEnabled = false,
@@ -3479,6 +3622,7 @@ export function Activity({
   item: ActivityItem;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onLoadImage?: LocalImageLoader;
   forkAction?: { disabled: boolean; onFork(): void };
   annotations?: PendingAnnotation[];
   annotationEnabled?: boolean;
@@ -3505,6 +3649,7 @@ export function Activity({
                 source="agentMessage"
                 cwd={cwd}
                 onDownload={onDownload}
+                onLoadImage={onLoadImage}
                 annotations={messageAnnotations}
                 enabled={annotationEnabled}
                 readOnly={annotationBusy}
@@ -3513,7 +3658,12 @@ export function Activity({
                 onDelete={onDeleteAnnotation}
               />
             ) : (
-              <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+              <MarkdownContent
+                text={item.text}
+                cwd={cwd}
+                onDownload={onDownload}
+                onLoadImage={onLoadImage}
+              />
             ))}
           {item.images.length > 0 && <MessageImages images={item.images} />}
         </div>
@@ -3529,7 +3679,12 @@ export function Activity({
     return (
       <article className="message reasoning">
         <div className="message-body">
-          <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
+          <MarkdownContent
+            text={item.text}
+            cwd={cwd}
+            onDownload={onDownload}
+            onLoadImage={onLoadImage}
+          />
         </div>
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
@@ -3547,6 +3702,7 @@ export function Activity({
             source="plan"
             cwd={cwd}
             onDownload={onDownload}
+            onLoadImage={onLoadImage}
             annotations={messageAnnotations}
             enabled={annotationEnabled}
             readOnly={annotationBusy}
@@ -3829,6 +3985,7 @@ function AnnotatableMarkdownContent({
   source,
   cwd,
   onDownload,
+  onLoadImage,
   annotations,
   enabled,
   readOnly,
@@ -3841,6 +3998,7 @@ function AnnotatableMarkdownContent({
   source: "agentMessage" | "plan";
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onLoadImage?: LocalImageLoader;
   annotations: NumberedAnnotation[];
   enabled: boolean;
   readOnly: boolean;
@@ -4060,7 +4218,7 @@ function AnnotatableMarkdownContent({
         onPointerUp={() => window.setTimeout(captureSelection, 0)}
         onKeyUp={captureSelection}
       >
-        <MarkdownContent text={text} cwd={cwd} onDownload={onDownload} />
+        <MarkdownContent text={text} cwd={cwd} onDownload={onDownload} onLoadImage={onLoadImage} />
       </div>
       {annotations.map((item) => {
         const position = markerPositions[item.annotation.id];

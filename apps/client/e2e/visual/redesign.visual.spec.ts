@@ -58,6 +58,21 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT);
     await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
     await expect(page.getByText("Готово. Контраст выровнен", { exact: false })).toBeVisible();
+    const checklistMarker = await page
+      .locator(".plan-checklist li")
+      .first()
+      .evaluate((row) => {
+        const checkbox = row.querySelector("input")!.getBoundingClientRect();
+        const label = row.querySelector("span")!.getBoundingClientRect();
+        return {
+          centerOffset: checkbox.top + checkbox.height / 2 - (label.top + label.height / 2),
+          height: checkbox.height,
+          width: checkbox.width,
+        };
+      });
+    expect(checklistMarker.width).toBe(16);
+    expect(checklistMarker.height).toBe(16);
+    expect(Math.abs(checklistMarker.centerOffset)).toBeLessThanOrEqual(2);
     await expect(page).toHaveScreenshot("02-desktop-dark-session.png", { fullPage: true });
     if (browserName === "chromium") await expectA11yClean(page, "desktop session");
   });

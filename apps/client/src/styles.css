@@ -1932,6 +1932,55 @@
   background: color-mix(in srgb, var(--surface-muted) 72%, transparent);
 }
 
+.markdown-image-preview {
+  width: min(100%, 720px);
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  overflow: hidden;
+  margin: 10px 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.markdown-image-preview:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.markdown-image-preview img {
+  width: 100%;
+  max-height: 520px;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  object-fit: contain;
+}
+
+.markdown-image-state {
+  width: min(100%, 720px);
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.markdown-image-retry {
+  cursor: pointer;
+}
+
 .message-images {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
@@ -2296,8 +2345,13 @@
 }
 
 .plan-checklist input {
-  width: auto;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  flex: 0 0 16px;
   margin: 4px 0 0;
+  padding: 0;
   accent-color: var(--status-complete);
   pointer-events: none;
 }
