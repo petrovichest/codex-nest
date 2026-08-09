@@ -4600,12 +4600,12 @@
   }
 
   .skill-switch {
-    width: var(--control-touch-height);
+    width: 38px;
     height: var(--control-touch-height);
   }
 
   .skill-switch > span:last-child {
-    inset: 11px 3px;
+    inset: 5px 0;
   }
 
   .app-frame[data-sidebar-side="right"] .session-inspector {
