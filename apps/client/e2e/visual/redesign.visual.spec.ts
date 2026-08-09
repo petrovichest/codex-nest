@@ -93,6 +93,21 @@ test.describe("CodexNest redesign visual contract", () => {
     if (browserName === "chromium") await expectA11yClean(page, "desktop session");
   });
 
+  test("9 desktop light message queue", async ({ browserName, page }) => {
+    await openVisualPage(page, "/threads/session-attention", "light", DESKTOP_VIEWPORT);
+    const queue = page.getByRole("region", { name: "Очередь сообщений" });
+    await expect(queue).toBeVisible();
+    await expect(queue.locator(".queued-messages-count")).toHaveText("·1");
+    expect(
+      await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      "desktop queue fits without horizontal scrolling",
+    ).toBe(true);
+    await expect(page).toHaveScreenshot("09-desktop-light-queue.png", { fullPage: true });
+    if (browserName === "chromium") {
+      await expectA11yClean(page, "desktop message queue", ".queued-messages");
+    }
+  });
+
   test("3 desktop light settings", async ({ browserName, page }) => {
     await openVisualPage(page, "/settings?section=application", "light", DESKTOP_VIEWPORT);
     await expect(page.getByRole("heading", { name: "Интерфейс" })).toBeVisible();
@@ -135,7 +150,7 @@ test.describe("CodexNest redesign visual contract", () => {
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
     await expect(queue).toBeVisible();
-    await expect(queue.locator(".queued-messages-count")).toHaveText("1");
+    await expect(queue.locator(".queued-messages-count")).toHaveText("·1");
     await expect(queue.locator(".queued-message-order")).toHaveText("01");
     expect(
       await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
@@ -186,8 +201,10 @@ async function openVisualPage(
   await waitForVisualReady(page);
 }
 
-async function expectA11yClean(page: Page, surface: string): Promise<void> {
-  const { violations } = await new AxeBuilder({ page }).analyze();
+async function expectA11yClean(page: Page, surface: string, include?: string): Promise<void> {
+  const builder = new AxeBuilder({ page });
+  if (include) builder.include(include);
+  const { violations } = await builder.analyze();
   const report = violations.map((violation) => ({
     id: violation.id,
     impact: violation.impact,

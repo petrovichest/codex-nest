@@ -4457,7 +4457,10 @@ function QueuedMessages({
     <section className="queued-messages" aria-label={t("Очередь сообщений")}>
       <header className="queued-messages-header">
         <span>{t("Очередь сообщений")}</span>
-        <span className="queued-messages-count">{messages.length}</span>
+        <span className="queued-messages-count">
+          <span aria-hidden="true">·</span>
+          {messages.length}
+        </span>
       </header>
       <div className="queued-messages-list">
         {messages.map((message, index) => {
@@ -4532,6 +4535,7 @@ function QueuedMessages({
                       type="button"
                       className="icon-button"
                       aria-label={t("Изменить сообщение в очереди")}
+                      title={t("Изменить сообщение в очереди")}
                       disabled={actionsDisabled}
                       onClick={() => setEditor({ messageId: message.id, value: message.text })}
                     >
@@ -4542,6 +4546,7 @@ function QueuedMessages({
                     type="button"
                     className="icon-button danger"
                     aria-label={t("Удалить сообщение из очереди")}
+                    title={t("Удалить сообщение из очереди")}
                     disabled={actionsDisabled}
                     onClick={() => void onDelete(message.id)}
                   >
@@ -4549,12 +4554,13 @@ function QueuedMessages({
                   </button>
                   <button
                     type="button"
-                    className="queued-message-send"
+                    className="icon-button queued-message-send"
+                    aria-label={t("Отправить сейчас")}
+                    title={t("Отправить сейчас")}
                     disabled={actionsDisabled}
                     onClick={() => void onSendNow(message.id)}
                   >
                     <SendIcon />
-                    {t("Отправить сейчас")}
                   </button>
                 </div>
               </div>
