@@ -104,6 +104,11 @@ test.describe("CodexNest redesign visual contract", () => {
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
     await assertCompactTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
     await assertCompactTouchTarget(page.getByRole("button", { name: "Показать сведения" }));
+    const composerOptions = page.locator(".composer-options");
+    expect(
+      await composerOptions.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      "mobile composer options fit without horizontal scrolling",
+    ).toBe(true);
     await expect(page).toHaveScreenshot("06-mobile-dark-attention.png", { fullPage: true });
   });
 
@@ -149,7 +154,7 @@ async function expectA11yClean(page: Page, surface: string): Promise<void> {
 async function assertCompactTouchTarget(locator: Locator): Promise<void> {
   const box = await locator.boundingBox();
   expect(box, "mobile action must have a rendered box").not.toBeNull();
-  expect(box!.width, "mobile action width").toBeGreaterThanOrEqual(38);
-  expect(box!.height, "mobile action height").toBeGreaterThanOrEqual(38);
-  expect(box!.height, "mobile action stays compact").toBeLessThanOrEqual(40);
+  expect(box!.width, "mobile action width").toBeGreaterThanOrEqual(32);
+  expect(box!.height, "mobile action height").toBeGreaterThanOrEqual(32);
+  expect(box!.height, "mobile action stays compact").toBeLessThanOrEqual(34);
 }

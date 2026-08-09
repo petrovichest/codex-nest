@@ -23,10 +23,10 @@
 .icon-button {
   display: inline-grid;
   place-items: center;
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
-  min-height: 38px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
   border-color: transparent;
   background: transparent;
@@ -4969,8 +4969,35 @@
   }
 
   .composer-options {
-    max-width: calc(100vw - 116px);
-    overflow-x: auto;
+    max-width: none;
+    overflow: hidden;
+  }
+
+  .model-toggle {
+    max-width: 60px;
+    padding-inline: 6px;
+  }
+
+  .model-toggle svg {
+    display: none;
+  }
+
+  .composer-options:has(.project-picker) .project-picker select {
+    max-width: 70px;
+  }
+
+  .composer-options:has(.project-picker) .model-toggle {
+    width: var(--control-touch-height);
+    min-width: var(--control-touch-height);
+    padding: 0;
+  }
+
+  .composer-options:has(.project-picker) .model-toggle svg {
+    display: block;
+  }
+
+  .composer-options:has(.project-picker) .model-toggle span {
+    display: none;
   }
 
   .composer-empty-projects {
