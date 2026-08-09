@@ -30,8 +30,8 @@ describe("CodexSettingsCard", () => {
     expect(await screen.findByText("Не проверялась")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Codex CLI" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Прокси" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Codex CLI" }).closest(".settings-card")).not.toBe(
-      screen.getByRole("heading", { name: "Прокси" }).closest(".settings-card"),
+    expect(screen.getByRole("heading", { name: "Codex CLI" }).closest(".settings-group")).not.toBe(
+      screen.getByRole("heading", { name: "Прокси" }).closest(".settings-group"),
     );
     expect(screen.getByText("Установленная версия Codex CLI")).toBeInTheDocument();
     expect(screen.getByText("Актуальная версия Codex CLI")).toBeInTheDocument();

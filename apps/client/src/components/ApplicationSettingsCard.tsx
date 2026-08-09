@@ -8,6 +8,7 @@ import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { openDownloadUrl } from "../downloads";
 import { ServerIcon } from "./Icons";
+import { SettingsGroup } from "./SettingsPresentation";
 
 type Action = "checking" | "updating" | null;
 
@@ -153,37 +154,32 @@ export function ApplicationSettingsCard({
   const busy = action !== null || (status !== null && status.operation !== "idle");
 
   return (
-    <section className="settings-card application-settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <ServerIcon />
-        </span>
-        <div>
-          <h2>{t("Обновление CodexNest")}</h2>
-          <p>
-            {t("Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.")}
-          </p>
-        </div>
-      </div>
-
+    <SettingsGroup
+      className="application-settings-card"
+      description={t(
+        "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.",
+      )}
+      icon={<ServerIcon />}
+      title={t("Обновление CodexNest")}
+    >
       {loading ? (
         <div className="settings-loading compact">
           <span className="spinner small" /> {t("Получаем версию CodexNest…")}
         </div>
       ) : (
         <>
-          <dl className="codex-status-grid">
+          <dl className="settings-status-list">
             <div>
               <dt>{t("Установлено на сервере")}</dt>
-              <dd>{status?.currentVersion ?? "—"}</dd>
+              <dd className="settings-technical">{status?.currentVersion ?? "—"}</dd>
             </div>
             <div>
               <dt>{t("Актуальная версия в GitHub")}</dt>
-              <dd>{status?.latestVersion ?? t("Не проверялась")}</dd>
+              <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
             </div>
             <div>
               <dt>{t("APK на этом устройстве")}</dt>
-              <dd>{apkVersionLabel}</dd>
+              <dd className="settings-technical">{apkVersionLabel}</dd>
             </div>
             <div>
               <dt>{t("Состояние")}</dt>
@@ -252,7 +248,7 @@ export function ApplicationSettingsCard({
           </div>
         </>
       )}
-    </section>
+    </SettingsGroup>
   );
 }
 

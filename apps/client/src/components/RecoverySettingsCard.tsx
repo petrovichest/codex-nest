@@ -6,6 +6,7 @@ import { ApiClientError } from "../api";
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n } from "../i18n";
 import { AlertIcon } from "./Icons";
+import { SettingsGroup } from "./SettingsPresentation";
 
 type RecoveryAction = "app" | "codex" | null;
 type Feedback = { kind: "error" | "success"; message: string } | null;
@@ -115,21 +116,14 @@ export function RecoverySettingsCard({
     state.snapshot?.threads.filter((thread) => thread.currentTurnId !== null).length ?? 0;
 
   return (
-    <section className="settings-card recovery-settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <AlertIcon />
-        </span>
-        <div>
-          <h2>{t("Аварийное восстановление")}</h2>
-          <p>
-            {t(
-              "Используйте только если обычное обновление или работа сессий зависли. Эти действия обходят безопасное ожидание активных задач.",
-            )}
-          </p>
-        </div>
-      </div>
-
+    <SettingsGroup
+      className="recovery-settings-card"
+      description={t(
+        "Используйте только если обычное обновление или работа сессий зависли. Эти действия обходят безопасное ожидание активных задач.",
+      )}
+      icon={<AlertIcon />}
+      title={t("Аварийное восстановление")}
+    >
       <div className="settings-notice danger" role="status">
         {activeTurnCount > 0
           ? t("Активных ответов: {{count}}. Жёсткий перезапуск может их прервать.", {
@@ -165,7 +159,7 @@ export function RecoverySettingsCard({
           {action === "codex" ? t("Перезапускаем Codex…") : t("Жёстко перезапустить Codex")}
         </button>
       </div>
-    </section>
+    </SettingsGroup>
   );
 }
 

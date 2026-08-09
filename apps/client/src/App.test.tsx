@@ -133,8 +133,12 @@ describe("App routing and navigation", () => {
 
     renderApp("/threads/newer");
 
-    expect(screen.getByRole("dialog", { name: "Разрешить уведомления?" })).toBeInTheDocument();
+    const prompt = screen.getByRole("dialog", { name: "Разрешить уведомления?" });
+    expect(prompt).toBeInTheDocument();
     expect(requestPermission).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseDown(prompt.parentElement!);
+    expect(screen.getByRole("dialog", { name: "Разрешить уведомления?" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Разрешить уведомления" }));
 
     await waitFor(() => expect(requestPermission).toHaveBeenCalledOnce());
@@ -791,10 +795,57 @@ describe("App routing and navigation", () => {
     const theme = await screen.findByRole("combobox", { name: "Тема" });
     expect(theme).toHaveValue("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+      "content",
+      "#11171D",
+    );
 
     fireEvent.change(theme, { target: { value: "light" } });
     await waitFor(() => expect(localStorage.getItem("codexnest.theme")).toBe("light"));
     expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+      "content",
+      "#F5F7F9",
+    );
+  });
+
+  it("keeps settings inside the app's single main landmark", () => {
+    mockConnection(snapshot([baseThread]));
+
+    const view = renderApp("/settings");
+    const settingsRegion = screen.getByRole("region", { name: "Настройки" });
+
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+    expect(settingsRegion).toHaveClass("settings-scroll");
+    expect(view.container.querySelector("main .settings-scroll")).toBe(settingsRegion);
+  });
+
+  it("reacts to system theme changes and updates browser chrome", () => {
+    let onChange: (() => void) | undefined;
+    const colorScheme = {
+      matches: false,
+      addEventListener: vi.fn((_type: string, listener: () => void) => {
+        onChange = listener;
+      }),
+      removeEventListener: vi.fn(),
+    };
+    vi.mocked(window.matchMedia).mockReturnValue(colorScheme as unknown as MediaQueryList);
+    mockConnection(snapshot([baseThread]));
+
+    renderApp("/settings");
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+
+    colorScheme.matches = true;
+    act(() => onChange?.());
+
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+      "content",
+      "#11171D",
+    );
   });
 
   it("uses conventional interface defaults on a new device", async () => {

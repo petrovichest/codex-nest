@@ -1,5 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
@@ -11,5 +12,9 @@ export default defineConfig({
     },
   },
   build: { sourcemap: true },
-  test: { environment: "jsdom", setupFiles: ["./src/test/setup.ts"] },
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
+    exclude: [...configDefaults.exclude, "e2e/**"],
+  },
 });

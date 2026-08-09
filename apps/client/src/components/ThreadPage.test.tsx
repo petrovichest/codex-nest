@@ -1054,30 +1054,17 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const downloadButton = screen.getByRole("button", { name: "Скачать file.txt" });
-    fireEvent.click(downloadButton);
+    const downloadLink = screen.getByRole("link", { name: "Скачать файл" });
+    fireEvent.click(downloadLink);
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скачать файл");
 
-    fireEvent.click(downloadButton);
+    fireEvent.click(downloadLink);
     await waitFor(() => expect(openDownloadUrl).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("opens a supported agent file in the artifact viewer without scanning the workspace", async () => {
+  it("keeps linked files as regular download links rather than inferred artifacts", () => {
     const api = threadApi();
-    api.createDownload.mockResolvedValueOnce({
-      downloadUrl: "/downloads/ticket/report.md",
-      expiresAt: 61_000,
-      fileName: "report.md",
-      size: 18,
-    });
-    const fetchFile = vi.fn().mockResolvedValue(
-      new Response("# Artifact report", {
-        status: 200,
-        headers: { "Content-Type": "application/octet-stream" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchFile);
     mockThreadConnection(api, summary, {
       turns: [
         {
@@ -1092,7 +1079,7 @@ describe("Activity", () => {
               type: "agentMessage",
               id: "agent",
               status: "completed",
-              text: "[Готовый отчёт](/work/project/output/report.md)",
+              text: "[universe.rs:183](/work/project/src/universe.rs)\n[Готовый отчёт](/work/project/output/report.md)",
               images: [],
               timestamp: 2,
               phase: "final_answer",
@@ -1103,64 +1090,9 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const open = screen.getByRole("button", { name: "Открыть report.md" });
-    fireEvent.click(open);
-
-    expect(await screen.findByRole("heading", { name: "Artifact report" })).toBeInTheDocument();
-    expect(api.createDownload).toHaveBeenCalledWith("thread", "/work/project/output/report.md");
-    expect(fetchFile).toHaveBeenCalledWith(
-      new URL("https://codex.home.arpa/downloads/ticket/report.md"),
-      { cache: "no-store" },
-    );
-    expect(openDownloadUrl).not.toHaveBeenCalled();
-
-    const viewer = screen.getByLabelText("Просмотр файла report.md");
-    fireEvent.click(within(viewer).getByRole("button", { name: "Закрыть предпросмотр" }));
-    expect(screen.queryByRole("heading", { name: "Artifact report" })).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Открыть report.md" })).toHaveFocus(),
-    );
-  });
-
-  it("does not fetch an artifact that exceeds its preview limit", async () => {
-    const api = threadApi();
-    api.createDownload.mockResolvedValueOnce({
-      downloadUrl: "/downloads/ticket/report.txt",
-      expiresAt: 61_000,
-      fileName: "report.txt",
-      size: 2 * 1024 * 1024 + 1,
-    });
-    const fetchFile = vi.fn();
-    vi.stubGlobal("fetch", fetchFile);
-    mockThreadConnection(api, summary, {
-      turns: [
-        {
-          id: "turn",
-          status: "completed",
-          startedAt: 1,
-          completedAt: 2,
-          durationMs: 1,
-          progress: progress(),
-          items: [
-            {
-              type: "agentMessage",
-              id: "agent",
-              status: "completed",
-              text: "[Большой отчёт](/work/project/report.txt)",
-              images: [],
-              timestamp: 2,
-              phase: "final_answer",
-            },
-          ],
-        },
-      ],
-    });
-    renderThread();
-
-    fireEvent.click(screen.getByRole("button", { name: "Открыть report.txt" }));
-
-    expect(await screen.findByText("Файл слишком большой для предпросмотра")).toBeInTheDocument();
-    expect(fetchFile).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "universe.rs:183" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Готовый отчёт" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Открыть (universe\.rs|report\.md)/ })).toBeNull();
   });
 
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {
@@ -1184,7 +1116,10 @@ describe("Activity", () => {
     expect(api.updateThread).toHaveBeenCalledWith("thread", { pinned: true });
 
     fireEvent.click(screen.getByRole("button", { name: "Переименовать" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Название" }), {
+    const renameDialog = screen.getByRole("dialog", { name: "Переименовать" });
+    const renameInput = within(renameDialog).getByRole("textbox", { name: "Название" });
+    expect(renameInput).toHaveFocus();
+    fireEvent.change(renameInput, {
       target: { value: "Новое имя" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
@@ -2147,8 +2082,22 @@ describe("Activity", () => {
     expect(screen.getByLabelText("Сведения о задаче")).toBeInTheDocument();
   });
 
-  it("loads the full history only after the artifacts tab is selected", async () => {
+  it("loads semantic artifacts lazily without loading historical turns", async () => {
     const api = threadApi();
+    api.readThreadArtifacts.mockResolvedValueOnce({
+      capability: "explicit",
+      artifacts: [
+        {
+          id: "artifact-latest",
+          label: "Свежий отчёт",
+          path: "/work/project/reports/latest.md",
+          relativePath: "reports/latest.md",
+          fileName: "latest.md",
+          turnId: "latest",
+          createdAt: 1,
+        },
+      ],
+    });
     const context = mockThreadConnection(api, summary, {
       olderTurnsCursor: "older-1",
       turns: [
@@ -2164,65 +2113,88 @@ describe("Activity", () => {
               type: "agentMessage",
               id: "latest-answer",
               status: "completed",
-              text: "[Свежий отчёт](/work/project/reports/latest.md)",
+              text: "[universe.rs:183](/work/project/src/universe.rs)",
               images: [],
               timestamp: 40,
               phase: "final_answer",
+            },
+            {
+              type: "reasoning",
+              id: "reasoning-link",
+              status: "completed",
+              text: "[Проверка](/work/project/checks/reasoning.log)",
+              images: [],
+              timestamp: 39,
+              phase: null,
+            },
+            {
+              type: "plan",
+              id: "plan-link",
+              status: "completed",
+              text: "[Пункт плана](/work/project/plan.md)",
+              images: [],
+              timestamp: 38,
+              phase: null,
             },
           ],
         },
       ],
     });
-    context.loadOlderDetail.mockImplementation(async (_threadId, cursor) => {
-      const current = context.state.details.thread;
-      const page = {
-        ...current,
-        turns: [
-          {
-            id: cursor,
-            status: "completed" as const,
-            startedAt: cursor === "older-1" ? 20 : 10,
-            completedAt: cursor === "older-1" ? 21 : 11,
-            durationMs: 1,
-            progress: progress(),
-            items:
-              cursor === "older-2"
-                ? [
-                    {
-                      type: "agentMessage" as const,
-                      id: "old-answer",
-                      status: "completed" as const,
-                      text: "[Старый файл](/work/project/archive/old.pdf)",
-                      images: [],
-                      timestamp: 11,
-                      phase: "final_answer" as const,
-                    },
-                  ]
-                : [],
-          },
-        ],
-        olderTurnsCursor: cursor === "older-1" ? "older-2" : null,
-      };
-      context.state.details.thread = {
-        ...current,
-        turns: [...page.turns, ...current.turns],
-        olderTurnsCursor: page.olderTurnsCursor,
-      };
-      return page;
-    });
     renderThread();
 
     fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    expect(api.readThreadArtifacts).not.toHaveBeenCalled();
     expect(context.loadOlderDetail).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("tab", { name: "Артефакты" }));
 
-    await waitFor(() => expect(context.loadOlderDetail).toHaveBeenCalledTimes(2));
-    expect(context.loadOlderDetail).toHaveBeenNthCalledWith(1, "thread", "older-1");
-    expect(context.loadOlderDetail).toHaveBeenNthCalledWith(2, "thread", "older-2");
+    await waitFor(() => expect(api.readThreadArtifacts).toHaveBeenCalledWith("thread"));
+    expect(context.loadOlderDetail).not.toHaveBeenCalled();
     const inspector = screen.getByLabelText("Сведения о задаче");
     expect(within(inspector).getByText("reports/latest.md")).toBeInTheDocument();
-    expect(within(inspector).getByText("archive/old.pdf")).toBeInTheDocument();
-    expect(within(inspector).getByRole("tab", { name: "Артефакты, 2" })).toBeInTheDocument();
+    expect(within(inspector).queryByText("src/universe.rs")).not.toBeInTheDocument();
+    expect(within(inspector).queryByText("checks/reasoning.log")).not.toBeInTheDocument();
+    expect(within(inspector).queryByText("plan.md")).not.toBeInTheDocument();
+    expect(within(inspector).getByRole("tab", { name: "Артефакты, 1" })).toBeInTheDocument();
+  });
+
+  it("refreshes semantic artifacts when a turn completes while the tab is open", async () => {
+    const api = threadApi();
+    api.readThreadArtifacts
+      .mockResolvedValueOnce({ capability: "explicit", artifacts: [] })
+      .mockResolvedValueOnce({
+        capability: "explicit",
+        artifacts: [
+          {
+            id: "artifact-result",
+            label: "Результат",
+            path: "/work/project/result.pdf",
+            relativePath: "result.pdf",
+            fileName: "result.pdf",
+            turnId: "turn",
+            createdAt: 1,
+          },
+        ],
+      });
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    const view = renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Артефакты" }));
+    await waitFor(() => expect(api.readThreadArtifacts).toHaveBeenCalledTimes(1));
+
+    const completed = {
+      ...running,
+      state: "completed" as const,
+      currentTurnId: null,
+      updatedAt: 3,
+    };
+    context.state.snapshot.threads = [completed];
+    context.state.details.thread.summary = completed;
+    view.rerender(threadRoute());
+
+    await waitFor(() => expect(api.readThreadArtifacts).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Результат")).toBeInTheDocument();
   });
 
   it("returns from an inspector artifact preview to the artifact shelf", async () => {
@@ -2232,6 +2204,20 @@ describe("Activity", () => {
       expiresAt: 61_000,
       fileName: "report.md",
       size: 8,
+    });
+    api.readThreadArtifacts.mockResolvedValueOnce({
+      capability: "explicit",
+      artifacts: [
+        {
+          id: "artifact-report",
+          label: "Отчёт",
+          path: "/work/project/report.md",
+          relativePath: "report.md",
+          fileName: "report.md",
+          turnId: "turn",
+          createdAt: 1,
+        },
+      ],
     });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("# Report", { status: 200 })));
     mockThreadConnection(api, summary, {
@@ -2260,7 +2246,8 @@ describe("Activity", () => {
     renderThread();
 
     fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Артефакты, 1" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Артефакты" }));
+    await screen.findByRole("tab", { name: "Артефакты, 1" });
     const inspector = screen.getByLabelText("Сведения о задаче");
     fireEvent.click(within(inspector).getByRole("button", { name: "Открыть report.md" }));
 
@@ -4226,6 +4213,7 @@ function threadApi() {
     readGitChanges: vi
       .fn()
       .mockResolvedValue({ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }),
+    readThreadArtifacts: vi.fn().mockResolvedValue({ capability: "explicit", artifacts: [] }),
     readGoal: vi.fn().mockResolvedValue(null),
     updateGoal: vi.fn().mockResolvedValue(null),
     clearGoal: vi.fn().mockResolvedValue(undefined),

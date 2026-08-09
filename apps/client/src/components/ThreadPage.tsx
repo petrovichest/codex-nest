@@ -40,11 +40,11 @@ import type {
 } from "@codexnest/protocol";
 
 import {
-  artifactDescriptor,
-  collectSessionArtifacts,
   type ArtifactDescriptor,
   type SessionArtifact,
   localDownloadPath,
+  sessionArtifacts,
+  type ThreadArtifactsResponse,
 } from "../artifacts";
 import {
   type AnnotationDraft,
@@ -74,6 +74,7 @@ import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { ArtifactViewer, type ArtifactLoadResult } from "./ArtifactViewer";
 import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
+import { Dialog } from "./Dialog";
 import {
   ArchiveIcon,
   ArrowDownIcon,
@@ -96,7 +97,7 @@ import {
 } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import {
-  type ArtifactHistoryState,
+  type ArtifactLoadState,
   type GitChangesView,
   type InspectorTab,
   NewSessionInspector,
@@ -469,12 +470,13 @@ export function ThreadPage({
     newSessionProject ??
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ??
     null;
-  const artifactCwd = summary?.cwd ?? project?.path ?? "";
-  const sessionArtifacts = useMemo(
-    () => (artifactCwd ? collectSessionArtifacts(detail?.turns ?? [], artifactCwd) : []),
-    [artifactCwd, detail?.turns],
-  );
-  const artifactHistoryComplete = detail?.olderTurnsCursor === null;
+  const [artifactShelf, setArtifactShelf] = useState<{
+    threadId: string;
+    response: ThreadArtifactsResponse;
+  } | null>(null);
+  const artifactResponse =
+    artifactShelf && artifactShelf.threadId === threadId ? artifactShelf.response : null;
+  const threadArtifacts = useMemo(() => sessionArtifacts(artifactResponse), [artifactResponse]);
   const [composerDraftState, setComposerDraftState] = useState<ComposerDraftState>(() => ({
     threadId,
     value: detail?.draft
@@ -531,8 +533,8 @@ export function ThreadPage({
   const [olderError, setOlderError] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
-  const [artifactHistoryState, setArtifactHistoryState] = useState<ArtifactHistoryState>("idle");
-  const artifactHistoryRun = useRef(0);
+  const [artifactLoadState, setArtifactLoadState] = useState<ArtifactLoadState>("idle");
+  const artifactRequestRun = useRef(0);
   const [artifactViewer, setArtifactViewer] = useState<{
     artifact: ArtifactDescriptor;
     opener: HTMLButtonElement;
@@ -541,8 +543,9 @@ export function ThreadPage({
   const artifactViewerRef = useRef(artifactViewer);
   artifactViewerRef.current = artifactViewer;
   useEffect(() => {
-    artifactHistoryRun.current += 1;
-    setArtifactHistoryState("idle");
+    artifactRequestRun.current += 1;
+    setArtifactShelf(null);
+    setArtifactLoadState("idle");
     setArtifactViewer(null);
     setInspectorTab("overview");
   }, [threadId]);
@@ -728,10 +731,6 @@ export function ThreadPage({
     [api, threadId],
   );
 
-  const openArtifact = useCallback((artifact: ArtifactDescriptor, opener: HTMLButtonElement) => {
-    setInspectorOpen(false);
-    setArtifactViewer({ artifact, opener, returnToInspector: false });
-  }, []);
   const openInspectorArtifact = useCallback(
     (artifact: SessionArtifact, opener: HTMLButtonElement) => {
       if (!artifact.preview) return;
@@ -1814,53 +1813,68 @@ export function ThreadPage({
     }
   }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, threadId]);
 
-  const loadArtifactHistory = useCallback(async () => {
-    if (artifactHistoryState === "loading") return;
-    let cursor = detail?.olderTurnsCursor;
-    if (!cursor) {
-      setArtifactHistoryState("idle");
-      return;
-    }
-    const run = ++artifactHistoryRun.current;
-    const seen = new Set<string>();
-    setArtifactHistoryState("loading");
+  const loadSessionArtifacts = useCallback(async () => {
+    const run = ++artifactRequestRun.current;
+    setArtifactLoadState("loading");
     try {
-      while (
-        cursor &&
-        artifactHistoryRun.current === run &&
-        activeThreadIdRef.current === threadId
-      ) {
-        if (seen.has(cursor)) throw new Error("Repeated thread history cursor");
-        seen.add(cursor);
-        const page = await loadOlderDetail(threadId, cursor);
-        cursor = page.olderTurnsCursor;
-      }
-      if (artifactHistoryRun.current === run && activeThreadIdRef.current === threadId) {
-        setArtifactHistoryState("idle");
+      const response = await api.readThreadArtifacts(threadId);
+      if (artifactRequestRun.current === run && activeThreadIdRef.current === threadId) {
+        setArtifactShelf({ threadId, response });
+        setArtifactLoadState("idle");
       }
     } catch {
-      if (artifactHistoryRun.current === run && activeThreadIdRef.current === threadId) {
-        setArtifactHistoryState("error");
+      if (artifactRequestRun.current === run && activeThreadIdRef.current === threadId) {
+        setArtifactLoadState("error");
       }
     }
-  }, [artifactHistoryState, detail?.olderTurnsCursor, loadOlderDetail, threadId]);
+  }, [api, threadId]);
 
   useEffect(() => {
     if (
       !inspectorOpen ||
       inspectorTab !== "artifacts" ||
-      artifactHistoryComplete ||
-      artifactHistoryState !== "idle"
+      artifactResponse ||
+      artifactLoadState !== "idle"
     ) {
       return;
     }
-    void loadArtifactHistory();
+    void loadSessionArtifacts();
+  }, [artifactLoadState, artifactResponse, inspectorOpen, inspectorTab, loadSessionArtifacts]);
+
+  const previousArtifactTurn = useRef<{
+    threadId: string;
+    state: ThreadState | undefined;
+    turnId: string | null;
+  } | null>(null);
+  useEffect(() => {
+    const previous = previousArtifactTurn.current;
+    const current = {
+      threadId,
+      state: summary?.state,
+      turnId: summary?.currentTurnId ?? null,
+    };
+    previousArtifactTurn.current = current;
+    const turnCompleted =
+      previous !== null &&
+      previous.threadId === threadId &&
+      previous.turnId !== null &&
+      (previous.state === "queued" ||
+        previous.state === "running" ||
+        previous.state === "needsAttention") &&
+      (current.turnId === null ||
+        current.state === "completed" ||
+        current.state === "failed" ||
+        current.state === "interrupted");
+    if (inspectorOpen && inspectorTab === "artifacts" && turnCompleted) {
+      void loadSessionArtifacts();
+    }
   }, [
-    artifactHistoryComplete,
-    artifactHistoryState,
     inspectorOpen,
     inspectorTab,
-    loadArtifactHistory,
+    loadSessionArtifacts,
+    summary?.currentTurnId,
+    summary?.state,
+    threadId,
   ]);
 
   function persistAnnotations(next: PendingAnnotation[]): boolean {
@@ -2831,7 +2845,6 @@ export function ThreadPage({
                             items={entry}
                             cwd={workspaceSummary.cwd}
                             onDownload={downloadFile}
-                            onArtifactOpen={openArtifact}
                             key={entry.map((item) => item.id).join(":")}
                           />
                         ) : (
@@ -2840,7 +2853,6 @@ export function ThreadPage({
                               item={entry}
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
-                              onArtifactOpen={openArtifact}
                               forkAction={
                                 !isSubagent && entry.id === forkResponseId
                                   ? {
@@ -2899,7 +2911,6 @@ export function ThreadPage({
                           onLoad={() => loadTurnItems(threadId, turn.id)}
                           cwd={workspaceSummary.cwd}
                           onDownload={downloadFile}
-                          onArtifactOpen={openArtifact}
                         />
                       )}
                       {isSubagent ? (
@@ -2933,7 +2944,6 @@ export function ThreadPage({
                       item={optimisticActivity(message)}
                       cwd={workspaceSummary.cwd}
                       onDownload={downloadFile}
-                      onArtifactOpen={openArtifact}
                     />
                   </div>
                 ))}
@@ -3149,15 +3159,15 @@ export function ThreadPage({
           project={project}
           gitChanges={gitChangesState?.threadId === threadId ? gitChangesState.value : null}
           activeTab={inspectorTab}
-          artifacts={sessionArtifacts}
-          artifactHistoryComplete={artifactHistoryComplete}
-          artifactHistoryState={artifactHistoryState}
+          artifacts={threadArtifacts}
+          artifactCapability={artifactResponse?.capability ?? null}
+          artifactLoadState={artifactLoadState}
           onClose={() => setInspectorOpen(false)}
           onTabChange={setInspectorTab}
           onArtifactOpen={openInspectorArtifact}
           onArtifactDownload={downloadFile}
           onArtifactRetry={() => {
-            setArtifactHistoryState("idle");
+            void loadSessionArtifacts();
           }}
         />
       )}
@@ -3317,12 +3327,10 @@ function MarkdownContent({
   text,
   cwd,
   onDownload,
-  onArtifactOpen,
 }: {
   text: string;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
-  onArtifactOpen?(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
 }) {
   return (
     <ReactMarkdown
@@ -3332,15 +3340,7 @@ function MarkdownContent({
         table: MarkdownTable,
         a({ href, children, title }) {
           const path = cwd ? localDownloadPath(href, cwd) : null;
-          const artifact = path ? artifactDescriptor(path) : null;
-          return artifact && onDownload && onArtifactOpen ? (
-            <ArtifactLink
-              artifact={artifact}
-              title={title}
-              onDownload={onDownload}
-              onOpen={onArtifactOpen}
-            />
-          ) : path && onDownload ? (
+          return path && onDownload ? (
             <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
               {children}
             </DownloadLink>
@@ -3354,71 +3354,6 @@ function MarkdownContent({
     >
       {text}
     </ReactMarkdown>
-  );
-}
-
-function ArtifactLink({
-  artifact,
-  title,
-  onDownload,
-  onOpen,
-}: {
-  artifact: ArtifactDescriptor;
-  title?: string;
-  onDownload(path: string): Promise<void>;
-  onOpen(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
-}) {
-  const { t } = useI18n();
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  async function download() {
-    if (busy) return;
-    setBusy(true);
-    setFailed(false);
-    try {
-      await onDownload(artifact.path);
-    } catch {
-      setFailed(true);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <span className="artifact-link-container">
-      <span className="artifact-link" title={title}>
-        <button
-          type="button"
-          className="artifact-link-open"
-          data-artifact-path={artifact.path}
-          aria-label={t("Открыть {{name}}", { name: artifact.fileName })}
-          onClick={(event) => onOpen(artifact, event.currentTarget)}
-        >
-          <span className="artifact-link-icon">
-            <FileIcon />
-          </span>
-          <span className="artifact-link-copy">
-            <strong>{artifact.fileName}</strong>
-            <span>{artifact.format}</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          className="artifact-link-download"
-          aria-label={t("Скачать {{name}}", { name: artifact.fileName })}
-          disabled={busy}
-          onClick={() => void download()}
-        >
-          <ArrowDownIcon />
-        </button>
-      </span>
-      {failed && (
-        <span className="download-link-error" role="alert">
-          {t("Не удалось скачать файл. Нажмите ещё раз.")}
-        </span>
-      )}
-    </span>
   );
 }
 
@@ -3533,7 +3468,6 @@ export function Activity({
   item,
   cwd,
   onDownload,
-  onArtifactOpen,
   forkAction,
   annotations = [],
   annotationEnabled = false,
@@ -3545,7 +3479,6 @@ export function Activity({
   item: ActivityItem;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
-  onArtifactOpen?(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
   forkAction?: { disabled: boolean; onFork(): void };
   annotations?: PendingAnnotation[];
   annotationEnabled?: boolean;
@@ -3572,7 +3505,6 @@ export function Activity({
                 source="agentMessage"
                 cwd={cwd}
                 onDownload={onDownload}
-                onArtifactOpen={onArtifactOpen}
                 annotations={messageAnnotations}
                 enabled={annotationEnabled}
                 readOnly={annotationBusy}
@@ -3597,12 +3529,7 @@ export function Activity({
     return (
       <article className="message reasoning">
         <div className="message-body">
-          <MarkdownContent
-            text={item.text}
-            cwd={cwd}
-            onDownload={onDownload}
-            onArtifactOpen={onArtifactOpen}
-          />
+          <MarkdownContent text={item.text} cwd={cwd} onDownload={onDownload} />
         </div>
         <MessageFooter text={item.text} timestamp={item.timestamp} />
       </article>
@@ -3620,7 +3547,6 @@ export function Activity({
             source="plan"
             cwd={cwd}
             onDownload={onDownload}
-            onArtifactOpen={onArtifactOpen}
             annotations={messageAnnotations}
             enabled={annotationEnabled}
             readOnly={annotationBusy}
@@ -3828,6 +3754,7 @@ export function Activity({
         icon={<TerminalIcon />}
         title={item.command || t("Выполнена команда")}
         status={item.status}
+        technicalTitle={Boolean(item.command)}
       >
         {item.cwd && <div className="path">{item.cwd}</div>}
         <pre>{item.output || `$ ${item.command}`}</pre>
@@ -3902,7 +3829,6 @@ function AnnotatableMarkdownContent({
   source,
   cwd,
   onDownload,
-  onArtifactOpen,
   annotations,
   enabled,
   readOnly,
@@ -3915,7 +3841,6 @@ function AnnotatableMarkdownContent({
   source: "agentMessage" | "plan";
   cwd?: string;
   onDownload?(path: string): Promise<void>;
-  onArtifactOpen?(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
   annotations: NumberedAnnotation[];
   enabled: boolean;
   readOnly: boolean;
@@ -4135,12 +4060,7 @@ function AnnotatableMarkdownContent({
         onPointerUp={() => window.setTimeout(captureSelection, 0)}
         onKeyUp={captureSelection}
       >
-        <MarkdownContent
-          text={text}
-          cwd={cwd}
-          onDownload={onDownload}
-          onArtifactOpen={onArtifactOpen}
-        />
+        <MarkdownContent text={text} cwd={cwd} onDownload={onDownload} />
       </div>
       {annotations.map((item) => {
         const position = markerPositions[item.annotation.id];
@@ -4243,12 +4163,10 @@ function ActivityGroup({
   items,
   cwd,
   onDownload,
-  onArtifactOpen,
 }: {
   items: ActivityItem[];
   cwd: string;
   onDownload(path: string): Promise<void>;
-  onArtifactOpen(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -4277,13 +4195,7 @@ function ActivityGroup({
       {open && (
         <div className="activity-group-content">
           {items.map((item) => (
-            <MemoizedActivity
-              item={item}
-              cwd={cwd}
-              onDownload={onDownload}
-              onArtifactOpen={onArtifactOpen}
-              key={item.id}
-            />
+            <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
           ))}
         </div>
       )}
@@ -4299,14 +4211,12 @@ function LazyTechnicalDetails({
   onLoad,
   cwd,
   onDownload,
-  onArtifactOpen,
 }: {
   items: ActivityItem[];
   loaded: boolean;
   onLoad(): Promise<void>;
   cwd: string;
   onDownload(path: string): Promise<void>;
-  onArtifactOpen(artifact: ArtifactDescriptor, opener: HTMLButtonElement): void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -4348,13 +4258,7 @@ function LazyTechnicalDetails({
           )}
           {loaded &&
             items.map((item) => (
-              <MemoizedActivity
-                item={item}
-                cwd={cwd}
-                onDownload={onDownload}
-                onArtifactOpen={onArtifactOpen}
-                key={item.id}
-              />
+              <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
             ))}
         </div>
       )}
@@ -4865,11 +4769,13 @@ function ActivityDetails({
   icon,
   title,
   status,
+  technicalTitle = false,
   children,
 }: {
   icon: React.ReactNode;
   title: string;
   status: string;
+  technicalTitle?: boolean;
   children: React.ReactNode;
 }) {
   const { t } = useI18n();
@@ -4878,7 +4784,7 @@ function ActivityDetails({
     <details className="activity-card" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         <span className="activity-icon">{icon}</span>
-        <span className="activity-title">{title}</span>
+        <span className={`activity-title${technicalTitle ? " technical" : ""}`}>{title}</span>
         <span className={`activity-status activity-status-${status}`}>
           {statusLabel(status, t)}
         </span>
@@ -4901,11 +4807,18 @@ function RenameDialog({
   const [value, setValue] = useState(initialValue);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <Dialog
+      titleId="rename-dialog-title"
+      className="compact"
+      closeOnBackdrop
+      closeOnEscape
+      initialFocusRef={inputRef}
+      onClose={onClose}
+    >
       <form
-        className="modal compact"
-        onMouseDown={(event) => event.stopPropagation()}
+        className="dialog-form"
         onSubmit={(event) => {
           event.preventDefault();
           if (!value.trim()) return;
@@ -4916,10 +4829,10 @@ function RenameDialog({
             .finally(() => setBusy(false));
         }}
       >
-        <div className="row-between">
-          <div>
+        <div className="dialog-header">
+          <div className="dialog-heading">
             <span className="dialog-eyebrow">{t("Задача")}</span>
-            <h2>{t("Переименовать")}</h2>
+            <h2 id="rename-dialog-title">{t("Переименовать")}</h2>
           </div>
           <button type="button" className="icon-button" aria-label={t("Закрыть")} onClick={onClose}>
             <XIcon />
@@ -4927,9 +4840,18 @@ function RenameDialog({
         </div>
         <label>
           {t("Название")}
-          <input autoFocus value={value} onChange={(event) => setValue(event.target.value)} />
+          <input
+            ref={inputRef}
+            autoFocus
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+          />
         </label>
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="dialog-notice danger" role="alert">
+            {error}
+          </div>
+        )}
         <div className="dialog-actions">
           <button type="button" onClick={onClose}>
             {t("Отмена")}
@@ -4939,7 +4861,7 @@ function RenameDialog({
           </button>
         </div>
       </form>
-    </div>
+    </Dialog>
   );
 }
 

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useRef, useState } from "react";
 
 import type {
   ModelOption,
@@ -10,6 +9,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { useI18n, type Translate } from "../i18n";
+import { Dialog } from "./Dialog";
 import { CheckIcon, ModelIcon, PlanIcon, TargetIcon, TeamIcon, XIcon } from "./Icons";
 
 export function SettingsPicker({
@@ -227,107 +227,85 @@ function ModelSettingsPopup({
 }) {
   const { t } = useI18n();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const openerRef = useRef<HTMLButtonElement | null>(opener);
+  openerRef.current = opener;
 
-  useEffect(() => {
-    closeButtonRef.current?.focus();
-    return () => {
-      if (opener?.isConnected) opener.focus();
-    };
-  }, [opener]);
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
-    }
-
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      className="modal-backdrop model-settings-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+  return (
+    <Dialog
+      ariaLabel={t("Настройки модели")}
+      className="model-settings-popup"
+      backdropClassName="model-settings-backdrop"
+      closeOnBackdrop
+      closeOnEscape
+      initialFocusRef={closeButtonRef}
+      returnFocusRef={openerRef}
+      onClose={onClose}
     >
-      <div
-        className="modal model-settings-popup"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("Настройки модели")}
-      >
-        <div className="model-settings-header">
-          <div>
-            <ModelIcon />
-            <h2>{t("Настройки модели")}</h2>
-          </div>
-          <button
-            ref={closeButtonRef}
-            type="button"
-            className="icon-button"
-            aria-label={t("Закрыть")}
-            onClick={onClose}
-          >
-            <XIcon />
-          </button>
+      <div className="dialog-header">
+        <div className="dialog-heading">
+          <h2>{t("Настройки модели")}</h2>
         </div>
-
-        <section className="model-settings-section">
-          <h3>{t("Модель")}</h3>
-          <div className="model-settings-options" role="radiogroup" aria-label={t("Модель")}>
-            <SelectionOption
-              title={t("По умолчанию")}
-              description={defaultModelName}
-              selected={modelId === null}
-              disabled={disabled}
-              onClick={() => onModelChange(null)}
-            />
-            {models.map((option) => (
-              <SelectionOption
-                title={option.displayName}
-                description={option.description || undefined}
-                selected={modelId === option.id}
-                disabled={disabled}
-                onClick={() => onModelChange(option.id)}
-                key={option.id}
-              />
-            ))}
-          </div>
-        </section>
-
-        <section className="model-settings-section">
-          <h3>{t("Уровень рассуждений")}</h3>
-          <div
-            className="model-settings-options effort-options"
-            role="radiogroup"
-            aria-label={t("Уровень рассуждений")}
-          >
-            <SelectionOption
-              title={t("По умолчанию")}
-              description={defaultEffort}
-              selected={reasoningEffort === null}
-              disabled={disabled || !model}
-              onClick={() => onEffortChange(null)}
-            />
-            {model?.reasoningEfforts.map((option) => (
-              <SelectionOption
-                title={option.value}
-                description={option.description ?? undefined}
-                selected={reasoningEffort === option.value}
-                disabled={disabled}
-                onClick={() => onEffortChange(option.value)}
-                key={option.value}
-              />
-            ))}
-          </div>
-        </section>
+        <button
+          ref={closeButtonRef}
+          type="button"
+          className="icon-button"
+          aria-label={t("Закрыть")}
+          onClick={onClose}
+        >
+          <XIcon />
+        </button>
       </div>
-    </div>,
-    document.body,
+
+      <section className="model-settings-section">
+        <h3>{t("Модель")}</h3>
+        <div className="model-settings-options" role="radiogroup" aria-label={t("Модель")}>
+          <SelectionOption
+            title={t("По умолчанию")}
+            description={defaultModelName}
+            selected={modelId === null}
+            disabled={disabled}
+            onClick={() => onModelChange(null)}
+          />
+          {models.map((option) => (
+            <SelectionOption
+              title={option.displayName}
+              description={option.description || undefined}
+              selected={modelId === option.id}
+              disabled={disabled}
+              onClick={() => onModelChange(option.id)}
+              key={option.id}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="model-settings-section">
+        <h3>{t("Уровень рассуждений")}</h3>
+        <div
+          className="model-settings-options effort-options"
+          role="radiogroup"
+          aria-label={t("Уровень рассуждений")}
+        >
+          <SelectionOption
+            title={t("По умолчанию")}
+            description={defaultEffort}
+            selected={reasoningEffort === null}
+            disabled={disabled || !model}
+            onClick={() => onEffortChange(null)}
+          />
+          {model?.reasoningEfforts.map((option) => (
+            <SelectionOption
+              title={option.value}
+              description={option.description ?? undefined}
+              selected={reasoningEffort === option.value}
+              disabled={disabled}
+              onClick={() => onEffortChange(option.value)}
+              key={option.value}
+            />
+          ))}
+        </div>
+      </section>
+    </Dialog>
   );
 }
 

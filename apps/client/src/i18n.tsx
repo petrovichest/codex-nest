@@ -135,6 +135,8 @@ const ENGLISH: Record<string, string> = {
   Скиллы: "Skills",
   "Установленные возможности Codex для выбранного проекта.":
     "Installed Codex capabilities for the selected project.",
+  "Каталог и переключатели ниже относятся к выбранному проекту.":
+    "The catalog and switches below apply to the selected project.",
   "Проект для скиллов": "Project for skills",
   "Обновить список скиллов": "Refresh skills",
   "Добавьте проект, чтобы посмотреть доступные для него скиллы.":
@@ -159,6 +161,8 @@ const ENGLISH: Record<string, string> = {
   "Новые задачи": "New tasks",
   "Эти значения применяются к новым задачам на всех подключённых устройствах.":
     "These values apply to new tasks on every connected device.",
+  "Приоритет обработки для новых задач.": "Processing priority for new tasks.",
+  "Стиль ответов для новых задач.": "Response style for new tasks.",
   "По умолчанию": "Default",
   Дружелюбная: "Friendly",
   Прагматичная: "Pragmatic",
@@ -190,15 +194,19 @@ const ENGLISH: Record<string, string> = {
   "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.":
     "The interface language is synchronized through the server; other settings apply only to this device.",
   "Язык интерфейса": "Interface language",
+  "Синхронизируется между подключёнными устройствами.": "Synchronized across connected devices.",
   "Не удалось сохранить язык интерфейса": "Failed to save the interface language",
   Тема: "Theme",
+  "Светлая, тёмная или системная цветовая схема.": "Light, dark, or system color scheme.",
   "Системная тема": "System theme",
   "Светлая тема": "Light theme",
   "Тёмная тема": "Dark theme",
   "Боковая панель": "Sidebar",
+  "Расположение списка проектов и задач.": "Placement of the project and task list.",
   Слева: "Left",
   Справа: "Right",
   "Порядок проектов": "Project order",
+  "Как проекты расположены в боковой панели.": "How projects are ordered in the sidebar.",
   "Сверху вниз": "Top to bottom",
   "Снизу вверх": "Bottom to top",
   Сервер: "Server",
@@ -214,10 +222,13 @@ const ENGLISH: Record<string, string> = {
     "Failed to load speech recognition settings: {{error}}",
   "Загружаем настройки…": "Loading settings…",
   Провайдер: "Provider",
+  "Где обрабатывается записанное аудио.": "Where recorded audio is processed.",
   "Провайдер распознавания речи": "Speech recognition provider",
   "Выберите провайдера": "Select a provider",
   "Локальная модель": "Local model",
   "URL локального STT": "Local STT URL",
+  "HTTP-адрес сервиса распознавания на вашем сервере.":
+    "HTTP endpoint of the transcription service on your server.",
   "Расставлять пунктуацию и исправлять очевидные ошибки через Codex":
     "Add punctuation and correct obvious errors with Codex",
   "Модель улучшения": "Refinement model",
@@ -229,10 +240,13 @@ const ENGLISH: Record<string, string> = {
   "gpt-4o-transcribe — точнее": "gpt-4o-transcribe — more accurate",
   "gpt-4o-mini-transcribe — дешевле": "gpt-4o-mini-transcribe — cheaper",
   "Ключ сохранён; оставьте пустым без изменений": "Key saved; leave empty to keep it unchanged",
+  "Хранится на сервере и не возвращается в интерфейс.":
+    "Stored on the server and never returned to the interface.",
   Скрыть: "Hide",
   Показать: "Show",
   "Ключ будет удалён": "The key will be removed",
   "API key настроен": "API key configured",
+  "Код языка аудио, например ru или en.": "Audio language code, such as ru or en.",
   "Не удалять": "Keep key",
   "Удалить ключ": "Delete key",
   "Ввод API key доступен только через HTTPS или локальное подключение.":
@@ -336,6 +350,8 @@ const ENGLISH: Record<string, string> = {
   "Ввод прокси с паролем доступен только через HTTPS или локальное подключение.":
     "A password-protected proxy can be entered only over HTTPS or a local connection.",
   "Новый HTTP/HTTPS-прокси": "New HTTP/HTTPS proxy",
+  "Будет проверен до перезапуска Codex daemon.":
+    "It will be verified before the Codex daemon restarts.",
   "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.":
     "Formats: host:port, host:port:user:password, user:password@host:port, or a full URL.",
   "Проверяем и применяем…": "Checking and applying…",
@@ -389,11 +405,13 @@ const ENGLISH: Record<string, string> = {
   Обзор: "Overview",
   Артефакты: "Artifacts",
   "Артефакты, {{count}}": "Artifacts, {{count}}",
-  "Ищем файлы во всей истории…": "Searching the full history for files…",
-  "Не удалось проверить всю историю сессии.": "Could not check the full session history.",
+  "Загружаем артефакты…": "Loading artifacts…",
+  "Не удалось загрузить артефакты.": "Could not load artifacts.",
   "В этой сессии пока нет артефактов": "There are no artifacts in this session yet",
   "Файлы появятся здесь, когда Codex приложит их к ответу.":
     "Files will appear here when Codex attaches them to a response.",
+  "Артефакты недоступны для этой сессии": "Artifacts are unavailable for this session",
+  "Явные артефакты доступны в новых сессиях.": "Explicit artifacts are available in new sessions.",
   Статус: "Status",
   Проект: "Project",
   Создана: "Created",

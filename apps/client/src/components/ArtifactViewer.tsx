@@ -60,9 +60,7 @@ export function ArtifactViewer({
           ? opener
           : [
               ...document.querySelectorAll<HTMLButtonElement>(
-                returnToArtifacts
-                  ? ".inspector-artifact-open[data-artifact-path]"
-                  : ".artifact-link-open[data-artifact-path]",
+                ".inspector-artifact-open[data-artifact-path]",
               ),
             ].find((button) => button.dataset.artifactPath === artifact.path);
         target?.focus();
@@ -114,7 +112,7 @@ export function ArtifactViewer({
       data-android-back-layer
     >
       <header className="artifact-viewer-header">
-        <span className="artifact-viewer-file-icon">
+        <span className="artifact-viewer-file-icon" aria-hidden="true">
           <FileIcon />
         </span>
         <span className="artifact-viewer-title">

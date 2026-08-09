@@ -195,6 +195,11 @@ describe("SettingsPage", () => {
 
     const view = renderPage();
 
+    const headerIcon = view.container.querySelector(".workspace-title-icon");
+    expect(headerIcon).toBeInTheDocument();
+    expect(
+      headerIcon?.querySelector('path[d="M4 7h10M18 7h2M4 17h2M10 17h10"]'),
+    ).toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "Разделы настроек" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Приложение" })).toHaveAttribute(
       "aria-selected",

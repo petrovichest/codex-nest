@@ -14,6 +14,7 @@ import type { CodexManagementStatus } from "@codexnest/protocol";
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { ToolIcon } from "./Icons";
+import { SettingsGroup, SettingsRow } from "./SettingsPresentation";
 
 type Action = "checking" | "proxy" | "updating" | "restarting" | null;
 type Feedback = { kind: "error" | "success"; message: string } | null;
@@ -230,31 +231,26 @@ export function CodexSettingsCard() {
   } = useCodexSettings();
 
   return (
-    <section className="settings-card codex-settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <ToolIcon />
-        </span>
-        <div>
-          <h2>Codex CLI</h2>
-          <p>{t("Версия и состояние Codex daemon на сервере.")}</p>
-        </div>
-      </div>
-
+    <SettingsGroup
+      className="codex-settings-card"
+      description={t("Версия и состояние Codex daemon на сервере.")}
+      icon={<ToolIcon />}
+      title="Codex CLI"
+    >
       {loading ? (
         <div className="settings-loading compact">
           <span className="spinner small" /> {t("Получаем состояние Codex…")}
         </div>
       ) : (
         <>
-          <dl className="codex-status-grid">
+          <dl className="settings-status-list">
             <div>
               <dt>{t("Установленная версия Codex CLI")}</dt>
-              <dd>{status?.cliVersion ?? "—"}</dd>
+              <dd className="settings-technical">{status?.cliVersion ?? "—"}</dd>
             </div>
             <div>
               <dt>Daemon</dt>
-              <dd>{status?.appServerVersion ?? "—"}</dd>
+              <dd className="settings-technical">{status?.appServerVersion ?? "—"}</dd>
             </div>
             <div>
               <dt>{t("Состояние")}</dt>
@@ -262,7 +258,7 @@ export function CodexSettingsCard() {
             </div>
             <div>
               <dt>{t("Актуальная версия Codex CLI")}</dt>
-              <dd>{status?.latestVersion ?? t("Не проверялась")}</dd>
+              <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
             </div>
           </dl>
 
@@ -303,7 +299,7 @@ export function CodexSettingsCard() {
           </div>
         </>
       )}
-    </section>
+    </SettingsGroup>
   );
 }
 
@@ -327,31 +323,23 @@ export function ProxySettingsCard() {
   } = useCodexSettings();
 
   return (
-    <section className="settings-card codex-settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <ToolIcon />
-        </span>
-        <div>
-          <h2>{t("Прокси")}</h2>
-          <p>
-            {t(
-              "Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.",
-            )}
-          </p>
-        </div>
-      </div>
-
+    <SettingsGroup
+      className="codex-settings-card"
+      description={t(
+        "Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.",
+      )}
+      icon={<ToolIcon />}
+      title={t("Прокси")}
+    >
       {loading ? (
         <div className="settings-loading compact">
           <span className="spinner small" /> {t("Получаем состояние прокси…")}
         </div>
       ) : (
         <>
-          <div className="codex-proxy-summary">
-            <strong>{t("Текущий прокси")}</strong>
-            <span>{proxySummary(status, language, t)}</span>
-          </div>
+          <SettingsRow className="codex-proxy-summary" label={t("Текущий прокси")}>
+            <code>{proxySummary(status, language, t)}</code>
+          </SettingsRow>
 
           {status?.networkStatus === "ok" && (
             <div className="settings-notice success" role="status">
@@ -370,12 +358,16 @@ export function ProxySettingsCard() {
           )}
 
           <form className="codex-proxy-form" onSubmit={applyProxy}>
-            <label>
-              <span>{t("Новый HTTP/HTTPS-прокси")}</span>
+            <SettingsRow
+              description={t("Будет проверен до перезапуска Codex daemon.")}
+              label={t("Новый HTTP/HTTPS-прокси")}
+              labelFor="settings-codex-proxy"
+            >
               <span className="codex-proxy-input">
                 <input
                   autoComplete="off"
                   disabled={!supported || busy || !secure}
+                  id="settings-codex-proxy"
                   placeholder="host:port:user:password"
                   spellCheck={false}
                   type={showProxy ? "text" : "password"}
@@ -390,7 +382,7 @@ export function ProxySettingsCard() {
                   {showProxy ? t("Скрыть") : t("Показать")}
                 </button>
               </span>
-            </label>
+            </SettingsRow>
             <small>
               {t(
                 "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.",
@@ -410,7 +402,7 @@ export function ProxySettingsCard() {
           <SettingsFeedback feedback={proxyFeedback} />
         </>
       )}
-    </section>
+    </SettingsGroup>
   );
 }
 

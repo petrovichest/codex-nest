@@ -9,6 +9,13 @@ afterEach(() => {
 });
 
 describe("SetupScreen", () => {
+  it("uses the textual CodexNest identity without a generic brand mark", () => {
+    const { container } = render(<SetupScreen onConnected={() => undefined} />);
+
+    expect(screen.getByText("CodexNest", { selector: ".setup-identity" })).toBeInTheDocument();
+    expect(container.querySelector(".brand-mark")).not.toBeInTheDocument();
+  });
+
   it("shows the permanent LAN interception warning for HTTP", () => {
     render(<SetupScreen onConnected={() => undefined} />);
     expect(screen.getByText(/HTTP не шифрует token/)).toBeInTheDocument();

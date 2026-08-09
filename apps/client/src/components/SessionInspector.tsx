@@ -17,7 +17,7 @@ import {
 
 export type GitChangesView = GitChangesSummary | "error" | null;
 export type InspectorTab = "overview" | "artifacts";
-export type ArtifactHistoryState = "idle" | "loading" | "error";
+export type ArtifactLoadState = "idle" | "loading" | "error";
 
 export function SessionInspector({
   open,
@@ -26,8 +26,8 @@ export function SessionInspector({
   gitChanges,
   activeTab,
   artifacts,
-  artifactHistoryComplete,
-  artifactHistoryState,
+  artifactCapability,
+  artifactLoadState,
   onClose,
   onTabChange,
   onArtifactOpen,
@@ -40,8 +40,8 @@ export function SessionInspector({
   gitChanges: GitChangesView;
   activeTab: InspectorTab;
   artifacts: SessionArtifact[];
-  artifactHistoryComplete: boolean;
-  artifactHistoryState: ArtifactHistoryState;
+  artifactCapability: "explicit" | "unavailable" | null;
+  artifactLoadState: ArtifactLoadState;
   onClose(): void;
   onTabChange(tab: InspectorTab): void;
   onArtifactOpen(artifact: SessionArtifact, opener: HTMLButtonElement): void;
@@ -50,7 +50,7 @@ export function SessionInspector({
 }) {
   const { language, t } = useI18n();
   if (!open) return null;
-  const artifactsTabLabel = artifactHistoryComplete
+  const artifactsTabLabel = artifactCapability
     ? t("Артефакты, {{count}}", { count: artifacts.length })
     : t("Артефакты");
   return (
@@ -64,6 +64,7 @@ export function SessionInspector({
       <div className="inspector-tabs" role="tablist" aria-label={t("Разделы сведений")}>
         <button
           type="button"
+          id="session-overview-tab"
           role="tab"
           aria-controls="session-overview-panel"
           aria-selected={activeTab === "overview"}
@@ -74,6 +75,7 @@ export function SessionInspector({
         </button>
         <button
           type="button"
+          id="session-artifacts-tab"
           role="tab"
           aria-controls="session-artifacts-panel"
           aria-label={artifactsTabLabel}
@@ -83,7 +85,7 @@ export function SessionInspector({
         >
           <span>{t("Артефакты")}</span>
           <span className="inspector-tab-count" aria-hidden="true">
-            {artifactHistoryComplete ? artifacts.length : "…"}
+            {artifactCapability ? artifacts.length : "…"}
           </span>
         </button>
       </div>
@@ -93,6 +95,7 @@ export function SessionInspector({
           id="session-overview-panel"
           className="inspector-panel inspector-overview"
           role="tabpanel"
+          aria-labelledby="session-overview-tab"
         >
           <dl className="inspector-list">
             <InspectorRow icon={<ServerIcon />} label={t("Статус")}>
@@ -104,13 +107,13 @@ export function SessionInspector({
             <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
               {project?.displayName ?? t("Без проекта")}
             </InspectorRow>
-            <InspectorRow icon={<GitBranchIcon />} label="Git changes">
+            <InspectorRow technical icon={<GitBranchIcon />} label="Git changes">
               <GitChangesValue value={gitChanges} />
             </InspectorRow>
-            <InspectorRow icon={<ClockIcon />} label={t("Создана")}>
+            <InspectorRow technical icon={<ClockIcon />} label={t("Создана")}>
               {formatDate(summary.createdAt, language)}
             </InspectorRow>
-            <InspectorRow icon={<ClockIcon />} label={t("Обновлена")}>
+            <InspectorRow technical icon={<ClockIcon />} label={t("Обновлена")}>
               {formatDate(summary.updatedAt, language)}
             </InspectorRow>
           </dl>
@@ -124,40 +127,50 @@ export function SessionInspector({
           id="session-artifacts-panel"
           className="inspector-panel inspector-artifacts"
           role="tabpanel"
+          aria-labelledby="session-artifacts-tab"
         >
           {artifacts.length > 0 && (
             <div className="inspector-artifact-list">
               {artifacts.map((artifact) => (
                 <InspectorArtifact
                   artifact={artifact}
-                  key={artifact.path}
+                  key={artifact.id}
                   onDownload={onArtifactDownload}
                   onOpen={onArtifactOpen}
                 />
               ))}
             </div>
           )}
-          {artifactHistoryState === "loading" && (
+          {artifactLoadState === "loading" && (
             <div className="inspector-artifact-progress" role="status">
               <span className="spinner small" />
-              <span>{t("Ищем файлы во всей истории…")}</span>
+              <span>{t("Загружаем артефакты…")}</span>
             </div>
           )}
-          {artifactHistoryState === "error" && (
+          {artifactLoadState === "error" && (
             <div className="inspector-artifact-error" role="alert">
-              <span>{t("Не удалось проверить всю историю сессии.")}</span>
+              <span>{t("Не удалось загрузить артефакты.")}</span>
               <button type="button" onClick={onArtifactRetry}>
                 {t("Повторить")}
               </button>
             </div>
           )}
-          {artifactHistoryComplete && artifacts.length === 0 && (
+          {artifactCapability === "explicit" && artifacts.length === 0 && (
             <div className="inspector-artifact-empty">
               <span className="inspector-artifact-empty-icon">
                 <FileIcon />
               </span>
               <strong>{t("В этой сессии пока нет артефактов")}</strong>
               <span>{t("Файлы появятся здесь, когда Codex приложит их к ответу.")}</span>
+            </div>
+          )}
+          {artifactCapability === "unavailable" && (
+            <div className="inspector-artifact-empty">
+              <span className="inspector-artifact-empty-icon">
+                <FileIcon />
+              </span>
+              <strong>{t("Артефакты недоступны для этой сессии")}</strong>
+              <span>{t("Явные артефакты доступны в новых сессиях.")}</span>
             </div>
           )}
         </div>
@@ -250,7 +263,7 @@ function InspectorArtifact({
         >
           <span className="inspector-artifact-stamp">{artifactStamp(artifact)}</span>
           <span className="inspector-artifact-copy">
-            <strong>{artifact.fileName}</strong>
+            <strong>{artifact.label}</strong>
             <span>{artifact.relativePath}</span>
           </span>
         </button>
@@ -298,10 +311,12 @@ function GitChangesValue({ value }: { value: GitChangesView }) {
 function InspectorRow({
   icon,
   label,
+  technical = false,
   children,
 }: {
   icon: React.ReactNode;
   label: string;
+  technical?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -310,7 +325,7 @@ function InspectorRow({
         {icon}
         {label}
       </dt>
-      <dd>{children}</dd>
+      <dd className={technical ? "inspector-value-technical" : undefined}>{children}</dd>
     </div>
   );
 }

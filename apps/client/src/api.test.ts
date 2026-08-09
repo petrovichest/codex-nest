@@ -93,6 +93,25 @@ describe("ApiClient", () => {
     );
   });
 
+  it("reads semantic artifacts for an encoded thread without caching", async () => {
+    const response = { capability: "explicit", artifacts: [] };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(response), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await expect(api.readThreadArtifacts("thread/id")).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/artifacts"),
+      expect.objectContaining({ method: "GET", cache: "no-store" }),
+    );
+  });
+
   it("marks an encoded thread as viewed and retries an ambiguous failure", async () => {
     vi.useFakeTimers();
     const fetchMock = vi

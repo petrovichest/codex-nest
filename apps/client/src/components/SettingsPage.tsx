@@ -43,6 +43,7 @@ import { ApplicationSettingsCard } from "./ApplicationSettingsCard";
 import { CodexSettingsCard, CodexSettingsProvider, ProxySettingsCard } from "./CodexSettingsCard";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import { RecoverySettingsCard } from "./RecoverySettingsCard";
+import { SettingsGroup, SettingsRow } from "./SettingsPresentation";
 import { SkillsSettingsCard } from "./SkillsSettingsCard";
 
 export type SidebarSide = "left" | "right";
@@ -316,11 +317,12 @@ export function SettingsPage({
   return (
     <div className="settings-workspace">
       <WorkspaceHeader
+        leadingIcon={<SlidersIcon />}
         title={t("Настройки")}
         subtitle={t("Приложение, Codex и сервер")}
         onOpenNavigation={onOpenNavigation}
       />
-      <main className="settings-scroll" ref={settingsScrollRef}>
+      <section aria-label={t("Настройки")} className="settings-scroll" ref={settingsScrollRef}>
         <div className="settings-section-shelf">
           <div aria-label={t("Разделы настроек")} className="settings-section-tabs" role="tablist">
             {SETTINGS_SECTIONS.map(({ id, label, Icon }, index) => (
@@ -353,58 +355,70 @@ export function SettingsPage({
             id="settings-section-panel-application"
             role="tabpanel"
           >
-            <section className="settings-card">
-              <div className="settings-card-heading">
-                <span className="settings-card-icon">
-                  <SlidersIcon />
-                </span>
-                <div>
-                  <h2>{t("Интерфейс")}</h2>
-                  <p>
-                    {t(
-                      "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.",
-                    )}
-                  </p>
-                </div>
-              </div>
-              <label className="theme-setting">
-                <span>{t("Язык интерфейса")}</span>
+            <SettingsGroup
+              description={t(
+                "Язык интерфейса синхронизируется через сервер; остальные настройки применяются только на этом устройстве.",
+              )}
+              icon={<SlidersIcon />}
+              title={t("Интерфейс")}
+            >
+              <SettingsRow
+                description={t("Синхронизируется между подключёнными устройствами.")}
+                label={t("Язык интерфейса")}
+                labelFor="settings-language"
+              >
                 <select
                   aria-label={t("Язык интерфейса")}
                   disabled={languageSaving}
+                  id="settings-language"
                   value={language}
                   onChange={(event) => void changeLanguage(event.target.value as UiLanguage)}
                 >
                   <option value="en">English</option>
                   <option value="ru">Русский</option>
                 </select>
-              </label>
+              </SettingsRow>
               {languageError && (
                 <div className="settings-notice danger" role="alert">
                   {languageError}
                 </div>
               )}
-              <label className="theme-setting">
-                <span>{t("Тема")}</span>
-                <select value={theme} onChange={(event) => onThemeChange(event.target.value)}>
+              <SettingsRow
+                description={t("Светлая, тёмная или системная цветовая схема.")}
+                label={t("Тема")}
+                labelFor="settings-theme"
+              >
+                <select
+                  id="settings-theme"
+                  value={theme}
+                  onChange={(event) => onThemeChange(event.target.value)}
+                >
                   <option value="system">{t("Системная тема")}</option>
                   <option value="light">{t("Светлая тема")}</option>
                   <option value="dark">{t("Тёмная тема")}</option>
                 </select>
-              </label>
-              <label className="theme-setting">
-                <span>{t("Боковая панель")}</span>
+              </SettingsRow>
+              <SettingsRow
+                description={t("Расположение списка проектов и задач.")}
+                label={t("Боковая панель")}
+                labelFor="settings-sidebar-side"
+              >
                 <select
+                  id="settings-sidebar-side"
                   value={sidebarSide}
                   onChange={(event) => onSidebarSideChange(event.target.value as SidebarSide)}
                 >
                   <option value="left">{t("Слева")}</option>
                   <option value="right">{t("Справа")}</option>
                 </select>
-              </label>
-              <label className="theme-setting">
-                <span>{t("Порядок проектов")}</span>
+              </SettingsRow>
+              <SettingsRow
+                description={t("Как проекты расположены в боковой панели.")}
+                label={t("Порядок проектов")}
+                labelFor="settings-project-order"
+              >
                 <select
+                  id="settings-project-order"
                   value={projectListDirection}
                   onChange={(event) =>
                     onProjectListDirectionChange(event.target.value as ProjectListDirection)
@@ -413,22 +427,17 @@ export function SettingsPage({
                   <option value="top-down">{t("Сверху вниз")}</option>
                   <option value="bottom-up">{t("Снизу вверх")}</option>
                 </select>
-              </label>
-            </section>
+              </SettingsRow>
+            </SettingsGroup>
 
             {!Capacitor.isNativePlatform() && (
-              <section className="settings-card">
-                <div className="settings-card-heading">
-                  <span className="settings-card-icon">
-                    <BellIcon />
-                  </span>
-                  <div>
-                    <h2>{t("Уведомления браузера")}</h2>
-                    <p>
-                      {t("События приходят напрямую с вашего сервера, без Google и внешнего push.")}
-                    </p>
-                  </div>
-                </div>
+              <SettingsGroup
+                description={t(
+                  "События приходят напрямую с вашего сервера, без Google и внешнего push.",
+                )}
+                icon={<BellIcon />}
+                title={t("Уведомления браузера")}
+              >
                 {notificationPermission === "granted" && (
                   <div className="settings-notice success" role="status">
                     {t("Уведомления включены. Они приходят, пока вкладка открыта или свёрнута.")}
@@ -463,7 +472,7 @@ export function SettingsPage({
                     </button>
                   </div>
                 )}
-              </section>
+              </SettingsGroup>
             )}
 
             <TranscriptionSettingsCard
@@ -480,24 +489,23 @@ export function SettingsPage({
             id="settings-section-panel-codex"
             role="tabpanel"
           >
-            <form className="settings-card" onSubmit={saveTaskDefaults}>
-              <div className="settings-card-heading">
-                <span className="settings-card-icon">
-                  <SlidersIcon />
-                </span>
-                <div>
-                  <h2>{t("Новые задачи")}</h2>
-                  <p>
-                    {t(
-                      "Эти значения применяются к новым задачам на всех подключённых устройствах.",
-                    )}
-                  </p>
-                </div>
-              </div>
-              <label className="theme-setting">
-                <span>Service tier</span>
+            <SettingsGroup
+              as="form"
+              description={t(
+                "Эти значения применяются к новым задачам на всех подключённых устройствах.",
+              )}
+              icon={<SlidersIcon />}
+              title={t("Новые задачи")}
+              onSubmit={saveTaskDefaults}
+            >
+              <SettingsRow
+                description={t("Приоритет обработки для новых задач.")}
+                label="Service tier"
+                labelFor="settings-service-tier"
+              >
                 <select
                   disabled={!defaultModel || taskDefaultsSaving}
+                  id="settings-service-tier"
                   value={taskDefaults.serviceTier ?? ""}
                   onChange={(event) =>
                     setTaskDefaults((current) => ({
@@ -513,11 +521,15 @@ export function SettingsPage({
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="theme-setting">
-                <span>Personality</span>
+              </SettingsRow>
+              <SettingsRow
+                description={t("Стиль ответов для новых задач.")}
+                label="Personality"
+                labelFor="settings-personality"
+              >
                 <select
                   disabled={!defaultModel?.supportsPersonality || taskDefaultsSaving}
+                  id="settings-personality"
                   value={taskDefaults.personality ?? ""}
                   onChange={(event) =>
                     setTaskDefaults((current) => ({
@@ -531,7 +543,7 @@ export function SettingsPage({
                   <option value="pragmatic">{t("Прагматичная")}</option>
                   <option value="none">{t("Без personality")}</option>
                 </select>
-              </label>
+              </SettingsRow>
               {taskDefaultsError && (
                 <div className="settings-notice danger" role="alert">
                   {taskDefaultsError}
@@ -549,19 +561,15 @@ export function SettingsPage({
                   {taskDefaultsSaving ? t("Сохраняем…") : t("Сохранить настройки новых задач")}
                 </button>
               </div>
-            </form>
+            </SettingsGroup>
 
-            <form className="settings-card" onSubmit={save}>
-              <div className="settings-card-heading">
-                <span className="settings-card-icon">
-                  <ShieldIcon />
-                </span>
-                <div>
-                  <h2>{t("Разрешения Codex")}</h2>
-                  <p>{t("Выбранный режим применяется ко всем задачам со следующего хода.")}</p>
-                </div>
-              </div>
-
+            <SettingsGroup
+              as="form"
+              description={t("Выбранный режим применяется ко всем задачам со следующего хода.")}
+              icon={<ShieldIcon />}
+              title={t("Разрешения Codex")}
+              onSubmit={save}
+            >
               {loading ? (
                 <div className="settings-loading">
                   <span className="spinner small" /> {t("Загружаем конфигурацию…")}
@@ -622,7 +630,7 @@ export function SettingsPage({
                   {saving ? t("Сохраняем…") : t("Сохранить")}
                 </button>
               </div>
-            </form>
+            </SettingsGroup>
           </div>
 
           <div
@@ -647,22 +655,17 @@ export function SettingsPage({
           >
             <ProxySettingsCard />
 
-            <section className="settings-card">
-              <div className="settings-card-heading">
-                <span className="settings-card-icon">
-                  <ServerIcon />
-                </span>
-                <div>
-                  <h2>{t("Сервер")}</h2>
-                  <p>{t("Подключение к CodexNest на этом устройстве.")}</p>
-                </div>
-              </div>
-              <div className="settings-actions">
+            <SettingsGroup
+              description={t("Подключение к CodexNest на этом устройстве.")}
+              icon={<ServerIcon />}
+              title={t("Сервер")}
+            >
+              <SettingsRow label={t("Сервер")}>
                 <button type="button" onClick={onSwitchServer}>
                   {t("Сменить сервер")}
                 </button>
-              </div>
-            </section>
+              </SettingsRow>
+            </SettingsGroup>
           </div>
 
           <div
@@ -680,7 +683,7 @@ export function SettingsPage({
             <RecoverySettingsCard appStatus={appUpdateStatus} codexStatus={codexManagementStatus} />
           </div>
         </CodexSettingsProvider>
-      </main>
+      </section>
     </div>
   );
 }
@@ -743,16 +746,11 @@ function TranscriptionSettingsCard({
   }
 
   return (
-    <section className="settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <MicrophoneIcon />
-        </span>
-        <div>
-          <h2>{t("Распознавание речи")}</h2>
-          <p>{t("Эти настройки общие для всех клиентов и сохраняются на сервере.")}</p>
-        </div>
-      </div>
+    <SettingsGroup
+      description={t("Эти настройки общие для всех клиентов и сохраняются на сервере.")}
+      icon={<MicrophoneIcon />}
+      title={t("Распознавание речи")}
+    >
       {configError && (
         <div className="settings-notice danger" role="alert">
           {t("Не удалось получить настройки распознавания: {{error}}", {
@@ -767,11 +765,15 @@ function TranscriptionSettingsCard({
       )}
       {config && (
         <form className="transcription-settings-form" onSubmit={saveTranscriptionSettings}>
-          <label className="theme-setting">
-            <span>{t("Провайдер")}</span>
+          <SettingsRow
+            description={t("Где обрабатывается записанное аудио.")}
+            label={t("Провайдер")}
+            labelFor="settings-transcription-provider"
+          >
             <select
               aria-label={t("Провайдер распознавания речи")}
               disabled={saving}
+              id="settings-transcription-provider"
               value={form.provider ?? ""}
               onChange={(event) =>
                 setForm((current) => ({
@@ -786,15 +788,19 @@ function TranscriptionSettingsCard({
               <option value="local">{t("Локальная модель")}</option>
               <option value="openai">OpenAI API</option>
             </select>
-          </label>
+          </SettingsRow>
 
           {form.provider === "local" && (
             <div className="transcription-provider-settings">
-              <label className="theme-setting">
-                <span>{t("URL локального STT")}</span>
+              <SettingsRow
+                description={t("HTTP-адрес сервиса распознавания на вашем сервере.")}
+                label={t("URL локального STT")}
+                labelFor="settings-local-stt-url"
+              >
                 <input
                   aria-label={t("URL локального STT")}
                   disabled={saving}
+                  id="settings-local-stt-url"
                   placeholder="http://127.0.0.1:8178/inference"
                   spellCheck={false}
                   value={form.localUrl ?? ""}
@@ -805,24 +811,30 @@ function TranscriptionSettingsCard({
                     }))
                   }
                 />
-              </label>
-              <label className="check">
-                <input
-                  checked={form.refineLocal}
-                  disabled={saving}
-                  type="checkbox"
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, refineLocal: event.target.checked }))
-                  }
-                />
-                <span>{t("Расставлять пунктуацию и исправлять очевидные ошибки через Codex")}</span>
-              </label>
+              </SettingsRow>
+              <SettingsRow
+                label={t("Расставлять пунктуацию и исправлять очевидные ошибки через Codex")}
+              >
+                <label className="check settings-check-control">
+                  <input
+                    checked={form.refineLocal}
+                    disabled={saving}
+                    type="checkbox"
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, refineLocal: event.target.checked }))
+                    }
+                  />
+                  <span className="sr-only">
+                    {t("Расставлять пунктуацию и исправлять очевидные ошибки через Codex")}
+                  </span>
+                </label>
+              </SettingsRow>
               {form.refineLocal && (
-                <label className="theme-setting">
-                  <span>{t("Модель улучшения")}</span>
+                <SettingsRow label={t("Модель улучшения")} labelFor="settings-refinement-model">
                   <select
                     aria-label={t("Модель улучшения расшифровки")}
                     disabled={saving}
+                    id="settings-refinement-model"
                     value={form.refinementModel}
                     onChange={(event) =>
                       setForm((current) => ({
@@ -840,7 +852,7 @@ function TranscriptionSettingsCard({
                       </option>
                     ))}
                   </select>
-                </label>
+                </SettingsRow>
               )}
               <div className="settings-notice" role="status">
                 {t(
@@ -852,11 +864,11 @@ function TranscriptionSettingsCard({
 
           {form.provider === "openai" && (
             <div className="transcription-provider-settings">
-              <label className="theme-setting">
-                <span>{t("Модель OpenAI")}</span>
+              <SettingsRow label={t("Модель OpenAI")} labelFor="settings-openai-stt-model">
                 <select
                   aria-label={t("Модель распознавания OpenAI")}
                   disabled={saving}
+                  id="settings-openai-stt-model"
                   value={form.openAiModel}
                   onChange={(event) =>
                     setForm((current) => ({ ...current, openAiModel: event.target.value }))
@@ -867,14 +879,18 @@ function TranscriptionSettingsCard({
                     {t("gpt-4o-mini-transcribe — дешевле")}
                   </option>
                 </select>
-              </label>
-              <label className="theme-setting">
-                <span>OpenAI API key</span>
+              </SettingsRow>
+              <SettingsRow
+                description={t("Хранится на сервере и не возвращается в интерфейс.")}
+                label="OpenAI API key"
+                labelFor="settings-openai-api-key"
+              >
                 <span className="codex-proxy-input">
                   <input
                     aria-label="OpenAI API key"
                     autoComplete="off"
                     disabled={!secure || saving}
+                    id="settings-openai-api-key"
                     placeholder={
                       config.openAiApiKeyConfigured && !removeApiKey
                         ? t("Ключ сохранён; оставьте пустым без изменений")
@@ -896,7 +912,7 @@ function TranscriptionSettingsCard({
                     {showApiKey ? t("Скрыть") : t("Показать")}
                   </button>
                 </span>
-              </label>
+              </SettingsRow>
               {config.openAiApiKeyConfigured && (
                 <div className="settings-actions codex-actions transcription-key-actions">
                   <span>{removeApiKey ? t("Ключ будет удалён") : t("API key настроен")}</span>
@@ -925,11 +941,15 @@ function TranscriptionSettingsCard({
             </div>
           )}
 
-          <label className="theme-setting">
-            <span>{t("Язык")}</span>
+          <SettingsRow
+            description={t("Код языка аудио, например ru или en.")}
+            label={t("Язык")}
+            labelFor="settings-transcription-language"
+          >
             <input
               aria-label={t("Язык распознавания")}
               disabled={saving}
+              id="settings-transcription-language"
               maxLength={32}
               placeholder="ru"
               spellCheck={false}
@@ -938,7 +958,7 @@ function TranscriptionSettingsCard({
                 setForm((current) => ({ ...current, language: event.target.value || null }))
               }
             />
-          </label>
+          </SettingsRow>
 
           {config.providers.length === 0 && (
             <div className="settings-notice warning" role="status">
@@ -969,7 +989,7 @@ function TranscriptionSettingsCard({
           </div>
         </form>
       )}
-    </section>
+    </SettingsGroup>
   );
 }
 

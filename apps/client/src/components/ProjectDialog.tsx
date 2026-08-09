@@ -4,6 +4,7 @@ import type { DirectoryListing } from "@codexnest/protocol";
 
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
+import { Dialog } from "./Dialog";
 import { ArrowLeftIcon, ChevronRightIcon, FolderIcon, PlusIcon, XIcon } from "./Icons";
 
 type Operation = "loading" | "creating" | "selecting" | null;
@@ -84,172 +85,167 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
   }
 
   return (
-    <div
-      className="modal-backdrop project-browser-backdrop"
-      role="presentation"
-      onMouseDown={() => !busy && onClose()}
+    <Dialog
+      titleId="project-dialog-title"
+      className="project-browser-modal"
+      backdropClassName="project-browser-backdrop"
+      closeOnBackdrop={!busy}
+      closeOnEscape={!busy}
+      onClose={onClose}
     >
-      <div
-        className="modal project-browser-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="project-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="row-between">
-          <div>
-            <span className="dialog-eyebrow">{t("Рабочая папка на сервере")}</span>
-            <h2 id="project-dialog-title">{t("Добавить проект")}</h2>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label={t("Закрыть")}
+      <div className="dialog-header">
+        <div className="dialog-heading">
+          <span className="dialog-eyebrow">{t("Рабочая папка на сервере")}</span>
+          <h2 id="project-dialog-title">{t("Добавить проект")}</h2>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={t("Закрыть")}
+          disabled={busy}
+          onClick={onClose}
+        >
+          <XIcon />
+        </button>
+      </div>
+
+      <div className="project-browser-navigation">
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={t("На уровень выше")}
+          disabled={busy || !listing?.parentPath}
+          onClick={() => void openDirectory(listing?.parentPath ?? undefined)}
+        >
+          <ArrowLeftIcon />
+        </button>
+        <nav className="project-breadcrumbs" aria-label={t("Путь к папке")}>
+          {listing ? (
+            breadcrumbs(listing, t).map((item, index, items) => (
+              <span className="project-breadcrumb" key={item.path}>
+                {index > 0 && <ChevronRightIcon />}
+                <button
+                  type="button"
+                  disabled={busy || index === items.length - 1}
+                  onClick={() => void openDirectory(item.path)}
+                >
+                  {item.label}
+                </button>
+              </span>
+            ))
+          ) : (
+            <span className="project-breadcrumb-placeholder">{t("Домашняя папка")}</span>
+          )}
+        </nav>
+        {operation === "loading" && <div className="spinner small" aria-label={t("Загрузка")} />}
+      </div>
+
+      <div className="project-browser-controls">
+        <button
+          type="button"
+          disabled={busy || !listing}
+          onClick={() => {
+            setShowCreate((value) => !value);
+            setDirectoryName("");
+            setError(null);
+          }}
+        >
+          <PlusIcon /> {t("Новая папка")}
+        </button>
+        <label className="project-hidden-toggle">
+          <input
+            type="checkbox"
+            checked={showHidden}
             disabled={busy}
-            onClick={onClose}
-          >
-            <XIcon />
-          </button>
-        </div>
+            onChange={(event) => setShowHidden(event.target.checked)}
+          />
+          {t("Показывать скрытые")}
+        </label>
+      </div>
 
-        <div className="project-browser-navigation">
+      {showCreate && listing && (
+        <form className="project-directory-create" onSubmit={createNewDirectory}>
+          <input
+            autoFocus
+            aria-label={t("Название новой папки")}
+            value={directoryName}
+            disabled={busy}
+            placeholder={t("Название новой папки")}
+            onChange={(event) => setDirectoryName(event.target.value)}
+          />
+          <button type="submit" className="primary" disabled={busy || !directoryName.trim()}>
+            {operation === "creating" ? t("Создаём…") : t("Создать")}
+          </button>
           <button
             type="button"
-            className="icon-button"
-            aria-label={t("На уровень выше")}
-            disabled={busy || !listing?.parentPath}
-            onClick={() => void openDirectory(listing?.parentPath ?? undefined)}
-          >
-            <ArrowLeftIcon />
-          </button>
-          <nav className="project-breadcrumbs" aria-label={t("Путь к папке")}>
-            {listing ? (
-              breadcrumbs(listing, t).map((item, index, items) => (
-                <span className="project-breadcrumb" key={item.path}>
-                  {index > 0 && <ChevronRightIcon />}
-                  <button
-                    type="button"
-                    disabled={busy || index === items.length - 1}
-                    onClick={() => void openDirectory(item.path)}
-                  >
-                    {item.label}
-                  </button>
-                </span>
-              ))
-            ) : (
-              <span className="project-breadcrumb-placeholder">{t("Домашняя папка")}</span>
-            )}
-          </nav>
-          {operation === "loading" && <div className="spinner small" aria-label={t("Загрузка")} />}
-        </div>
-
-        <div className="project-browser-controls">
-          <button
-            type="button"
-            disabled={busy || !listing}
+            disabled={busy}
             onClick={() => {
-              setShowCreate((value) => !value);
+              setShowCreate(false);
               setDirectoryName("");
-              setError(null);
             }}
           >
-            <PlusIcon /> {t("Новая папка")}
-          </button>
-          <label className="project-hidden-toggle">
-            <input
-              type="checkbox"
-              checked={showHidden}
-              disabled={busy}
-              onChange={(event) => setShowHidden(event.target.checked)}
-            />
-            {t("Показывать скрытые")}
-          </label>
-        </div>
-
-        {showCreate && listing && (
-          <form className="project-directory-create" onSubmit={createNewDirectory}>
-            <input
-              autoFocus
-              aria-label={t("Название новой папки")}
-              value={directoryName}
-              disabled={busy}
-              placeholder={t("Название новой папки")}
-              onChange={(event) => setDirectoryName(event.target.value)}
-            />
-            <button type="submit" className="primary" disabled={busy || !directoryName.trim()}>
-              {operation === "creating" ? t("Создаём…") : t("Создать")}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setShowCreate(false);
-                setDirectoryName("");
-              }}
-            >
-              {t("Отмена")}
-            </button>
-          </form>
-        )}
-
-        {error && (
-          <div className="error-banner project-browser-error">
-            <span>{error}</span>
-            {!listing && (
-              <button type="button" disabled={busy} onClick={() => void openDirectory()}>
-                {t("Повторить")}
-              </button>
-            )}
-          </div>
-        )}
-
-        <div className="project-directory-list" aria-label={t("Папки")}>
-          {!listing && operation === "loading" && (
-            <div className="project-directory-empty">
-              <div className="spinner" />
-              <span>{t("Получаем папки с сервера…")}</span>
-            </div>
-          )}
-          {listing && visibleDirectories.length === 0 && (
-            <div className="project-directory-empty">
-              <FolderIcon />
-              <span>
-                {listing.directories.length > 0
-                  ? t("Скрытые папки не показаны")
-                  : t("В этой папке нет других папок")}
-              </span>
-            </div>
-          )}
-          {visibleDirectories.map((entry) => (
-            <button
-              type="button"
-              className="project-directory-entry"
-              key={entry.path}
-              disabled={busy}
-              onClick={() => void openDirectory(entry.path)}
-            >
-              <FolderIcon />
-              <span>{entry.name}</span>
-              <ChevronRightIcon />
-            </button>
-          ))}
-        </div>
-
-        <div className="dialog-actions project-browser-actions">
-          <button type="button" disabled={busy} onClick={onClose}>
             {t("Отмена")}
           </button>
+        </form>
+      )}
+
+      {error && (
+        <div className="dialog-notice danger project-browser-error" role="alert">
+          <span>{error}</span>
+          {!listing && (
+            <button type="button" disabled={busy} onClick={() => void openDirectory()}>
+              {t("Повторить")}
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="project-directory-list" aria-label={t("Папки")}>
+        {!listing && operation === "loading" && (
+          <div className="project-directory-empty">
+            <div className="spinner" />
+            <span>{t("Получаем папки с сервера…")}</span>
+          </div>
+        )}
+        {listing && visibleDirectories.length === 0 && (
+          <div className="project-directory-empty">
+            <FolderIcon />
+            <span>
+              {listing.directories.length > 0
+                ? t("Скрытые папки не показаны")
+                : t("В этой папке нет других папок")}
+            </span>
+          </div>
+        )}
+        {visibleDirectories.map((entry) => (
           <button
             type="button"
-            className="primary"
-            disabled={busy || !listing}
-            onClick={() => void selectDirectory()}
+            className="project-directory-entry"
+            key={entry.path}
+            disabled={busy}
+            onClick={() => void openDirectory(entry.path)}
           >
-            <FolderIcon /> {operation === "selecting" ? t("Добавляем…") : t("Выбрать эту папку")}
+            <FolderIcon />
+            <span>{entry.name}</span>
+            <ChevronRightIcon />
           </button>
-        </div>
+        ))}
       </div>
-    </div>
+
+      <div className="dialog-actions project-browser-actions">
+        <button type="button" disabled={busy} onClick={onClose}>
+          {t("Отмена")}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          disabled={busy || !listing}
+          onClick={() => void selectDirectory()}
+        >
+          <FolderIcon /> {operation === "selecting" ? t("Добавляем…") : t("Выбрать эту папку")}
+        </button>
+      </div>
+    </Dialog>
   );
 }
 

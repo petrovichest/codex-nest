@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { ActivityItem } from "./index.js";
+import type { ActivityItem, ThreadArtifactsResponse } from "./index.js";
 import { bearerHeader, isClientFrame, isServerFrame } from "./index.js";
 
 describe("protocol guards", () => {
@@ -79,5 +79,28 @@ describe("protocol guards", () => {
 
     expect(v1.agents[0]).not.toHaveProperty("result");
     expect(v2.agents[0]!.result).toMatchObject({ outcome: "partial" });
+  });
+
+  it("exposes explicit and unavailable artifact capability responses", () => {
+    const explicit = {
+      capability: "explicit",
+      artifacts: [
+        {
+          id: "artifact-id",
+          label: "Final report",
+          path: "/work/deliverables/report.txt",
+          relativePath: "deliverables/report.txt",
+          fileName: "report.txt",
+          turnId: "turn-1",
+          createdAt: 1,
+        },
+      ],
+    } satisfies ThreadArtifactsResponse;
+    const unavailable = {
+      capability: "unavailable",
+      artifacts: [],
+    } satisfies ThreadArtifactsResponse;
+    expect(explicit.artifacts[0]?.label).toBe("Final report");
+    expect(unavailable.artifacts).toEqual([]);
   });
 });

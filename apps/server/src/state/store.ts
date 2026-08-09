@@ -158,6 +158,14 @@ export interface TeamOrchestrationState {
   tasks: Record<string, ManagedTeamTaskState>;
 }
 
+export interface SessionArtifactState {
+  id: string;
+  label: string;
+  path: string;
+  turnId: string;
+  createdAt: number;
+}
+
 export interface TeamToolOperationState {
   threadId: string;
   turnId: string;
@@ -207,6 +215,8 @@ export interface ThreadMetaState {
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
   teamOrchestration?: TeamOrchestrationState;
   managedTeamToolsAvailable?: true;
+  sessionArtifactsVersion?: 1;
+  sessionArtifacts?: SessionArtifactState[];
   managedParent?: {
     parentThreadId: string;
     taskId: string;
@@ -1073,6 +1083,9 @@ function validateState(value: unknown): CodexNestState {
       (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
       meta.teamToolsVersion !== undefined ||
       (meta.managedTeamToolsAvailable !== undefined && meta.managedTeamToolsAvailable !== true) ||
+      (meta.sessionArtifactsVersion !== undefined && meta.sessionArtifactsVersion !== 1) ||
+      (meta.sessionArtifacts !== undefined && meta.sessionArtifactsVersion !== 1) ||
+      (meta.sessionArtifacts !== undefined && !isSessionArtifacts(meta.sessionArtifacts)) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||
@@ -1160,6 +1173,22 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshotState {
     Number.isFinite(value.updatedAt) &&
     typeof value.archived === "boolean" &&
     (value.currentTurnId === null || typeof value.currentTurnId === "string")
+  );
+}
+
+function isSessionArtifacts(value: unknown): value is SessionArtifactState[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (artifact) =>
+        isRecord(artifact) &&
+        hasOnlyKeys(artifact, ["id", "label", "path", "turnId", "createdAt"]) &&
+        isBoundedString(artifact.id, 128) &&
+        isBoundedString(artifact.label, 500) &&
+        isSafeRelativePath(artifact.path) &&
+        isBoundedString(artifact.turnId, 500) &&
+        isNonNegativeFiniteNumber(artifact.createdAt),
+    )
   );
 }
 

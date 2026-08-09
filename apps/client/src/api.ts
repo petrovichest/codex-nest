@@ -30,6 +30,7 @@ import type {
   SummaryResponse,
   ThreadDetail,
   ThreadChanges,
+  ThreadArtifactsResponse,
   ThreadDraft,
   ThreadGoal,
   ThreadSummary,
@@ -316,6 +317,12 @@ export class ApiClient {
 
   readGitChanges(id: string): Promise<GitChangesSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
+  }
+
+  readThreadArtifacts(id: string): Promise<ThreadArtifactsResponse> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/artifacts`, {
+      cache: "no-store",
+    });
   }
 
   createDownload(id: string, path: string): Promise<DownloadTicketResponse> {

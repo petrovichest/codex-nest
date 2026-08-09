@@ -7,6 +7,8 @@ import { SetupScreen } from "./components/SetupScreen";
 import { ConnectionProvider } from "./connection";
 import { I18nProvider } from "./i18n";
 import { loadConnectionSettings, type ConnectionSettings } from "./storage";
+import "./styles/tokens.css";
+import "./styles/primitives.css";
 import "./styles.css";
 
 function Root() {

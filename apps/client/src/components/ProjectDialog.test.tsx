@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DirectoryListing } from "@codexnest/protocol";
@@ -117,5 +117,30 @@ describe("ProjectDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByRole("button", { name: "projects" })).toBeInTheDocument();
     expect(listDirectories).toHaveBeenCalledTimes(2);
+  });
+
+  it("prevents dismissal while busy and allows it after loading", async () => {
+    let finishLoading!: (listing: DirectoryListing) => void;
+    const listDirectories = vi.fn(
+      () =>
+        new Promise<DirectoryListing>((resolve) => {
+          finishLoading = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+    connection.mockReturnValue({
+      api: { listDirectories, createDirectory: vi.fn(), createProject: vi.fn() },
+    });
+
+    render(<ProjectDialog onClose={onClose} />);
+    const dialog = screen.getByRole("dialog", { name: "Добавить проект" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseDown(dialog.parentElement!);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => finishLoading(root));
+    await screen.findByRole("button", { name: "projects" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

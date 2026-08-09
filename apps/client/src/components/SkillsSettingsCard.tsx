@@ -6,6 +6,7 @@ import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n } from "../i18n";
 import { useSkillsCatalog } from "../useSkillsCatalog";
 import { RefreshIcon, SearchIcon, SkillsIcon } from "./Icons";
+import { SettingsGroup, SettingsRow } from "./SettingsPresentation";
 
 export function SkillsSettingsCard({
   projects,
@@ -95,23 +96,22 @@ export function SkillsSettingsCard({
         : null;
 
   return (
-    <section className="settings-card skills-settings-card">
-      <div className="settings-card-heading">
-        <span className="settings-card-icon">
-          <SkillsIcon />
-        </span>
-        <div>
-          <h2>{t("Скиллы")}</h2>
-          <p>{t("Установленные возможности Codex для выбранного проекта.")}</p>
-        </div>
-      </div>
-
+    <SettingsGroup
+      className="skills-settings-card"
+      description={t("Установленные возможности Codex для выбранного проекта.")}
+      icon={<SkillsIcon />}
+      title={t("Скиллы")}
+    >
       {projects.length ? (
-        <div className="skills-settings-controls">
-          <label className="theme-setting">
-            <span>{t("Проект")}</span>
+        <SettingsRow
+          description={t("Каталог и переключатели ниже относятся к выбранному проекту.")}
+          label={t("Проект")}
+          labelFor="settings-skills-project"
+        >
+          <div className="skills-settings-controls">
             <select
               aria-label={t("Проект для скиллов")}
+              id="settings-skills-project"
               value={project?.id ?? ""}
               onChange={(event) => setProjectId(event.target.value)}
             >
@@ -121,17 +121,17 @@ export function SkillsSettingsCard({
                 </option>
               ))}
             </select>
-          </label>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={t("Обновить список скиллов")}
-            disabled={!project || loading}
-            onClick={refresh}
-          >
-            <RefreshIcon />
-          </button>
-        </div>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={t("Обновить список скиллов")}
+              disabled={!project || loading}
+              onClick={refresh}
+            >
+              <RefreshIcon />
+            </button>
+          </div>
+        </SettingsRow>
       ) : (
         <div className="settings-notice warning" role="status">
           {t("Добавьте проект, чтобы посмотреть доступные для него скиллы.")}
@@ -208,7 +208,7 @@ export function SkillsSettingsCard({
           ))}
         </div>
       )}
-    </section>
+    </SettingsGroup>
   );
 }
 

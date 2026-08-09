@@ -1,17 +1,19 @@
 import type { ReactNode } from "react";
 
 import { useI18n } from "../i18n";
-import { FolderIcon, InfoIcon, PanelLeftIcon } from "./Icons";
+import { InfoIcon, PanelLeftIcon } from "./Icons";
 
 export function WorkspaceHeader({
   title,
   subtitle,
+  leadingIcon,
   onOpenNavigation,
   onToggleInspector,
   actions,
 }: {
   title: string;
   subtitle?: string;
+  leadingIcon?: ReactNode;
   onOpenNavigation(): void;
   onToggleInspector?(): void;
   actions?: ReactNode;
@@ -27,9 +29,11 @@ export function WorkspaceHeader({
         >
           <PanelLeftIcon />
         </button>
-        <span className="workspace-title-icon">
-          <FolderIcon />
-        </span>
+        {leadingIcon && (
+          <span aria-hidden="true" className="workspace-title-icon">
+            {leadingIcon}
+          </span>
+        )}
         <div>
           <h1>{title}</h1>
           {subtitle && <p>{subtitle}</p>}

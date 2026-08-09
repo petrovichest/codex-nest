@@ -2028,6 +2028,7 @@ describe("thread settings", () => {
         expect.objectContaining({
           threadId: "created",
           config: { agents: { enabled: false } },
+          developerInstructions: expect.stringMatching(/standalone final deliverables/i),
         }),
         30_000,
       ],
@@ -2037,6 +2038,7 @@ describe("thread settings", () => {
         expect.objectContaining({
           threadId: "created",
           config: { agents: { enabled: false } },
+          developerInstructions: expect.stringMatching(/standalone final deliverables/i),
         }),
         30_000,
       ],
@@ -2833,6 +2835,188 @@ describe("thread settings", () => {
     });
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json()).toMatchObject({ error: { code: "conflict" } });
+
+    await app.close();
+  });
+});
+
+describe("explicit session artifacts", () => {
+  it("does not reuse an old empty root that lacks the artifact tool", async () => {
+    const { app, bridge, headers } = await createTeamHarness();
+    const startsBefore = bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/start",
+    ).length;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().thread.id).toBe("created");
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+      startsBefore + 1,
+    );
+    await app.close();
+  });
+
+  it("attaches only to new roots and validates, persists, deduplicates, and lists files", async () => {
+    const repository = await createApiTestRepository();
+    await mkdir(join(repository, "deliverables"));
+    await writeFile(join(repository, "deliverables", "report.txt"), "report\n");
+    await writeFile(join(repository, "deliverables", "notes.txt"), "notes\n");
+    const outside = await mkdtemp(join(tmpdir(), "codexnest-artifact-outside-"));
+    directories.push(outside);
+    await writeFile(join(outside, "secret.txt"), "secret\n");
+    await symlink(join(outside, "secret.txt"), join(repository, "deliverables", "escape.txt"));
+
+    const { app, bridge, headers, store } = await createTeamHarness({ projectPath: repository });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads",
+      headers,
+      payload: {
+        projectId: "project",
+        input: "Create a final report",
+        settings: { collaborationMode: "team" },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(store.snapshot().threadMeta.created).toMatchObject({
+      managedTeamToolsAvailable: true,
+      sessionArtifactsVersion: 1,
+    });
+    const rootStart = bridge.request.mock.calls
+      .filter(
+        ([method, params]) =>
+          method === "thread/start" &&
+          !String(params.threadSource).startsWith("codexnest-managed:"),
+      )
+      .at(-1)?.[1] as Record<string, unknown>;
+    expect(rootStart.developerInstructions).toMatch(/standalone final deliverables/i);
+    expect(
+      (rootStart.dynamicTools as Array<{ tools: Array<{ name: string }> }>)[0]?.tools.map(
+        (tool) => tool.name,
+      ),
+    ).toContain("publish_artifact");
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100);
+    const first = dynamicToolJson(
+      await callTeamTool(
+        bridge,
+        "created",
+        "publish_artifact",
+        { path: "deliverables/report.txt" },
+        "publish-first",
+        "turn-first",
+      ),
+    ).artifact as Record<string, unknown>;
+    expect(first).toMatchObject({
+      label: "report.txt",
+      path: "deliverables/report.txt",
+      turnId: "turn-first",
+      createdAt: 100,
+    });
+    clock.mockReturnValue(200);
+    await callTeamTool(bridge, "created", "publish_artifact", {
+      path: join(repository, "deliverables", "notes.txt"),
+      label: "Release notes",
+    });
+    clock.mockReturnValue(300);
+    const republished = dynamicToolJson(
+      await callTeamTool(
+        bridge,
+        "created",
+        "publish_artifact",
+        {
+          path: "deliverables/report.txt",
+          label: "Final report",
+        },
+        "publish-again",
+        "turn-republish",
+      ),
+    ).artifact as Record<string, unknown>;
+    clock.mockRestore();
+    expect(republished).toMatchObject({
+      id: first.id,
+      label: "Final report",
+      turnId: "turn-republish",
+      createdAt: 300,
+    });
+    expect(store.snapshot().threadMeta.created?.sessionArtifacts).toEqual([
+      expect.objectContaining({ id: first.id, path: "deliverables/report.txt" }),
+      expect.objectContaining({ path: "deliverables/notes.txt" }),
+    ]);
+
+    for (const path of [
+      "../secret.txt",
+      "deliverables/missing.txt",
+      "deliverables",
+      "deliverables/escape.txt",
+    ]) {
+      const rejected = await callTeamTool(bridge, "created", "publish_artifact", { path });
+      expect(rejected.success, path).toBe(false);
+    }
+
+    const listed = await app.inject({ url: "/api/v1/threads/created/artifacts", headers });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual({
+      capability: "explicit",
+      artifacts: [
+        expect.objectContaining({
+          id: first.id,
+          label: "Final report",
+          path: await realpath(join(repository, "deliverables", "report.txt")),
+        }),
+        expect.objectContaining({
+          label: "Release notes",
+          path: await realpath(join(repository, "deliverables", "notes.txt")),
+        }),
+      ],
+    });
+
+    expect(
+      (
+        await callTeamTool(bridge, "thread", "publish_artifact", {
+          path: "src/index.ts",
+        })
+      ).success,
+    ).toBe(false);
+    expect((await app.inject({ url: "/api/v1/threads/thread/artifacts", headers })).json()).toEqual(
+      {
+        capability: "unavailable",
+        artifacts: [],
+      },
+    );
+
+    const spawned = dynamicToolJson(
+      await callTeamTool(bridge, "created", "spawn_task", {
+        title: "Prepare supporting result",
+        prompt: "Return a result without publishing it to the session.",
+      }),
+    );
+    const childId = String(spawned.threadId);
+    expect(
+      (
+        await callTeamTool(bridge, childId, "publish_artifact", {
+          path: "deliverables/report.txt",
+        })
+      ).success,
+    ).toBe(false);
+    const childStart = bridge.request.mock.calls
+      .filter(
+        ([method, params]) =>
+          method === "thread/start" && String(params.threadSource).startsWith("codexnest-managed:"),
+      )
+      .at(-1)?.[1] as { dynamicTools: Array<{ tools: Array<{ name: string }> }> };
+    expect(childStart.dynamicTools[0]?.tools.map((tool) => tool.name)).toEqual(["submit_result"]);
+    await callTeamTool(bridge, childId, "submit_result", {
+      outcome: "success",
+      summary: "Supporting result",
+      artifacts: [{ label: "Team report", path: "deliverables/report.txt" }],
+    });
+    expect(store.snapshot().threadMeta.created?.sessionArtifacts).toHaveLength(2);
 
     await app.close();
   });
@@ -4712,7 +4896,7 @@ class SettingsBridge extends EventEmitter {
         this.managedThreads.push(thread);
         return { thread };
       }
-      return { thread: testThread("created") };
+      return { thread: { ...testThread("created"), cwd: String(params.cwd ?? "/work") } };
     }
     if (method === "thread/fork") {
       const thread = {
@@ -5139,6 +5323,7 @@ async function callTeamTool(
   tool: string,
   args: Record<string, unknown>,
   requestId = `tool-${Math.random()}`,
+  turnId = `turn-${threadId}`,
 ): Promise<TestDynamicToolResponse> {
   return new Promise((resolve, reject) => {
     bridge.emit(
@@ -5148,7 +5333,7 @@ async function callTeamTool(
         id: requestId,
         params: {
           threadId,
-          turnId: `turn-${threadId}`,
+          turnId,
           callId: requestId,
           namespace: "codexnest",
           tool,

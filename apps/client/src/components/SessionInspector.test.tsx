@@ -34,11 +34,14 @@ const project: Project = {
 };
 
 const artifact: SessionArtifact = {
+  id: "artifact",
+  label: "Итоговый отчёт",
   path: "/work/project/reports/result.md",
   fileName: "result.md",
   relativePath: "reports/result.md",
+  turnId: "turn",
+  createdAt: 1,
   format: "Markdown",
-  linkedAt: 100,
   preview: {
     path: "/work/project/reports/result.md",
     fileName: "result.md",
@@ -108,8 +111,8 @@ describe("SessionInspector", () => {
         gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
         activeTab="overview"
         artifacts={[]}
-        artifactHistoryComplete
-        artifactHistoryState="idle"
+        artifactCapability="explicit"
+        artifactLoadState="idle"
         onClose={() => undefined}
         onTabChange={vi.fn()}
         onArtifactOpen={vi.fn()}
@@ -135,8 +138,8 @@ describe("SessionInspector", () => {
         gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
         activeTab="artifacts"
         artifacts={[artifact]}
-        artifactHistoryComplete
-        artifactHistoryState="idle"
+        artifactCapability="explicit"
+        artifactLoadState="idle"
         onClose={vi.fn()}
         onTabChange={onTabChange}
         onArtifactOpen={onArtifactOpen}
@@ -144,10 +147,15 @@ describe("SessionInspector", () => {
         onArtifactRetry={vi.fn()}
       />,
     );
+    expect(screen.getByText("Итоговый отчёт")).toBeInTheDocument();
 
     expect(screen.getByRole("tab", { name: "Артефакты, 1" })).toHaveAttribute(
       "aria-selected",
       "true",
+    );
+    expect(screen.getByRole("tabpanel")).toHaveAttribute(
+      "aria-labelledby",
+      "session-artifacts-tab",
     );
     expect(screen.getByText("reports/result.md")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Открыть result.md" }));
@@ -155,7 +163,7 @@ describe("SessionInspector", () => {
     expect(view.container.querySelector(".inspector-actions")).not.toBeInTheDocument();
   });
 
-  it("shows progress instead of a false empty state while older history loads", () => {
+  it("shows progress instead of a false empty state while artifacts load", () => {
     render(
       <SessionInspector
         open
@@ -164,8 +172,8 @@ describe("SessionInspector", () => {
         gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
         activeTab="artifacts"
         artifacts={[]}
-        artifactHistoryComplete={false}
-        artifactHistoryState="loading"
+        artifactCapability={null}
+        artifactLoadState="loading"
         onClose={vi.fn()}
         onTabChange={vi.fn()}
         onArtifactOpen={vi.fn()}
@@ -174,8 +182,31 @@ describe("SessionInspector", () => {
       />,
     );
 
-    expect(screen.getByText("Ищем файлы во всей истории…")).toBeInTheDocument();
+    expect(screen.getByText("Загружаем артефакты…")).toBeInTheDocument();
     expect(screen.queryByText("В этой сессии пока нет артефактов")).not.toBeInTheDocument();
+  });
+
+  it("explains why old sessions cannot expose explicit artifacts", () => {
+    render(
+      <SessionInspector
+        open
+        summary={summary}
+        project={project}
+        gitChanges={{ state: "clean", filesChanged: 0, additions: 0, deletions: 0 }}
+        activeTab="artifacts"
+        artifacts={[]}
+        artifactCapability="unavailable"
+        artifactLoadState="idle"
+        onClose={vi.fn()}
+        onTabChange={vi.fn()}
+        onArtifactOpen={vi.fn()}
+        onArtifactDownload={vi.fn()}
+        onArtifactRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Артефакты недоступны для этой сессии")).toBeInTheDocument();
+    expect(screen.getByText("Явные артефакты доступны в новых сессиях.")).toBeInTheDocument();
   });
 });
 
@@ -188,8 +219,8 @@ function renderInspector(gitChanges: GitChangesView, thread = summary) {
       gitChanges={gitChanges}
       activeTab="overview"
       artifacts={[]}
-      artifactHistoryComplete
-      artifactHistoryState="idle"
+      artifactCapability="explicit"
+      artifactLoadState="idle"
       onClose={() => undefined}
       onTabChange={vi.fn()}
       onArtifactOpen={vi.fn()}

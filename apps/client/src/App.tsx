@@ -30,10 +30,10 @@ import {
 import type { ConnectionSettings } from "./storage";
 import { copyText } from "./clipboard";
 import { AttentionPanel } from "./components/AttentionPanel";
+import { Dialog } from "./components/Dialog";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  BellIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -63,6 +63,9 @@ import { hasAlwaysVisibleThreadStatus, threadStatusClasses } from "./thread-stat
 import { useDrawerNavigation } from "./useDrawerNavigation";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
+const THEME_KEY = "codexnest.theme";
+const DARK_THEME_QUERY = "(prefers-color-scheme: dark)";
+const THEME_COLOR = { dark: "#11171D", light: "#F5F7F9" } as const;
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
 const LAYOUT_DEFAULTS_VERSION = "1";
@@ -78,6 +81,7 @@ const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
 
 type ListExpansion = number | "all";
 type SessionListMode = "projects" | "active";
+type ThemeMode = "dark" | "light" | "system";
 
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
@@ -105,6 +109,29 @@ type ProjectDragView = {
   projectId: string;
 };
 
+function themeMode(value: string | null): ThemeMode {
+  return value === "dark" || value === "light" ? value : "system";
+}
+
+function storedTheme(): ThemeMode {
+  return themeMode(localStorage.getItem(THEME_KEY));
+}
+
+export function applyTheme(theme: string, systemDark: boolean): ThemeMode {
+  const mode = themeMode(theme);
+  const resolved = mode === "dark" || (mode === "system" && systemDark) ? "dark" : "light";
+  document.documentElement.dataset.theme = mode;
+  document.documentElement.dataset.resolvedTheme = resolved;
+  let themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!themeColor) {
+    themeColor = document.createElement("meta");
+    themeColor.name = "theme-color";
+    document.head.append(themeColor);
+  }
+  themeColor.content = THEME_COLOR[resolved];
+  return mode;
+}
+
 export function App({
   settings,
   onDisconnected,
@@ -128,7 +155,7 @@ export function App({
         : `thread:${location.pathname}`;
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
-  const [theme, setTheme] = useState(() => localStorage.getItem("codexnest.theme") ?? "system");
+  const [theme, setTheme] = useState<ThemeMode>(storedTheme);
   const [initialLayout] = useState(readLayoutPreferences);
   const [sidebarSide, setSidebarSide] = useState<SidebarSide>(initialLayout.sidebarSide);
   const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(
@@ -226,8 +253,12 @@ export function App({
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("codexnest.theme", theme);
+    const colorScheme = window.matchMedia(DARK_THEME_QUERY);
+    const syncTheme = () => applyTheme(theme, colorScheme.matches);
+    syncTheme();
+    localStorage.setItem(THEME_KEY, theme);
+    colorScheme.addEventListener("change", syncTheme);
+    return () => colorScheme.removeEventListener("change", syncTheme);
   }, [theme]);
 
   useEffect(() => {
@@ -386,7 +417,7 @@ export function App({
                       .then(onDisconnected)
                   }
                   theme={theme}
-                  onThemeChange={setTheme}
+                  onThemeChange={(nextTheme) => setTheme(themeMode(nextTheme))}
                   sidebarSide={sidebarSide}
                   onSidebarSideChange={setSidebarSide}
                   projectListDirection={projectListDirection}
@@ -415,48 +446,42 @@ export function App({
       )}
       {newProject && <ProjectDialog onClose={() => setNewProject(false)} />}
       {notificationPrompt && (
-        <div className="modal-backdrop" role="presentation">
-          <div
-            className="modal compact"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="notification-permission-title"
-          >
-            <div className="settings-card-heading">
-              <span className="settings-card-icon">
-                <BellIcon />
-              </span>
-              <div>
-                <h2 id="notification-permission-title">{t("Разрешить уведомления?")}</h2>
-                <p>
-                  {t("CodexNest сообщит, когда задача завершится или потребуется ваше решение.")}
-                </p>
-              </div>
-            </div>
-            {notificationError && (
-              <div className="settings-notice danger" role="alert">
-                {notificationError}
-              </div>
-            )}
-            <div className="dialog-actions">
-              <button
-                type="button"
-                disabled={notificationRequesting}
-                onClick={dismissNotificationPrompt}
-              >
-                {t("Не сейчас")}
-              </button>
-              <button
-                type="button"
-                className="primary"
-                disabled={notificationRequesting}
-                onClick={() => void enableBrowserNotifications()}
-              >
-                {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
-              </button>
+        <Dialog
+          titleId="notification-permission-title"
+          className="compact"
+          closeOnBackdrop={false}
+          closeOnEscape={false}
+          onClose={dismissNotificationPrompt}
+        >
+          <div className="dialog-header">
+            <div className="dialog-heading">
+              <h2 id="notification-permission-title">{t("Разрешить уведомления?")}</h2>
+              <p>{t("CodexNest сообщит, когда задача завершится или потребуется ваше решение.")}</p>
             </div>
           </div>
-        </div>
+          {notificationError && (
+            <div className="dialog-notice danger" role="alert">
+              {notificationError}
+            </div>
+          )}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              disabled={notificationRequesting}
+              onClick={dismissNotificationPrompt}
+            >
+              {t("Не сейчас")}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={notificationRequesting}
+              onClick={() => void enableBrowserNotifications()}
+            >
+              {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
+            </button>
+          </div>
+        </Dialog>
       )}
     </div>
   );
@@ -604,7 +629,11 @@ function HomeRoute({
   return (
     <div className="thread-workspace">
       <div className="conversation-pane">
-        <WorkspaceHeader title={t("Нет открытых сессий")} onOpenNavigation={onOpenNavigation} />
+        <WorkspaceHeader
+          leadingIcon={<NewTaskIcon />}
+          title={t("Нет открытых сессий")}
+          onOpenNavigation={onOpenNavigation}
+        />
         <div className="new-session-empty">
           <span className="new-session-glyph">
             <NewTaskIcon />

@@ -3,7 +3,6 @@ import { type FormEvent, useState } from "react";
 import { ApiClient } from "../api";
 import { localizeKnownServerText, useI18n } from "../i18n";
 import { normalizeBaseUrl, saveConnectionSettings, type ConnectionSettings } from "../storage";
-import { ServerIcon } from "./Icons";
 
 export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionSettings): void }) {
   const { language, t } = useI18n();
@@ -38,10 +37,7 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
   return (
     <main className="setup-page">
       <form className="setup-card" onSubmit={submit}>
-        <div className="brand-mark">
-          <ServerIcon />
-        </div>
-        <span className="dialog-eyebrow">CodexNest</span>
+        <div className="setup-identity">CodexNest</div>
         <h1>{t("Подключение к CodexNest")}</h1>
         <p className="muted">{t("Укажите адрес домашнего сервера и bearer token.")}</p>
         <label>

@@ -682,6 +682,41 @@ describe("StateStore", () => {
     }
   });
 
+  it("persists explicit session artifacts and rejects unsafe metadata", async () => {
+    const { path } = await temporaryState();
+    const state = validManagedTeamSerializedState();
+    state.threadMeta.parent.sessionArtifactsVersion = 1;
+    state.threadMeta.parent.sessionArtifacts = [
+      {
+        id: "artifact-id",
+        label: "Final report",
+        path: "deliverables/report.txt",
+        turnId: "turn-1",
+        createdAt: 10,
+      },
+    ];
+    await writeFile(path, JSON.stringify(state), "utf8");
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.snapshot().threadMeta.parent?.sessionArtifacts).toEqual(
+      state.threadMeta.parent.sessionArtifacts,
+    );
+
+    for (const mutate of [
+      (value: any) => (value.threadMeta.parent.sessionArtifactsVersion = 2),
+      (value: any) => (value.threadMeta.parent.sessionArtifacts[0].path = "../secret.txt"),
+      (value: any) => (value.threadMeta.parent.sessionArtifacts[0].label = "x".repeat(501)),
+    ]) {
+      const invalid = structuredClone(state);
+      mutate(invalid);
+      const candidate = await temporaryState();
+      await writeFile(candidate.path, JSON.stringify(invalid), "utf8");
+      await expect(new StateStore(candidate.path).load()).rejects.toThrow(
+        "Corrupt thread metadata in CodexNest state",
+      );
+    }
+  });
+
   it("reloads unmaterialized sessions and complete server drafts", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

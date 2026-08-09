@@ -468,6 +468,21 @@ export type ThreadDetail = {
   syncPoint?: ThreadSyncPoint | null;
 };
 
+export type SessionArtifact = {
+  id: string;
+  label: string;
+  path: string;
+  relativePath: string;
+  fileName: string;
+  turnId: string;
+  createdAt: number;
+};
+
+export type ThreadArtifactsResponse = {
+  capability: "explicit" | "unavailable";
+  artifacts: SessionArtifact[];
+};
+
 export type ThreadChanges = {
   summary: ThreadSummary;
   turns: TurnView[];

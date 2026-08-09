@@ -32,6 +32,7 @@ import type {
   RefreshThreadResponse,
   ServerEvent,
   SessionSettings,
+  SessionArtifact,
   SkillCatalogItem,
   SkillsCatalogResponse,
   StartTurnRequest,
@@ -39,6 +40,7 @@ import type {
   TaskDefaults,
   ThreadGoal,
   ThreadChanges,
+  ThreadArtifactsResponse,
   ThreadOutcome,
   ThreadSyncPoint,
   ThreadSummary,
@@ -133,6 +135,7 @@ import type {
   ManagedTeamTaskResultCheck,
   ManagedTeamTaskResult,
   ManagedTeamTaskState,
+  SessionArtifactState,
   StateStore,
   TeamToolOperationState,
 } from "./state/store";
@@ -221,6 +224,8 @@ const TEAM_CHILD_INSTRUCTIONS = [
   "Before finishing, call codexnest.submit_result with outcome, a concise summary, optional details, checks, risks, and artifacts.",
   "The submitted value is a result candidate; still provide a normal final answer after the tool call.",
 ].join(" ");
+const SESSION_ARTIFACT_INSTRUCTIONS =
+  "Use codexnest.publish_artifact only for standalone final deliverables intentionally delivered to the user. Never publish ordinary source references, intermediate files, plans or checklists, or every edited file.";
 
 interface DownloadTicket {
   root: string;
@@ -299,12 +304,21 @@ const TEAM_TASK_OPTIONS_SCHEMA = {
   serviceTier: { type: "string" },
 } as const;
 
-const TEAM_ROOT_DYNAMIC_TOOLS = [
+const ROOT_DYNAMIC_TOOLS = [
   {
     type: "namespace",
     name: "codexnest",
-    description: "Create and manage isolated CodexNest child tasks for Team mode.",
+    description: "Publish session deliverables and manage isolated CodexNest child tasks.",
     tools: [
+      dynamicTool("publish_artifact", "Publish one standalone final file to the user.", {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository-relative path to one local file." },
+          label: { type: "string", description: "Optional user-facing label." },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      }),
       dynamicTool("spawn_task", "Create one managed child task.", {
         type: "object",
         properties: {
@@ -560,6 +574,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             cwd: summary.cwd,
             excludeTurns: true,
             ...threadSettings(summary.settings),
+            ...(store.view().threadMeta[threadId]?.sessionArtifactsVersion === 1
+              ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
+              : {}),
             ...(summary.settings.collaborationMode === "team"
               ? { config: teamRuntimeConfig() }
               : {}),
@@ -662,7 +679,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
     for (const candidate of projection.emptyThreadCandidates(projectId)) {
-      if (store.view().threadMeta[candidate.thread.id]?.managedTeamToolsAvailable !== true) {
+      const meta = store.view().threadMeta[candidate.thread.id];
+      if (meta?.managedTeamToolsAvailable !== true || meta.sessionArtifactsVersion !== 1) {
         continue;
       }
       if (candidate.knownUnmaterialized) return candidate.thread;
@@ -690,13 +708,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await bridge.request<unknown>("thread/start", {
           cwd: project.path,
           ...threadSettings(settings),
-          dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
+          developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
+          dynamicTools: ROOT_DYNAMIC_TOOLS,
           ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
         }),
       );
       projection.upsertThread(started.thread);
       await projection.markUnmaterialized(started.thread.id);
-      await markTeamToolsAvailable(store, started.thread.id);
+      await markRootToolsAvailable(store, started.thread.id);
       return projection.setSettings(started.thread.id, settings);
     })().finally(() => {
       if (projectThreadCreations.get(projectId) === request) {
@@ -1035,6 +1054,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return;
     }
     if (request.method === "item/tool/call" && request.params.namespace === "codexnest") {
+      if (request.params.tool === "publish_artifact") {
+        const pending = withKeyLock(teamParentLocks, request.params.threadId, () =>
+          handlePublishArtifact(request, store, projection),
+        );
+        void (lifecycle?.track(pending, "Artifact publication") ?? pending)
+          .then((response) => transport.respond(request.id, response))
+          .catch((error: unknown) => {
+            try {
+              transport.respond(request.id, dynamicToolError(safeError(error).message));
+            } catch {
+              // The caller disconnected before the response was delivered.
+            }
+          });
+        return;
+      }
       const operationKey = teamToolOperationKey(request);
       const caller = request.params.threadId;
       const parent =
@@ -2015,6 +2049,23 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/threads/:id/artifacts",
+    async (request, reply): Promise<ThreadArtifactsResponse | undefined> => {
+      let observed = projection.summary(request.params.id);
+      if (!observed) observed = await projection.refreshThread(request.params.id);
+      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+      const meta = store.view().threadMeta[request.params.id];
+      if (observed.relation.kind !== "session" || meta?.sessionArtifactsVersion !== 1) {
+        return { capability: "unavailable", artifacts: [] };
+      }
+      return {
+        capability: "explicit",
+        artifacts: await resolveSessionArtifacts(observed.cwd, meta.sessionArtifacts ?? []),
+      };
+    },
+  );
+
   app.post<{ Params: { id: string } }>("/api/v1/threads/:id/refresh", async (request, reply) => {
     const observed = await projection.refreshThread(request.params.id);
     if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
@@ -2232,13 +2283,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await bridge.request<unknown>("thread/start", {
           cwd: project.path,
           ...threadSettings(settings),
-          dynamicTools: TEAM_ROOT_DYNAMIC_TOOLS,
+          developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
+          dynamicTools: ROOT_DYNAMIC_TOOLS,
           ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
         }),
       );
       projection.upsertThread(started.thread);
       await projection.markUnmaterialized(started.thread.id);
-      await markTeamToolsAvailable(store, started.thread.id);
+      await markRootToolsAvailable(store, started.thread.id);
       await projection.setSettings(started.thread.id, settings);
       const result = await startTurn(
         started.thread.id,
@@ -2315,6 +2367,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           settings: structuredClone(source.settings),
           ...(sourceMeta?.managedTeamToolsAvailable === true
             ? { managedTeamToolsAvailable: true as const }
+            : {}),
+          ...(sourceMeta?.sessionArtifactsVersion === 1
+            ? { sessionArtifactsVersion: 1 as const }
             : {}),
         };
         if (state.messageQueues) delete state.messageQueues[forked.id];
@@ -2399,6 +2454,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           cwd: summary.cwd,
           excludeTurns: true,
           ...threadSettings(settings),
+          ...(store.view().threadMeta[request.params.id]?.sessionArtifactsVersion === 1
+            ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
+            : {}),
           config: teamRuntimeConfig(),
         };
         try {
@@ -2778,6 +2836,112 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 409, "conflict", error.message);
     return apiError(reply, 500, "internal_error", "Internal server error");
   });
+}
+
+async function handlePublishArtifact(
+  request: Extract<ServerRequest, { method: "item/tool/call" }>,
+  store: StateStore,
+  projection: AppProjection,
+): Promise<DynamicToolCallResponse> {
+  const { threadId, turnId } = request.params;
+  const summary = projection.summary(threadId);
+  const meta = store.view().threadMeta[threadId];
+  if (!summary || summary.relation.kind !== "session" || meta?.sessionArtifactsVersion !== 1) {
+    return dynamicToolError("Explicit session artifacts are unavailable for this thread");
+  }
+  const args = dynamicToolArguments(request.params.arguments);
+  if (Object.keys(args).some((key) => key !== "path" && key !== "label")) {
+    throw new ProjectValidationError("publish_artifact accepts only path and label");
+  }
+  const published = await resolvePublishedArtifact(summary.cwd, requiredToolString(args, "path"));
+  const requestedLabel = optionalToolString(args, "label");
+  const label = requestedLabel ?? basename(published.relativePath);
+  if (label.length > 500) {
+    throw new ProjectValidationError("label must be at most 500 characters");
+  }
+  let artifact: SessionArtifactState | undefined;
+  await store.update((state) => {
+    const current = state.threadMeta[threadId];
+    if (current?.sessionArtifactsVersion !== 1 || current.managedParent) return;
+    const now = Date.now();
+    const existing = current.sessionArtifacts?.find(
+      (candidate) => candidate.path === published.relativePath,
+    );
+    artifact = {
+      id: existing?.id ?? randomUUID(),
+      label,
+      path: published.relativePath,
+      turnId,
+      createdAt: now,
+    };
+    current.sessionArtifacts = [
+      artifact,
+      ...(current.sessionArtifacts ?? []).filter(
+        (candidate) => candidate.path !== published.relativePath,
+      ),
+    ];
+  });
+  return artifact
+    ? dynamicToolSuccess({ published: true, artifact })
+    : dynamicToolError("Explicit session artifacts are unavailable for this thread");
+}
+
+async function resolvePublishedArtifact(
+  cwd: string,
+  input: string,
+): Promise<{ relativePath: string; absolutePath: string }> {
+  if (input.includes("\0") || input.length > 4_096) {
+    throw new ProjectValidationError("Invalid artifact path");
+  }
+  if (
+    !isAbsolute(input) &&
+    (input.includes("\\") ||
+      input.split("/").some((segment) => !segment || segment === "." || segment === ".."))
+  ) {
+    throw new ProjectValidationError("Artifact path must be a repository-relative file path");
+  }
+  let canonicalRoot: string;
+  let canonicalPath: string;
+  try {
+    canonicalRoot = await realpath(cwd);
+    canonicalPath = await realpath(isAbsolute(input) ? input : resolve(canonicalRoot, input));
+  } catch {
+    throw new ProjectValidationError("Artifact file does not exist");
+  }
+  if (!pathContains(canonicalRoot, canonicalPath)) {
+    throw new ProjectValidationError("Artifact file must stay inside the thread directory");
+  }
+  let info: Stats;
+  try {
+    info = await stat(canonicalPath);
+  } catch {
+    throw new ProjectValidationError("Artifact file does not exist");
+  }
+  if (!info.isFile()) throw new ProjectValidationError("Artifact path must be a regular file");
+  const relativePath = relative(canonicalRoot, canonicalPath);
+  if (!relativePath) throw new ProjectValidationError("Artifact path must be a regular file");
+  return { relativePath, absolutePath: canonicalPath };
+}
+
+async function resolveSessionArtifacts(
+  cwd: string,
+  artifacts: readonly DeepReadonly<SessionArtifactState>[],
+): Promise<SessionArtifact[]> {
+  const resolved: SessionArtifact[] = [];
+  for (const artifact of artifacts) {
+    try {
+      const file = await resolvePublishedArtifact(cwd, artifact.path);
+      resolved.push({
+        ...artifact,
+        path: file.absolutePath,
+        relativePath: file.relativePath,
+        fileName: basename(file.relativePath),
+      });
+    } catch {
+      // Files are resolved lazily; removed or newly unsafe entries are not exposed.
+    }
+  }
+  return resolved;
 }
 
 async function handleManagedTeamToolCall(
@@ -5405,10 +5569,11 @@ function managedChildResumeSettings(
   });
 }
 
-async function markTeamToolsAvailable(store: StateStore, threadId: string): Promise<void> {
+async function markRootToolsAvailable(store: StateStore, threadId: string): Promise<void> {
   await store.update((state) => {
     const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
     meta.managedTeamToolsAvailable = true;
+    meta.sessionArtifactsVersion = 1;
     state.threadMeta[threadId] = meta;
   });
 }
