@@ -67,8 +67,8 @@
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
-  --control-height: 38px;
-  --control-touch-height: 44px;
+  --control-height: 36px;
+  --control-touch-height: 38px;
   --elevation-overlay: 0 10px 32px rgb(28 30 27 / 9%), 0 1px 3px rgb(28 30 27 / 7%);
   --motion-fast: 120ms;
   --motion-standard: 180ms;

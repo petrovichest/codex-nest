@@ -82,10 +82,10 @@ test.describe("CodexNest redesign visual contract", () => {
   test("5 mobile light drawer", async ({ page }) => {
     await openVisualPage(page, "/", "light", PHONE_VIEWPORT);
     const drawerToggle = page.getByRole("button", { name: "Открыть список задач" });
-    await assertTouchTarget(drawerToggle);
+    await assertCompactTouchTarget(drawerToggle);
     await drawerToggle.click();
     await expect(page.getByRole("link", { name: "Настройки" })).toBeVisible();
-    await assertTouchTarget(page.getByRole("link", { name: "Настройки" }));
+    await assertCompactTouchTarget(page.getByRole("link", { name: "Настройки" }));
     await expect(
       page.getByRole("link", { name: "Сверка токенов темы" }).locator(".status"),
     ).toHaveCSS("background-color", "rgb(75, 156, 232)");
@@ -102,15 +102,15 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-attention", "dark", PHONE_VIEWPORT);
     await expect(page.getByRole("region", { name: "Требуется внимание" })).toBeVisible();
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
-    await assertTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
-    await assertTouchTarget(page.getByRole("button", { name: "Показать сведения" }));
+    await assertCompactTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
+    await assertCompactTouchTarget(page.getByRole("button", { name: "Показать сведения" }));
     await expect(page).toHaveScreenshot("06-mobile-dark-attention.png", { fullPage: true });
   });
 
   test("7 mobile light settings", async ({ page }) => {
     await openVisualPage(page, "/settings?section=application", "light", PHONE_VIEWPORT);
     await expect(page.getByRole("heading", { name: "Интерфейс" })).toBeVisible();
-    await assertTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
+    await assertCompactTouchTarget(page.getByRole("button", { name: "Открыть список задач" }));
     await expect(page).toHaveScreenshot("07-mobile-light-settings.png", { fullPage: true });
   });
 
@@ -146,9 +146,10 @@ async function expectA11yClean(page: Page, surface: string): Promise<void> {
   expect(report, `${surface} has axe violations`).toEqual([]);
 }
 
-async function assertTouchTarget(locator: Locator): Promise<void> {
+async function assertCompactTouchTarget(locator: Locator): Promise<void> {
   const box = await locator.boundingBox();
   expect(box, "mobile action must have a rendered box").not.toBeNull();
-  expect(box!.width, "mobile action width").toBeGreaterThanOrEqual(44);
-  expect(box!.height, "mobile action height").toBeGreaterThanOrEqual(44);
+  expect(box!.width, "mobile action width").toBeGreaterThanOrEqual(38);
+  expect(box!.height, "mobile action height").toBeGreaterThanOrEqual(38);
+  expect(box!.height, "mobile action stays compact").toBeLessThanOrEqual(40);
 }

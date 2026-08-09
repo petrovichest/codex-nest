@@ -4568,7 +4568,7 @@
 
   .settings-section-tab {
     min-width: max-content;
-    min-height: 44px;
+    min-height: var(--control-touch-height);
     flex: 0 0 auto;
     padding: 0 14px;
   }
