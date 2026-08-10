@@ -108,10 +108,7 @@ type ComposerDraftState = {
 };
 
 type LocalImageLoader = (path: string) => Promise<Blob>;
-type LocalArtifactOpener = (
-  artifact: ArtifactDescriptor,
-  opener: HTMLButtonElement | null,
-) => void;
+type LocalArtifactOpener = (artifact: ArtifactDescriptor, opener: HTMLButtonElement | null) => void;
 
 const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
 

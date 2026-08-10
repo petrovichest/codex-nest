@@ -1182,7 +1182,12 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Открыть report.md" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Скачать report.md" }));
-    await waitFor(() => expect(openDownloadUrl).toHaveBeenCalledWith("https://codex.home.arpa", "/downloads/ticket/report.md"));
+    await waitFor(() =>
+      expect(openDownloadUrl).toHaveBeenCalledWith(
+        "https://codex.home.arpa",
+        "/downloads/ticket/report.md",
+      ),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Открыть report.md" }));
     expect(await screen.findByRole("heading", { name: "Report" })).toBeInTheDocument();
