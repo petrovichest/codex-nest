@@ -22,7 +22,6 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
           "req.headers.x-codexnest-restart-token",
           "headers.x-codexnest-restart-token",
           "token",
-          "fcmToken",
           "input",
           "images",
           "output",

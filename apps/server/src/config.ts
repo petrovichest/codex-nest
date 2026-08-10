@@ -27,8 +27,6 @@ export interface AppConfig {
   sttRefineLocal: boolean;
   sttRefinementModel: string;
   sttTimeoutMs: number;
-  firebaseCredentialPath?: string;
-  firebaseProjectId?: string;
   managedInstall: boolean;
   updateStatusPath: string;
   restartTokenPath: string;
@@ -111,8 +109,6 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sttRefineLocal: envBoolean("CODEXNEST_STT_REFINE_LOCAL", true),
     sttRefinementModel: env("CODEXNEST_STT_REFINEMENT_MODEL") ?? "gpt-5.6-luna",
     sttTimeoutMs,
-    firebaseCredentialPath: env("CODEXNEST_FIREBASE_CREDENTIAL_PATH"),
-    firebaseProjectId: env("CODEXNEST_FIREBASE_PROJECT_ID"),
     managedInstall: envBoolean("CODEXNEST_MANAGED_INSTALL", false),
     updateStatusPath:
       env("CODEXNEST_UPDATE_STATUS_PATH") ?? resolve(stateRoot, "codexnest/update.json"),
@@ -147,8 +143,4 @@ function validateHttpUrl(value: string, name: string): void {
   if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
     throw new Error(`${name} must be an HTTP(S) URL without credentials`);
   }
-}
-
-export function isLoopback(host: string): boolean {
-  return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }

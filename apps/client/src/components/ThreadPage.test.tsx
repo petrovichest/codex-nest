@@ -4350,7 +4350,6 @@ function threadApi() {
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
     updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),
     deleteQueued: vi.fn().mockResolvedValue(undefined),
-    steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
     updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>

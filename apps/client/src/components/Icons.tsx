@@ -172,12 +172,6 @@ export const ModelIcon = (props: IconProps) => (
   </Icon>
 );
 
-export const BrainIcon = (props: IconProps) => (
-  <Icon {...props}>
-    <path d="M9.5 4.5A3 3 0 0 0 4 6.2a3.5 3.5 0 0 0 .5 6.6A3.5 3.5 0 0 0 9.5 18M14.5 4.5A3 3 0 0 1 20 6.2a3.5 3.5 0 0 1-.5 6.6 3.5 3.5 0 0 1-5 5.2M9.5 4.5v13.7M14.5 4.5v13.7M7 9h2.5M14.5 9H17M7 14h2.5M14.5 14H17" />
-  </Icon>
-);
-
 export const PlanIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m4 6 1.5 1.5L8 5M11 6h9M4 12l1.5 1.5L8 11M11 12h9M4 18l1.5 1.5L8 17M11 18h9" />

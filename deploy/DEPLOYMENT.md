@@ -39,8 +39,8 @@ installer.
 Установка конкретной версии:
 
 ```bash
-curl -fsSL https://github.com/petrovichest/codex-nest/releases/download/v0.2.0/install.sh | \
-  bash -s -- --version 0.2.0
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/download/v0.1.6/install.sh | \
+  bash -s -- --version 0.1.6
 ```
 
 Codex CLI installer не устанавливает. Если CLI отсутствует, диагностический UI
@@ -396,7 +396,7 @@ accept-all certificate handler). Android-клиент доверяет сист�
 | `CODEXNEST_UPDATE_CHANNEL`       | Канал обновлений: `rolling` или `stable`          | `rolling`                                     |
 | `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |
 | `CODEXNEST_STT_PROVIDER`         | Глобальный режим: `local` или `openai`            | первый настроенный провайдер                  |
-| `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального `whisper-server`              | локальный провайдер выключен                  |
+| `CODEXNEST_STT_LOCAL_URL`        | Endpoint локального STT-сервиса                   | локальный провайдер выключен                  |
 | `CODEXNEST_STT_OPENAI_API_KEY`   | Отдельный API-ключ OpenAI для транскрипции        | OpenAI-провайдер выключен                     |
 | `CODEXNEST_STT_OPENAI_MODEL`     | Модель OpenAI speech-to-text                      | `gpt-4o-transcribe`                           |
 | `CODEXNEST_STT_LANGUAGE`         | ISO-код языка записи                              | `ru`                                          |
@@ -424,9 +424,17 @@ API-ключ удаляется из окружения запускаемых C
 пунктуацию, регистр и исправить очевидные ошибки через изолированный поток Codex.
 При ошибке или таймауте улучшения клиент получает исходный локальный текст.
 
-Для полностью локального варианта установите `cmake`, C++ compiler, `ffmpeg` и,
-при необходимости, OpenBLAS или CUDA toolkit. Затем соберите протестированную
-версию `whisper.cpp`:
+Оба поддерживаемых локальных backend принимают `multipart/form-data` с записью и
+языком через `POST /inference` и возвращают JSON с полем `text`. CodexNest
+обращается к выбранному сервису только через общий адрес
+`CODEXNEST_STT_LOCAL_URL`; обычно это
+`http://127.0.0.1:8178/inference`. Выберите один из следующих сервисов и не
+запускайте оба на одном порту одновременно.
+
+#### Локальный backend A: whisper.cpp
+
+Установите `cmake`, C++ compiler, `ffmpeg` и, при необходимости, OpenBLAS или
+CUDA toolkit. Затем соберите протестированную версию `whisper.cpp`:
 
 ```bash
 mkdir -p "$HOME/.local/opt" "$HOME/.local/share/codexnest"
@@ -457,7 +465,50 @@ systemctl --user status codexnest-stt.service
 curl --fail --silent http://127.0.0.1:8178/
 ```
 
-После проверки добавьте в `server.env`:
+Пути в [`systemd/codexnest-stt.service.example`](./systemd/codexnest-stt.service.example)
+можно менять: укажите фактические каталоги сборки `whisper.cpp` и файла модели в
+`WorkingDirectory` и `ExecStart` до установки unit.
+
+#### Локальный backend B: faster-whisper
+
+В репозитории есть HTTP-адаптер
+[`local-stt-server.py`](./local-stt-server.py) и пример user-systemd unit
+[`systemd/codexnest-faster-whisper.service.example`](./systemd/codexnest-faster-whisper.service.example).
+Создайте отдельный virtual environment и установите backend:
+
+```bash
+mkdir -p "$HOME/.local/share/local-stt"
+python3 -m venv "$HOME/.local/share/local-stt/.venv"
+"$HOME/.local/share/local-stt/.venv/bin/python" -m pip install --upgrade pip faster-whisper
+```
+
+Разместите совместимую локальную CTranslate2-модель в выбранном каталоге. Затем
+скопируйте и отредактируйте unit:
+
+```bash
+cp deploy/systemd/codexnest-faster-whisper.service.example \
+  "$HOME/.config/systemd/user/codexnest-faster-whisper.service"
+systemctl --user edit --full codexnest-faster-whisper.service
+```
+
+В unit задайте фактические значения трёх путей: `WorkingDirectory` должен
+указывать на checkout CodexNest с `deploy/local-stt-server.py`, первый путь в
+`ExecStart` — на Python созданного venv, а значение `--model` — на каталог
+локальной CTranslate2-модели. При необходимости измените `--threads`. Примерные
+пути `%h/git/codex-nest`, `%h/.local/share/local-stt/.venv` и
+`%h/.local/share/local-stt/whisper-codeswitch/ct2_int8_float16` не обязательны.
+
+Запустите и проверьте сервис:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now codexnest-faster-whisper.service
+systemctl --user status codexnest-faster-whisper.service
+curl --fail --silent http://127.0.0.1:8178/health
+```
+
+После проверки любого из двух backend добавьте один и тот же endpoint в
+`server.env`:
 
 ```dotenv
 CODEXNEST_STT_LOCAL_URL=http://127.0.0.1:8178/inference
@@ -471,8 +522,8 @@ CODEXNEST_STT_REFINEMENT_MODEL=gpt-5.6-luna
 страница, открытая по обычному LAN HTTP-адресу, не получит доступ к микрофону.
 
 Android-клиент получает фоновые уведомления напрямую через существующий WebSocket
-CodexNest. Firebase, Google Play Services, внешний push-провайдер и дополнительные
-серверные credentials не используются. Для надёжной работы Android показывает
+CodexNest. Сторонний push-провайдер и дополнительные серверные credentials не
+используются. Для надёжной работы Android показывает
 постоянное низкоприоритетное уведомление foreground service.
 
 Браузерный интерфейс использует тот же WebSocket для системных уведомлений о
@@ -610,7 +661,7 @@ systemctl --user start codexnest.service
 
 Основным источником состояния служит `state.sqlite`; `state.json` экспортируется
 при штатной остановке для rollback на предыдущую версию. В них находятся verifier
-токена, список проектов, read/pin/outcome metadata и регистрации FCM. Промпты,
+токена, список проектов, read/pin/outcome metadata и регистрации устройств. Промпты,
 ответы и вывод команд там не хранятся. История Codex остаётся в `~/.codex` и должна
 резервироваться отдельно.
 

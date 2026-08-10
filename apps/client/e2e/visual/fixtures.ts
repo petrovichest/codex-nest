@@ -350,7 +350,6 @@ export const snapshot: AppSnapshot = {
   ],
   defaultReasoningEffort: "high",
   taskDefaults: { serviceTier: "priority", personality: "pragmatic" },
-  pushConfigured: false,
   voiceTranscriptions: [],
 };
 
@@ -561,7 +560,6 @@ async function mockHttpRoute(route: Route): Promise<void> {
       syncedAt: snapshot.connection.syncedAt,
     });
   }
-  if (path === "/api/v1/sync") return json(snapshot);
   if (path === "/api/v1/transcriptions/config") return json(transcriptionConfig);
   if (path === "/api/v1/codex/rate-limits") {
     return json({
@@ -576,7 +574,7 @@ async function mockHttpRoute(route: Route): Promise<void> {
   if (path === "/api/v1/settings/permissions") {
     return json({ preset: "auto", version: "visual-v1", overridden: false, message: null });
   }
-  if (path === "/api/v1/settings/task-defaults") return json(snapshot.taskDefaults ?? {});
+  if (path === "/api/v1/settings/task-defaults" && method === "PUT") return json(body ?? {});
   if (path === "/api/v1/directories") {
     return json({
       rootPath: "/home/codex",

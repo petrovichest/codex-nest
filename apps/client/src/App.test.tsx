@@ -1980,7 +1980,6 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("second"));
-    expect(api.createThread).not.toHaveBeenCalled();
   });
 
   it("does not activate a created thread after navigating away from its preparation", async () => {
@@ -3349,7 +3348,6 @@ function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProjec
     threads,
     attention: [],
     models: [],
-    pushConfigured: false,
   };
 }
 
@@ -3364,9 +3362,7 @@ function mockConnection(
     updateThread: vi.fn().mockResolvedValue(undefined),
     archive: vi.fn().mockResolvedValue(undefined),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
-    steer: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
-    createThread: vi.fn(),
     createProjectThread: vi.fn(),
     updateThreadDraft: vi.fn().mockImplementation(async (_id, draft) => ({
       ...draft,

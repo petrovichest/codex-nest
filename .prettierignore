@@ -5,4 +5,3 @@ apps/client/android/
 apps/client/playwright-report/
 apps/client/test-results/
 package-lock.json
-START_HERE.md

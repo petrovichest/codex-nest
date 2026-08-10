@@ -31,7 +31,6 @@ const snapshot: AppSnapshot = {
   threads: [baseThread],
   attention: [],
   models: [],
-  pushConfigured: false,
 };
 
 describe("clientReducer", () => {

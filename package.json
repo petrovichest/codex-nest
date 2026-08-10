@@ -13,7 +13,6 @@
     "apps/*"
   ],
   "overrides": {
-    "google-gax": "5.0.4",
     "tsup": {
       "esbuild": "0.28.1"
     }
@@ -26,7 +25,6 @@
     "lint": "eslint .",
     "typecheck": "npm run build -w @codexnest/protocol && npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "test:coverage": "npm run test:coverage --workspaces --if-present",
     "protocol:generate": "npm run protocol:generate -w @codexnest/server"
   },
   "devDependencies": {

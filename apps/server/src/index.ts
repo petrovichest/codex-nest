@@ -11,7 +11,6 @@ import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
 import { childProcessEnvironment, loadConfig, SERVER_VERSION } from "./config";
 import { AppProjection } from "./projection";
-import { PushNotifier } from "./push";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
 import { ThreadTitleGenerator } from "./thread-title";
@@ -47,8 +46,7 @@ const bridge = new CodexBridge({
           env: childProcessEnvironment(),
         }) as unknown as JsonlProcess),
 });
-const push = new PushNotifier(store, config.firebaseCredentialPath, config.firebaseProjectId);
-const projection = new AppProjection(bridge, store, attention, push.configured);
+const projection = new AppProjection(bridge, store, attention);
 const lifecycle = new RuntimeLifecycle({
   transport: config.codexTransport,
   tokenPath: config.restartTokenPath,
@@ -111,32 +109,11 @@ bridge.on("state", (state) => {
     attention.expireAll();
   }
 });
-const pushedTerminal = new Map<string, string>();
-projection.on("event", (_sequence, event) => {
-  if (event.type === "attention.upserted" && event.attention.threadId) {
-    const thread = projection.summary(event.attention.threadId);
-    if (thread) void push.send(thread, "attention").catch(() => undefined);
-  }
-  if (
-    event.type === "thread.upserted" &&
-    event.thread.relation.kind === "session" &&
-    event.thread.queuedMessageCount === 0 &&
-    (event.thread.state === "completed" || event.thread.state === "failed")
-  ) {
-    const pushKey = `${event.thread.state}:${event.thread.updatedAt}`;
-    if (pushedTerminal.get(event.thread.id) !== pushKey) {
-      pushedTerminal.set(event.thread.id, pushKey);
-      void push.send(event.thread, event.thread.state).catch(() => undefined);
-    }
-  }
-});
-
 const app = await buildApp(config, {
   bridge,
   store,
   projection,
   attention,
-  push,
   codexManager,
   appManager,
   lifecycle,

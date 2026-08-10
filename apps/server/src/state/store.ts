@@ -226,11 +226,6 @@ export interface ThreadMetaState {
   sessionSnapshot?: SessionSnapshotState;
 }
 
-export interface DeviceState {
-  fcmToken: string;
-  updatedAt: number;
-}
-
 export interface TranscriptionTimingSampleState {
   audioDurationMs: number;
   processingMs: number;
@@ -275,7 +270,6 @@ export interface CodexNestState {
   projects: Project[];
   dismissedProjectPaths?: string[];
   threadMeta: Record<string, ThreadMetaState>;
-  devices: Record<string, DeviceState>;
   transcriptionTimings?: Record<string, TranscriptionTimingSampleState[]>;
   uiLanguage: UiLanguage;
   defaultReasoningEffort?: string;
@@ -308,7 +302,6 @@ export function emptyState(): CodexNestState {
     auth: {},
     projects: [],
     threadMeta: {},
-    devices: {},
     uiLanguage: "en",
     messageQueues: {},
     messageReceipts: {},
@@ -738,7 +731,6 @@ function uncloneablePath(value: unknown, path = "state"): string {
 const ROOT_NAMESPACE = "root";
 const MAP_NAMESPACES = [
   "threadMeta",
-  "devices",
   "transcriptionTimings",
   "messageQueues",
   "messageReceipts",
@@ -826,7 +818,6 @@ function loadDatabaseState(database: DatabaseSync): CodexNestState {
     .all() as unknown as StateEntryRow[];
   const state: Record<string, unknown> = {
     threadMeta: {},
-    devices: {},
     transcriptionTimings: {},
     messageQueues: {},
     messageReceipts: {},
@@ -995,6 +986,12 @@ function validateState(value: unknown): CodexNestState {
   if (!isRecord(value) || value.schemaVersion !== 1) {
     throw new Error("Unsupported or corrupt CodexNest state schema");
   }
+  if (value.devices !== undefined) {
+    if (!isRecord(value.devices) || Object.keys(value.devices).length) {
+      throw new Error("Unsupported legacy device registrations in CodexNest state");
+    }
+    delete value.devices;
+  }
   if (!isRecord(value.auth) || !Array.isArray(value.projects)) {
     throw new Error("Corrupt CodexNest state");
   }
@@ -1007,7 +1004,7 @@ function validateState(value: unknown): CodexNestState {
   ) {
     throw new Error("Corrupt dismissed project paths in CodexNest state");
   }
-  if (!isRecord(value.threadMeta) || !isRecord(value.devices)) {
+  if (!isRecord(value.threadMeta)) {
     throw new Error("Corrupt CodexNest state");
   }
   const transcriptionTimings = normalizeTranscriptionTimings(value.transcriptionTimings);
@@ -1094,15 +1091,6 @@ function validateState(value: unknown): CodexNestState {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
     compactTerminalWorkspaceBaselines(meta as unknown as ThreadMetaState);
-  }
-  for (const device of Object.values(value.devices)) {
-    if (
-      !isRecord(device) ||
-      typeof device.fcmToken !== "string" ||
-      typeof device.updatedAt !== "number"
-    ) {
-      throw new Error("Corrupt device registration in CodexNest state");
-    }
   }
   for (const [threadId, messages] of Object.entries(value.messageQueues ?? {})) {
     if (

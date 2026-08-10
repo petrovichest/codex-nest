@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 
-import type { AppServerState, AttentionRequest, AttentionResponse } from "@codexnest/protocol";
+import type { AppServerState } from "@codexnest/protocol";
 
 import { safeError } from "../logging";
 import type { InitializeResponse, ServerNotification, ServerRequest } from "./generated/index";
@@ -13,12 +13,6 @@ const BACKOFF_SECONDS = [1, 2, 4, 8, 16, 30] as const;
 
 export interface SpawnBridgeProcess {
   (): JsonlProcess;
-}
-
-export interface AttentionAdapter {
-  receive(request: ServerRequest, transport: JsonlTransport): AttentionRequest | undefined;
-  resolve(id: string, response: AttentionResponse): boolean;
-  expireAll(): void;
 }
 
 export interface BridgeOptions {
@@ -94,10 +88,6 @@ export class CodexBridge extends EventEmitter {
   respond(id: number | string, result: unknown): void {
     if (!this.transport || !this.ready) throw new BridgeUnavailableError(this._state);
     this.transport.respond(id, result);
-  }
-
-  respondUnsupported(id: number | string, method: string): void {
-    this.transport?.respondError(id, -32_601, `Method not supported: ${method}`);
   }
 
   private async launch(): Promise<void> {

@@ -277,6 +277,5 @@ function snapshot(
     threads,
     attention,
     models: [],
-    pushConfigured: false,
   };
 }

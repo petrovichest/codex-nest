@@ -1,52 +1,121 @@
 # CodexNest
 
+English | [Русский](./README.ru.md)
+
 CodexNest is an unofficial, self-hosted Android and browser client for managing
 Codex CLI sessions on a private Linux machine. It is not affiliated with or
 endorsed by OpenAI.
 
-Production can connect through Codex's managed app-server daemon so active turns
-survive a CodexNest server restart. Direct stdio remains the zero-setup default
-for local development.
+CodexNest gives one owner an app-like workspace for Codex:
 
-Read [START_HERE.md](./START_HERE.md) for the product brief and
-[PLAN.md](./PLAN.md) for the implementation decisions.
+- organize server-side project folders and their sessions;
+- start, resume, fork, archive, steer, queue, and interrupt work;
+- follow streamed messages, plans, commands, file changes, approvals, and
+  artifacts while multiple sessions run concurrently;
+- keep drafts and recent session data available across temporary disconnects;
+- use English or Russian with system, light, and dark themes;
+- dictate prompts through configurable speech-to-text; and
+- receive browser and Android notifications when work finishes, fails, or needs
+  attention.
+
+The React interface runs in a browser and is bundled into the Capacitor Android
+app. On iOS, the HTTPS site can also be added to the Home Screen as a web app.
 
 ## Security boundary
 
-CodexNest is a single-owner, local-first application. The server is intended to
-be reachable only from the host itself, a trusted private LAN, or the owner's
-private WireGuard/Tailscale network. Remote access must stay inside that VPN
-boundary.
+CodexNest is a single-owner, local-first application. Run it only on the host,
+a fully trusted private LAN, or the owner's private WireGuard/Tailscale network.
+Never expose port `4310` through public port forwarding, UPnP, a public reverse
+proxy or tunnel, or a public cloud firewall rule.
 
-Do not expose port `4310` to the public internet through router port forwarding,
-UPnP, a public reverse proxy, a public tunnel, or a cloud firewall rule. The
-owner token grants control over Codex, and CodexNest runs with the same Linux
-user permissions as Codex CLI; leaking the token can therefore expose projects
-and other files available to that user.
+The bearer token grants owner-level control over CodexNest, and the server has
+the same filesystem permissions as the Linux user running Codex CLI. Plain HTTP
+does not protect the token, prompts, output, paths, or approval decisions; use
+it only inside an encrypted private VPN or on a fully trusted LAN. Use private
+HTTPS for shared or otherwise untrusted networks. See the
+[deployment security guidance](./deploy/DEPLOYMENT.md) and the
+[Android network caveat](./apps/client/android/README.md).
 
-Plain HTTP is suitable only inside an encrypted WireGuard/Tailscale tunnel or a
-fully trusted LAN. On a shared or untrusted network, connect through the private
-VPN or use HTTPS that remains restricted to the private LAN/VPN.
+## Architecture and sources of truth
 
-### iPhone Home Screen app
+```text
+Browser / Capacitor Android app
+              |
+       authenticated HTTP + WebSocket
+              |
+       CodexNest server (Fastify)
+          |                 |
+          |                 +-- CodexNest metadata (SQLite + rollback JSON)
+          |
+          +-- Codex app-server daemon over a local Unix socket (production)
+              or JSONL over stdio (development)
+```
 
-Open the root HTTPS URL in Safari, choose **Share → Add to Home Screen**, and
-leave **Open as Web App** enabled. CodexNest then runs in standalone mode, and
-all session routes remain inside the Home Screen app.
+The server is the only component that talks to Codex app-server. Production can
+use the managed daemon so active turns survive a CodexNest restart; direct stdio
+is the zero-setup development fallback. Codex remains the source of truth for
+threads, turns, and conversation history. CodexNest stores only application-owned
+state such as projects, token verification, read/pin/outcome metadata, queues,
+preferences, and Team orchestration state.
 
-When upgrading a Home Screen shortcut created before PWA metadata was available,
-remove the old icon and add it again from the root URL. iOS may clear that
-installation's local storage, so be prepared to enter the server URL and owner
-token again.
+The repository is an npm workspace:
 
-## Requirements
+- `apps/server` — authenticated API/WebSocket server and Codex bridge;
+- `apps/client` — React/Vite UI and Capacitor Android project;
+- `packages/protocol` — the public client/server DTO contract; and
+- `deploy` — installer, service, proxy, STT, update, and recovery artifacts.
 
-- Node.js 24 LTS
-- npm 10 or newer
-- Codex CLI, already signed in on the server host
-- For Android: Android Studio/JDK 21 and Android SDK
+The current implementation and tests are authoritative for product behavior.
+Generated app-server types under `apps/server/src/codex/generated` are pinned by
+`apps/server/src/codex/PROTOCOL_VERSION`. This README is the product entry point;
+[deploy/DEPLOYMENT.md](./deploy/DEPLOYMENT.md) is the operational source of truth.
 
-## Development
+## CodexNest Team
+
+CodexNest Team is the application's own managed orchestration mechanism, not
+Codex native multi-agent or subagent mode. A root CodexNest session coordinates
+managed child tasks through CodexNest tools and persisted `teamOrchestration`
+state, remains responsible for integration and the final answer, and is the only
+session allowed to delegate. Managed children cannot create more children.
+
+Children are read-only and offline by default. A root may grant scoped network
+or repository-relative write access; writable work is normally isolated in
+detached worktrees until the root integrates it. Team parent and child sessions
+disable native agent tools to preserve this boundary. Native subagents elsewhere
+in the Codex projection are separate and are not the implementation of Team.
+
+## Notifications
+
+Android notifications are self-hosted. A foreground service keeps an
+authenticated WebSocket open to the owner's CodexNest server, reconnects after
+network loss or reboot, and emits local notifications. Android therefore shows
+a permanent low-priority connection notification while background delivery is
+active. Firebase, Google Play Services, third-party push providers, and extra
+notification credentials are not required.
+
+Browser notifications use the same WebSocket. The tab must remain open or
+minimized, and browser security rules may require HTTPS before notification
+permission is available.
+
+## Speech-to-text
+
+Voice recordings can be transcribed by an OpenAI audio model or by a local
+service. Both supported local backends expose the same
+`CODEXNEST_STT_LOCAL_URL` contract:
+
+- the `whisper.cpp` HTTP server; or
+- the shipped [`deploy/local-stt-server.py`](./deploy/local-stt-server.py)
+  adapter backed by `faster-whisper`.
+
+Only one local backend should listen on the configured endpoint. Provider,
+language, timeout, and optional Codex-based cleanup of local transcripts can be
+managed in the UI or server environment. Installation and service examples for
+both backends are in the [deployment guide](./deploy/DEPLOYMENT.md#speech-to-text).
+
+## Development and testing
+
+Requirements: Node.js 24 LTS, npm 10 or newer, and a signed-in Codex CLI. Android
+builds additionally require JDK 21 and the Android SDK.
 
 ```bash
 npm install
@@ -54,22 +123,15 @@ npm run protocol:generate
 npm run dev
 ```
 
-The browser UI is served by Vite on `http://localhost:5173`; the API listens on
-`http://127.0.0.1:4310` by default.
-
-Generate the single-owner access token before using protected endpoints:
+Vite serves the browser UI at `http://localhost:5173`; the API listens at
+`http://127.0.0.1:4310` by default. Generate the single-owner token before using
+protected endpoints:
 
 ```bash
 npm run auth:generate -w @codexnest/server
 ```
 
-Rotation prints a replacement once and disconnects authenticated WebSockets:
-
-```bash
-npm run auth:generate -w @codexnest/server -- --rotate
-```
-
-Normal verification never contacts OpenAI:
+Normal verification uses local fixtures and does not contact OpenAI:
 
 ```bash
 npm run format:check
@@ -85,12 +147,7 @@ The real app-server smoke test is opt-in:
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
 ```
 
-CodexNest records the installed CLI version for diagnostics but does not require
-an exact version at runtime. `npm run protocol:generate` remains pinned to
-`apps/server/src/codex/PROTOCOL_VERSION` so generated TypeScript types stay
-reproducible.
-
-## Production
+## Installation and operations
 
 Install the latest successful rolling build on Ubuntu or Debian (`amd64` or
 `arm64`) as a regular user:
@@ -99,33 +156,15 @@ Install the latest successful rolling build on Ubuntu or Debian (`amd64` or
 curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
 ```
 
-The installer is pinned to the same tested commit as the release APK. It
-provides its own pinned Node.js runtime, creates a versioned release, installs
-user `systemd` services, generates the owner token, and prints the private LAN
-URL. It never installs Codex CLI: when Codex is missing, CodexNest starts in
-diagnostic mode and becomes ready after the user installs and signs in to
-Codex, then runs `codexnest repair`.
+The installer supplies its pinned Node.js runtime and managed user services but
+does not install or sign in to Codex CLI. Keep the resulting listener inside the
+private LAN/VPN boundary.
 
-Rolling versions are assigned automatically as `<package version>-<commit>`,
-for example `0.1.6-73e1842`. The GitHub Release title, APK, manifest, and Linux
-installer all use that same version.
-
-The managed install listens on the private LAN by default. Keep port `4310`
-inside the trusted LAN or private WireGuard/Tailscale network. HTTP is
-intentionally supported for those private environments, while HTTPS
-reverse-proxy examples remain available under `deploy/` for private LAN/VPN
-deployments.
-
-See the [deployment and update guide](./deploy/DEPLOYMENT.md) and
-[Android build instructions](./apps/client/android/README.md). A normal local
-build does not commit, push, deploy, use signing secrets, contact Firebase, or
-produce a release APK.
-
-## Contributing
-
-External contributions are accepted through reviewed pull requests, not direct
-writes to the upstream repository. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+- [Deployment, configuration, updates, backup, and recovery](./deploy/DEPLOYMENT.md)
+- [Android build, signing, networking, and notifications](./apps/client/android/README.md)
+- [Contributing](./CONTRIBUTING.md)
 
 ## License
 
-CodexNest is licensed under the [Apache License 2.0](./LICENSE).
+CodexNest is licensed under the [Apache License 2.0](./LICENSE). Bundled font
+licenses remain with the font assets under `apps/client/src/assets/fonts`.

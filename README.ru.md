@@ -1,0 +1,174 @@
+# CodexNest
+
+[English](./README.md) | Русский
+
+CodexNest — неофициальный self-hosted клиент для Android и браузера, который
+управляет сессиями Codex CLI на приватной Linux-машине. Проект не связан с
+OpenAI и не поддерживается ею.
+
+CodexNest даёт одному владельцу интерфейс приложения для работы с Codex:
+
+- группирует сессии по папкам проектов на сервере;
+- позволяет запускать, продолжать, ответвлять, архивировать, направлять,
+  ставить в очередь и прерывать работу;
+- показывает потоковые сообщения, планы, команды, изменения файлов, approval и
+  артефакты, пока несколько сессий работают одновременно;
+- сохраняет черновики и недавние данные сессий при временной потере связи;
+- поддерживает русский и английский языки, системную, светлую и тёмную темы;
+- принимает голосовые промпты через настраиваемое распознавание речи; и
+- отправляет уведомления в браузере и Android, когда работа завершена, упала или
+  требует внимания.
+
+React-интерфейс работает в браузере и встроен в Android-приложение Capacitor. На
+iOS HTTPS-сайт также можно добавить на экран «Домой» как веб-приложение.
+
+## Граница безопасности
+
+CodexNest — локальное приложение для одного владельца. Запускайте его только на
+самом хосте, в полностью доверенной частной LAN или в приватной сети
+WireGuard/Tailscale владельца. Никогда не публикуйте порт `4310` через публичный
+port forwarding, UPnP, reverse proxy, tunnel или правило cloud firewall.
+
+Bearer token даёт права владельца CodexNest, а сервер имеет те же права на
+файлы, что Linux-пользователь Codex CLI. Обычный HTTP не защищает token,
+промпты, вывод, пути или решения по approval; используйте его только внутри
+зашифрованной приватной VPN или в полностью доверенной LAN. В общей или иной
+недоверенной сети используйте приватный HTTPS. Подробности приведены в
+[инструкции по развёртыванию](./deploy/DEPLOYMENT.md) и
+[предупреждении для Android](./apps/client/android/README.md).
+
+## Архитектура и источники истины
+
+```text
+Браузер / Android-приложение Capacitor
+                 |
+       authenticated HTTP + WebSocket
+                 |
+          сервер CodexNest (Fastify)
+             |                 |
+             |                 +-- metadata CodexNest (SQLite + rollback JSON)
+             |
+             +-- daemon Codex app-server через локальный Unix socket (production)
+                 или JSONL через stdio (разработка)
+```
+
+Только сервер общается с Codex app-server. В production можно использовать
+managed daemon, чтобы активные turn переживали перезапуск CodexNest; прямой
+stdio остаётся простым вариантом для разработки. Codex служит источником истины
+для threads, turns и истории диалогов. CodexNest хранит только собственное
+состояние: проекты, verifier токена, read/pin/outcome metadata, очереди,
+настройки и состояние Team orchestration.
+
+Репозиторий организован как npm workspace:
+
+- `apps/server` — authenticated API/WebSocket server и мост к Codex;
+- `apps/client` — React/Vite UI и Android-проект Capacitor;
+- `packages/protocol` — публичный DTO-контракт клиента и сервера; и
+- `deploy` — installer, services, proxy, STT, update и recovery artifacts.
+
+Текущая реализация и тесты определяют поведение продукта. Сгенерированные типы
+app-server в `apps/server/src/codex/generated` закреплены через
+`apps/server/src/codex/PROTOCOL_VERSION`. Этот README — основная точка входа в
+продукт, а [deploy/DEPLOYMENT.md](./deploy/DEPLOYMENT.md) — источник истины для
+эксплуатации.
+
+## CodexNest Team
+
+CodexNest Team — собственный механизм managed orchestration приложения, а не
+нативный multi-agent или subagent mode Codex. Корневая сессия CodexNest
+координирует managed child tasks через инструменты CodexNest и сохранённое
+состояние `teamOrchestration`, отвечает за интеграцию и финальный ответ, и только
+она имеет право делегировать. Дочерние сессии не могут создавать новых детей.
+
+По умолчанию дочерние сессии работают без записи и сети. Корень может выдать
+ограниченный доступ к сети или путям внутри репозитория; изменения обычно
+изолированы в detached worktrees до интеграции корнем. В Team parent и child
+sessions нативные agent tools отключены для сохранения этой границы. Нативные
+subagents в других частях проекции Codex отделены и не реализуют Team.
+
+## Уведомления
+
+Android-уведомления полностью self-hosted. Foreground service держит
+authenticated WebSocket к серверу CodexNest владельца, переподключается после
+потери сети или перезагрузки и создаёт локальные уведомления. Поэтому при
+активной фоновой доставке Android показывает постоянное низкоприоритетное
+уведомление о соединении. Firebase, Google Play Services, сторонний push provider
+и дополнительные credentials для уведомлений не требуются.
+
+Браузерные уведомления используют тот же WebSocket. Вкладка должна оставаться
+открытой или свёрнутой, а правила безопасности браузера могут требовать HTTPS
+для выдачи разрешения на уведомления.
+
+## Распознавание речи
+
+Голосовые записи можно распознавать моделью OpenAI Audio API или локальным
+сервисом. Оба поддерживаемых локальных backend используют единый контракт
+`CODEXNEST_STT_LOCAL_URL`:
+
+- HTTP-сервер `whisper.cpp`; или
+- входящий в репозиторий адаптер
+  [`deploy/local-stt-server.py`](./deploy/local-stt-server.py) на базе
+  `faster-whisper`.
+
+На настроенном endpoint должен работать только один локальный backend. Provider,
+язык, timeout и необязательное улучшение локального текста через Codex можно
+настроить в UI или окружении сервера. Установка и service examples для обоих
+backend описаны в [инструкции по развёртыванию](./deploy/DEPLOYMENT.md#speech-to-text).
+
+## Разработка и тестирование
+
+Требуются Node.js 24 LTS, npm 10 или новее и авторизованный Codex CLI. Для
+Android также нужны JDK 21 и Android SDK.
+
+```bash
+npm install
+npm run protocol:generate
+npm run dev
+```
+
+Vite запускает браузерный UI на `http://localhost:5173`; API по умолчанию
+слушает `http://127.0.0.1:4310`. До обращения к защищённым endpoint создайте
+token единственного владельца:
+
+```bash
+npm run auth:generate -w @codexnest/server
+```
+
+Обычная проверка использует локальные fixtures и не обращается к OpenAI:
+
+```bash
+npm run format:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Реальный smoke test app-server запускается только явно:
+
+```bash
+RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
+```
+
+## Установка и эксплуатация
+
+Установите последнюю успешную rolling-сборку на Ubuntu или Debian
+(`amd64`/`arm64`) от обычного пользователя:
+
+```bash
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
+```
+
+Installer предоставляет закреплённый Node.js runtime и управляемые
+пользовательские services, но не устанавливает и не авторизует Codex CLI.
+Оставляйте созданный listener внутри приватной LAN/VPN.
+
+- [Развёртывание, конфигурация, обновление, backup и recovery](./deploy/DEPLOYMENT.md)
+- [Сборка, подпись, сеть и уведомления Android](./apps/client/android/README.md)
+- [Участие в разработке](./CONTRIBUTING.md)
+
+## Лицензия
+
+CodexNest распространяется по [Apache License 2.0](./LICENSE). Лицензии
+встроенных шрифтов находятся рядом с font assets в
+`apps/client/src/assets/fonts`.

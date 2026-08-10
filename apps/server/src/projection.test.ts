@@ -116,7 +116,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const events: Array<{ type: string }> = [];
     projection.on("event", (_sequence, event) => events.push(event));
@@ -160,7 +159,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const stateViews = vi.spyOn(store, "view");
 
@@ -205,7 +203,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await expect(projection.sync()).resolves.toBeUndefined();
@@ -226,7 +223,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
     await projection.setCurrentTurn("one", "turn");
@@ -289,7 +285,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 5, { type: "idle" }));
 
@@ -349,7 +344,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 5, { type: "idle" }));
 
@@ -375,7 +369,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
@@ -462,7 +455,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const events: Array<{ type: string }> = [];
     projection.on("event", (_sequence, event) => events.push(event));
@@ -503,7 +495,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const child = {
       ...thread("child", "/work", 2),
@@ -587,7 +578,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     for (const threadId of ["child-a", "child-b"]) {
       projection.upsertThread({
@@ -641,7 +631,6 @@ describe("AppProjection", () => {
       replayBridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     replayProjection.upsertThread({
       ...thread("child-a", "/work", 11),
@@ -691,7 +680,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread({
       ...thread("child", "/work", 10),
@@ -760,7 +748,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("parent", "/work", 10));
     for (const threadId of ["completed-child", "failed-child", "interrupted-child"]) {
@@ -826,7 +813,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const agent = {
       threadId: "child",
@@ -896,7 +882,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -977,7 +962,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1033,7 +1017,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(
       thread("persistent", "/work", 8, { type: "active", activeFlags: [] }, [
@@ -1059,7 +1042,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       reloadedStore,
       new AttentionManager(),
-      false,
     );
 
     expect(reloaded.summary("persistent")).toMatchObject({
@@ -1096,7 +1078,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
     const removed: string[] = [];
@@ -1157,7 +1138,6 @@ describe("AppProjection", () => {
         bridge as unknown as CodexBridge,
         store,
         new AttentionManager(),
-        false,
       );
 
       await projection.sync();
@@ -1221,7 +1201,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1266,7 +1245,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1343,7 +1321,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1437,7 +1414,6 @@ describe("AppProjection", () => {
         bridge as unknown as CodexBridge,
         store,
         new AttentionManager(),
-        false,
       );
 
       await projection.sync();
@@ -1504,7 +1480,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1628,7 +1603,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -1750,7 +1724,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread({
       ...thread("child", "/work", 4, { type: "notLoaded" }),
@@ -1864,7 +1837,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread({
       ...thread("child", "/work", 4, { type: "notLoaded" }),
@@ -1916,7 +1888,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("running", "/work", 10, { type: "active", activeFlags: [] }));
     projection.upsertThread({
@@ -1946,7 +1917,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("root-thread", "/work/src", 3));
     projection.upsertThread(thread("nested-thread", "/work/nested", 2));
@@ -2022,7 +1992,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -2088,7 +2057,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     await projection.sync();
     expect(projection.threadCount).toBe(2);
@@ -2240,7 +2208,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const events: Array<{ type: string; [key: string]: unknown }> = [];
     projection.on("event", (_sequence, event) => events.push(event));
@@ -2299,7 +2266,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       attention,
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10, { type: "active", activeFlags: [] }, []));
 
@@ -2344,7 +2310,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -2390,7 +2355,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -2434,7 +2398,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
     bridge.emit("notification", goalNotification("active"));
@@ -2496,7 +2459,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
     await projection.setSettings("one", { collaborationMode: "plan" });
@@ -2649,7 +2611,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -2735,7 +2696,6 @@ describe("AppProjection", () => {
         bridge as unknown as CodexBridge,
         store,
         new AttentionManager(),
-        false,
       );
       projection.upsertThread(thread("one", "/work", 10));
       await projection.setCurrentTurn("one", `${outcome}-plan`);
@@ -2777,7 +2737,6 @@ describe("AppProjection", () => {
       new FakeBridge() as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     const value = projection.upsertThread(
@@ -2815,7 +2774,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 3));
 
@@ -2860,7 +2818,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 4));
 
@@ -2899,7 +2856,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -2962,7 +2918,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
     const initial = await projection.readThread("one");
@@ -3015,7 +2970,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -3132,7 +3086,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     const response = await projection.readTurnItems("one", "turn");
@@ -3206,7 +3159,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await expect(projection.readTurnItems("one", "missing")).resolves.toEqual({
@@ -3256,7 +3208,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
@@ -3336,7 +3287,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -3406,7 +3356,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -3492,7 +3441,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();
@@ -3514,7 +3462,6 @@ describe("AppProjection", () => {
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
-      false,
     );
 
     await projection.sync();

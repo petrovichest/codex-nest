@@ -92,7 +92,6 @@ export class AppProjection extends EventEmitter {
     private readonly bridge: CodexBridge,
     private readonly store: StateStore,
     private readonly attention: AttentionManager,
-    private readonly pushConfigured: boolean,
   ) {
     super();
     this.historyCache = new HistoryCache(store.path);
@@ -175,7 +174,6 @@ export class AppProjection extends EventEmitter {
       models: this.models,
       defaultReasoningEffort: state.defaultReasoningEffort,
       taskDefaults: state.taskDefaults ?? {},
-      pushConfigured: this.pushConfigured,
       voiceTranscriptions: Object.values(state.voiceTranscriptions ?? {})
         .filter((job) => visibleThreadIds.has(job.threadId))
         .map(publicVoiceTranscription)

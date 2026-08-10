@@ -2,8 +2,6 @@
 <resources>
     <string name="app_name">CodexNest</string>
     <string name="title_activity_main">CodexNest</string>
-    <string name="package_name">com.codexnest.app</string>
-    <string name="custom_url_scheme">com.codexnest.app</string>
     <string name="notification_channel_connection">CodexNest connection</string>
     <string name="notification_channel_connection_description">Persistent connection to your home server</string>
     <string name="notification_channel_events">CodexNest events</string>

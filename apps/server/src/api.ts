@@ -17,8 +17,6 @@ import type {
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadResponse,
-  CreateThreadRequest,
-  DeviceRegistrationRequest,
   GlobalPermissionSettings,
   InterruptTurnRequest,
   MarkReadRequest,
@@ -36,7 +34,6 @@ import type {
   SkillCatalogItem,
   SkillsCatalogResponse,
   StartTurnRequest,
-  SteerTurnRequest,
   TaskDefaults,
   ThreadGoal,
   ThreadChanges,
@@ -51,7 +48,6 @@ import type {
   UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
-  UpdateProjectRequest,
   UpdateQueuedMessageRequest,
   UpdateSkillConfigRequest,
   UpdateSkillConfigResponse,
@@ -111,7 +107,6 @@ import {
   ProjectValidationError,
 } from "./projects";
 import type { AppProjection } from "./projection";
-import type { PushNotifier } from "./push";
 import {
   RESTART_RECOVERY_PROTOCOL_VERSION,
   RestartPreparationTimeoutError,
@@ -443,7 +438,6 @@ export interface ApiServices {
   store: StateStore;
   projection: AppProjection;
   attention: AttentionManager;
-  push: PushNotifier;
   codexManager?: CodexManager;
   appManager?: AppManager;
   lifecycle?: RuntimeLifecycle;
@@ -1754,10 +1748,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.get("/api/v1/settings/task-defaults", async (): Promise<TaskDefaults> => {
-    return store.view().taskDefaults ?? {};
-  });
-
   app.put<{ Body: UpdateTaskDefaultsRequest }>(
     "/api/v1/settings/task-defaults",
     async (request) => {
@@ -1899,39 +1889,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     projection.publishProject(project.id);
     return reply.code(201).send(project);
   });
-
-  app.patch<{ Params: { id: string }; Body: UpdateProjectRequest }>(
-    "/api/v1/projects/:id",
-    async (request, reply) => {
-      const body = requireRecord<UpdateProjectRequest>(request.body);
-      const state = store.view();
-      const current = state.projects.find((project) => project.id === request.params.id);
-      if (!current) return apiError(reply, 404, "not_found", "Project not found");
-      if (body.path !== undefined && typeof body.path !== "string") {
-        return apiError(reply, 400, "validation_failed", "path must be a string");
-      }
-      if (body.displayName !== undefined && typeof body.displayName !== "string") {
-        return apiError(reply, 400, "validation_failed", "displayName must be a string");
-      }
-      const path =
-        body.path === undefined
-          ? current.path
-          : await canonicalProjectPath(body.path, services.projectRoot);
-      assertUniqueProjectPath(state.projects, path, current.id);
-      const displayName =
-        body.displayName === undefined ? current.displayName : body.displayName.trim();
-      if (!displayName) return apiError(reply, 400, "validation_failed", "displayName is required");
-      const updated = { ...current, displayName, path, updatedAt: new Date().toISOString() };
-      await store.update((draft) => {
-        draft.projects = draft.projects.map((project) =>
-          project.id === current.id ? updated : project,
-        );
-        restoreDismissedProjectPath(draft, path);
-      });
-      projection.publishProject(updated.id);
-      return updated;
-    },
-  );
 
   app.post<{ Params: { id: string }; Body: MoveProjectRequest }>(
     "/api/v1/projects/:id/move",
@@ -2240,75 +2197,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.post<{ Body: CreateThreadRequest }>(
-    "/api/v1/threads",
-    { bodyLimit: CHAT_BODY_LIMIT },
-    async (request, reply) => {
-      codexManager?.assertTurnsAllowed();
-      const body = validateThreadBody(request.body, reply);
-      if (!body) return;
-      if (body.clientMessageId) {
-        const receipt = store.view().messageReceipts?.[body.clientMessageId];
-        if (receipt) {
-          if (
-            receipt.contentHash !==
-            messageContentHash(body.input, body.images ?? [], body.goal ?? false)
-          ) {
-            throw new MessageQueueConflictError("Message id has already been used");
-          }
-          let existing = projection.summary(receipt.threadId);
-          if (!existing) {
-            existing = await projection.refreshThread(receipt.threadId);
-          }
-          if (!existing) {
-            throw new MessageQueueConflictError("The original thread is temporarily unavailable");
-          }
-          return reply.code(200).send({
-            thread: existing,
-            turnId: receipt.turnId ?? body.clientMessageId,
-          });
-        }
-      }
-      const project = store.view().projects.find((candidate) => candidate.id === body.projectId);
-      if (!project) return apiError(reply, 404, "not_found", "Project not found");
-      const settings = mergeSettings(
-        projection.newSessionSettings,
-        body.settings ?? {},
-        projection.availableModels,
-      );
-      if (body.goal && settings.collaborationMode === "team") {
-        throw new ProjectConflictError("Team mode cannot be combined with a goal");
-      }
-      const started = parseThreadStart(
-        await bridge.request<unknown>("thread/start", {
-          cwd: project.path,
-          ...threadSettings(settings),
-          developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
-          dynamicTools: ROOT_DYNAMIC_TOOLS,
-          ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
-        }),
-      );
-      projection.upsertThread(started.thread);
-      await projection.markUnmaterialized(started.thread.id);
-      await markRootToolsAvailable(store, started.thread.id);
-      await projection.setSettings(started.thread.id, settings);
-      const result = await startTurn(
-        started.thread.id,
-        body.input,
-        body.images ?? [],
-        body.clientMessageId ?? null,
-        body.goal ?? false,
-      );
-      if (body.settings?.reasoningEffort !== undefined) {
-        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
-      }
-      return reply.code(201).send({
-        thread: projection.summary(started.thread.id),
-        ...result,
-      });
-    },
-  );
-
   app.post<{ Params: { id: string }; Body: ForkThreadRequest }>(
     "/api/v1/threads/:id/forks",
     async (request, reply) => {
@@ -2599,37 +2487,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.post<{ Params: { id: string }; Body: SteerTurnRequest }>(
-    "/api/v1/threads/:id/steer",
-    { bodyLimit: CHAT_BODY_LIMIT },
-    async (request, reply) => {
-      const summary = projection.summary(request.params.id);
-      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      assertWritableThread(summary);
-      if (voiceTranscriptions?.active(request.params.id)) {
-        return apiError(
-          reply,
-          409,
-          "conflict",
-          "The composer is locked while voice transcription is active",
-        );
-      }
-      await voiceTranscriptions?.clearFailure(request.params.id);
-      const body = requireRecord<SteerTurnRequest>(request.body);
-      const images = validateImages(body.images);
-      if (
-        typeof body.turnId !== "string" ||
-        typeof body.input !== "string" ||
-        (!body.input.trim() && !images.length)
-      ) {
-        return apiError(reply, 400, "validation_failed", "turnId and input or images are required");
-      }
-      return {
-        turnId: await steerTurn(request.params.id, body.turnId, body.input, images, null),
-      };
-    },
-  );
-
   app.post<{ Params: { id: string }; Body: InterruptTurnRequest }>(
     "/api/v1/threads/:id/interrupt",
     async (request, reply) => {
@@ -2737,42 +2594,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return reply.code(204).send();
     },
   );
-
-  app.put<{ Params: { installationId: string }; Body: DeviceRegistrationRequest }>(
-    "/api/v1/devices/:installationId",
-    async (request, reply) => {
-      const body = requireRecord<DeviceRegistrationRequest>(request.body);
-      if (
-        !validInstallationId(request.params.installationId) ||
-        typeof body.fcmToken !== "string" ||
-        !body.fcmToken.trim()
-      ) {
-        return apiError(reply, 400, "validation_failed", "Invalid installationId or fcmToken");
-      }
-      await store.update((state) => {
-        state.devices[request.params.installationId] = {
-          fcmToken: body.fcmToken,
-          updatedAt: Date.now(),
-        };
-      });
-      return reply.code(204).send();
-    },
-  );
-
-  app.delete<{ Params: { installationId: string } }>(
-    "/api/v1/devices/:installationId",
-    async (request, reply) => {
-      await store.update((state) => {
-        delete state.devices[request.params.installationId];
-      });
-      return reply.code(204).send();
-    },
-  );
-
-  app.post("/api/v1/sync", async (_request, reply) => {
-    await projection.sync();
-    return reply.send(projection.snapshot());
-  });
 
   app.setErrorHandler((error: Error, request, reply) => {
     request.log.error(
@@ -5907,35 +5728,6 @@ function messageInput(text: string, images: string[]): UserInput[] {
   return result;
 }
 
-function validateThreadBody(body: unknown, reply: FastifyReply): CreateThreadRequest | undefined {
-  const value = requireRecord<CreateThreadRequest>(body);
-  const images = validateImages(value.images);
-  if (typeof value.projectId !== "string" || typeof value.input !== "string") {
-    apiError(reply, 400, "validation_failed", "projectId and input are required");
-    return undefined;
-  }
-  if (!value.input.trim() && !images.length) {
-    apiError(reply, 400, "validation_failed", "input or images are required");
-    return undefined;
-  }
-  if (value.goal !== undefined && typeof value.goal !== "boolean") {
-    apiError(reply, 400, "validation_failed", "goal must be boolean");
-    return undefined;
-  }
-  if (value.goal && (!value.input.trim() || value.input.trim().length > 4_000)) {
-    apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
-    return undefined;
-  }
-  if (
-    value.clientMessageId !== undefined &&
-    optionalClientMessageId(value.clientMessageId) === null
-  ) {
-    apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
-    return undefined;
-  }
-  return { ...value, images, settings: validateSettings(value.settings) };
-}
-
 function validateForkThreadBody(value: unknown): ForkThreadRequest {
   const body = requireRecord<ForkThreadRequest>(value);
   if (Object.keys(body).some((key) => !["lastTurnId", "agentMessageId"].includes(key))) {
@@ -6144,11 +5936,6 @@ function validateGoalPatch(value: unknown): UpdateThreadGoalRequest {
     ...(body.objective === undefined ? {} : { objective: body.objective.trim() }),
     ...(body.status === undefined ? {} : { status: body.status }),
   };
-}
-
-function validateSettings(value: unknown): UpdateThreadSettingsRequest | undefined {
-  if (value === undefined) return undefined;
-  return validateSettingsPatch(value);
 }
 
 function validateSettingsPatch(value: unknown): UpdateThreadSettingsRequest {
@@ -6442,10 +6229,6 @@ function restoreDismissedProjectPath(state: CodexNestState, path: string): void 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function validInstallationId(value: string): boolean {
-  return /^[A-Za-z0-9._-]{8,128}$/.test(value);
 }
 
 async function resolveDownloadFile(

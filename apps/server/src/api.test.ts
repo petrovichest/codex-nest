@@ -32,7 +32,6 @@ import { RpcError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
-import { PushNotifier } from "./push";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
 import { computeTeamWorkspaceDelta, createTeamWorkspace } from "./team-workspace";
@@ -59,7 +58,7 @@ describe("HTTP authentication", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     const tokenPath = join(directory, "restart-token");
     const lifecycle = new RuntimeLifecycle({
       transport: "daemon",
@@ -89,7 +88,6 @@ describe("HTTP authentication", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         lifecycle,
         appManager,
         codexManager,
@@ -233,7 +231,7 @@ describe("HTTP authentication", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     const tokenPath = join(directory, "restart-token");
     const lifecycle = new RuntimeLifecycle({
       transport: "daemon",
@@ -254,7 +252,6 @@ describe("HTTP authentication", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         lifecycle,
       },
     );
@@ -326,8 +323,7 @@ describe("HTTP authentication", () => {
     await bridge.start();
     bridge.stop();
     const attention = new AttentionManager();
-    const push = new PushNotifier(store);
-    const projection = new AppProjection(bridge, store, attention, false);
+    const projection = new AppProjection(bridge, store, attention);
     const config = loadConfig({
       statePath: store.path,
       clientDist: join(directory, "missing"),
@@ -339,7 +335,6 @@ describe("HTTP authentication", () => {
       store,
       projection,
       attention,
-      push,
       projectRoot: directory,
     });
 
@@ -868,7 +863,7 @@ describe("project removal", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     projection.upsertThread({ ...testThread("project-thread"), cwd: projectPath });
     projection.upsertThread({ ...testThread("unrelated"), cwd: join(directory, "other") });
     const config = loadConfig({
@@ -882,7 +877,6 @@ describe("project removal", () => {
       store,
       projection,
       attention,
-      push: new PushNotifier(store),
       projectRoot: directory,
     });
     const headers = { authorization: "Bearer correct" };
@@ -979,7 +973,7 @@ describe("audio transcriptions", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     await projection.sync();
     const transcription = {
       configuration: vi.fn(() => ({
@@ -1029,7 +1023,6 @@ describe("audio transcriptions", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         transcription,
       },
     );
@@ -1172,7 +1165,7 @@ describe("audio transcriptions", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     await projection.sync();
     projection.upsertThread(testThread("voice"));
     await projection.setDraft("voice", {
@@ -1220,7 +1213,6 @@ describe("audio transcriptions", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         transcription,
       },
     );
@@ -1336,7 +1328,7 @@ describe("file downloads", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     await projection.sync();
     projection.upsertThread({ ...testThread("download"), cwd: taskRoot });
     const app = await buildApp(
@@ -1350,7 +1342,6 @@ describe("file downloads", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         projectRoot: directory,
       },
     );
@@ -1673,7 +1664,7 @@ describe("thread settings", () => {
     });
     const bridge = new SettingsBridge();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     await projection.sync();
     const activityEvents: Array<Record<string, unknown>> = [];
     projection.on("event", (_sequence, event) => {
@@ -1695,7 +1686,6 @@ describe("thread settings", () => {
       store,
       projection,
       attention,
-      push: new PushNotifier(store),
       threadTitles,
       projectRoot: directory,
     });
@@ -2080,33 +2070,6 @@ describe("thread settings", () => {
       name: "Первая задача",
     });
 
-    const created = await app.inject({
-      method: "POST",
-      url: "/api/v1/threads",
-      headers,
-      payload: { projectId: "project", input: "Начни работу" },
-    });
-    expect(created.statusCode).toBe(201);
-    expect(created.json().thread.settings).toEqual({
-      collaborationMode: "plan",
-    });
-    expect(
-      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
-    ).toMatchObject({ collaborationMode: { mode: "plan" } });
-    await vi.waitFor(() =>
-      expect(threadTitles.generate).toHaveBeenCalledWith("Начни работу", {
-        cwd: "/work",
-        model: "gpt-a",
-        effort: "high",
-      }),
-    );
-    const threadStartCall = bridge.request.mock.calls
-      .filter(([method]) => method === "thread/start")
-      .at(-1);
-    expect(threadStartCall?.[1]).not.toHaveProperty("sandbox");
-    expect(threadStartCall?.[1]).not.toHaveProperty("approvalPolicy");
-    expect(threadStartCall?.[1]).not.toHaveProperty("approvalsReviewer");
-
     await projection.setSettings("thread", {
       collaborationMode: "default",
       model: "gpt-a",
@@ -2136,17 +2099,18 @@ describe("thread settings", () => {
     });
 
     const resetPreference = await app.inject({
-      method: "POST",
-      url: "/api/v1/threads",
+      method: "PATCH",
+      url: "/api/v1/threads/thread/settings",
       headers,
-      payload: {
-        projectId: "project",
-        input: "Верни стандартные рассуждения",
-        settings: { collaborationMode: "default", reasoningEffort: null },
-      },
+      payload: { collaborationMode: "default", reasoningEffort: null },
     });
-    expect(resetPreference.statusCode).toBe(201);
-    expect(resetPreference.json().thread.settings).toEqual({ collaborationMode: "default" });
+    expect(resetPreference.statusCode).toBe(200);
+    expect(resetPreference.json().settings).toEqual({
+      collaborationMode: "default",
+      model: "gpt-a",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
     expect(store.snapshot().defaultReasoningEffort).toBeUndefined();
 
     const updated = await app.inject({
@@ -2159,7 +2123,6 @@ describe("thread settings", () => {
     expect(updated.json().settings).toEqual({
       collaborationMode: "plan",
       model: "gpt-b",
-      reasoningEffort: "low",
     });
     expect(store.snapshot().threadMeta.thread?.settings).toEqual(updated.json().settings);
 
@@ -2287,31 +2250,33 @@ describe("thread settings", () => {
     expect(repeatedUserInputSend.statusCode).toBe(200);
     expect(repeatedUserInputSend.json()).toEqual({ turnId: "turn" });
 
-    const teamCreated = await app.inject({
+    const teamRoot = await app.inject({
       method: "POST",
-      url: "/api/v1/threads",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(teamRoot.statusCode).toBe(201);
+    const teamThreadId = teamRoot.json().thread.id as string;
+    const teamSettings = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/threads/${teamThreadId}/settings`,
       headers,
       payload: {
-        projectId: "project",
-        input: "Выполни многошаговый план",
-        settings: {
-          collaborationMode: "team",
-          model: "gpt-a",
-          reasoningEffort: "high",
-        },
+        collaborationMode: "team",
+        model: "gpt-a",
+        reasoningEffort: "high",
       },
     });
-    expect(teamCreated.statusCode).toBe(201);
-    expect(teamCreated.json().thread.settings).toEqual({
+    expect(teamSettings.statusCode).toBe(200);
+    expect(teamSettings.json().settings).toEqual({
       collaborationMode: "team",
       model: "gpt-a",
       reasoningEffort: "high",
     });
     expect(
-      bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
+      bridge.request.mock.calls.filter(([method]) => method === "thread/resume").at(-1)?.[1],
     ).toMatchObject({
       config: { agents: { enabled: false } },
-      dynamicTools: expect.any(Array),
     });
     const teamThreadStart = bridge.request.mock.calls
       .filter(([method]) => method === "thread/start")
@@ -2325,6 +2290,13 @@ describe("thread settings", () => {
         }>;
       }>;
     };
+    const teamCreated = await app.inject({
+      method: "POST",
+      url: `/api/v1/threads/${teamThreadId}/turns`,
+      headers,
+      payload: { input: "Выполни многошаговый план" },
+    });
+    expect(teamCreated.statusCode).toBe(201);
     const managedTools = teamThreadStart.dynamicTools?.find(
       (candidate) => candidate.type === "namespace",
     )?.tools;
@@ -2394,21 +2366,19 @@ describe("thread settings", () => {
       expect.stringContaining("codexnest.inspect_task to obtain workspacePath"),
     );
     const startsBeforeInvalidTeamGoal = bridge.request.mock.calls.filter(
-      ([method]) => method === "thread/start",
+      ([method]) => method === "turn/start",
     ).length;
     const invalidTeamGoal = await app.inject({
       method: "POST",
-      url: "/api/v1/threads",
+      url: `/api/v1/threads/${teamThreadId}/turns`,
       headers,
       payload: {
-        projectId: "project",
         input: "Несовместимо",
         goal: true,
-        settings: { collaborationMode: "team" },
       },
     });
     expect(invalidTeamGoal.statusCode).toBe(409);
-    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
       startsBeforeInvalidTeamGoal,
     );
 
@@ -2502,15 +2472,7 @@ describe("thread settings", () => {
       method: "turn/started",
       params: { threadId: "thread", turn: testTurn("running", "inProgress") },
     } satisfies ServerNotification);
-    const steered = await app.inject({
-      method: "POST",
-      url: "/api/v1/threads/thread/steer",
-      headers,
-      payload: { turnId: "running", input: "Продолжай" },
-    });
-    expect(steered.statusCode).toBe(200);
-    expect(steered.json()).toEqual({ turnId: "steered" });
-    expect(projection.summary("thread")?.currentTurnId).toBe("steered");
+    expect(projection.summary("thread")?.currentTurnId).toBe("running");
     const conflict = await app.inject({
       method: "PATCH",
       url: "/api/v1/threads/thread/settings",
@@ -2531,7 +2493,7 @@ describe("thread settings", () => {
     ).length;
     bridge.emit("notification", {
       method: "turn/completed",
-      params: { threadId: "thread", turn: testTurn("steered", "completed") },
+      params: { threadId: "thread", turn: testTurn("running", "completed") },
     } satisfies ServerNotification);
     await vi.waitFor(() =>
       expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
@@ -2694,7 +2656,7 @@ describe("thread settings", () => {
     const { codexManager, codexStatus } = createCodexManagerMock();
     const { appManager, appStatus } = createAppManagerMock();
     const attention = new AttentionManager();
-    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
     await projection.sync();
     const app = await buildApp(
       loadConfig({
@@ -2708,7 +2670,6 @@ describe("thread settings", () => {
         store,
         projection,
         attention,
-        push: new PushNotifier(store),
         codexManager,
         appManager,
         projectRoot: directory,
@@ -2874,15 +2835,20 @@ describe("explicit session artifacts", () => {
     const { app, bridge, headers, store } = await createTeamHarness({ projectPath: repository });
     const created = await app.inject({
       method: "POST",
-      url: "/api/v1/threads",
+      url: "/api/v1/projects/project/threads",
       headers,
-      payload: {
-        projectId: "project",
-        input: "Create a final report",
-        settings: { collaborationMode: "team" },
-      },
     });
     expect(created.statusCode).toBe(201);
+    expect(
+      (
+        await app.inject({
+          method: "PATCH",
+          url: "/api/v1/threads/created/settings",
+          headers,
+          payload: { collaborationMode: "team", model: "gpt-a", reasoningEffort: "high" },
+        })
+      ).statusCode,
+    ).toBe(200);
     expect(store.snapshot().threadMeta.created).toMatchObject({
       managedTeamToolsAvailable: true,
       sessionArtifactsVersion: 1,
@@ -5133,7 +5099,7 @@ async function createSkillsHarness() {
   });
   const bridge = new SettingsBridge();
   const attention = new AttentionManager();
-  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
   await projection.sync();
   const app = await buildApp(
     loadConfig({
@@ -5146,7 +5112,6 @@ async function createSkillsHarness() {
       store,
       projection,
       attention,
-      push: new PushNotifier(store),
     },
   );
   return {
@@ -5173,7 +5138,7 @@ async function createForkHarness() {
   });
   const bridge = new SettingsBridge();
   const attention = new AttentionManager();
-  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
   await projection.sync();
   await projection.setSettings("thread", {
     collaborationMode: "default",
@@ -5207,7 +5172,6 @@ async function createForkHarness() {
       store,
       projection,
       attention,
-      push: new PushNotifier(store),
       threadTitles,
     },
   );
@@ -5241,7 +5205,7 @@ async function createTeamHarness(
   const bridge = new SettingsBridge();
   bridge.includeManagedModel = options.includeManagedModel ?? true;
   const attention = new AttentionManager();
-  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention, false);
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
   await projection.sync();
   if (options.projectPath) {
     projection.upsertThread({ ...testThread(), cwd: options.projectPath });
@@ -5276,7 +5240,6 @@ async function createTeamHarness(
     store,
     projection,
     attention,
-    push: new PushNotifier(store),
     projectRoot: directory,
     lifecycle,
   });

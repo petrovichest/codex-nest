@@ -1205,10 +1205,6 @@ describe("ConnectionProvider", () => {
       resumed.receive({ type: "snapshot", snapshot: snapshot(2, []) });
     });
     expect(await screen.findByText("snapshot:2")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      new URL("https://codexnest.example/api/v1/sync"),
-      expect.anything(),
-    );
     view.unmount();
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
@@ -1286,8 +1282,6 @@ describe("ConnectionProvider", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(FakeWebSocket.instances).toHaveLength(2);
-    expect(requestedPaths).not.toContain("/api/v1/sync");
-
     await act(async () => {
       responses[0]?.(new Response(JSON.stringify(detail), { status: 200 }));
       responses[1]?.(new Response(JSON.stringify(detail), { status: 200 }));
@@ -1425,7 +1419,6 @@ function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSn
     threads,
     attention: [],
     models: [],
-    pushConfigured: false,
   };
 }
 

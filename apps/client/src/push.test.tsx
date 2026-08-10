@@ -282,6 +282,5 @@ function notificationSnapshot(): AppSnapshot {
     threads: [thread],
     attention: [],
     models: [],
-    pushConfigured: false,
   };
 }

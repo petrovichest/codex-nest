@@ -1,6 +1,3 @@
-export const API_PREFIX = "/api/v1";
-export const EVENTS_PATH = `${API_PREFIX}/events`;
-
 export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
 export type RecoveryState =
   "starting" | "syncing" | "recovering" | "ready" | "draining" | "unavailable" | "failed";
@@ -719,7 +716,6 @@ export type AppSnapshot = {
   models: ModelOption[];
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
-  pushConfigured: boolean;
   voiceTranscriptions?: VoiceTranscriptionJob[];
 };
 
@@ -770,26 +766,12 @@ export type CreateProjectRequest = {
   path: string;
 };
 
-export type UpdateProjectRequest = {
-  displayName?: string;
-  path?: string;
-};
-
 export type MoveProjectRequest =
   { direction: "up" | "down"; targetIndex?: never } | { direction?: never; targetIndex: number };
 
 export type CreateDirectoryRequest = {
   parentPath: string;
   name: string;
-};
-
-export type CreateThreadRequest = {
-  projectId: string;
-  input: string;
-  images?: string[];
-  goal?: boolean;
-  settings?: UpdateThreadSettingsRequest;
-  clientMessageId?: string;
 };
 
 export type ForkThreadRequest = {
@@ -841,12 +823,6 @@ export type UpdateThreadSettingsRequest = {
   personality?: string | null;
 };
 
-export type SteerTurnRequest = {
-  turnId: string;
-  input: string;
-  images?: string[];
-};
-
 export type InterruptTurnRequest = {
   turnId?: string;
 };
@@ -862,10 +838,6 @@ export type MarkReadRequest = {
 
 export type MarkViewedRequest = {
   observedUpdatedAt: number;
-};
-
-export type DeviceRegistrationRequest = {
-  fcmToken: string;
 };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,15 +1,12 @@
 import type {
   ApiError,
   AppUpdateStatus,
-  AppSnapshot,
   AttentionResponse,
   CodexRateLimitsResponse,
   CodexManagementStatus,
   CreateDirectoryRequest,
   CreateProjectRequest,
   CreateProjectThreadResponse,
-  CreateThreadRequest,
-  DeviceRegistrationRequest,
   DirectoryListing,
   ForceRestartAccepted,
   ForkThreadRequest,
@@ -25,7 +22,6 @@ import type {
   QueueMessageRequest,
   RefreshThreadResponse,
   StartTurnRequest,
-  SteerTurnRequest,
   SkillsCatalogResponse,
   SummaryResponse,
   ThreadDetail,
@@ -43,7 +39,6 @@ import type {
   UiLanguageSettings,
   UpdateGlobalPermissionSettingsRequest,
   UpdateCodexProxyRequest,
-  UpdateProjectRequest,
   UpdateQueuedMessageRequest,
   UpdateSkillConfigRequest,
   UpdateSkillConfigResponse,
@@ -202,10 +197,6 @@ export class ApiClient {
     return this.request("/api/v1/settings/permissions", { method: "PUT", body });
   }
 
-  readTaskDefaults(): Promise<TaskDefaults> {
-    return this.request("/api/v1/settings/task-defaults");
-  }
-
   updateTaskDefaults(body: UpdateTaskDefaultsRequest): Promise<TaskDefaults> {
     return this.request("/api/v1/settings/task-defaults", { method: "PUT", body });
   }
@@ -234,10 +225,6 @@ export class ApiClient {
 
   createProject(body: CreateProjectRequest): Promise<Project> {
     return this.request("/api/v1/projects", { method: "POST", body });
-  }
-
-  updateProject(id: string, body: UpdateProjectRequest): Promise<Project> {
-    return this.request(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "PATCH", body });
   }
 
   moveProject(id: string, body: MoveProjectRequest): Promise<Project[]> {
@@ -332,15 +319,6 @@ export class ApiClient {
     });
   }
 
-  createThread(body: CreateThreadRequest): Promise<{ thread: ThreadSummary } & TurnStartResult> {
-    return this.request("/api/v1/threads", {
-      method: "POST",
-      body,
-      timeoutMs: null,
-      retry: Boolean(body.clientMessageId),
-    });
-  }
-
   forkThread(id: string, body: ForkThreadRequest): Promise<ForkThreadResponse> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/forks`, {
       method: "POST",
@@ -419,13 +397,6 @@ export class ApiClient {
     );
   }
 
-  steer(id: string, body: SteerTurnRequest): Promise<{ turnId: string }> {
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/steer`, {
-      method: "POST",
-      body,
-    });
-  }
-
   interrupt(id: string, turnId?: string): Promise<void> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/interrupt`, {
       method: "POST",
@@ -457,17 +428,6 @@ export class ApiClient {
       method: "POST",
       body,
     });
-  }
-
-  registerDevice(installationId: string, body: DeviceRegistrationRequest): Promise<void> {
-    return this.request(`/api/v1/devices/${encodeURIComponent(installationId)}`, {
-      method: "PUT",
-      body,
-    });
-  }
-
-  sync(): Promise<AppSnapshot> {
-    return this.request("/api/v1/sync", { method: "POST", retry: true });
   }
 
   webSocketUrl(): string {

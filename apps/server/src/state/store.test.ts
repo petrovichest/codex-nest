@@ -83,7 +83,6 @@ function validManagedTeamSerializedState(): any {
         },
       },
     },
-    devices: {},
     uiLanguage: "en",
   };
 }
@@ -96,13 +95,13 @@ describe("StateStore", () => {
     expect(store.snapshot().uiLanguage).toBe("en");
     await Promise.all([
       store.update((state) => {
-        state.devices.a = { fcmToken: "one", updatedAt: 1 };
+        state.threadMeta.a = { pinned: false, lastReadUpdatedAt: 1 };
       }),
       store.update((state) => {
-        state.devices.b = { fcmToken: "two", updatedAt: 2 };
+        state.threadMeta.b = { pinned: true, lastReadUpdatedAt: 2 };
       }),
     ]);
-    expect(Object.keys(store.snapshot().devices)).toEqual(["a", "b"]);
+    expect(Object.keys(store.snapshot().threadMeta)).toEqual(["a", "b"]);
     expect((await stat(store.databasePath)).mode & 0o777).toBe(0o600);
     const database = new DatabaseSync(store.databasePath, { readOnly: true });
     expect(database.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
@@ -113,6 +112,37 @@ describe("StateStore", () => {
     const { path } = await temporaryState();
     await writeFile(path, '{"schemaVersion":2}', "utf8");
     await expect(new StateStore(path).load()).rejects.toThrow("Unsupported or corrupt");
+  });
+
+  it("normalizes a legacy empty devices map out of active state and persistence", async () => {
+    const { path } = await temporaryState();
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        auth: {},
+        projects: [],
+        threadMeta: {},
+        devices: {},
+        uiLanguage: "en",
+      }),
+      "utf8",
+    );
+
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.snapshot()).not.toHaveProperty("devices");
+
+    const database = new DatabaseSync(store.databasePath, { readOnly: true });
+    expect(
+      database
+        .prepare("SELECT count(*) AS count FROM state_entries WHERE namespace = 'devices'")
+        .get(),
+    ).toEqual({ count: 0 });
+    database.close();
+
+    await store.checkpoint();
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("devices");
   });
 
   it("accepts legacy permission fields for backward-compatible state loading", async () => {
@@ -159,7 +189,6 @@ describe("StateStore", () => {
         auth: {},
         projects: [],
         threadMeta: {},
-        devices: {},
         messageQueues: {
           thread: [
             {
@@ -812,7 +841,6 @@ describe("StateStore", () => {
         auth: {},
         projects: [],
         threadMeta: {},
-        devices: {},
         uiLanguage: "ru",
         transcriptionTimings: {
           "local:http://127.0.0.1:8178/inference:raw": [2_000, 3_000],
@@ -835,7 +863,17 @@ describe("StateStore", () => {
       auth: {},
       projects: [],
       threadMeta: {},
-      devices: { original: { fcmToken: "before", updatedAt: 1 } },
+      messageQueues: {
+        original: [
+          {
+            id: "before",
+            threadId: "original",
+            text: "before",
+            createdAt: 1,
+            status: "queued",
+          },
+        ],
+      },
       uiLanguage: "en",
     };
     const serialized = `${JSON.stringify(legacy, null, 2)}\n`;
@@ -847,20 +885,30 @@ describe("StateStore", () => {
     expect((await stat(`${path}.pre-sqlite`)).mode & 0o777).toBe(0o600);
 
     await store.update((state) => {
-      state.devices.current = { fcmToken: "after", updatedAt: 2 };
+      state.messageQueues!.current = [
+        {
+          id: "after",
+          threadId: "current",
+          text: "after",
+          createdAt: 2,
+          status: "queued",
+        },
+      ];
     });
-    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("devices.current");
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("messageQueues.current");
 
     await store.checkpoint();
     const checkpoint = await readFile(path, "utf8");
     expect(checkpoint).not.toContain("\n  ");
-    expect(JSON.parse(checkpoint).devices.current).toEqual({ fcmToken: "after", updatedAt: 2 });
+    expect(JSON.parse(checkpoint).messageQueues.current).toEqual([
+      expect.objectContaining({ id: "after", text: "after" }),
+    ]);
 
     const reloaded = new StateStore(path);
     await reloaded.load();
-    expect(reloaded.snapshot().devices).toMatchObject({
-      original: { fcmToken: "before" },
-      current: { fcmToken: "after" },
+    expect(reloaded.snapshot().messageQueues).toMatchObject({
+      original: [expect.objectContaining({ id: "before" })],
+      current: [expect.objectContaining({ id: "after" })],
     });
   });
 
@@ -869,20 +917,20 @@ describe("StateStore", () => {
     const store = new StateStore(path);
     await store.load();
     const before = store.view();
-    const beforeThreadMeta = before.threadMeta;
+    const beforeProjects = before.projects;
 
     await store.update((state) => {
-      state.devices.first = { fcmToken: "one", updatedAt: 1 };
+      state.threadMeta.first = { pinned: false, lastReadUpdatedAt: 1 };
     });
 
     const after = store.view();
     expect(after).not.toBe(before);
-    expect(after.threadMeta).toBe(beforeThreadMeta);
-    expect(before.devices).toEqual({});
-    expect(after.devices.first).toEqual({ fcmToken: "one", updatedAt: 1 });
+    expect(after.projects).toBe(beforeProjects);
+    expect(before.threadMeta).toEqual({});
+    expect(after.threadMeta.first).toEqual({ pinned: false, lastReadUpdatedAt: 1 });
     const exported = store.snapshot();
-    exported.devices.first!.fcmToken = "mutated snapshot";
-    expect(store.view().devices.first?.fcmToken).toBe("one");
+    exported.threadMeta.first!.pinned = true;
+    expect(store.view().threadMeta.first?.pinned).toBe(false);
   });
 
   it("skips SQLite writes for no-op updates", async () => {
@@ -920,8 +968,8 @@ describe("StateStore", () => {
     const before = store.view();
     const database = new DatabaseSync(store.databasePath);
     database.exec(`
-      CREATE TRIGGER reject_broken_device BEFORE INSERT ON state_entries
-      WHEN NEW.namespace = 'devices' AND NEW.entry_key = 'broken'
+      CREATE TRIGGER reject_broken_metadata BEFORE INSERT ON state_entries
+      WHEN NEW.namespace = 'threadMeta' AND NEW.entry_key = 'broken'
       BEGIN
         SELECT RAISE(ABORT, 'forced rollback');
       END;
@@ -929,15 +977,15 @@ describe("StateStore", () => {
 
     await expect(
       store.update((state) => {
-        state.devices.broken = { fcmToken: "never", updatedAt: 1 };
+        state.threadMeta.broken = { pinned: false, lastReadUpdatedAt: 1 };
       }),
     ).rejects.toThrow("forced rollback");
     expect(store.view()).toBe(before);
-    expect(store.view().devices.broken).toBeUndefined();
+    expect(store.view().threadMeta.broken).toBeUndefined();
     expect(
       database
         .prepare(
-          "SELECT json FROM state_entries WHERE namespace = 'devices' AND entry_key = 'broken'",
+          "SELECT json FROM state_entries WHERE namespace = 'threadMeta' AND entry_key = 'broken'",
         )
         .get(),
     ).toBeUndefined();

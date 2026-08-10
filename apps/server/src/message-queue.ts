@@ -214,10 +214,6 @@ export class MessageQueue {
     await Promise.all([...this.locks.values()].map((pending) => pending.catch(() => undefined)));
   }
 
-  async idle(): Promise<void> {
-    await Promise.all([...this.locks.values()].map((pending) => pending.catch(() => undefined)));
-  }
-
   async removeThread(threadId: string): Promise<void> {
     if (!this.store.view().messageQueues?.[threadId]) return;
     await this.store.update((state) => {
