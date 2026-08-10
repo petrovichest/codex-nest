@@ -108,6 +108,10 @@ type ComposerDraftState = {
 };
 
 type LocalImageLoader = (path: string) => Promise<Blob>;
+type LocalArtifactOpener = (
+  artifact: ArtifactDescriptor,
+  opener: HTMLButtonElement | null,
+) => void;
 
 const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
 
@@ -536,7 +540,7 @@ export function ThreadPage({
   const artifactRequestRun = useRef(0);
   const [artifactViewer, setArtifactViewer] = useState<{
     artifact: ArtifactDescriptor;
-    opener: HTMLButtonElement;
+    opener: HTMLButtonElement | null;
     returnToInspector: boolean;
   } | null>(null);
   const artifactViewerRef = useRef(artifactViewer);
@@ -738,6 +742,10 @@ export function ThreadPage({
     },
     [],
   );
+  const openLinkedArtifact = useCallback<LocalArtifactOpener>((artifact, opener) => {
+    setInspectorOpen(false);
+    setArtifactViewer({ artifact, opener, returnToInspector: false });
+  }, []);
   const closeArtifact = useCallback(() => {
     const returnToInspector = artifactViewerRef.current?.returnToInspector ?? false;
     setArtifactViewer(null);
@@ -2830,6 +2838,7 @@ export function ThreadPage({
                   item={optimisticActivity(pendingOptimisticMessage)}
                   cwd={project?.path ?? workspaceSummary.cwd}
                   onDownload={async () => undefined}
+                  onOpenArtifact={openLinkedArtifact}
                 />
               </div>
             ) : (
@@ -2877,6 +2886,7 @@ export function ThreadPage({
                           item={optimisticActivity(message)}
                           cwd={workspaceSummary.cwd}
                           onDownload={downloadFile}
+                          onOpenArtifact={openLinkedArtifact}
                           key={message.id}
                         />
                       ))}
@@ -2886,6 +2896,7 @@ export function ThreadPage({
                             items={entry}
                             cwd={workspaceSummary.cwd}
                             onDownload={downloadFile}
+                            onOpenArtifact={openLinkedArtifact}
                             key={entry.map((item) => item.id).join(":")}
                           />
                         ) : (
@@ -2894,6 +2905,7 @@ export function ThreadPage({
                               item={entry}
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
+                              onOpenArtifact={openLinkedArtifact}
                               onLoadImage={loadLocalImage}
                               forkAction={
                                 !isSubagent && entry.id === forkResponseId
@@ -2953,6 +2965,7 @@ export function ThreadPage({
                           onLoad={() => loadTurnItems(threadId, turn.id)}
                           cwd={workspaceSummary.cwd}
                           onDownload={downloadFile}
+                          onOpenArtifact={openLinkedArtifact}
                         />
                       )}
                       {isSubagent ? (
@@ -2986,6 +2999,7 @@ export function ThreadPage({
                       item={optimisticActivity(message)}
                       cwd={workspaceSummary.cwd}
                       onDownload={downloadFile}
+                      onOpenArtifact={openLinkedArtifact}
                     />
                   </div>
                 ))}
@@ -3369,11 +3383,13 @@ function MarkdownContent({
   text,
   cwd,
   onDownload,
+  onOpenArtifact,
   onLoadImage,
 }: {
   text: string;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
 }) {
   const components = useMemo<MarkdownComponents>(
@@ -3382,7 +3398,18 @@ function MarkdownContent({
       table: MarkdownTable,
       a({ href, children, title }) {
         const path = cwd ? localDownloadPath(href, cwd) : null;
-        return path && onDownload ? (
+        const artifact = path ? artifactDescriptor(path) : null;
+        return path && artifact && onOpenArtifact ? (
+          <PreviewLink
+            path={path}
+            title={title}
+            artifact={artifact}
+            onDownload={onDownload}
+            onOpenArtifact={onOpenArtifact}
+          >
+            {children}
+          </PreviewLink>
+        ) : path && onDownload ? (
           <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
             {children}
           </DownloadLink>
@@ -3404,7 +3431,7 @@ function MarkdownContent({
         );
       },
     }),
-    [cwd, onDownload, onLoadImage],
+    [cwd, onDownload, onLoadImage, onOpenArtifact],
   );
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
@@ -3502,6 +3529,81 @@ function MarkdownImage({
         />
       )}
     </>
+  );
+}
+
+function PreviewLink({
+  path,
+  title,
+  artifact,
+  onDownload,
+  onOpenArtifact,
+  children,
+}: {
+  path: string;
+  title?: string;
+  artifact: ArtifactDescriptor;
+  onDownload?(path: string): Promise<void>;
+  onOpenArtifact(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
+  children: React.ReactNode;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const busyRef = useRef(false);
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+
+  async function download() {
+    if (!onDownload || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setFailed(false);
+    try {
+      await onDownload(path);
+    } catch {
+      setFailed(true);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="download-link-container preview-link-container">
+      <span className="preview-link-row">
+        <button
+          type="button"
+          ref={openButtonRef}
+          title={title}
+          className="download-link preview-link-open"
+          aria-label={t("Открыть {{name}}", { name: artifact.fileName })}
+          aria-busy={busy}
+          aria-disabled={busy}
+          disabled={busy}
+          onClick={() => onOpenArtifact(artifact, openButtonRef.current)}
+        >
+          {children}
+          {busy && <span className="download-link-status"> — {t("открываем…")}</span>}
+        </button>
+        {onDownload && (
+          <button
+            type="button"
+            className="download-link preview-link-download"
+            aria-label={t("Скачать {{name}}", { name: artifact.fileName })}
+            title={t("Скачать")}
+            disabled={busy}
+            onClick={() => void download()}
+          >
+            <ArrowDownIcon />
+          </button>
+        )}
+      </span>
+      {failed && (
+        <span className="download-link-error" role="alert">
+          {t("Не удалось скачать файл. Нажмите ещё раз.")}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -3622,6 +3724,7 @@ export function Activity({
   item,
   cwd,
   onDownload,
+  onOpenArtifact,
   onLoadImage,
   forkAction,
   annotations = [],
@@ -3634,6 +3737,7 @@ export function Activity({
   item: ActivityItem;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
   forkAction?: { disabled: boolean; onFork(): void };
   annotations?: PendingAnnotation[];
@@ -3661,6 +3765,7 @@ export function Activity({
                 source="agentMessage"
                 cwd={cwd}
                 onDownload={onDownload}
+                onOpenArtifact={onOpenArtifact}
                 onLoadImage={onLoadImage}
                 annotations={messageAnnotations}
                 enabled={annotationEnabled}
@@ -3674,6 +3779,7 @@ export function Activity({
                 text={item.text}
                 cwd={cwd}
                 onDownload={onDownload}
+                onOpenArtifact={onOpenArtifact}
                 onLoadImage={onLoadImage}
               />
             ))}
@@ -3695,6 +3801,7 @@ export function Activity({
             text={item.text}
             cwd={cwd}
             onDownload={onDownload}
+            onOpenArtifact={onOpenArtifact}
             onLoadImage={onLoadImage}
           />
         </div>
@@ -3714,6 +3821,7 @@ export function Activity({
             source="plan"
             cwd={cwd}
             onDownload={onDownload}
+            onOpenArtifact={onOpenArtifact}
             onLoadImage={onLoadImage}
             annotations={messageAnnotations}
             enabled={annotationEnabled}
@@ -3997,6 +4105,7 @@ function AnnotatableMarkdownContent({
   source,
   cwd,
   onDownload,
+  onOpenArtifact,
   onLoadImage,
   annotations,
   enabled,
@@ -4010,6 +4119,7 @@ function AnnotatableMarkdownContent({
   source: "agentMessage" | "plan";
   cwd?: string;
   onDownload?(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
   annotations: NumberedAnnotation[];
   enabled: boolean;
@@ -4230,7 +4340,13 @@ function AnnotatableMarkdownContent({
         onPointerUp={() => window.setTimeout(captureSelection, 0)}
         onKeyUp={captureSelection}
       >
-        <MarkdownContent text={text} cwd={cwd} onDownload={onDownload} onLoadImage={onLoadImage} />
+        <MarkdownContent
+          text={text}
+          cwd={cwd}
+          onDownload={onDownload}
+          onOpenArtifact={onOpenArtifact}
+          onLoadImage={onLoadImage}
+        />
       </div>
       {annotations.map((item) => {
         const position = markerPositions[item.annotation.id];
@@ -4333,10 +4449,12 @@ function ActivityGroup({
   items,
   cwd,
   onDownload,
+  onOpenArtifact,
 }: {
   items: ActivityItem[];
   cwd: string;
   onDownload(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -4365,7 +4483,13 @@ function ActivityGroup({
       {open && (
         <div className="activity-group-content">
           {items.map((item) => (
-            <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
+            <MemoizedActivity
+              item={item}
+              cwd={cwd}
+              onDownload={onDownload}
+              onOpenArtifact={onOpenArtifact}
+              key={item.id}
+            />
           ))}
         </div>
       )}
@@ -4381,12 +4505,14 @@ function LazyTechnicalDetails({
   onLoad,
   cwd,
   onDownload,
+  onOpenArtifact,
 }: {
   items: ActivityItem[];
   loaded: boolean;
   onLoad(): Promise<void>;
   cwd: string;
   onDownload(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -4428,7 +4554,13 @@ function LazyTechnicalDetails({
           )}
           {loaded &&
             items.map((item) => (
-              <MemoizedActivity item={item} cwd={cwd} onDownload={onDownload} key={item.id} />
+              <MemoizedActivity
+                item={item}
+                cwd={cwd}
+                onDownload={onDownload}
+                onOpenArtifact={onOpenArtifact}
+                key={item.id}
+              />
             ))}
         </div>
       )}

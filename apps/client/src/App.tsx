@@ -793,11 +793,13 @@ function Sidebar({
       if (event.key !== "Escape") return;
       const gesture = projectDragRef.current;
       if (!gesture) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
       clearProjectDragGesture(gesture);
     }
 
-    window.addEventListener("keydown", cancelWithEscape);
-    return () => window.removeEventListener("keydown", cancelWithEscape);
+    window.addEventListener("keydown", cancelWithEscape, true);
+    return () => window.removeEventListener("keydown", cancelWithEscape, true);
   }, []);
 
   useEffect(() => {

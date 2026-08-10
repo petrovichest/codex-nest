@@ -1630,9 +1630,54 @@
   display: inline-block;
 }
 
+.preview-link-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+}
+
 .download-link[aria-disabled="true"] {
   opacity: 0.72;
   pointer-events: none;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  appearance: none;
+  color: var(--color-lapis);
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.download-link:hover:not(:disabled) {
+  color: var(--color-lapis);
+}
+
+.download-link:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+
+.preview-link-open {
+  cursor: pointer;
+}
+
+.preview-link-download {
+  flex: 0 0 auto;
+  text-decoration: none;
+}
+
+.preview-link-download:disabled {
+  cursor: default;
 }
 
 .download-link-status {

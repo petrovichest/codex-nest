@@ -324,6 +324,31 @@ export function Composer({
     if (activeSkillIndex >= matchingSkills.length) setActiveSkillIndex(0);
   }, [activeSkillIndex, matchingSkills.length]);
 
+  useEffect(() => {
+    if (!running || !onStop) return;
+    const stop = onStop;
+
+    function handleStopTask(event: globalThis.KeyboardEvent) {
+      if (
+        event.key !== "Escape" ||
+        event.defaultPrevented ||
+        event.repeat ||
+        event.isComposing ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
+      }
+      event.preventDefault();
+      stop();
+    }
+
+    window.addEventListener("keydown", handleStopTask);
+    return () => window.removeEventListener("keydown", handleStopTask);
+  }, [onStop, running]);
+
   useLayoutEffect(() => {
     attachmentImagesRef.current.set(attachmentScope, images);
   }, [attachmentScope, images]);

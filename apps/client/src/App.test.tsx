@@ -1902,7 +1902,8 @@ describe("App routing and navigation", () => {
 
   it("does not reorder for a short or cancelled project drag", () => {
     const secondProject = testProject("second", "Второй");
-    const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+    const running = { ...baseThread, state: "running" as const, currentTurnId: "turn" };
+    const api = mockConnection(snapshot([running], [defaultProject(), secondProject]));
 
     const view = renderApp("/threads/newer");
     setProjectDragBounds(view.container, [80, 120]);
@@ -1925,6 +1926,7 @@ describe("App routing and navigation", () => {
     fireEvent.keyDown(window, { key: "Escape" });
 
     expect(api.moveProject).not.toHaveBeenCalled();
+    expect(api.interrupt).not.toHaveBeenCalled();
     expect(view.container.querySelector(".project-list")).not.toHaveClass("project-list-dragging");
   });
 

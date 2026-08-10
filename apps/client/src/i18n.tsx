@@ -620,6 +620,7 @@ const ENGLISH: Record<string, string> = {
   "Не удалось скачать файл. Нажмите ещё раз.": "Failed to download the file. Click again.",
   "Просмотр файла {{name}}": "Viewing {{name}}",
   "Открыть {{name}}": "Open {{name}}",
+  "открываем…": "opening…",
   "Скачать {{name}}": "Download {{name}}",
   Скачать: "Download",
   "Обновить предпросмотр": "Refresh preview",

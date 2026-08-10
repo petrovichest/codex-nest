@@ -1102,7 +1102,7 @@ describe("Activity", () => {
     const api = threadApi();
     api.createDownload
       .mockRejectedValueOnce(new Error("unavailable"))
-      .mockResolvedValueOnce({ downloadUrl: "/downloads/retry/file.txt", expiresAt: 61_000 });
+      .mockResolvedValueOnce({ downloadUrl: "/downloads/retry/file.bin", expiresAt: 61_000 });
     mockThreadConnection(api, summary, {
       turns: [
         {
@@ -1117,7 +1117,7 @@ describe("Activity", () => {
               type: "agentMessage",
               id: "agent",
               status: "completed",
-              text: "[Скачать файл](/work/project/file.txt)",
+              text: "[Скачать файл](/work/project/file.bin)",
               images: [],
               timestamp: 2,
               phase: "final_answer",
@@ -1137,8 +1137,22 @@ describe("Activity", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("keeps linked files as regular download links rather than inferred artifacts", () => {
+  it("opens previewable agent files inline and keeps unsupported files downloadable", async () => {
     const api = threadApi();
+    api.createDownload
+      .mockResolvedValueOnce({
+        downloadUrl: "/downloads/ticket/report.md",
+        expiresAt: 61_000,
+        fileName: "report.md",
+        size: 8,
+      })
+      .mockResolvedValueOnce({
+        downloadUrl: "/downloads/ticket/report.md",
+        expiresAt: 61_000,
+        fileName: "report.md",
+        size: 8,
+      });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("# Report", { status: 200 })));
     mockThreadConnection(api, summary, {
       turns: [
         {
@@ -1165,8 +1179,14 @@ describe("Activity", () => {
     renderThread();
 
     expect(screen.getByRole("link", { name: "universe.rs:183" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Готовый отчёт" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Открыть (universe\.rs|report\.md)/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Открыть report.md" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Скачать report.md" }));
+    await waitFor(() => expect(openDownloadUrl).toHaveBeenCalledWith("https://codex.home.arpa", "/downloads/ticket/report.md"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть report.md" }));
+    expect(await screen.findByRole("heading", { name: "Report" })).toBeInTheDocument();
+    expect(screen.getByText("Готовый отчёт")).toBeInTheDocument();
   });
 
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {
@@ -2461,6 +2481,22 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Включить командный режим" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
+  });
+
+  it("stops a running task with Escape", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, {
+      ...summary,
+      state: "running",
+      currentTurnId: "turn",
+    });
+    renderThread();
+
+    const textbox = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+    fireEvent.keyDown(textbox, { key: "Escape" });
+
+    await waitFor(() => expect(api.interrupt).toHaveBeenCalledWith("thread", "turn"));
+    expect(api.interrupt).toHaveBeenCalledTimes(1);
   });
 
   it("stops a Team orchestration while the parent is between turns", async () => {
