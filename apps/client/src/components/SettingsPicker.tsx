@@ -39,6 +39,7 @@ export function SettingsPicker({
 }) {
   const { language, t } = useI18n();
   const modelButtonRef = useRef<HTMLButtonElement>(null);
+  const modelPopupOpenerRef = useRef<HTMLElement | null>(null);
   const [modelPopupOpen, setModelPopupOpen] = useState(false);
   const closeModelPopup = useCallback(() => setModelPopupOpen(false), []);
   const defaultModel = effectiveModel(models);
@@ -58,7 +59,15 @@ export function SettingsPicker({
         className="setting-control model-toggle"
         disabled={disabled || !models.length}
         title={`${modelDisplayName} · ${effortDisplayName}`}
-        onClick={() => setModelPopupOpen(true)}
+        onClick={(event) => {
+          const activeElement = event.currentTarget.ownerDocument.activeElement;
+          modelPopupOpenerRef.current =
+            activeElement instanceof HTMLElement &&
+            activeElement !== event.currentTarget.ownerDocument.body
+              ? activeElement
+              : event.currentTarget;
+          setModelPopupOpen(true);
+        }}
       >
         <ModelIcon />
         <span>{modelDisplayName}</span>
@@ -72,7 +81,7 @@ export function SettingsPicker({
           reasoningEffort={value.reasoningEffort ?? null}
           defaultEffort={defaultEffort}
           disabled={disabled}
-          opener={modelButtonRef.current}
+          opener={modelPopupOpenerRef.current}
           onModelChange={changeModel}
           onEffortChange={(reasoningEffort) => onChange({ reasoningEffort })}
           onClose={closeModelPopup}
@@ -220,14 +229,14 @@ function ModelSettingsPopup({
   reasoningEffort: string | null;
   defaultEffort: string | undefined;
   disabled: boolean;
-  opener: HTMLButtonElement | null;
+  opener: HTMLElement | null;
   onModelChange(modelId: string | null): void;
   onEffortChange(reasoningEffort: string | null): void;
   onClose(): void;
 }) {
   const { t } = useI18n();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const openerRef = useRef<HTMLButtonElement | null>(opener);
+  const openerRef = useRef<HTMLElement | null>(opener);
   openerRef.current = opener;
 
   return (

@@ -1,8 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  Project,
   SessionSettings,
   TranscriptionConfigResponse,
   UpdateThreadSettingsRequest,
@@ -46,6 +47,23 @@ const models = [
     reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
     serviceTiers: [],
     supportsPersonality: true,
+  },
+];
+
+const projects: Project[] = [
+  {
+    id: "one",
+    displayName: "Первый",
+    path: "/work/one",
+    createdAt: "2026-01-01",
+    updatedAt: "2026-01-01",
+  },
+  {
+    id: "two",
+    displayName: "Второй",
+    path: "/work/two",
+    createdAt: "2026-01-02",
+    updatedAt: "2026-01-02",
   },
 ];
 
@@ -312,6 +330,69 @@ describe("Composer", () => {
     expect(toggle).toHaveFocus();
   });
 
+  it("keeps pointer focus in the textarea for direct toolbar and attachment controls", () => {
+    const view = render(
+      <Harness
+        initialInput="Сообщение"
+        initialImages={[{ id: "one", name: "one.png", url: "data:image/png;base64,b25l" }]}
+      >
+        <button type="button">Дочернее действие</button>
+      </Harness>,
+    );
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(4, 4);
+
+    const ownedControls = view.container.querySelectorAll(
+      ".composer-toolbar button:not(:disabled), .composer-attachments button:not(:disabled), .composer-toolbar summary",
+    );
+    expect(ownedControls.length).toBeGreaterThan(0);
+    for (const control of ownedControls) {
+      expect(fireEvent.pointerDown(control)).toBe(false);
+      expect(textarea).toHaveFocus();
+      expect(textarea.selectionStart).toBe(4);
+    }
+
+    expect(fireEvent.pointerDown(screen.getByRole("button", { name: "Дочернее действие" }))).toBe(
+      true,
+    );
+  });
+
+  it("returns focus after a pointer project selection but preserves keyboard focus", () => {
+    render(<Harness projects={projects} initialProjectId="one" />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const project = screen.getByRole("combobox", { name: "Проект" });
+
+    textarea.focus();
+    expect(fireEvent.pointerDown(project)).toBe(true);
+    project.focus();
+    fireEvent.change(project, { target: { value: "two" } });
+    expect(textarea).toHaveFocus();
+
+    project.focus();
+    fireEvent.change(project, { target: { value: "one" } });
+    expect(project).toHaveFocus();
+  });
+
+  it("restores model dialog focus to the pointer or keyboard opener", () => {
+    render(<Harness />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const toggle = screen.getByRole("button", { name: "Модель и уровень рассуждений" });
+
+    textarea.focus();
+    expect(fireEvent.pointerDown(toggle)).toBe(false);
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(textarea).toHaveFocus();
+
+    toggle.focus();
+    fireEvent.click(toggle);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(toggle).toHaveFocus();
+  });
+
   it("renders plan, team, and goal as compact mutually exclusive controls", () => {
     const view = render(<Harness />);
     const settings = view.container.querySelector(".settings-picker");
@@ -403,6 +484,27 @@ describe("Composer", () => {
     await waitFor(() => expect(screen.queryByAltText("one.png")).toBeNull());
     expect(screen.getByAltText("two.jpg")).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Просмотр изображений" })).toBeNull();
+  });
+
+  it("restores attachment viewer focus based on pointer or keyboard activation", () => {
+    render(
+      <Harness
+        initialImages={[{ id: "one", name: "one.png", url: "data:image/png;base64,b25l" }]}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const preview = screen.getByRole("button", { name: "Открыть изображение one.png" });
+
+    textarea.focus();
+    expect(fireEvent.pointerDown(preview)).toBe(false);
+    fireEvent.click(preview);
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(textarea).toHaveFocus();
+
+    preview.focus();
+    fireEvent.click(preview);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(preview).toHaveFocus();
   });
 
   it("attaches pasted clipboard images without cancelling ordinary paste behavior", async () => {
@@ -734,13 +836,17 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 
 function Harness({
   busy = false,
+  children,
   cwd,
   goalMode = false,
   hasSupplementalContent = false,
+  initialImages = [],
   initialInput = "",
+  initialProjectId,
   onGoalModeChange,
   onSettingsChange,
   onSubmit = () => undefined,
+  projects: projectOptions,
   transcriptionConfig: speechConfig,
   onTranscribe,
   onRecordingReady,
@@ -748,13 +854,17 @@ function Harness({
   voiceInputLocked = false,
 }: {
   busy?: boolean;
+  children?: ReactNode;
   cwd?: string;
   goalMode?: boolean;
   hasSupplementalContent?: boolean;
+  initialImages?: ComposerImage[];
   initialInput?: string;
+  initialProjectId?: string;
   onGoalModeChange?(value: boolean): void;
   onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
   onSubmit?(intent: ComposerSubmitIntent): void;
+  projects?: Project[];
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   onRecordingReady?: Parameters<typeof Composer>[0]["onRecordingReady"];
@@ -762,7 +872,8 @@ function Harness({
   voiceInputLocked?: boolean;
 }) {
   const [input, setInput] = useState(initialInput);
-  const [images, setImages] = useState<ComposerImage[]>([]);
+  const [images, setImages] = useState<ComposerImage[]>(initialImages);
+  const [projectId, setProjectId] = useState(initialProjectId);
   const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
   const [voiceMode, setVoiceMode] = useState<"draft" | "send">("draft");
   return (
@@ -774,6 +885,9 @@ function Harness({
       onSubmit={onSubmit}
       busy={busy}
       cwd={cwd}
+      projects={projectOptions}
+      projectId={projectId}
+      onProjectChange={setProjectId}
       settings={settings}
       onSettingsChange={(patch) => {
         onSettingsChange?.(patch);
@@ -799,7 +913,9 @@ function Harness({
       transcriptionStatus={transcriptionStatus}
       error={null}
       hasSupplementalContent={hasSupplementalContent}
-    />
+    >
+      {children}
+    </Composer>
   );
 }
 

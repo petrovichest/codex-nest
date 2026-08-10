@@ -18,7 +18,7 @@ export function ImageViewer({
 }: {
   images: ViewerImage[];
   index: number;
-  opener: HTMLButtonElement | null;
+  opener: HTMLElement | null;
   onIndexChange(index: number): void;
   onClose(): void;
 }) {

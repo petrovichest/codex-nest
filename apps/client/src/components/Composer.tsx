@@ -1,6 +1,7 @@
 import {
   type ClipboardEvent,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useEffect,
   useLayoutEffect,
@@ -157,6 +158,7 @@ export function Composer({
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const restoreTextareaAfterProjectChangeRef = useRef(false);
   const viewportBaselineRef = useRef(viewportHeight());
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -210,7 +212,7 @@ export function Composer({
     t,
     transcriptionConfig,
   };
-  const [viewer, setViewer] = useState<{ index: number; opener: HTMLButtonElement } | null>(null);
+  const [viewer, setViewer] = useState<{ index: number; opener: HTMLElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
@@ -824,6 +826,20 @@ export function Composer({
     transcriptionTimerRef.current = undefined;
   }
 
+  function preserveTextareaFocus(event: ReactPointerEvent<HTMLElement>) {
+    const textarea = textareaRef.current;
+    const target = event.target instanceof Element ? event.target : null;
+    const control = target?.closest<HTMLElement>(
+      "button:not(:disabled), select:not(:disabled), summary",
+    );
+    if (!textarea || !control || !event.currentTarget.contains(control)) return;
+    if (control instanceof HTMLSelectElement) {
+      restoreTextareaAfterProjectChangeRef.current = document.activeElement === textarea;
+    } else if (document.activeElement === textarea) {
+      event.preventDefault();
+    }
+  }
+
   function stopMediaStream() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -846,14 +862,28 @@ export function Composer({
         </div>
       )}
       {images.length > 0 && (
-        <div className="composer-attachments" aria-label={t("Изображения")}>
+        <div
+          className="composer-attachments"
+          aria-label={t("Изображения")}
+          onPointerDownCapture={preserveTextareaFocus}
+        >
           {images.map((image, index) => (
             <div className="composer-attachment" key={image.id}>
               <button
                 type="button"
                 className="composer-attachment-preview"
                 aria-label={t("Открыть изображение {{name}}", { name: image.name })}
-                onClick={(event) => setViewer({ index, opener: event.currentTarget })}
+                onClick={(event) => {
+                  const activeElement = event.currentTarget.ownerDocument.activeElement;
+                  setViewer({
+                    index,
+                    opener:
+                      activeElement instanceof HTMLElement &&
+                      activeElement !== event.currentTarget.ownerDocument.body
+                        ? activeElement
+                        : event.currentTarget,
+                  });
+                }}
               >
                 <img src={image.url} alt={image.name} />
               </button>
@@ -938,7 +968,7 @@ export function Composer({
                 : t("Спросите что угодно")
           }
         />
-        <div className="composer-toolbar">
+        <div className="composer-toolbar" onPointerDownCapture={preserveTextareaFocus}>
           <div className="composer-options">
             <input
               ref={fileInputRef}
@@ -963,7 +993,15 @@ export function Composer({
                 <select
                   aria-label={t("Проект")}
                   value={projectId}
-                  onChange={(event) => onProjectChange?.(event.target.value)}
+                  onBlur={() => {
+                    restoreTextareaAfterProjectChangeRef.current = false;
+                  }}
+                  onChange={(event) => {
+                    const restoreTextarea = restoreTextareaAfterProjectChangeRef.current;
+                    restoreTextareaAfterProjectChangeRef.current = false;
+                    onProjectChange?.(event.target.value);
+                    if (restoreTextarea) textareaRef.current?.focus();
+                  }}
                 >
                   {projects.map((project) => (
                     <option value={project.id} key={project.id}>
