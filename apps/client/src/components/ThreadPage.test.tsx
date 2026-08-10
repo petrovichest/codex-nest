@@ -2772,6 +2772,80 @@ describe("Activity", () => {
         expect.objectContaining({ input: "Сообщение", clientMessageId: expect.any(String) }),
       ),
     );
+    expect(api.sendQueuedNow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { modifier: "Meta", keys: { metaKey: true } },
+    { modifier: "Control", keys: { ctrlKey: true } },
+  ])("sends the new message immediately with $modifier+Enter", async ({ keys }) => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running, {
+      queuedMessages: [
+        {
+          id: "older-message",
+          threadId: "thread",
+          text: "Старое сообщение",
+          createdAt: 1,
+          status: "queued",
+        },
+      ],
+    });
+    context.sendReliable.mockImplementation(async (threadId, body) => {
+      await api.enqueue(threadId, body);
+      return "delivered";
+    });
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.change(textarea, { target: { value: "Сразу" } });
+    fireEvent.keyDown(textarea, { key: "Enter", ...keys });
+
+    await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledOnce());
+    const clientMessageId = api.enqueue.mock.calls[0]?.[1].clientMessageId;
+    expect(clientMessageId).toEqual(expect.any(String));
+    expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", clientMessageId);
+    expect(api.sendQueuedNow).not.toHaveBeenCalledWith("thread", "older-message");
+  });
+
+  it("keeps an accepted immediate message queued when send-now fails", async () => {
+    const api = threadApi();
+    api.sendQueuedNow.mockRejectedValueOnce(new Error("offline"));
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    context.sendReliable.mockImplementation(async (threadId, body) => {
+      await api.enqueue(threadId, body);
+      return "delivered";
+    });
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.change(textarea, { target: { value: "Сразу" } });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+    expect(
+      await screen.findByText("Не удалось отправить сразу — сообщение осталось в очереди"),
+    ).toBeInTheDocument();
+    expect(textarea).toHaveValue("");
+    expect(context.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "optimistic.remove" }),
+    );
+  });
+
+  it("does not request send-now while reliable delivery is pending", async () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    context.sendReliable.mockResolvedValueOnce("pending");
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.change(textarea, { target: { value: "После подключения" } });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledOnce());
+    expect(api.sendQueuedNow).not.toHaveBeenCalled();
   });
 
   it("focuses the composer only when navigation marks the session as newly created", () => {

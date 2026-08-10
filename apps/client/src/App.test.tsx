@@ -189,6 +189,24 @@ describe("App routing and navigation", () => {
     expect(screen.queryByText("Ошибка старой сессии")).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["desktop", false],
+    ["mobile", true],
+  ] as const)(
+    "focuses the composer when opening another sidebar session in the %s layout",
+    async (_layout, mobile) => {
+      const other = { ...baseThread, id: "other", title: "Другая задача", updatedAt: 10 };
+      mockConnection(snapshot([baseThread, other]));
+      if (mobile) mockMobileViewport();
+      renderApp("/threads/newer");
+
+      fireEvent.click(screen.getByRole("link", { name: "Другая задача" }));
+
+      expect(await screen.findByRole("heading", { level: 1, name: "Другая задача" })).toBeVisible();
+      expect(await screen.findByRole("textbox", { name: "Сообщение для Codex" })).toHaveFocus();
+    },
+  );
+
   it("shows project-only session creation when only archived tasks exist", async () => {
     mockConnection(snapshot([{ ...baseThread, archived: true }]));
 

@@ -1,13 +1,4 @@
-import {
-  type FormEvent,
-  memo,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, matchPath, Navigate, useLocation, useNavigate, useParams } from "react-router";
@@ -74,7 +65,12 @@ import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
 import { AttentionPanel } from "./AttentionPanel";
 import { ArtifactViewer, type ArtifactLoadResult } from "./ArtifactViewer";
-import { Composer, type ComposerImage, type ComposerRecording } from "./Composer";
+import {
+  Composer,
+  type ComposerImage,
+  type ComposerRecording,
+  type ComposerSubmitIntent,
+} from "./Composer";
 import { Dialog } from "./Dialog";
 import {
   ArchiveIcon,
@@ -2071,10 +2067,9 @@ export function ThreadPage({
     if (messageId) submittedGoalMessageIdsRef.current.delete(messageId);
   }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function submit(intent: ComposerSubmitIntent) {
     if (preparationRef.current.active && newSessionProject) {
-      await submitPreparingSession(newSessionProject);
+      await submitPreparingSession(newSessionProject, intent);
       return;
     }
     const targetThreadId = activeThreadIdRef.current;
@@ -2120,7 +2115,7 @@ export function ThreadPage({
     replaceComposerDraft(emptyComposerDraft(), false);
     try {
       await flushDraft(targetThreadId);
-      await sendReliable(targetThreadId, {
+      const delivery = await sendReliable(targetThreadId, {
         input: submittedInput,
         ...(submittedDraft.images.length
           ? { images: submittedDraft.images.map((image) => image.url) }
@@ -2129,6 +2124,13 @@ export function ThreadPage({
         clientMessageId,
       });
       releaseSubmittedMessageClaim(messageClaimKey);
+      if (intent === "immediate" && delivery === "delivered") {
+        try {
+          await api.sendQueuedNow(targetThreadId, clientMessageId);
+        } catch {
+          setError(t("Не удалось отправить сразу — сообщение осталось в очереди"));
+        }
+      }
     } catch (caught) {
       releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
       dispatch({ type: "optimistic.remove", threadId: targetThreadId, messageId: clientMessageId });
@@ -2169,7 +2171,10 @@ export function ThreadPage({
     }
   }
 
-  async function submitPreparingSession(activeProject: Project): Promise<void> {
+  async function submitPreparingSession(
+    activeProject: Project,
+    intent: ComposerSubmitIntent,
+  ): Promise<void> {
     const generation = preparationGenerationRef.current;
     assertPreparationGeneration(generation);
     if (preparationClaimedForSubmitRef.current) {
@@ -2265,7 +2270,7 @@ export function ThreadPage({
       setPendingOptimisticMessage(null);
       if (!activateCreatedThread(thread, null, generation)) throw PREPARATION_SUPERSEDED;
       activatedThreadId = thread.id;
-      await sendReliable(thread.id, {
+      const delivery = await sendReliable(thread.id, {
         input: completeInput,
         ...(completeDraft.images.length
           ? { images: completeDraft.images.map((image) => image.url) }
@@ -2275,6 +2280,13 @@ export function ThreadPage({
       });
       accepted = true;
       releaseSubmittedMessageClaim(messageClaimKey);
+      if (intent === "immediate" && delivery === "delivered") {
+        try {
+          await api.sendQueuedNow(thread.id, clientMessageId);
+        } catch {
+          setError(t("Не удалось отправить сразу — сообщение осталось в очереди"));
+        }
+      }
       await waitForPendingAttachments();
       const staleServerWrite = await settleClaimedPreparationDraftTransfer();
       await waitForPendingAttachments();

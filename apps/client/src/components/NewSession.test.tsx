@@ -66,6 +66,28 @@ afterEach(() => {
 });
 
 describe("NewSession", () => {
+  it("carries immediate submission through session creation", async () => {
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    const sendQueuedNow = vi.fn().mockResolvedValue({ turnId: "turn" });
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread: vi.fn().mockResolvedValue({ thread }),
+        sendQueuedNow,
+        sendReliable,
+      }),
+    );
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textbox, { target: { value: "Отправь сразу" } });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    const clientMessageId = sendReliable.mock.calls[0]?.[1].clientMessageId;
+    expect(clientMessageId).toEqual(expect.any(String));
+    expect(sendQueuedNow).toHaveBeenCalledWith(thread.id, clientMessageId);
+  });
+
   it("opens immediately for the selected project and transfers the draft to the created thread", async () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const dispatch = vi.fn();
@@ -753,6 +775,7 @@ function mockConnection({
   createProjectThread = vi.fn(),
   models = [],
   readThread = vi.fn(),
+  sendQueuedNow = vi.fn(),
   sendReliable = vi.fn(),
   taskDefaults,
   updateThreadDraft = vi.fn(),
@@ -761,6 +784,7 @@ function mockConnection({
   createProjectThread?: ReturnType<typeof vi.fn>;
   models?: ModelOption[];
   readThread?: ReturnType<typeof vi.fn>;
+  sendQueuedNow?: ReturnType<typeof vi.fn>;
   sendReliable?: ReturnType<typeof vi.fn>;
   taskDefaults?: { serviceTier?: string; personality?: string };
   updateThreadDraft?: ReturnType<typeof vi.fn>;
@@ -770,6 +794,7 @@ function mockConnection({
     api: {
       createProjectThread,
       readThread,
+      sendQueuedNow,
       settings: connectionSettings,
       transcribe: vi.fn(),
       updateThreadDraft,

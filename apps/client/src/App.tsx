@@ -1743,6 +1743,7 @@ function ThreadLink({
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
       end
+      state={{ focusComposer: true }}
       to={target}
       onClick={(event) => {
         if (

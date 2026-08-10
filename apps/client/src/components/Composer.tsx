@@ -1,6 +1,5 @@
 import {
   type ClipboardEvent,
-  type FormEvent,
   type KeyboardEvent,
   type ReactNode,
   useEffect,
@@ -54,6 +53,8 @@ export type ComposerTranscriptionStatus = {
   estimatedTotalSeconds: number | null;
   status?: "uploading" | Exclude<VoiceTranscriptionStatus, "failed">;
 };
+
+export type ComposerSubmitIntent = "queue" | "immediate";
 
 const KEYBOARD_VIEWPORT_DELTA = 120;
 
@@ -114,7 +115,7 @@ export function Composer({
   onImagesChange(value: ComposerImage[], attachmentScope?: number): void;
   attachmentScope?: number;
   onPendingAttachmentsChange?(pending: boolean, attachmentScope?: number): void;
-  onSubmit(event: FormEvent): void;
+  onSubmit(intent: ComposerSubmitIntent): void;
   busy: boolean;
   running?: boolean;
   settings: SessionSettings;
@@ -237,6 +238,17 @@ export function Composer({
     !busy &&
     !speechBusy &&
     (!creating || Boolean(projectId));
+  const planToggleEligible =
+    !running &&
+    !busy &&
+    !settingsBusy &&
+    !speechBusy &&
+    !goal &&
+    Boolean(
+      settings.model
+        ? models.some((model) => model.id === settings.model)
+        : (models.find((model) => model.isDefault) ?? models[0]),
+    );
   const speechUnavailable = microphoneUnavailableReason(
     transcriptionConfig,
     transcriptionProvider,
@@ -410,6 +422,7 @@ export function Composer({
   }, [sessionIdentity]);
 
   function keyboardSubmit(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const unmodified = !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
     if (skillMenuOpen && !event.nativeEvent.isComposing) {
       if (event.key === "ArrowDown" && matchingSkills.length) {
         event.preventDefault();
@@ -421,8 +434,9 @@ export function Composer({
         setActiveSkillIndex((current) => (current <= 0 ? matchingSkills.length - 1 : current - 1));
         return;
       }
-      if ((event.key === "Enter" || event.key === "Tab") && matchingSkills.length) {
+      if (unmodified && (event.key === "Enter" || event.key === "Tab") && matchingSkills.length) {
         event.preventDefault();
+        if (event.repeat) return;
         insertSkill(matchingSkills[Math.min(activeSkillIndex, matchingSkills.length - 1)]!);
         return;
       }
@@ -432,10 +446,30 @@ export function Composer({
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+
+    if (
+      event.key === "Tab" &&
+      event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      planToggleEligible
+    ) {
       event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
+      if (event.repeat) return;
+      onGoalModeChange?.(false);
+      onSettingsChange({
+        collaborationMode: settings.collaborationMode === "plan" ? "default" : "plan",
+      });
+      return;
     }
+
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    if (event.repeat || !canSubmit) return;
+    onSubmit(event.metaKey || event.ctrlKey ? "immediate" : "queue");
   }
 
   async function addImages(files: readonly File[]) {
@@ -798,7 +832,10 @@ export function Composer({
   return (
     <form
       className={`composer${keyboardOpen ? " keyboard-open" : ""}`}
-      onSubmit={speechBusy ? (event) => event.preventDefault() : onSubmit}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) onSubmit("queue");
+      }}
     >
       {creating && projects.length === 0 && (
         <div className="composer-empty-projects">

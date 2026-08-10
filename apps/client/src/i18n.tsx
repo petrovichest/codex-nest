@@ -609,6 +609,8 @@ const ENGLISH: Record<string, string> = {
   "Не удалось начать реализацию плана в режиме оркестратора":
     "Failed to start implementing the plan in orchestrator mode",
   "Не удалось отправить сообщение": "Failed to send the message",
+  "Не удалось отправить сразу — сообщение осталось в очереди":
+    "Could not send immediately — the message remains queued",
   "Это сообщение уже отправлено": "This message has already been sent",
   "Не удалось остановить задачу": "Failed to stop the task",
   "Не удалось отправить запись на сервер": "Failed to upload the recording",

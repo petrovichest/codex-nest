@@ -2,9 +2,18 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { SessionSettings, TranscriptionConfigResponse } from "@codexnest/protocol";
+import type {
+  SessionSettings,
+  TranscriptionConfigResponse,
+  UpdateThreadSettingsRequest,
+} from "@codexnest/protocol";
 
-import { Composer, type ComposerImage, type ComposerTranscriptionStatus } from "./Composer";
+import {
+  Composer,
+  type ComposerImage,
+  type ComposerSubmitIntent,
+  type ComposerTranscriptionStatus,
+} from "./Composer";
 
 const connection = vi.hoisted(() => vi.fn());
 
@@ -154,6 +163,111 @@ describe("Composer", () => {
     expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
     fireEvent.change(textarea, { target: { value: "$re" } });
     expect(await screen.findByRole("listbox", { name: "Доступные скиллы" })).toBeInTheDocument();
+  });
+
+  it("uses queue for form and plain Enter submissions and immediate for modifier Enter", () => {
+    const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
+    const view = render(<Harness initialInput="Сообщение" onSubmit={onSubmit} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const form = view.container.querySelector("form")!;
+
+    expect(fireEvent.submit(form)).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: "Enter" })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: "Enter", metaKey: true })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true })).toBe(false);
+
+    expect(onSubmit.mock.calls).toEqual([["queue"], ["queue"], ["immediate"], ["immediate"]]);
+  });
+
+  it("keeps Shift+Enter native and ignores composing and repeated submit shortcuts", () => {
+    const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
+    render(<Harness initialInput="Сообщение" onSubmit={onSubmit} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(textarea, { key: "Enter", metaKey: true, isComposing: true })).toBe(
+      true,
+    );
+    expect(fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true, repeat: true })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: "Enter", repeat: true })).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("respects canSubmit for textarea and form submissions", () => {
+    const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
+    const view = render(<Harness initialInput="Сообщение" busy onSubmit={onSubmit} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Enter" })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: "Enter", metaKey: true })).toBe(false);
+    expect(fireEvent.submit(view.container.querySelector("form")!)).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("submits modified Enter instead of selecting a skill suggestion", async () => {
+    const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
+    render(<Harness cwd="/work/project" onSubmit={onSubmit} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "$rev" } });
+    await screen.findByRole("listbox", { name: "Доступные скиллы" });
+
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledWith("immediate");
+    expect(textarea).toHaveValue("$rev");
+  });
+
+  it("toggles Plan with Shift+Tab when its control is eligible", () => {
+    const onGoalModeChange = vi.fn();
+    const onSettingsChange = vi.fn();
+    render(
+      <Harness
+        goalMode
+        initialInput="Сообщение"
+        onGoalModeChange={onGoalModeChange}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(screen.getByRole("button", { name: "Выключить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(onGoalModeChange).toHaveBeenLastCalledWith(false);
+    expect(onSettingsChange).toHaveBeenLastCalledWith({ collaborationMode: "plan" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(screen.getByRole("button", { name: "Включить режим планирования" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(onSettingsChange).toHaveBeenLastCalledWith({ collaborationMode: "default" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Tab", shiftKey: true, repeat: true })).toBe(false);
+    expect(onGoalModeChange).toHaveBeenCalledTimes(2);
+    expect(onSettingsChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Shift+Tab focus traversal native when the Plan control is ineligible", () => {
+    const onGoalModeChange = vi.fn();
+    const onSettingsChange = vi.fn();
+    render(
+      <Harness
+        busy
+        initialInput="Сообщение"
+        onGoalModeChange={onGoalModeChange}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    expect(fireEvent.keyDown(textarea, { key: "Tab", shiftKey: true })).toBe(true);
+    expect(onGoalModeChange).not.toHaveBeenCalled();
+    expect(onSettingsChange).not.toHaveBeenCalled();
   });
 
   it("opens model and reasoning effort in one popup", () => {
@@ -621,8 +735,12 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 function Harness({
   busy = false,
   cwd,
+  goalMode = false,
   hasSupplementalContent = false,
   initialInput = "",
+  onGoalModeChange,
+  onSettingsChange,
+  onSubmit = () => undefined,
   transcriptionConfig: speechConfig,
   onTranscribe,
   onRecordingReady,
@@ -631,8 +749,12 @@ function Harness({
 }: {
   busy?: boolean;
   cwd?: string;
+  goalMode?: boolean;
   hasSupplementalContent?: boolean;
   initialInput?: string;
+  onGoalModeChange?(value: boolean): void;
+  onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
+  onSubmit?(intent: ComposerSubmitIntent): void;
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   onRecordingReady?: Parameters<typeof Composer>[0]["onRecordingReady"];
@@ -649,11 +771,12 @@ function Harness({
       onInput={setInput}
       images={images}
       onImagesChange={setImages}
-      onSubmit={(event) => event.preventDefault()}
+      onSubmit={onSubmit}
       busy={busy}
       cwd={cwd}
       settings={settings}
-      onSettingsChange={(patch) =>
+      onSettingsChange={(patch) => {
+        onSettingsChange?.(patch);
         setSettings((current) => {
           const next = { ...current };
           for (const [key, value] of Object.entries(patch)) {
@@ -661,8 +784,10 @@ function Harness({
             else if (value !== undefined) Object.assign(next, { [key]: value });
           }
           return next;
-        })
-      }
+        });
+      }}
+      goalMode={goalMode}
+      onGoalModeChange={onGoalModeChange}
       models={models}
       transcriptionConfig={speechConfig}
       transcriptionProvider={speechConfig?.provider ?? null}
