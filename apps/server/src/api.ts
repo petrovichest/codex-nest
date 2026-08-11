@@ -852,34 +852,38 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ? withKeyLock(teamParentLocks, threadId, run)
       : run();
   };
-  const queue = new MessageQueue(store, {
-    paused: () => codexManager?.maintenanceActive ?? false,
-    currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
-    shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
-    start: (threadId, message) =>
-      startTurn(
-        threadId,
-        message.text,
-        message.images ?? [],
-        message.id,
-        message.goal ?? false,
-      ).then((result) => result.turnId),
-    steer: (threadId, turnId, message) =>
-      steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
-    deliveredTurnId: async (threadId, messageId) => {
-      const result = parseThreadRead(
-        await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
-      );
-      return (
-        result.thread.turns.find((turn) =>
-          turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
-        )?.id ?? null
-      );
+  const queue = new MessageQueue(
+    store,
+    {
+      paused: () => codexManager?.maintenanceActive ?? false,
+      currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
+      shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
+      start: (threadId, message) =>
+        startTurn(
+          threadId,
+          message.text,
+          message.images ?? [],
+          message.id,
+          message.goal ?? false,
+        ).then((result) => result.turnId),
+      steer: (threadId, turnId, message) =>
+        steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
+      deliveredTurnId: async (threadId, messageId) => {
+        const result = parseThreadRead(
+          await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
+        );
+        return (
+          result.thread.turns.find((turn) =>
+            turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
+          )?.id ?? null
+        );
+      },
+      publish: (threadId, messages) => projection.publishQueue(threadId, messages),
     },
-    publish: (threadId, messages) => projection.publishQueue(threadId, messages),
-  }, {
-    onMissingThreadCleanup: (threadId) => projection.removeOrphanedThread(threadId),
-  });
+    {
+      onMissingThreadCleanup: (threadId) => projection.removeOrphanedThread(threadId),
+    },
+  );
   const scheduledTeamContinuations = new Set<string>();
   const scheduledTeamTaskStarts = new Set<string>();
   const teamContinuationImmediates = new Map<string, NodeJS.Immediate>();

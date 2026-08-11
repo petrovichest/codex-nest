@@ -151,9 +151,7 @@ export class AppProjection extends EventEmitter {
     });
   }
 
-  setMissingThreadCleanup(
-    cleanup: ((threadId: string) => Promise<void> | void) | undefined,
-  ): void {
+  setMissingThreadCleanup(cleanup: ((threadId: string) => Promise<void> | void) | undefined): void {
     this.missingThreadCleanup = cleanup;
   }
 

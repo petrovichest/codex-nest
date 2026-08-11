@@ -1,7 +1,8 @@
 import { RpcError } from "./codex/transport";
 import type { StateStore } from "./state/store";
 
-const MISSING_THREAD_ERROR = /thread not loaded|missing thread|not found|unknown thread|does not exist/i;
+const MISSING_THREAD_ERROR =
+  /thread not loaded|missing thread|not found|unknown thread|does not exist/i;
 
 export function isMissingThreadError(error: unknown): boolean {
   return error instanceof RpcError && MISSING_THREAD_ERROR.test(error.message);
