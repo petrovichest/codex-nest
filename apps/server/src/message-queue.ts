@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { QueuedMessage } from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
+import { isMissingThreadError, removeThreadState } from "./thread-state";
 
 export interface MessageQueueDelivery {
   paused(): boolean;
@@ -26,6 +27,9 @@ export class MessageQueue {
   constructor(
     private readonly store: StateStore,
     private readonly delivery: MessageQueueDelivery,
+    private readonly options: {
+      onMissingThreadCleanup?: (threadId: string) => Promise<void> | void;
+    } = {},
   ) {}
 
   list(threadId: string): QueuedMessage[] {
@@ -175,9 +179,16 @@ export class MessageQueue {
   async recover(): Promise<void> {
     const queues = this.store.view().messageQueues ?? {};
     for (const [threadId, messages] of Object.entries(queues)) {
-      await this.withLock(threadId, async () => {
+      const orphaned = await this.withLock(threadId, async () => {
         for (const message of messages.filter((candidate) => candidate.status === "dispatching")) {
-          const deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
+          let deliveredTurnId: string | null;
+          try {
+            deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
+          } catch (error) {
+            if (!isMissingThreadError(error)) throw error;
+            await this.cleanupMissingThread(threadId);
+            return true;
+          }
           await this.store.update((state) => {
             const queue = state.messageQueues?.[threadId] ?? [];
             state.messageQueues![threadId] = deliveredTurnId
@@ -198,7 +209,9 @@ export class MessageQueue {
           });
         }
         this.publish(threadId);
+        return false;
       });
+      if (orphaned) continue;
       await this.drain(threadId).catch(() => undefined);
     }
   }
@@ -237,13 +250,21 @@ export class MessageQueue {
         ? await this.delivery.steer(threadId, activeTurnId, message)
         : await this.delivery.start(threadId, message);
     } catch (error) {
+      if (isMissingThreadError(error)) {
+        await this.cleanupMissingThread(threadId);
+        throw error;
+      }
       try {
         const deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
         if (deliveredTurnId) {
           await this.remove(threadId, message.id, deliveredTurnId, message);
           return deliveredTurnId;
         }
-      } catch {
+      } catch (deliveryError) {
+        if (isMissingThreadError(deliveryError)) {
+          await this.cleanupMissingThread(threadId);
+          throw error;
+        }
         // Keep an ambiguous delivery parked until a later recovery can reconcile it.
         throw error;
       }
@@ -300,6 +321,11 @@ export class MessageQueue {
 
   private publish(threadId: string): void {
     this.delivery.publish(threadId, this.list(threadId));
+  }
+
+  private async cleanupMissingThread(threadId: string): Promise<void> {
+    await Promise.resolve(this.options.onMissingThreadCleanup?.(threadId)).catch(() => undefined);
+    await removeThreadState(this.store, threadId);
   }
 
   private withLock<T>(threadId: string, task: () => Promise<T>): Promise<T> {

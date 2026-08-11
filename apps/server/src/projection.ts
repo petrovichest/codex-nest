@@ -44,6 +44,7 @@ import {
 import { RpcError } from "./codex/transport";
 import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
+import { isMissingThreadError, removeThreadState } from "./thread-state";
 import type {
   CodexNestState,
   CodexNestStateView,
@@ -77,6 +78,8 @@ export class AppProjection extends EventEmitter {
   private readonly pendingSubagentTitles = new Map<string, string>();
   private readonly subagentTitleUpdates = new Set<string>();
   private readonly deliveredNativeWaits = new Set<string>();
+  private readonly removedThreads = new Set<string>();
+  private missingThreadCleanup?: (threadId: string) => Promise<void> | void;
   private models: ModelOption[] = [];
   private sequence = 0;
   private syncedAt: string | null = null;
@@ -148,6 +151,12 @@ export class AppProjection extends EventEmitter {
     });
   }
 
+  setMissingThreadCleanup(
+    cleanup: ((threadId: string) => Promise<void> | void) | undefined,
+  ): void {
+    this.missingThreadCleanup = cleanup;
+  }
+
   get connection(): AppSnapshot["connection"] {
     return {
       state: this.bridge.state,
@@ -208,6 +217,7 @@ export class AppProjection extends EventEmitter {
   }
 
   summary(id: string): ThreadSummary | undefined {
+    if (this.removedThreads.has(id)) return undefined;
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
   }
@@ -908,6 +918,13 @@ export class AppProjection extends EventEmitter {
     const activeCandidates = [...listedActive, ...recovered.threads];
     const active = await Promise.all(
       activeCandidates.map(async (thread) => {
+        if (this.removedThreads.has(thread.id)) {
+          return {
+            thread,
+            restoredGoalStatus: undefined,
+            recoveryFailed: false,
+          };
+        }
         const cachedGoalStatus = this.threads.get(thread.id)?.goalStatus;
         const recoverLoadedThread =
           shouldRecoverLoaded && loadedIds.has(thread.id) && thread.status.type === "notLoaded";
@@ -924,6 +941,7 @@ export class AppProjection extends EventEmitter {
     );
     const incoming = new Set<string>();
     for (const { thread, restoredGoalStatus } of active) {
+      if (this.removedThreads.has(thread.id)) continue;
       incoming.add(thread.id);
       if (changedDuringSync(thread.id)) continue;
       const liveCached = this.threads.get(thread.id);
@@ -940,6 +958,7 @@ export class AppProjection extends EventEmitter {
       this.hydrateLiveTurn(thread);
     }
     for (const thread of archived) {
+      if (this.removedThreads.has(thread.id)) continue;
       incoming.add(thread.id);
       if (changedDuringSync(thread.id)) continue;
       this.threads.set(thread.id, {
@@ -1361,18 +1380,27 @@ export class AppProjection extends EventEmitter {
         });
         continue;
       }
-      const page = parseTurnsList(
-        await this.bridge.request<unknown>(
-          "thread/turns/list",
-          {
-            threadId: cached.thread.id,
-            limit: 1,
-            sortDirection: "desc",
-            itemsView: planMode ? "full" : "notLoaded",
-          },
-          30_000,
-        ),
-      );
+      let page;
+      try {
+        page = parseTurnsList(
+          await this.bridge.request<unknown>(
+            "thread/turns/list",
+            {
+              threadId: cached.thread.id,
+              limit: 1,
+              sortDirection: "desc",
+              itemsView: planMode ? "full" : "notLoaded",
+            },
+            30_000,
+          ),
+        );
+      } catch (error) {
+        if (isMissingThreadError(error)) {
+          await this.removeOrphanedThread(cached.thread.id);
+          continue;
+        }
+        throw error;
+      }
       const latestTurn = page.data[0];
       const outcome = normalizeOutcome(latestTurn?.status);
       const awaitingPlanResponse =
@@ -1500,19 +1528,7 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "thread/deleted": {
-        this.threads.delete(notification.params.threadId);
-        this.subscribedThreads.delete(notification.params.threadId);
-        this.unmaterializedThreads.delete(notification.params.threadId);
-        this.pendingSubagentTitles.delete(notification.params.threadId);
-        this.subagentTitleUpdates.delete(notification.params.threadId);
-        for (const key of this.progress.keys()) {
-          if (key.startsWith(`${notification.params.threadId}:`)) this.progress.delete(key);
-        }
-        await this.store.update((state) => {
-          const meta = state.threadMeta[notification.params.threadId];
-          if (meta) delete meta.sessionSnapshot;
-        });
-        this.publish({ type: "thread.removed", threadId: notification.params.threadId });
+        await this.removeOrphanedThread(notification.params.threadId);
         break;
       }
       case "thread/closed": {
@@ -1776,6 +1792,36 @@ export class AppProjection extends EventEmitter {
     }
   }
 
+  async removeOrphanedThread(threadId: string): Promise<void> {
+    this.removedThreads.add(threadId);
+    await Promise.resolve(this.missingThreadCleanup?.(threadId)).catch((error: unknown) => {
+      this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+    });
+    this.bumpHistoryRevision(threadId);
+    this.forgetThread(threadId);
+    await removeThreadState(this.store, threadId);
+    await this.historyCache.invalidateThread(threadId).catch(() => undefined);
+    this.publish({ type: "thread.removed", threadId });
+  }
+
+  private forgetThread(threadId: string): void {
+    this.threads.delete(threadId);
+    this.subscribedThreads.delete(threadId);
+    this.unmaterializedThreads.delete(threadId);
+    this.hiddenThreads.delete(threadId);
+    this.pendingSubagentTitles.delete(threadId);
+    this.subagentTitleUpdates.delete(threadId);
+    for (const key of [...this.progress.keys()]) {
+      if (key.startsWith(`${threadId}:`)) this.progress.delete(key);
+    }
+    for (const key of [...this.activity.keys()]) {
+      if (key.startsWith(`${threadId}:`)) this.activity.delete(key);
+    }
+    for (const key of [...this.deliveredNativeWaits]) {
+      if (key.startsWith(`${threadId}:`)) this.deliveredNativeWaits.delete(key);
+    }
+  }
+
   private captureSubagentTitles(item: Turn["items"][number]): void {
     if (item.type !== "collabAgentToolCall" || item.tool !== "spawnAgent" || !item.prompt) return;
     const title = subagentTaskTitle(item.prompt);
@@ -2031,12 +2077,6 @@ function notificationThreadId(notification: ServerNotification): string | undefi
 
 function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
-}
-
-function isMissingThreadError(error: unknown): boolean {
-  return (
-    error instanceof RpcError && /not found|unknown thread|does not exist/i.test(error.message)
-  );
 }
 
 function sessionSnapshot(cached: CachedThread): SessionSnapshotState | null {

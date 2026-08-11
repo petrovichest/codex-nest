@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QueuedMessage } from "@codexnest/protocol";
 
 import { MessageQueue } from "./message-queue";
+import { RpcError } from "./codex/transport";
 import { StateStore } from "./state/store";
 
 const directories: string[] = [];
@@ -83,6 +84,25 @@ describe("MessageQueue", () => {
       turnId: "active",
     });
     expect(delivery.steer).toHaveBeenCalledOnce();
+  });
+
+  it("drops orphaned dispatching work when the daemon reports a missing thread", async () => {
+    const { queue, delivery, store } = await setup("active");
+    const message = queued("missing", "Исчезнувшее сообщение", "dispatching");
+    await store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      state.messageQueues = { thread: [message] };
+    });
+    delivery.deliveredTurnId.mockRejectedValueOnce(new RpcError(-32_600, "thread not loaded"));
+
+    await expect(queue.recover()).resolves.toBeUndefined();
+
+    expect(queue.list("thread")).toEqual([]);
+    expect(store.snapshot().threadMeta.thread).toBeUndefined();
+    expect(store.snapshot().messageQueues?.thread).toBeUndefined();
   });
 
   it("parks an ambiguous delivery while reconciliation is unavailable", async () => {

@@ -305,6 +305,98 @@ describe("HTTP authentication", () => {
     await lifecycle.close();
   });
 
+  it("recovers orphaned startup state to ready instead of failed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-startup-recovery-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.threadMeta["queued-thread"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      state.messageQueues = {
+        "queued-thread": [
+          {
+            id: "queued-message",
+            threadId: "queued-thread",
+            text: "Recover me",
+            createdAt: 1,
+            status: "dispatching",
+          },
+        ],
+      };
+    });
+    const bridge = new EventEmitter() as EventEmitter & {
+      state: "ready";
+      request: ReturnType<typeof vi.fn>;
+    };
+    bridge.state = "ready";
+    bridge.request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "thread/list") {
+        if (params.archived) return { data: [], nextCursor: null, backwardsCursor: null };
+        return {
+          data: [
+            {
+              ...testThread("orphan-thread"),
+              status: { type: "idle" as const },
+              updatedAt: 5,
+              recencyAt: 5,
+            },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list" && params.threadId === "orphan-thread") {
+        throw new RpcError(-32_600, "thread not loaded");
+      }
+      if (method === "thread/read" && params.threadId === "queued-thread") {
+        throw new RpcError(-32_600, "thread not loaded");
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    const tokenPath = join(directory, "restart-token");
+    const lifecycle = new RuntimeLifecycle({
+      transport: "daemon",
+      tokenPath,
+      bridgeReady: () => true,
+      checkpoint: () => store.checkpoint(),
+      drainLeaseMs: 1_000,
+    });
+    await lifecycle.initialize();
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        lifecycle,
+      },
+    );
+    lifecycle.syncing();
+    await projection.sync();
+    await vi.waitFor(() => expect(lifecycle.state).toBe("ready"));
+    expect(store.snapshot().threadMeta["orphan-thread"]).toBeUndefined();
+    expect(store.snapshot().threadMeta["queued-thread"]).toBeUndefined();
+    expect(store.snapshot().messageQueues?.["queued-thread"]).toBeUndefined();
+    await app.close();
+    await lifecycle.close();
+  });
+
   it("keeps health public and rejects missing, query, and bad tokens", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-api-test-"));
     directories.push(directory);

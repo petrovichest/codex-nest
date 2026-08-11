@@ -278,6 +278,24 @@ describe("AppProjection", () => {
         };
       }
       if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return {
+          data: [
+            {
+              id: "last",
+              items: [],
+              itemsView: "notLoaded",
+              status: "completed",
+              error: null,
+              startedAt: null,
+              completedAt: null,
+              durationMs: null,
+            },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
       if (method === "model/list") return { data: [], nextCursor: null };
       throw new Error(`Unexpected ${method}`);
     });
@@ -337,6 +355,24 @@ describe("AppProjection", () => {
         };
       }
       if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return {
+          data: [
+            {
+              id: "last",
+              items: [],
+              itemsView: "notLoaded",
+              status: "completed",
+              error: null,
+              startedAt: null,
+              completedAt: null,
+              durationMs: null,
+            },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
       if (method === "model/list") return { data: [], nextCursor: null };
       throw new Error(`Unexpected ${method}`);
     });
@@ -357,6 +393,61 @@ describe("AppProjection", () => {
     await syncing;
 
     expect(projection.summary("one")).toBeUndefined();
+  });
+
+  it("keeps an orphaned thread removed if sync lists it again", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new EventEmitter() as EventEmitter & {
+      state: "ready";
+      request: ReturnType<typeof vi.fn>;
+    };
+    bridge.state = "ready";
+    bridge.request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        if (params.archived) return { data: [], nextCursor: null, backwardsCursor: null };
+        return {
+          data: [thread("one", "/work", 5, { type: "idle" })],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return {
+          data: [
+            {
+              id: "last",
+              items: [],
+              itemsView: "notLoaded",
+              status: "completed",
+              error: null,
+              startedAt: null,
+              completedAt: null,
+              durationMs: null,
+            },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 5, { type: "idle" }));
+    await projection.removeOrphanedThread("one");
+
+    await expect(projection.sync()).resolves.toBeUndefined();
+
+    expect(projection.summary("one")).toBeUndefined();
+    expect(store.snapshot().threadMeta.one).toBeUndefined();
   });
 
   it("projects managed spawn tools as linked subagent launch activities", async () => {
@@ -1154,6 +1245,52 @@ describe("AppProjection", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("drops orphaned cached state when thread history is missing during sync", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      state.messageQueues = {
+        one: [
+          {
+            id: "queued",
+            threadId: "one",
+            text: "Очередь",
+            createdAt: 1,
+            status: "dispatching",
+          },
+        ],
+      };
+    });
+    const bridge = new FakeBridge();
+    const baseRequest = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/loaded/list") {
+        return { data: [], nextCursor: null };
+      }
+      if (method === "thread/turns/list" && params.threadId === "one") {
+        throw new RpcError(-32_600, "thread not loaded");
+      }
+      return baseRequest(method, params);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+
+    await expect(projection.sync()).resolves.toBeUndefined();
+
+    expect(projection.summary("one")).toBeUndefined();
+    expect(store.snapshot().threadMeta.one).toBeUndefined();
+    expect(store.snapshot().messageQueues?.one).toBeUndefined();
   });
 
   it("resumes only loaded listed sessions whose status is notLoaded", async () => {

@@ -877,6 +877,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       );
     },
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
+  }, {
+    onMissingThreadCleanup: (threadId) => projection.removeOrphanedThread(threadId),
   });
   const scheduledTeamContinuations = new Set<string>();
   const scheduledTeamTaskStarts = new Set<string>();
@@ -1157,7 +1159,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ].map((pending) => pending.catch(() => undefined)),
     );
   });
-  const voiceTranscriptions = services.transcription
+  let voiceTranscriptions: VoiceTranscriptionManager | null = null;
+  voiceTranscriptions = services.transcription
     ? new VoiceTranscriptionManager({
         store,
         projection,
@@ -1170,8 +1173,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     void voiceTranscriptions.start().catch((error: unknown) => {
       app.log.error({ err: safeError(error) }, "Failed to start voice transcription worker");
     });
-    app.addHook("onClose", async () => voiceTranscriptions.stop());
+    app.addHook("onClose", async () => voiceTranscriptions?.stop());
   }
+  projection.setMissingThreadCleanup(async (threadId) => {
+    if (!voiceTranscriptions) return;
+    await voiceTranscriptions.cancelThread(threadId).catch((error: unknown) => {
+      app.log.warn(
+        { err: safeError(error), threadId },
+        "Failed to cancel voice transcription for orphaned thread",
+      );
+    });
+  });
 
   let recoveryAgain = false;
   const runRecovery = (): Promise<void> => {
