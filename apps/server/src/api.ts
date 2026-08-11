@@ -475,7 +475,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   });
   const scheduleThreadTitle = (threadId: string, input: string, summary: ThreadSummary): void => {
     if (!threadTitles || !input.trim() || projection.hasExplicitName(threadId)) return;
-    const model = effectiveModel(summary.settings, projection.availableModels);
+    const model = effectiveTitleModel(
+      summary.settings,
+      store.view().taskDefaults,
+      projection.availableModels,
+    );
     const pending = threadTitles
       .generate(input, {
         cwd: summary.cwd,
@@ -1768,15 +1772,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/settings/task-defaults",
     async (request) => {
       const patch = validateTaskDefaults(request.body);
-      const merged = mergeSettings(
-        projection.newSessionSettings,
-        patch,
-        projection.availableModels,
-      );
-      const taskDefaults: TaskDefaults = {
-        ...(merged.serviceTier ? { serviceTier: merged.serviceTier } : {}),
-        ...(merged.personality ? { personality: merged.personality } : {}),
-      };
+      const current = store.view().taskDefaults ?? {};
+      const taskDefaults = mergeTaskDefaults(current, patch, projection.availableModels);
       await projection.setTaskDefaults(taskDefaults);
       return taskDefaults;
     },
@@ -2245,7 +2242,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         );
       }
       if (!threadTitles) throw new Error("Thread title generation is unavailable");
-      const model = effectiveModel(source.settings, projection.availableModels);
+      const model = effectiveTitleModel(
+        source.settings,
+        store.view().taskDefaults,
+        projection.availableModels,
+      );
       const title = await threadTitles.generate(forkResponse.text, {
         cwd: source.cwd,
         model: model?.id,
@@ -5909,10 +5910,14 @@ function isInlineImage(value: unknown): value is string {
 
 function validateTaskDefaults(value: unknown): UpdateTaskDefaultsRequest {
   const body = requireRecord<UpdateTaskDefaultsRequest>(value);
-  if (Object.keys(body).some((key) => !["serviceTier", "personality"].includes(key))) {
+  if (
+    Object.keys(body).some(
+      (key) => !["model", "titleModel", "serviceTier", "personality"].includes(key),
+    )
+  ) {
     throw new ProjectValidationError("Unknown task default");
   }
-  for (const key of ["serviceTier", "personality"] as const) {
+  for (const key of ["model", "titleModel", "serviceTier", "personality"] as const) {
     if (
       body[key] !== undefined &&
       body[key] !== null &&
@@ -6042,6 +6047,71 @@ function applySettingsPatch(
 function effectiveModel(settings: SessionSettings, models: ModelOption[]): ModelOption | undefined {
   if (settings.model) return models.find((model) => model.id === settings.model);
   return models.find((model) => model.isDefault) ?? models[0];
+}
+
+function effectiveTitleModel(
+  settings: SessionSettings,
+  taskDefaults: TaskDefaults | undefined,
+  models: ModelOption[],
+): ModelOption | undefined {
+  const titleModel = taskDefaults?.titleModel
+    ? models.find((model) => model.id === taskDefaults.titleModel)
+    : undefined;
+  const sessionModel = settings.model
+    ? models.find((model) => model.id === settings.model)
+    : undefined;
+  return titleModel ?? sessionModel ?? models.find((model) => model.isDefault) ?? models[0];
+}
+
+function validateTaskDefaultModel(
+  modelId: string | null | undefined,
+  models: ModelOption[],
+): string | undefined {
+  if (modelId === undefined || modelId === null) return undefined;
+  const model = models.find((candidate) => candidate.id === modelId);
+  if (!model) throw new ProjectValidationError("Unknown model");
+  return model.id;
+}
+
+function mergeTaskDefaults(
+  current: TaskDefaults,
+  patch: UpdateTaskDefaultsRequest,
+  models: ModelOption[],
+): TaskDefaults {
+  const next = { ...current };
+  if (patch.model !== undefined) {
+    const model = validateTaskDefaultModel(patch.model, models);
+    if (model) next.model = model;
+    else delete next.model;
+  }
+  if (patch.titleModel !== undefined) {
+    const model = validateTaskDefaultModel(patch.titleModel, models);
+    if (model) next.titleModel = model;
+    else delete next.titleModel;
+  }
+  for (const key of ["serviceTier", "personality"] as const) {
+    const value = patch[key];
+    if (value === null) delete next[key];
+    else if (value !== undefined) next[key] = value;
+  }
+
+  const model =
+    (next.model ? models.find((candidate) => candidate.id === next.model) : undefined) ??
+    models.find((candidate) => candidate.isDefault) ??
+    models[0];
+  if (next.serviceTier && !model?.serviceTiers.some(({ id }) => id === next.serviceTier)) {
+    if (patch.serviceTier !== undefined && patch.serviceTier !== null) {
+      throw new ProjectValidationError("Service tier is not supported by the selected model");
+    }
+    if (patch.model !== undefined && model) delete next.serviceTier;
+  }
+  if (next.personality && !model?.supportsPersonality) {
+    if (patch.personality !== undefined && patch.personality !== null) {
+      throw new ProjectValidationError("Personality is not supported by the selected model");
+    }
+    if (patch.model !== undefined && model) delete next.personality;
+  }
+  return next;
 }
 
 function requireRecord<T>(value: unknown): T {

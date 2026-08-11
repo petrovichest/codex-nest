@@ -12,12 +12,14 @@ import { useSearchParams } from "react-router";
 import type {
   AppUpdateStatus,
   CodexManagementStatus,
+  ModelOption,
   GlobalPermissionSettings,
   PermissionPreset,
   TaskDefaults,
   TranscriptionConfigResponse,
   TranscriptionProvider,
   UiLanguage,
+  UpdateTaskDefaultsRequest,
   UpdateTranscriptionSettingsRequest,
 } from "@codexnest/protocol";
 
@@ -80,6 +82,7 @@ const SETTINGS_SECTIONS = [
 ] as const;
 
 type SettingsSection = (typeof SETTINGS_SECTIONS)[number]["id"];
+const EMPTY_MODELS: ModelOption[] = [];
 
 function isSettingsSection(value: string | null): value is SettingsSection {
   return SETTINGS_SECTIONS.some((section) => section.id === value);
@@ -147,8 +150,9 @@ export function SettingsPage({
   const [codexManagementStatus, setCodexManagementStatus] = useState<CodexManagementStatus | null>(
     null,
   );
-  const defaultModel =
-    state?.snapshot?.models.find((model) => model.isDefault) ?? state?.snapshot?.models[0];
+  const models = state?.snapshot?.models ?? EMPTY_MODELS;
+  const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+  const selectedTaskModel = models.find((model) => model.id === taskDefaults.model) ?? defaultModel;
 
   useEffect(() => {
     if (initialAppUpdateStatus) setAppUpdateStatus(initialAppUpdateStatus);
@@ -229,10 +233,9 @@ export function SettingsPage({
     setTaskDefaultsSaving(true);
     setTaskDefaultsError(null);
     try {
-      const updated = await api.updateTaskDefaults({
-        serviceTier: taskDefaults.serviceTier ?? null,
-        personality: taskDefaults.personality ?? null,
-      });
+      const updated = await api.updateTaskDefaults(
+        taskDefaultsPatch(savedTaskDefaults, taskDefaults),
+      );
       setTaskDefaults(updated);
       setSavedTaskDefaults(updated);
     } catch (caught) {
@@ -492,19 +495,84 @@ export function SettingsPage({
             <SettingsGroup
               as="form"
               description={t(
-                "Эти значения применяются к новым задачам на всех подключённых устройствах.",
+                "Эти значения применяются к новым сессиям и задачам на всех подключённых устройствах.",
               )}
               icon={<SlidersIcon />}
               title={t("Новые задачи")}
               onSubmit={saveTaskDefaults}
             >
               <SettingsRow
+                description={t("Модель, которая будет выбрана для новых сессий.")}
+                label="Session model"
+                labelFor="settings-session-model"
+              >
+                <select
+                  disabled={!defaultModel || taskDefaultsSaving}
+                  id="settings-session-model"
+                  value={taskDefaults.model ?? ""}
+                  onChange={(event) =>
+                    setTaskDefaults((current) =>
+                      taskDefaultsForModel(
+                        {
+                          ...current,
+                          model: event.target.value || undefined,
+                        },
+                        models,
+                      ),
+                    )
+                  }
+                >
+                  <option value="">{t("По умолчанию")}</option>
+                  {taskDefaults.model &&
+                    !models.some((model) => model.id === taskDefaults.model) && (
+                      <option value={taskDefaults.model}>
+                        {taskDefaults.model} — {t("Недоступна")}
+                      </option>
+                    )}
+                  {models.map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.displayName}
+                    </option>
+                  ))}
+                </select>
+              </SettingsRow>
+              <SettingsRow
+                description={t("Модель для автоматических названий сессий.")}
+                label="Title model"
+                labelFor="settings-title-model"
+              >
+                <select
+                  disabled={!defaultModel || taskDefaultsSaving}
+                  id="settings-title-model"
+                  value={taskDefaults.titleModel ?? ""}
+                  onChange={(event) =>
+                    setTaskDefaults((current) => ({
+                      ...current,
+                      titleModel: event.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">{t("По умолчанию")}</option>
+                  {taskDefaults.titleModel &&
+                    !models.some((model) => model.id === taskDefaults.titleModel) && (
+                      <option value={taskDefaults.titleModel}>
+                        {taskDefaults.titleModel} — {t("Недоступна")}
+                      </option>
+                    )}
+                  {models.map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.displayName}
+                    </option>
+                  ))}
+                </select>
+              </SettingsRow>
+              <SettingsRow
                 description={t("Приоритет обработки для новых задач.")}
                 label="Service tier"
                 labelFor="settings-service-tier"
               >
                 <select
-                  disabled={!defaultModel || taskDefaultsSaving}
+                  disabled={!selectedTaskModel || taskDefaultsSaving}
                   id="settings-service-tier"
                   value={taskDefaults.serviceTier ?? ""}
                   onChange={(event) =>
@@ -515,7 +583,15 @@ export function SettingsPage({
                   }
                 >
                   <option value="">{t("По умолчанию")}</option>
-                  {defaultModel?.serviceTiers.map((tier) => (
+                  {taskDefaults.serviceTier &&
+                    !selectedTaskModel?.serviceTiers.some(
+                      (tier) => tier.id === taskDefaults.serviceTier,
+                    ) && (
+                      <option value={taskDefaults.serviceTier}>
+                        {taskDefaults.serviceTier} — {t("Недоступна")}
+                      </option>
+                    )}
+                  {selectedTaskModel?.serviceTiers.map((tier) => (
                     <option value={tier.id} key={tier.id}>
                       {tier.displayName}
                     </option>
@@ -528,7 +604,7 @@ export function SettingsPage({
                 labelFor="settings-personality"
               >
                 <select
-                  disabled={!defaultModel?.supportsPersonality || taskDefaultsSaving}
+                  disabled={!selectedTaskModel?.supportsPersonality || taskDefaultsSaving}
                   id="settings-personality"
                   value={taskDefaults.personality ?? ""}
                   onChange={(event) =>
@@ -539,6 +615,12 @@ export function SettingsPage({
                   }
                 >
                   <option value="">{t("По умолчанию")}</option>
+                  {taskDefaults.personality &&
+                    !["friendly", "pragmatic", "none"].includes(taskDefaults.personality) && (
+                      <option value={taskDefaults.personality}>
+                        {taskDefaults.personality} — {t("Недоступна")}
+                      </option>
+                    )}
                   <option value="friendly">{t("Дружелюбная")}</option>
                   <option value="pragmatic">{t("Прагматичная")}</option>
                   <option value="none">{t("Без personality")}</option>
@@ -686,6 +768,35 @@ export function SettingsPage({
       </section>
     </div>
   );
+}
+
+function taskDefaultsForModel(value: TaskDefaults, models: ModelOption[]): TaskDefaults {
+  const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+  const selectedModel = value.model ? models.find((model) => model.id === value.model) : undefined;
+  const effectiveModel = selectedModel ?? defaultModel;
+  if (!effectiveModel) return value;
+  const next = { ...value };
+  if (
+    next.serviceTier &&
+    !effectiveModel.serviceTiers.some((tier) => tier.id === next.serviceTier)
+  ) {
+    delete next.serviceTier;
+  }
+  if (next.personality && !effectiveModel.supportsPersonality) delete next.personality;
+  return next;
+}
+
+function taskDefaultsPatch(saved: TaskDefaults, current: TaskDefaults): UpdateTaskDefaultsRequest {
+  return {
+    ...(saved.model !== current.model ? { model: current.model ?? null } : {}),
+    ...(saved.titleModel !== current.titleModel ? { titleModel: current.titleModel ?? null } : {}),
+    ...(saved.serviceTier !== current.serviceTier
+      ? { serviceTier: current.serviceTier ?? null }
+      : {}),
+    ...(saved.personality !== current.personality
+      ? { personality: current.personality ?? null }
+      : {}),
+  };
 }
 
 type TranscriptionForm = Omit<UpdateTranscriptionSettingsRequest, "openAiApiKey">;

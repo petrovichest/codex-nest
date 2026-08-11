@@ -212,8 +212,21 @@ export function initialSessionSettings(
   models: ModelOption[],
   taskDefaults?: TaskDefaults,
 ): SessionSettings {
-  const settings = { ...DEFAULT_SESSION_SETTINGS, ...(taskDefaults ?? {}) };
-  const model = models.find((candidate) => candidate.isDefault) ?? models[0];
+  const explicitModel = taskDefaults?.model
+    ? models.find((candidate) => candidate.id === taskDefaults.model)
+    : undefined;
+  const model = explicitModel ?? effectiveDefaultModel(models);
+  const settings = {
+    ...DEFAULT_SESSION_SETTINGS,
+    ...(explicitModel ? { model: explicitModel.id } : {}),
+    ...(taskDefaults?.serviceTier &&
+    (!model || model.serviceTiers.some((tier) => tier.id === taskDefaults.serviceTier))
+      ? { serviceTier: taskDefaults.serviceTier }
+      : {}),
+    ...(taskDefaults?.personality && (!model || model.supportsPersonality)
+      ? { personality: taskDefaults.personality }
+      : {}),
+  };
   if (
     defaultReasoningEffort &&
     (!model || model.reasoningEfforts.some((option) => option.value === defaultReasoningEffort))
@@ -3243,6 +3256,10 @@ export function ThreadPage({
       )}
     </div>
   );
+}
+
+function effectiveDefaultModel(models: ModelOption[]): ModelOption | undefined {
+  return models.find((candidate) => candidate.isDefault) ?? models[0];
 }
 
 export function VoiceTranscriptionBubble({ progress }: { progress: VoiceProgress }) {

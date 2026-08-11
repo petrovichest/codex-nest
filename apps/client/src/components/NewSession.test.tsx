@@ -786,7 +786,12 @@ function mockConnection({
   readThread?: ReturnType<typeof vi.fn>;
   sendQueuedNow?: ReturnType<typeof vi.fn>;
   sendReliable?: ReturnType<typeof vi.fn>;
-  taskDefaults?: { serviceTier?: string; personality?: string };
+  taskDefaults?: {
+    model?: string;
+    titleModel?: string;
+    serviceTier?: string;
+    personality?: string;
+  };
   updateThreadDraft?: ReturnType<typeof vi.fn>;
   dispatch?: ReturnType<typeof vi.fn>;
 }) {

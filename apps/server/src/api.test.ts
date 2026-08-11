@@ -1519,6 +1519,9 @@ describe("file downloads", () => {
 describe("session forks", () => {
   it("forks through the selected completed reply with a generated title and fresh state", async () => {
     const harness = await createForkHarness();
+    await harness.store.update((state) => {
+      state.taskDefaults = { titleModel: "gpt-a" };
+    });
     harness.bridge.threadTurns.set("thread", [
       {
         ...testTurn("selected-turn", "completed"),
@@ -1558,8 +1561,8 @@ describe("session forks", () => {
     expect(response.json().thread.relation).not.toHaveProperty("parentThreadId");
     expect(harness.threadTitles.generate).toHaveBeenCalledWith("Готовая реализация с проверками", {
       cwd: "/work",
-      model: "gpt-b",
-      effort: "low",
+      model: "gpt-a",
+      effort: "high",
     });
     expect(harness.bridge.request).toHaveBeenCalledWith(
       "thread/turns/list",
@@ -1734,6 +1737,98 @@ describe("session forks", () => {
     expect(response.statusCode).toBe(500);
     expect(harness.bridge.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
     expect(harness.projection.summary("fork")).toBeUndefined();
+    await harness.app.close();
+  });
+});
+
+describe("task defaults", () => {
+  it("uses the title model for first-turn naming without changing the session model", async () => {
+    const harness = await createForkHarness();
+    await harness.projection.markUnmaterialized("thread");
+    await harness.store.update((state) => {
+      state.taskDefaults = { titleModel: "gpt-a" };
+    });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: harness.headers,
+      payload: { input: "Первое сообщение" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    await vi.waitFor(() =>
+      expect(harness.threadTitles.generate).toHaveBeenCalledWith("Первое сообщение", {
+        cwd: "/work",
+        model: "gpt-a",
+        effort: "high",
+      }),
+    );
+    expect(harness.projection.summary("thread")?.settings).toMatchObject({
+      model: "gpt-b",
+      reasoningEffort: "low",
+    });
+    await harness.app.close();
+  });
+
+  it("preserves omitted defaults and clears explicit null values", async () => {
+    const harness = await createForkHarness();
+    const save = (payload: Record<string, string | null>) =>
+      harness.app.inject({
+        method: "PUT",
+        url: "/api/v1/settings/task-defaults",
+        headers: harness.headers,
+        payload,
+      });
+
+    expect(
+      (
+        await save({
+          model: "gpt-a",
+          titleModel: "gpt-b",
+          serviceTier: "fast",
+          personality: "friendly",
+        })
+      ).json(),
+    ).toEqual({
+      model: "gpt-a",
+      titleModel: "gpt-b",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    expect((await save({ titleModel: null })).json()).toEqual({
+      model: "gpt-a",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+    expect((await save({ model: null })).json()).toEqual({
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+
+    await harness.store.update((state) => {
+      state.taskDefaults = {
+        model: "retired-session-model",
+        titleModel: "retired-title-model",
+        serviceTier: "legacy-tier",
+        personality: "friendly",
+      };
+    });
+    expect((await save({ personality: "friendly" })).json()).toEqual({
+      model: "retired-session-model",
+      titleModel: "retired-title-model",
+      serviceTier: "legacy-tier",
+      personality: "friendly",
+    });
+    expect(harness.projection.newSessionSettings).toEqual({
+      collaborationMode: "plan",
+      personality: "friendly",
+    });
+    expect((await save({ titleModel: null })).json()).toEqual({
+      model: "retired-session-model",
+      serviceTier: "legacy-tier",
+      personality: "friendly",
+    });
     await harness.app.close();
   });
 });
@@ -2615,10 +2710,17 @@ describe("thread settings", () => {
       method: "PUT",
       url: "/api/v1/settings/task-defaults",
       headers,
-      payload: { serviceTier: "fast", personality: "friendly" },
+      payload: {
+        model: "gpt-a",
+        titleModel: "gpt-b",
+        serviceTier: "fast",
+        personality: "friendly",
+      },
     });
     expect(defaults.statusCode).toBe(200);
     expect(store.snapshot().taskDefaults).toEqual({
+      model: "gpt-a",
+      titleModel: "gpt-b",
       serviceTier: "fast",
       personality: "friendly",
     });
@@ -2629,6 +2731,7 @@ describe("thread settings", () => {
       headers,
     });
     expect(withDefaults.json().thread.settings).toMatchObject({
+      model: "gpt-a",
       serviceTier: "fast",
       personality: "friendly",
     });

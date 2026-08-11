@@ -533,11 +533,15 @@ export type SessionSettings = {
 };
 
 export type TaskDefaults = {
+  model?: string;
+  titleModel?: string;
   serviceTier?: string;
   personality?: string;
 };
 
 export type UpdateTaskDefaultsRequest = {
+  model?: string | null;
+  titleModel?: string | null;
   serviceTier?: string | null;
   personality?: string | null;
 };

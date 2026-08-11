@@ -180,6 +180,30 @@ describe("StateStore", () => {
     });
   });
 
+  it("persists session and title model task defaults", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.taskDefaults = {
+        model: "gpt-a",
+        titleModel: "gpt-b",
+        serviceTier: "fast",
+        personality: "friendly",
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+
+    expect(reloaded.snapshot().taskDefaults).toEqual({
+      model: "gpt-a",
+      titleModel: "gpt-b",
+      serviceTier: "fast",
+      personality: "friendly",
+    });
+  });
+
   it("loads legacy state and queued messages without the new optional fields", async () => {
     const { path } = await temporaryState();
     await writeFile(

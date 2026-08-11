@@ -202,9 +202,23 @@ export class AppProjection extends EventEmitter {
 
   get newSessionSettings(): SessionSettings {
     const state = this.store.view();
-    const settings = { ...DEFAULT_SESSION_SETTINGS, ...(state.taskDefaults ?? {}) };
+    const defaults = state.taskDefaults ?? {};
     const reasoningEffort = state.defaultReasoningEffort;
-    const model = this.models.find((candidate) => candidate.isDefault) ?? this.models[0];
+    const explicitModel = defaults.model
+      ? this.models.find((candidate) => candidate.id === defaults.model)
+      : undefined;
+    const model = explicitModel ?? defaultModel(this.models);
+    const settings: SessionSettings = {
+      ...DEFAULT_SESSION_SETTINGS,
+      ...(explicitModel ? { model: explicitModel.id } : {}),
+      ...(defaults.serviceTier &&
+      (!model || model.serviceTiers.some((tier) => tier.id === defaults.serviceTier))
+        ? { serviceTier: defaults.serviceTier }
+        : {}),
+      ...(defaults.personality && (!model || model.supportsPersonality)
+        ? { personality: defaults.personality }
+        : {}),
+    };
     if (
       reasoningEffort &&
       (!model || model.reasoningEfforts.some((option) => option.value === reasoningEffort))
@@ -2328,6 +2342,10 @@ function normalizeModel(model: Model): ModelOption {
     serviceTiers: model.serviceTiers.map((tier) => ({ id: tier.id, displayName: tier.name })),
     supportsPersonality: model.supportsPersonality,
   };
+}
+
+function defaultModel(models: ModelOption[]): ModelOption | undefined {
+  return models.find((candidate) => candidate.isDefault) ?? models[0];
 }
 
 function normalizeTurn(

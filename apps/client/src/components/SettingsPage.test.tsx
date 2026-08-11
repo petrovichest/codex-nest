@@ -501,8 +501,10 @@ describe("SettingsPage", () => {
     expect(onSwitchServer).toHaveBeenCalledOnce();
   });
 
-  it("stores Service tier and Personality as server defaults for new tasks", async () => {
+  it("stores model, title model, service tier and personality as server defaults", async () => {
     const updateTaskDefaults = vi.fn().mockResolvedValue({
+      model: "gpt",
+      titleModel: "gpt",
       serviceTier: "fast",
       personality: "friendly",
     });
@@ -537,6 +539,12 @@ describe("SettingsPage", () => {
 
     renderPage();
     openSection("Codex");
+    fireEvent.change(screen.getByRole("combobox", { name: "Session model" }), {
+      target: { value: "gpt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Title model" }), {
+      target: { value: "gpt" },
+    });
     fireEvent.change(screen.getByRole("combobox", { name: "Service tier" }), {
       target: { value: "fast" },
     });
@@ -547,10 +555,76 @@ describe("SettingsPage", () => {
 
     await waitFor(() =>
       expect(updateTaskDefaults).toHaveBeenCalledWith({
+        model: "gpt",
+        titleModel: "gpt",
         serviceTier: "fast",
         personality: "friendly",
       }),
     );
+  });
+
+  it("preserves stale defaults and unsaved edits across a model catalog refresh", async () => {
+    const taskDefaults = {
+      model: "retired-session-model",
+      titleModel: "retired-title-model",
+      serviceTier: "legacy-tier",
+      personality: "friendly",
+    };
+    const model = {
+      id: "gpt",
+      displayName: "GPT",
+      description: "",
+      isDefault: true,
+      reasoningEfforts: [],
+      serviceTiers: [{ id: "fast", displayName: "Fast" }],
+      supportsPersonality: true,
+    };
+    const updateTaskDefaults = vi.fn().mockResolvedValue({
+      ...taskDefaults,
+      titleModel: "gpt",
+    });
+    const api = {
+      readPermissionSettings: vi.fn().mockResolvedValue({
+        preset: "auto",
+        version: "version-1",
+        overridden: false,
+        message: null,
+      }),
+      updatePermissionSettings: vi.fn(),
+      updateTaskDefaults,
+    };
+    connection.mockReturnValue({
+      api,
+      state: { snapshot: { taskDefaults, models: [model] } },
+    });
+
+    renderPage();
+    openSection("Codex");
+    expect(screen.getByRole("combobox", { name: "Session model" })).toHaveValue(
+      "retired-session-model",
+    );
+    expect(screen.getByRole("combobox", { name: "Service tier" })).toHaveValue("legacy-tier");
+    fireEvent.change(screen.getByRole("combobox", { name: "Title model" }), {
+      target: { value: "gpt" },
+    });
+
+    connection.mockReturnValue({
+      api,
+      state: {
+        snapshot: { taskDefaults, models: [{ ...model, description: "Refreshed" }] },
+      },
+    });
+    openSection("Приложение");
+    openSection("Codex");
+
+    expect(screen.getByRole("combobox", { name: "Session model" })).toHaveValue(
+      "retired-session-model",
+    );
+    expect(screen.getByRole("combobox", { name: "Title model" })).toHaveValue("gpt");
+    expect(screen.getByRole("combobox", { name: "Service tier" })).toHaveValue("legacy-tier");
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки новых задач" }));
+
+    await waitFor(() => expect(updateTaskDefaults).toHaveBeenCalledWith({ titleModel: "gpt" }));
   });
 });
 

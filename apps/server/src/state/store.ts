@@ -1827,7 +1827,7 @@ function isVoiceTranscription(value: unknown, threadId: string): value is VoiceT
 
 function isTaskDefaults(value: unknown): value is TaskDefaults {
   if (!isRecord(value)) return false;
-  return ["serviceTier", "personality"].every(
+  return ["model", "titleModel", "serviceTier", "personality"].every(
     (key) => value[key] === undefined || (typeof value[key] === "string" && value[key].trim()),
   );
 }

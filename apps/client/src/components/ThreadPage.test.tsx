@@ -84,7 +84,7 @@ describe("initialSessionSettings", () => {
     });
   });
 
-  it("keeps task defaults with stale metadata while validating only reasoning effort", () => {
+  it("falls back from a stale model without carrying unsupported dependent defaults", () => {
     const staleModel: ModelOption = {
       id: "gpt",
       displayName: "GPT",
@@ -95,9 +95,26 @@ describe("initialSessionSettings", () => {
       supportsPersonality: false,
     };
 
-    expect(initialSessionSettings("high", [staleModel], taskDefaults)).toEqual({
+    expect(
+      initialSessionSettings("high", [staleModel], { model: "retired", ...taskDefaults }),
+    ).toEqual(DEFAULT_SESSION_SETTINGS);
+  });
+
+  it("uses the selected default model when it is available", () => {
+    const model: ModelOption = {
+      id: "gpt",
+      displayName: "GPT",
+      description: "",
+      isDefault: true,
+      reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+      serviceTiers: [],
+      supportsPersonality: false,
+    };
+
+    expect(initialSessionSettings("high", [model], { model: "gpt" })).toEqual({
       ...DEFAULT_SESSION_SETTINGS,
-      ...taskDefaults,
+      model: "gpt",
+      reasoningEffort: "high",
     });
   });
 });
