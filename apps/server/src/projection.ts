@@ -142,7 +142,9 @@ export class AppProjection extends EventEmitter {
       if (this.isThreadVisible(request.threadId, state)) {
         this.publish({ type: "attention.upserted", attention: request });
       }
-      this.publishThread(request.threadId, state);
+      if (!this.touchThreadActivity(request.threadId, request.createdAt, state)) {
+        this.publishThread(request.threadId, state);
+      }
     });
     attention.on("removed", (attentionId: string) => {
       this.publish({ type: "attention.removed", attentionId });
@@ -596,7 +598,9 @@ export class AppProjection extends EventEmitter {
     if (this.isThreadVisible(threadId, state)) {
       this.publish({ type: "queue.changed", threadId, messages });
     }
-    this.publishThread(threadId, state);
+    if (!this.touchThreadActivity(threadId, Date.now(), state)) {
+      this.publishThread(threadId, state);
+    }
   }
 
   publishVoiceTranscription(job: VoiceTranscriptionState): void {
@@ -614,12 +618,17 @@ export class AppProjection extends EventEmitter {
   }
 
   upsertThread(thread: Thread, archived = false): ThreadSummary {
+    const current = this.threads.get(thread.id);
+    const latestThread =
+      current && current.thread.updatedAt > thread.updatedAt
+        ? { ...thread, updatedAt: current.thread.updatedAt }
+        : thread;
     const cached = {
-      thread,
+      thread: latestThread,
       archived,
-      currentTurnId: activeTurnId(thread),
-      liveOutcome: this.threads.get(thread.id)?.liveOutcome,
-      goalStatus: this.threads.get(thread.id)?.goalStatus,
+      currentTurnId: activeTurnId(latestThread),
+      liveOutcome: current?.liveOutcome,
+      goalStatus: current?.goalStatus,
     };
     this.threads.set(thread.id, cached);
     this.queueSessionSnapshot(thread.id);
@@ -722,7 +731,7 @@ export class AppProjection extends EventEmitter {
     cached.currentTurnId = turnId;
     cached.liveOutcome = undefined;
     cached.thread.status = { type: "active", activeFlags: [] };
-    cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+    cached.thread.updatedAt = Math.max(cached.thread.updatedAt, Math.floor(Date.now() / 1_000));
     if (this.store.view().threadMeta[threadId]?.awaitingPlanResponse) {
       await this.store.update((state) => {
         const meta = state.threadMeta[threadId];
@@ -740,7 +749,7 @@ export class AppProjection extends EventEmitter {
     cached.currentTurnId = null;
     cached.liveOutcome = "interrupted";
     cached.thread.status = { type: "idle" };
-    cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+    cached.thread.updatedAt = Math.max(cached.thread.updatedAt, Math.floor(Date.now() / 1_000));
     const updatedAt = cached.thread.updatedAt * 1_000;
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
@@ -839,6 +848,7 @@ export class AppProjection extends EventEmitter {
     this.activity.set(key, item);
     this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
+    this.touchThreadActivity(threadId, item.timestamp ?? Date.now());
   }
 
   private async upsertTimelineArtifact(
@@ -865,6 +875,7 @@ export class AppProjection extends EventEmitter {
     this.activity.set(activityKey(threadId, turnId, item.id), item);
     this.bumpHistoryRevision(threadId);
     this.publish({ type: "activity.upserted", threadId, turnId, item });
+    this.touchThreadActivity(threadId, item.timestamp);
     if (markedRead.length) {
       const state = this.store.view();
       for (const deliveredThreadId of markedRead) this.publishThread(deliveredThreadId, state);
@@ -958,26 +969,35 @@ export class AppProjection extends EventEmitter {
       if (changedDuringSync(thread.id)) continue;
       const liveCached = this.threads.get(thread.id);
       const liveGoalStatus = liveCached?.goalStatus;
-      const resumedTurnId = activeTurnId(thread);
+      const latestThread =
+        liveCached && liveCached.thread.updatedAt > thread.updatedAt
+          ? { ...thread, updatedAt: liveCached.thread.updatedAt }
+          : thread;
+      const resumedTurnId = activeTurnId(latestThread);
       this.threads.set(thread.id, {
-        thread,
+        thread: latestThread,
         archived: false,
         currentTurnId:
           resumedTurnId ??
-          (thread.status.type === "active" ? (liveCached?.currentTurnId ?? null) : null),
+          (latestThread.status.type === "active" ? (liveCached?.currentTurnId ?? null) : null),
         goalStatus: liveGoalStatus === undefined ? restoredGoalStatus : liveGoalStatus,
       });
-      this.hydrateLiveTurn(thread);
+      this.hydrateLiveTurn(latestThread);
     }
     for (const thread of archived) {
       if (this.removedThreads.has(thread.id)) continue;
       incoming.add(thread.id);
       if (changedDuringSync(thread.id)) continue;
+      const liveCached = this.threads.get(thread.id);
+      const latestThread =
+        liveCached && liveCached.thread.updatedAt > thread.updatedAt
+          ? { ...thread, updatedAt: liveCached.thread.updatedAt }
+          : thread;
       this.threads.set(thread.id, {
-        thread,
+        thread: latestThread,
         archived: true,
-        currentTurnId: activeTurnId(thread),
-        goalStatus: this.threads.get(thread.id)?.goalStatus,
+        currentTurnId: activeTurnId(latestThread),
+        goalStatus: liveCached?.goalStatus,
       });
     }
     const state = this.store.view();
@@ -1464,6 +1484,7 @@ export class AppProjection extends EventEmitter {
           turnId: notification.params.turnId,
           item,
         });
+        this.touchThreadActivity(notification.params.threadId);
         break;
       }
       case "thread/started": {
@@ -1591,7 +1612,10 @@ export class AppProjection extends EventEmitter {
           cached.currentTurnId = null;
           cached.liveOutcome = outcome;
           cached.thread.status = { type: "idle" };
-          cached.thread.updatedAt = Math.floor(Date.now() / 1_000);
+          cached.thread.updatedAt = Math.max(
+            cached.thread.updatedAt,
+            Math.floor(Date.now() / 1_000),
+          );
           const updatedAt = cached.thread.updatedAt * 1_000;
           const hasPlan =
             turnContainsPlan(notification.params.turn) ||
@@ -1671,6 +1695,7 @@ export class AppProjection extends EventEmitter {
           turnId: notification.params.turnId,
           progress,
         });
+        this.touchThreadActivity(notification.params.threadId);
         break;
       }
       case "item/started":
@@ -1738,6 +1763,7 @@ export class AppProjection extends EventEmitter {
           turnId: notification.params.turnId,
           item,
         });
+        this.touchThreadActivity(notification.params.threadId, eventTimestamp);
         break;
       }
       case "item/agentMessage/delta":
@@ -1754,6 +1780,7 @@ export class AppProjection extends EventEmitter {
               ? "reasoning"
               : "agentMessage",
         );
+        this.touchThreadActivity(notification.params.threadId);
         break;
       }
       case "item/commandExecution/outputDelta": {
@@ -1794,6 +1821,7 @@ export class AppProjection extends EventEmitter {
                 item,
               },
         );
+        this.touchThreadActivity(notification.params.threadId);
         break;
       }
       case "serverRequest/resolved":
@@ -1933,6 +1961,22 @@ export class AppProjection extends EventEmitter {
         ? { type: "activity.delta", threadId, turnId, itemId, activityType: type, delta }
         : { type: "activity.upserted", threadId, turnId, item },
     );
+  }
+
+  private touchThreadActivity(
+    threadId: string,
+    observedAt = Date.now(),
+    state: CodexNestStateView = this.store.view(),
+  ): boolean {
+    const cached = this.threads.get(threadId);
+    const updatedAt = Math.floor(observedAt / 1_000);
+    if (!cached || !Number.isFinite(updatedAt) || updatedAt <= cached.thread.updatedAt) {
+      return false;
+    }
+    cached.thread.updatedAt = updatedAt;
+    this.queueSessionSnapshot(threadId);
+    this.publishThread(threadId, state);
+    return true;
   }
 
   private streamingActivityAlias(

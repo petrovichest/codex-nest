@@ -165,12 +165,25 @@ describe("App routing and navigation", () => {
 
   it("opens the most recently updated non-archived task from the root route", async () => {
     const older = { ...baseThread, id: "older", title: "Старая задача", updatedAt: 10 };
-    mockConnection(snapshot([older, baseThread]));
+    const child = {
+      ...baseThread,
+      id: "fresh-child",
+      title: "Свежий дочерний агент",
+      updatedAt: 30,
+      relation: {
+        kind: "subagent" as const,
+        sessionId: "fresh-child-session",
+        parentThreadId: older.id,
+        nickname: null,
+        role: null,
+      },
+    };
+    mockConnection(snapshot([older, baseThread, child]));
 
     renderApp("/");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Новая задача в истории" }),
+      await screen.findByRole("heading", { level: 1, name: "Старая задача" }),
     ).toBeInTheDocument();
   });
 
@@ -387,7 +400,22 @@ describe("App routing and navigation", () => {
       ...thread,
       relation: { kind: "session", sessionId: `${thread.id}-session` },
     }));
-    mockConnection(snapshot(threads, [defaultProject(), secondProject]));
+    const runningChild: ThreadSummary = {
+      ...baseThread,
+      id: "running-child",
+      title: "Дочерняя активность 110",
+      projectId: secondProject.id,
+      state: "running",
+      updatedAt: 110,
+      relation: {
+        kind: "subagent",
+        sessionId: "running-child-session",
+        parentThreadId: "running",
+        nickname: null,
+        role: null,
+      },
+    };
+    mockConnection(snapshot([...threads, runningChild], [defaultProject(), secondProject]));
 
     const view = renderApp("/threads/running");
     const activeList = view.container.querySelector(".active-session-list") as HTMLElement;
@@ -403,6 +431,7 @@ describe("App routing and navigation", () => {
     ).map((element) => element.textContent);
 
     expect(rootTitles).toEqual([
+      "Запущена 30",
       "Внимание 100",
       "Результат 90",
       "Ошибка 85",
@@ -410,10 +439,10 @@ describe("App routing and navigation", () => {
       "Внимание 70",
       "Прервана 65",
       "Внимание 60",
-      "Запущена 30",
       "Очередь 10",
     ]);
     expect(projectLabels).toEqual([
+      "Второй",
       "Без проекта",
       "Без проекта",
       "Проект",
@@ -421,7 +450,6 @@ describe("App routing and navigation", () => {
       "Второй",
       "Проект",
       "Проект",
-      "Второй",
       "Проект",
     ]);
     expect(activeList.querySelectorAll(":scope > .thread-branch")).toHaveLength(9);
@@ -1028,6 +1056,44 @@ describe("App routing and navigation", () => {
     fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 1" }));
     expect(sessionTitles()).toEqual(["Свежая", "Вторая", "Третья", "Четвёртая", "Пятая", "Старая"]);
     expect(sessions.lastElementChild).toHaveTextContent("Показать меньше");
+  });
+
+  it("sorts project sessions by the latest activity in each branch", () => {
+    const recentRoot = {
+      ...baseThread,
+      id: "recent-root",
+      title: "Свежий корень",
+      updatedAt: 100,
+    };
+    const childRoot = {
+      ...baseThread,
+      id: "child-root",
+      title: "Корень со свежим агентом",
+      updatedAt: 10,
+    };
+    const freshChild: ThreadSummary = {
+      ...baseThread,
+      id: "fresh-project-child",
+      title: "Свежий агент",
+      state: "running",
+      updatedAt: 200,
+      relation: {
+        kind: "subagent",
+        sessionId: "fresh-project-child-session",
+        parentThreadId: childRoot.id,
+        nickname: null,
+        role: null,
+      },
+    };
+    mockConnection(snapshot([recentRoot, childRoot, freshChild]));
+
+    const view = renderApp("/threads/recent-root");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const rootTitles = Array.from(
+      sessions.querySelectorAll(":scope > .thread-branch > .thread-branch-row .thread-link-title"),
+    ).map((item) => item.textContent);
+
+    expect(rootTitles).toEqual(["Корень со свежим агентом", "Свежий корень"]);
   });
 
   it("reveals project sessions five at a time", () => {

@@ -622,9 +622,11 @@ function HomeRoute({
   onOpenNavigation(): void;
 }) {
   const { t } = useI18n();
-  const latest = [...threads]
-    .filter((thread) => !thread.archived && thread.relation.kind === "session")
-    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const childrenByParent = childThreadsByParent(threads);
+  const latest = sortThreadBranchesByActivity(
+    threads.filter((thread) => !thread.archived && thread.relation.kind === "session"),
+    childrenByParent,
+  )[0];
   if (latest) return <Navigate to={`/threads/${encodeURIComponent(latest.id)}`} replace />;
   return (
     <div className="thread-workspace">
@@ -701,13 +703,16 @@ function Sidebar({
   const snapshot = state.snapshot;
   const snapshotReady = snapshot !== null;
   const allThreads = snapshot?.threads ?? [];
-  const roots = topLevelThreads(allThreads);
+  const childrenByParent = childThreadsByParent(allThreads);
+  const roots = sortThreadBranchesByActivity(topLevelThreads(allThreads), childrenByParent);
   const activeRoots = roots.filter((thread) => !thread.archived);
   const archivedRoots = roots.filter((thread) => thread.archived);
-  const childrenByParent = childThreadsByParent(allThreads);
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
-  const activeFeedRoots = sortActiveFeedThreads(activeRoots.filter(isActiveFeedEligible));
+  const activeFeedRoots = sortThreadBranchesByActivity(
+    activeRoots.filter(isActiveFeedEligible),
+    childrenByParent,
+  );
   const projectNames = new Map(
     (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
   );
@@ -1641,7 +1646,10 @@ function ThreadBranch({
   onToggleHistory(threadId: string, total: number): void;
 }) {
   const { t } = useI18n();
-  const children = childrenByParent.get(thread.id) ?? [];
+  const children = sortThreadBranchesByActivity(
+    childrenByParent.get(thread.id) ?? [],
+    childrenByParent,
+  );
   const activeChildren = children.filter((child) => child.state === "running");
   const historyChildren = children.filter((child) => child.state !== "running");
   const historyExpansion = branchHistoryExpansions.get(thread.id);
@@ -1698,8 +1706,9 @@ function ActiveThreadBranch({
   onNavigate(): void;
   projectLabel?: string;
 }) {
-  const children = sortActiveFeedThreads(
+  const children = sortThreadBranchesByActivity(
     (childrenByParent.get(thread.id) ?? []).filter(isActiveChildFeedEligible),
+    childrenByParent,
   );
 
   return (
@@ -1792,8 +1801,26 @@ function isActiveChildFeedEligible(thread: ThreadSummary): boolean {
   );
 }
 
-function sortActiveFeedThreads(threads: ThreadSummary[]): ThreadSummary[] {
-  return [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
+function sortThreadBranchesByActivity(
+  threads: ThreadSummary[],
+  childrenByParent: ReadonlyMap<string, ThreadSummary[]>,
+): ThreadSummary[] {
+  const recencyById = new Map<string, number>();
+  const visiting = new Set<string>();
+  const branchUpdatedAt = (thread: ThreadSummary): number => {
+    const cached = recencyById.get(thread.id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(thread.id)) return thread.updatedAt;
+    visiting.add(thread.id);
+    const updatedAt = Math.max(
+      thread.updatedAt,
+      ...(childrenByParent.get(thread.id) ?? []).map(branchUpdatedAt),
+    );
+    visiting.delete(thread.id);
+    recencyById.set(thread.id, updatedAt);
+    return updatedAt;
+  };
+  return [...threads].sort((a, b) => branchUpdatedAt(b) - branchUpdatedAt(a));
 }
 
 function childThreadsByParent(threads: ThreadSummary[]): Map<string, ThreadSummary[]> {

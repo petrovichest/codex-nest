@@ -2036,6 +2036,100 @@ describe("AppProjection", () => {
     expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["blank", "running"]);
   });
 
+  it("tracks live activity monotonically and coalesces streamed updates per second", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("running", "/work", 10, { type: "active", activeFlags: [] }));
+    projection.upsertThread(thread("newer", "/work", 20));
+    const events: Array<{ type: string; thread?: { id: string } }> = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const now = vi.spyOn(Date, "now").mockReturnValue(30_100);
+
+    try {
+      bridge.emit("notification", {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "running",
+          turnId: "live",
+          itemId: "answer",
+          delta: "Свежая активность",
+        },
+      } satisfies ServerNotification);
+
+      expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["running", "newer"]);
+      expect(projection.summary("running")?.updatedAt).toBe(30_000);
+      expect(
+        events.filter(
+          (event) => event.type === "thread.upserted" && event.thread?.id === "running",
+        ),
+      ).toHaveLength(1);
+
+      now.mockReturnValue(30_900);
+      bridge.emit("notification", {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "running",
+          turnId: "live",
+          itemId: "answer",
+          delta: " продолжается",
+        },
+      } satisfies ServerNotification);
+      expect(
+        events.filter(
+          (event) => event.type === "thread.upserted" && event.thread?.id === "running",
+        ),
+      ).toHaveLength(1);
+
+      now.mockReturnValue(31_100);
+      bridge.emit("notification", {
+        method: "item/commandExecution/outputDelta",
+        params: {
+          threadId: "running",
+          turnId: "live",
+          itemId: "command",
+          delta: "output",
+        },
+      } satisfies ServerNotification);
+      expect(projection.summary("running")?.updatedAt).toBe(31_000);
+      expect(
+        events.filter(
+          (event) => event.type === "thread.upserted" && event.thread?.id === "running",
+        ),
+      ).toHaveLength(2);
+
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: {
+          threadId: "running",
+          turnId: "live",
+          item: { type: "agentMessage", id: "stale", text: "Старое событие", phase: null },
+          completedAtMs: 29_000,
+        },
+      } satisfies ServerNotification);
+      projection.upsertThread(
+        thread("running", "/work", 25, {
+          type: "active",
+          activeFlags: [],
+        }),
+      );
+      expect(projection.summary("running")?.updatedAt).toBe(31_000);
+
+      await store.flushed();
+      expect(store.snapshot().threadMeta.running?.sessionSnapshot?.updatedAt).toBe(31);
+      expect(bridge.request).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("hides sessions from dismissed project paths and restores them when registered again", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
