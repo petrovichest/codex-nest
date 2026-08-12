@@ -88,4 +88,30 @@ describe("CodexBridge", () => {
     expect(bridge.actualVersion).toBe("0.145.0");
     bridge.stop();
   });
+
+  it("retries after initialization fails before the child exits", async () => {
+    vi.useFakeTimers();
+    const children: HandshakeChild[] = [];
+    const bridge = new CodexBridge({
+      codexBin: "codex",
+      checkVersion: async () => "0.145.0",
+      random: () => 0.5,
+      spawnProcess: () => {
+        const child = new HandshakeChild();
+        if (children.length === 0) child.stdin.removeAllListeners("data");
+        children.push(child);
+        return child as unknown as JsonlProcess;
+      },
+    });
+
+    const started = bridge.start();
+    await vi.advanceTimersByTimeAsync(10_001);
+    await started;
+    expect(bridge.state).toBe("unavailable");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(children).toHaveLength(2);
+    expect(bridge.state).toBe("ready");
+    bridge.stop();
+  });
 });

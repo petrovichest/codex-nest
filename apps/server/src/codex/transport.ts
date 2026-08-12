@@ -10,6 +10,7 @@ export interface JsonlProcess {
   stdin: Writable;
   stdout: Readable;
   stderr?: Readable | null;
+  onMessage?(listener: (message: string) => void): void;
   kill(signal?: NodeJS.Signals): boolean;
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
 }
@@ -57,14 +58,18 @@ class WebSocketJsonlProcess extends EventEmitter implements JsonlProcess {
       for (const frame of frames) this.send(frame);
     });
     this.socket.on("message", (data: RawData) => {
-      this.stdout.write(`${rawDataToString(data)}\n`);
+      this.emit("message", rawDataToString(data));
     });
     this.socket.on("error", (error: Error) => {
       this.stderr.write(`${error.message}\n`);
     });
-    this.socket.on("close", (code: number) => {
+    this.socket.on("close", (code: number, reason?: RawData) => {
       if (this.exited) return;
       this.exited = true;
+      const detail = reason === undefined ? "" : rawDataToString(reason).trim();
+      this.stderr.write(
+        `Codex app-server WebSocket closed (${code}${detail ? `: ${detail}` : ""})\n`,
+      );
       this.stdout.end();
       this.stderr.end();
       this.emit("exit", code === 1000 ? 0 : 1, null);
@@ -75,6 +80,10 @@ class WebSocketJsonlProcess extends EventEmitter implements JsonlProcess {
     if (this.exited || this.socket.readyState === 3) return false;
     this.socket.terminate();
     return true;
+  }
+
+  onMessage(listener: (message: string) => void): void {
+    this.on("message", listener);
   }
 
   private sendOrQueue(frame: string): void {
@@ -124,14 +133,18 @@ export class RpcTimeoutError extends Error {
 
 export class JsonlTransport extends EventEmitter {
   private readonly pending = new Map<number, PendingRequest>();
-  private readonly reader: Interface;
+  private readonly reader?: Interface;
   private nextRequestId = 1;
   private closed = false;
 
   constructor(private readonly child: JsonlProcess) {
     super();
-    this.reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    this.reader.on("line", (line) => this.onLine(line));
+    if (child.onMessage) {
+      child.onMessage((message) => this.onLine(message));
+    } else {
+      this.reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+      this.reader.on("line", (line) => this.onLine(line));
+    }
     child.once("exit", (code, signal) => {
       this.failAll(new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`));
       this.closed = true;
@@ -173,7 +186,7 @@ export class JsonlTransport extends EventEmitter {
   shutdown(reason = new Error("codex app-server transport stopped")): void {
     if (this.closed) return;
     this.closed = true;
-    this.reader.close();
+    this.reader?.close();
     this.failAll(reason);
   }
 
@@ -191,17 +204,19 @@ export class JsonlTransport extends EventEmitter {
     try {
       value = JSON.parse(line);
     } catch {
-      this.protocolFault("Malformed JSON received from codex app-server");
+      this.reportProtocolError(
+        `Malformed JSON received from codex app-server (${Buffer.byteLength(line)} bytes)`,
+      );
       return;
     }
     if (!isRecord(value)) {
-      this.protocolFault("Non-object JSON-RPC envelope received from codex app-server");
+      this.reportProtocolError("Non-object JSON-RPC envelope received from codex app-server");
       return;
     }
 
     if ((typeof value.id === "number" || typeof value.id === "string") && "method" in value) {
       if (typeof value.method !== "string" || !("params" in value)) {
-        this.protocolFault("Malformed server request received from codex app-server");
+        this.reportProtocolError("Malformed server request received from codex app-server");
         return;
       }
       this.emit("request", value as unknown as ServerRequest);
@@ -214,7 +229,7 @@ export class JsonlTransport extends EventEmitter {
     }
 
     if (typeof value.id !== "number") {
-      this.protocolFault("Malformed JSON-RPC response received from codex app-server");
+      this.reportProtocolError("Malformed JSON-RPC response received from codex app-server");
       return;
     }
     const pending = this.pending.get(value.id);
@@ -233,13 +248,8 @@ export class JsonlTransport extends EventEmitter {
     }
   }
 
-  private protocolFault(message: string): void {
-    const error = new Error(message);
-    this.failAll(error);
-    this.closed = true;
-    this.reader.close();
-    this.emit("protocolError", error);
-    this.child.kill("SIGTERM");
+  private reportProtocolError(message: string): void {
+    this.emit("protocolError", new Error(message));
   }
 
   private failAll(error: Error): void {

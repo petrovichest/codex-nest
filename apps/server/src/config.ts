@@ -31,6 +31,7 @@ export interface AppConfig {
   updateStatusPath: string;
   restartTokenPath: string;
   managementCli: string;
+  sessionLimit?: number;
 }
 
 function env(name: string): string | undefined {
@@ -79,6 +80,12 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   }
   const sttProvider =
     configuredSttProvider ?? (sttLocalUrl ? "local" : sttOpenAiApiKey ? "openai" : undefined);
+  const configuredSessionLimit = env("CODEXNEST_SESSION_LIMIT");
+  const sessionLimit =
+    configuredSessionLimit === undefined ? undefined : Number(configuredSessionLimit);
+  if (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1)) {
+    throw new Error("CODEXNEST_SESSION_LIMIT must be a positive integer");
+  }
 
   return {
     host: env("CODEXNEST_HOST") ?? "127.0.0.1",
@@ -115,6 +122,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     restartTokenPath:
       env("CODEXNEST_RESTART_TOKEN_PATH") ?? resolve(stateRoot, "codexnest/restart-token"),
     managementCli: env("CODEXNEST_MANAGEMENT_CLI") ?? resolve(homedir(), ".local/bin/codexnest"),
+    sessionLimit,
     ...overrides,
   };
 }

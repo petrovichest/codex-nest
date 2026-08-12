@@ -33,6 +33,14 @@ describe("loadConfig", () => {
     expect(() => loadConfig()).toThrow("CODEXNEST_CODEX_TRANSPORT must be stdio or daemon");
   });
 
+  it("loads and validates an optional session retention limit", () => {
+    vi.stubEnv("CODEXNEST_SESSION_LIMIT", "400");
+    expect(loadConfig().sessionLimit).toBe(400);
+
+    vi.stubEnv("CODEXNEST_SESSION_LIMIT", "0");
+    expect(() => loadConfig()).toThrow("CODEXNEST_SESSION_LIMIT must be a positive integer");
+  });
+
   it("always allows the bundled Android client origin", () => {
     vi.stubEnv("CODEXNEST_ALLOWED_ORIGINS", "https://codex.home.arpa");
     expect(loadConfig().allowedOrigins).toEqual(

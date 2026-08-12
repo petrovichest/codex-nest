@@ -102,6 +102,10 @@ export class CodexBridge extends EventEmitter {
       return;
     }
     this.child = child;
+    let transportDetail = "";
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      transportDetail = `${transportDetail}${chunk.toString()}`.slice(-2_000);
+    });
     child.stderr?.resume();
     const transport = new JsonlTransport(child);
     this.transport = transport;
@@ -117,7 +121,8 @@ export class CodexBridge extends EventEmitter {
       if (this.transport === transport) this.transport = undefined;
       if (this.child === child) this.child = undefined;
       if (!this.stopping) {
-        this.setState("unavailable");
+        const message = transportDetail.trim() || "Codex app-server transport exited";
+        this.setState("unavailable", new Error(message));
         this.scheduleRestart();
       }
     });
@@ -145,6 +150,7 @@ export class CodexBridge extends EventEmitter {
       transport.shutdown(error instanceof Error ? error : new Error(String(error)));
       child.kill("SIGTERM");
       this.setState("unavailable", safeError(error));
+      this.scheduleRestart();
     }
   }
 

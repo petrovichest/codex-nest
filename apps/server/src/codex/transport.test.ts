@@ -27,6 +27,10 @@ class FakeWebSocket extends EventEmitter implements WebSocketClient {
   readyState = 0;
   readonly frames: string[] = [];
 
+  constructor(private readonly autoRespond = true) {
+    super();
+  }
+
   open(): void {
     this.readyState = 1;
     this.emit("open");
@@ -35,7 +39,9 @@ class FakeWebSocket extends EventEmitter implements WebSocketClient {
   send(data: string, callback: (error?: Error) => void): void {
     this.frames.push(data);
     const request = JSON.parse(data) as { id: number };
-    this.emit("message", Buffer.from(JSON.stringify({ id: request.id, result: { ok: true } })));
+    if (this.autoRespond) {
+      this.emit("message", Buffer.from(JSON.stringify({ id: request.id, result: { ok: true } })));
+    }
     callback();
   }
 
@@ -75,6 +81,36 @@ describe("JsonlTransport", () => {
     child.kill();
   });
 
+  it("reports the WebSocket close code and reason on stderr", async () => {
+    const socket = new FakeWebSocket();
+    const child = connectUnixWebSocket("/tmp/app-server.sock", () => socket);
+    const stderr: string[] = [];
+    child.stderr?.on("data", (chunk) => stderr.push(chunk.toString()));
+    socket.open();
+
+    socket.readyState = 3;
+    socket.emit("close", 1009, Buffer.from("message too big"));
+
+    expect(stderr.join("")).toContain("WebSocket closed (1009: message too big)");
+  });
+
+  it("keeps a multiline WebSocket frame as one JSON-RPC envelope", async () => {
+    const socket = new FakeWebSocket(false);
+    const child = connectUnixWebSocket("/tmp/app-server.sock", () => socket);
+    const transport = new JsonlTransport(child);
+    const response = transport.request("initialize", {});
+    socket.open();
+
+    socket.emit(
+      "message",
+      Buffer.from(JSON.stringify({ id: 1, result: { text: "large response" } }, null, 2)),
+    );
+
+    await expect(response).resolves.toEqual({ text: "large response" });
+    expect(transport.pendingCount).toBe(0);
+    transport.shutdown();
+  });
+
   it("correlates successful responses with monotonic ids", async () => {
     const { child, transport, written } = harness();
     const first = transport.request<{ ok: boolean }>("thread/list", {});
@@ -96,12 +132,13 @@ describe("JsonlTransport", () => {
     );
   });
 
-  it("kills the child and rejects pending requests after malformed JSON", async () => {
+  it("ignores malformed output without dropping pending requests", async () => {
     const { child, transport } = harness();
     const pending = transport.request("thread/list", {});
     child.stdout.write("not-json\n");
-    await expect(pending).rejects.toThrow("Malformed JSON");
-    expect(child.killed).toBe(true);
+    child.stdout.write('{"id":1,"result":{"ok":true}}\n');
+    await expect(pending).resolves.toEqual({ ok: true });
+    expect(child.killed).toBe(false);
     expect(transport.pendingCount).toBe(0);
   });
 

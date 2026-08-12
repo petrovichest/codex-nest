@@ -10,6 +10,7 @@ import { CodexBridge } from "./codex/bridge";
 import { connectUnixWebSocket, type JsonlProcess } from "./codex/transport";
 import { CodexManager } from "./codex-management";
 import { childProcessEnvironment, loadConfig, SERVER_VERSION } from "./config";
+import { safeError } from "./logging";
 import { AppProjection } from "./projection";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
@@ -46,7 +47,7 @@ const bridge = new CodexBridge({
           env: childProcessEnvironment(),
         }) as unknown as JsonlProcess),
 });
-const projection = new AppProjection(bridge, store, attention);
+const projection = new AppProjection(bridge, store, attention, config.sessionLimit);
 const lifecycle = new RuntimeLifecycle({
   transport: config.codexTransport,
   tokenPath: config.restartTokenPath,
@@ -96,17 +97,29 @@ const appManager = new AppManager({
 projection.on("projectionError", (error: Error) => {
   process.stderr.write(`CodexNest projection update failed (${error.name})\n`);
 });
+bridge.on("protocolError", (error: Error) => {
+  process.stderr.write(`CodexNest app-server protocol error (${error.message})\n`);
+});
 
-bridge.on("state", (state) => {
+bridge.on("state", (state, detail: unknown) => {
   if (state === "ready") {
     lifecycle.syncing();
-    void projection.sync().catch((error: Error) => {
-      lifecycle.failed();
-      process.stderr.write(`CodexNest initial sync failed (${error.name})\n`);
-    });
+    void projection
+      .sync()
+      .then(() => lifecycle.ready())
+      .catch((error: Error) => {
+        lifecycle.failed();
+        process.stderr.write(`CodexNest initial sync failed (${error.name})\n`);
+      });
   } else if (state === "unavailable") {
     lifecycle.unavailable();
     attention.expireAll();
+    if (detail !== undefined) {
+      const failure = safeError(detail);
+      process.stderr.write(
+        `CodexNest app-server connection lost (${failure.name}: ${failure.message})\n`,
+      );
+    }
   }
 });
 const app = await buildApp(config, {

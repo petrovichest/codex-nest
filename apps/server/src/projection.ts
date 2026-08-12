@@ -50,6 +50,7 @@ import type {
   CodexNestState,
   CodexNestStateView,
   DeepReadonly,
+  ManagedTeamTaskState,
   SessionSnapshotState,
   StateStore,
   TimelineArtifact,
@@ -65,6 +66,7 @@ interface CachedThread {
 }
 
 const THREAD_TURN_PAGE_SIZE = 20;
+const SESSION_RETENTION_BATCH_SIZE = 25;
 const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 const LOADED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 
@@ -90,6 +92,8 @@ export class AppProjection extends EventEmitter {
   private loadedRecoveryTimer?: NodeJS.Timeout;
   private managedRecoveryAttempt = 0;
   private managedRecoveryTimer?: NodeJS.Timeout;
+  private sessionRetentionTimer?: NodeJS.Timeout;
+  private sessionRetentionRunning = false;
   private readonly historyCache: HistoryCache;
   private browserStatusProvider: (threadId: string) => BrowserThreadStatus = () => "disabled";
   private threadResumeConfigProvider: (threadId: string) => Record<string, unknown> = () => ({});
@@ -98,6 +102,7 @@ export class AppProjection extends EventEmitter {
     private readonly bridge: CodexBridge,
     private readonly store: StateStore,
     private readonly attention: AttentionManager,
+    private readonly sessionLimit?: number,
   ) {
     super();
     this.historyCache = new HistoryCache(store.path);
@@ -113,6 +118,8 @@ export class AppProjection extends EventEmitter {
         if (this.managedRecoveryTimer) clearTimeout(this.managedRecoveryTimer);
         this.managedRecoveryTimer = undefined;
         this.managedRecoveryAttempt = 0;
+        if (this.sessionRetentionTimer) clearTimeout(this.sessionRetentionTimer);
+        this.sessionRetentionTimer = undefined;
         this.subscribedThreads.clear();
         this.hiddenThreads.clear();
         this.pendingSubagentTitles.clear();
@@ -643,6 +650,7 @@ export class AppProjection extends EventEmitter {
     };
     this.threads.set(thread.id, cached);
     this.queueSessionSnapshot(thread.id);
+    if (this.syncedAt !== null) this.scheduleSessionRetention();
     return this.publishThread(thread.id)!;
   }
 
@@ -1058,6 +1066,7 @@ export class AppProjection extends EventEmitter {
     this.publish({ type: "resync.required" });
     this.backfillSubagentTitles();
     this.scheduleMissingManagedThreadRecovery();
+    this.scheduleSessionRetention();
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 1_000) {
       process.stderr.write(
@@ -1107,6 +1116,99 @@ export class AppProjection extends EventEmitter {
       });
     }, delay);
     this.managedRecoveryTimer.unref();
+  }
+
+  private scheduleSessionRetention(delayMs = 0): void {
+    if (
+      !this.sessionLimit ||
+      this.threads.size <= this.sessionLimit ||
+      this.bridge.state !== "ready" ||
+      this.sessionRetentionTimer ||
+      this.sessionRetentionRunning
+    ) {
+      return;
+    }
+    this.sessionRetentionTimer = setTimeout(() => {
+      this.sessionRetentionTimer = undefined;
+      this.sessionRetentionRunning = true;
+      void this.pruneOldestSessions(this.sessionLimit!, SESSION_RETENTION_BATCH_SIZE)
+        .then((deleted) => {
+          if (deleted > 0 && this.threads.size > this.sessionLimit!) {
+            this.sessionRetentionRunning = false;
+            this.scheduleSessionRetention(1_000);
+          }
+        })
+        .catch((error: unknown) => {
+          this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+        })
+        .finally(() => {
+          this.sessionRetentionRunning = false;
+        });
+    }, delayMs);
+    this.sessionRetentionTimer.unref();
+  }
+
+  async pruneOldestSessions(
+    limit: number,
+    batchSize = SESSION_RETENTION_BATCH_SIZE,
+  ): Promise<number> {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("Session limit must be positive");
+    if (!Number.isInteger(batchSize) || batchSize < 1) {
+      throw new Error("Session retention batch size must be positive");
+    }
+    const excess = this.threads.size - limit;
+    if (excess <= 0 || this.bridge.state !== "ready") return 0;
+
+    const protectedThreadIds = retentionProtectedThreadIds(
+      this.store.view(),
+      this.threads.values(),
+    );
+
+    const candidates = [...this.threads.values()]
+      .filter(
+        (cached) =>
+          cached.currentTurnId === null &&
+          cached.thread.status.type !== "active" &&
+          !protectedThreadIds.has(cached.thread.id),
+      )
+      .sort(
+        (left, right) =>
+          threadLastActivityAt(left.thread) - threadLastActivityAt(right.thread) ||
+          left.thread.createdAt - right.thread.createdAt ||
+          left.thread.id.localeCompare(right.thread.id),
+      )
+      .slice(0, Math.min(excess, batchSize));
+
+    let deleted = 0;
+    for (const cached of candidates) {
+      if (this.bridge.state !== "ready") break;
+      const current = this.threads.get(cached.thread.id);
+      if (
+        !current ||
+        current.currentTurnId !== null ||
+        current.thread.status.type === "active" ||
+        retentionProtectedThreadIds(this.store.view(), this.threads.values()).has(cached.thread.id)
+      ) {
+        continue;
+      }
+      try {
+        await this.bridge.request("thread/delete", { threadId: cached.thread.id }, 30_000);
+      } catch (error) {
+        if (!isMissingThreadError(error)) throw error;
+      }
+      await this.removeOrphanedThread(cached.thread.id);
+      deleted += 1;
+    }
+    if (deleted > 0) {
+      process.stderr.write(
+        `CodexNest session retention pruned ${deleted} old session${deleted === 1 ? "" : "s"} (${this.threads.size} remain, limit ${limit})\n`,
+      );
+    } else if (this.threads.size > limit) {
+      process.stderr.write(
+        `CodexNest session retention could not reach limit ${limit}; ${this.threads.size} protected or active sessions remain\n`,
+      );
+    }
+    return deleted;
   }
 
   private missingManagedThreadIds(): string[] {
@@ -1848,6 +1950,7 @@ export class AppProjection extends EventEmitter {
   }
 
   async removeOrphanedThread(threadId: string): Promise<void> {
+    if (this.removedThreads.has(threadId) && !this.threads.has(threadId)) return;
     this.removedThreads.add(threadId);
     await Promise.resolve(this.missingThreadCleanup?.(threadId)).catch((error: unknown) => {
       this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
@@ -2149,6 +2252,44 @@ function notificationThreadId(notification: ServerNotification): string | undefi
 
 function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
+}
+
+function threadLastActivityAt(thread: Thread): number {
+  return Math.max(thread.updatedAt, thread.recencyAt ?? 0);
+}
+
+function managedTaskNeedsSession(task: DeepReadonly<ManagedTeamTaskState>): boolean {
+  if (task.status === "queued" || task.status === "starting" || task.status === "running") {
+    return true;
+  }
+  if (task.delivery?.status === "claimed" || task.watchdog !== undefined) return true;
+  const workspace = task.workspace;
+  return Boolean(
+    workspace && workspace.lifecycle !== "integrated" && workspace.lifecycle !== "discarded",
+  );
+}
+
+function retentionProtectedThreadIds(
+  state: CodexNestStateView,
+  threads: Iterable<CachedThread>,
+): Set<string> {
+  const protectedThreadIds = new Set<string>();
+  for (const [threadId, meta] of Object.entries(state.threadMeta)) {
+    if (meta.pinned) protectedThreadIds.add(threadId);
+    if (!meta.teamOrchestration) continue;
+    for (const task of Object.values(meta.teamOrchestration.tasks)) {
+      if (!managedTaskNeedsSession(task)) continue;
+      protectedThreadIds.add(threadId);
+      protectedThreadIds.add(task.childThreadId);
+    }
+  }
+  for (const cached of threads) {
+    const parentThreadId = cached.thread.parentThreadId;
+    if (!parentThreadId) continue;
+    protectedThreadIds.add(cached.thread.id);
+    protectedThreadIds.add(parentThreadId);
+  }
+  return protectedThreadIds;
 }
 
 function sessionSnapshot(cached: CachedThread): SessionSnapshotState | null {

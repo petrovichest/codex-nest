@@ -44,6 +44,7 @@ class FakeBridge extends EventEmitter {
     }
     if (method === "thread/resume") return { thread: liveThread(this.resumedUpdatedAt) };
     if (method === "thread/read") return { thread: liveThread() };
+    if (method === "thread/delete") return {};
     if (method === "thread/name/set") return {};
     if (method === "thread/goal/get") {
       return { goal: this.activeGoal ? goalNotification("active").params.goal : null };
@@ -106,6 +107,54 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("prunes by last user or agent activity instead of creation time", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.pinned = { pinned: true, lastReadUpdatedAt: 0 };
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread({ ...thread("pinned", "/work", 1), createdAt: 1 });
+    projection.upsertThread({
+      ...thread("active", "/work", 2, { type: "active", activeFlags: [] }),
+      createdAt: 2,
+    });
+    projection.upsertThread({ ...thread("recent", "/work", 40), createdAt: 1 });
+    projection.upsertThread({ ...thread("agent-active", "/work", 5), createdAt: 100 });
+    projection.upsertThread({ ...thread("inactive", "/work", 10), createdAt: 200 });
+
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "agent-active",
+        turnId: "turn",
+        item: {
+          type: "agentMessage",
+          id: "answer",
+          text: "Fresh agent activity",
+          phase: null,
+        },
+        completedAtMs: 50_000,
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("agent-active")?.updatedAt).toBe(50_000));
+
+    await expect(projection.pruneOldestSessions(4, 10)).resolves.toBe(1);
+
+    expect(projection.summary("inactive")).toBeUndefined();
+    expect(projection.summary("agent-active")).toBeDefined();
+    expect(projection.summary("pinned")).toBeDefined();
+    expect(projection.summary("active")).toBeDefined();
+    expect(bridge.request).toHaveBeenCalledWith("thread/delete", { threadId: "inactive" }, 30_000);
+  });
+
   it("forwards skill catalog invalidations", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

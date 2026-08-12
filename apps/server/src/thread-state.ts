@@ -12,6 +12,16 @@ export async function removeThreadState(store: StateStore, threadId: string): Pr
   await store.update((state) => {
     delete state.threadMeta[threadId];
 
+    for (const meta of Object.values(state.threadMeta)) {
+      if (meta.managedParent?.parentThreadId === threadId) delete meta.managedParent;
+      const tasks = meta.teamOrchestration?.tasks;
+      if (!tasks) continue;
+      for (const [taskId, task] of Object.entries(tasks)) {
+        if (task.childThreadId === threadId) delete tasks[taskId];
+      }
+      if (Object.keys(tasks).length === 0) delete meta.teamOrchestration;
+    }
+
     if (state.messageQueues) {
       delete state.messageQueues[threadId];
     }
