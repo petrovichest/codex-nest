@@ -89,6 +89,11 @@ type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
 };
 
+type ActiveFeedRunningOrder = {
+  serverBaseUrl: string;
+  byParent: Map<string | null, string[]>;
+};
+
 type ProjectDragGesture = {
   active: boolean;
   clientY: number;
@@ -699,9 +704,16 @@ function Sidebar({
   const suppressedProjectToggleTimerRef = useRef<number | undefined>(undefined);
   const noticeTimerRef = useRef<number | undefined>(undefined);
   const threadNavRef = useRef<HTMLElement>(null);
+  const activeFeedRunningOrderRef = useRef<ActiveFeedRunningOrder>({
+    serverBaseUrl,
+    byParent: new Map(),
+  });
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
+  if (activeFeedRunningOrderRef.current.serverBaseUrl !== serverBaseUrl) {
+    activeFeedRunningOrderRef.current = { serverBaseUrl, byParent: new Map() };
+  }
   const snapshot = state.snapshot;
   const snapshotReady = snapshot !== null;
   const allThreads = snapshot?.threads ?? [];
@@ -711,9 +723,11 @@ function Sidebar({
   const archivedRoots = roots.filter((thread) => thread.archived);
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
-  const activeFeedRoots = sortThreadBranchesByActivity(
+  const activeFeedRoots = sortActiveFeedThreads(
     activeRoots.filter(isActiveFeedEligible),
     childrenByParent,
+    null,
+    activeFeedRunningOrderRef.current.byParent,
   );
   const projectNames = new Map(
     (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
@@ -1368,6 +1382,7 @@ function Sidebar({
                 childrenByParent={childrenByParent}
                 key={thread.id}
                 onNavigate={onClose}
+                runningOrderByParent={activeFeedRunningOrderRef.current.byParent}
                 projectLabel={
                   (thread.projectId ? projectNames.get(thread.projectId) : null) ?? t("Без проекта")
                 }
@@ -1702,15 +1717,19 @@ function ActiveThreadBranch({
   childrenByParent,
   onNavigate,
   projectLabel,
+  runningOrderByParent,
 }: {
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
   onNavigate(): void;
   projectLabel?: string;
+  runningOrderByParent: Map<string | null, string[]>;
 }) {
-  const children = sortThreadBranchesByActivity(
+  const children = sortActiveFeedThreads(
     (childrenByParent.get(thread.id) ?? []).filter(isActiveChildFeedEligible),
     childrenByParent,
+    thread.id,
+    runningOrderByParent,
   );
 
   return (
@@ -1727,6 +1746,7 @@ function ActiveThreadBranch({
               childrenByParent={childrenByParent}
               key={child.id}
               onNavigate={onNavigate}
+              runningOrderByParent={runningOrderByParent}
             />
           ))}
         </div>
@@ -1806,6 +1826,36 @@ function isActiveChildFeedEligible(thread: ThreadSummary): boolean {
     (thread.queuedMessageCount > 0 ||
       (thread.state !== "completed" && thread.state !== "failed" && thread.state !== "interrupted"))
   );
+}
+
+function sortActiveFeedThreads(
+  threads: ThreadSummary[],
+  childrenByParent: ReadonlyMap<string, ThreadSummary[]>,
+  parentThreadId: string | null,
+  runningOrderByParent: Map<string | null, string[]>,
+): ThreadSummary[] {
+  const sortedByActivity = sortThreadBranchesByActivity(threads, childrenByParent);
+  const runningById = new Map(
+    sortedByActivity
+      .filter((thread) => thread.state === "running")
+      .map((thread) => [thread.id, thread] as const),
+  );
+  const previousOrder = runningOrderByParent.get(parentThreadId) ?? [];
+  const previousIds = new Set(previousOrder);
+  const runningOrder = [
+    ...sortedByActivity
+      .filter((thread) => thread.state === "running" && !previousIds.has(thread.id))
+      .map((thread) => thread.id),
+    ...previousOrder.filter((threadId) => runningById.has(threadId)),
+  ];
+
+  if (runningOrder.length) runningOrderByParent.set(parentThreadId, runningOrder);
+  else runningOrderByParent.delete(parentThreadId);
+
+  return [
+    ...runningOrder.map((threadId) => runningById.get(threadId)!),
+    ...sortedByActivity.filter((thread) => thread.state !== "running"),
+  ];
 }
 
 function sortThreadBranchesByActivity(

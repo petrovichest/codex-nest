@@ -457,6 +457,164 @@ describe("App routing and navigation", () => {
     expect(activeList.querySelector(".show-more")).toBeNull();
   });
 
+  it("keeps running sessions stable while other active sessions follow branch recency", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const runningFirst = {
+      ...baseThread,
+      id: "running-first",
+      title: "Первая выполняется",
+      state: "running" as const,
+      updatedAt: 100,
+    };
+    const runningSecond = {
+      ...baseThread,
+      id: "running-second",
+      title: "Вторая выполняется",
+      state: "running" as const,
+      updatedAt: 90,
+    };
+    const attention = {
+      ...baseThread,
+      id: "attention",
+      title: "Требует внимания",
+      state: "needsAttention" as const,
+      updatedAt: 80,
+    };
+    const queued = {
+      ...baseThread,
+      id: "queued",
+      title: "Ожидает запуска",
+      state: "queued" as const,
+      updatedAt: 70,
+    };
+    mockConnection(snapshot([runningFirst, runningSecond, attention, queued]));
+
+    const view = renderApp("/threads/running-first");
+    const activeList = view.container.querySelector(".active-session-list") as HTMLElement;
+    const rootTitles = () =>
+      Array.from(
+        activeList.querySelectorAll(
+          ":scope > .thread-branch > .thread-branch-row .thread-link-title",
+        ),
+      ).map((element) => element.textContent);
+    const context = connection.mock.results.at(-1)!.value;
+    const updateThreads = (threads: ThreadSummary[]) => {
+      context.state.snapshot = snapshot(threads);
+      context.state.snapshotEpoch += 1;
+      view.rerender(
+        <MemoryRouter initialEntries={["/threads/running-first"]} useTransitions={false}>
+          <App
+            settings={{ baseUrl: "https://pi.local", token: "secret" }}
+            onDisconnected={() => undefined}
+          />
+        </MemoryRouter>,
+      );
+    };
+
+    expect(rootTitles()).toEqual([
+      "Первая выполняется",
+      "Вторая выполняется",
+      "Требует внимания",
+      "Ожидает запуска",
+    ]);
+
+    updateThreads([
+      { ...queued, updatedAt: 400 },
+      { ...attention, updatedAt: 300 },
+      { ...runningSecond, updatedAt: 200 },
+      runningFirst,
+    ]);
+    expect(rootTitles()).toEqual([
+      "Первая выполняется",
+      "Вторая выполняется",
+      "Ожидает запуска",
+      "Требует внимания",
+    ]);
+
+    updateThreads([
+      { ...attention, state: "running", updatedAt: 500 },
+      { ...queued, updatedAt: 400 },
+      { ...runningSecond, updatedAt: 200 },
+      runningFirst,
+    ]);
+    expect(rootTitles()).toEqual([
+      "Требует внимания",
+      "Первая выполняется",
+      "Вторая выполняется",
+      "Ожидает запуска",
+    ]);
+
+    updateThreads([
+      { ...queued, updatedAt: 700 },
+      { ...runningFirst, state: "needsAttention", updatedAt: 600 },
+      { ...attention, state: "running", updatedAt: 500 },
+      { ...runningSecond, updatedAt: 200 },
+    ]);
+    expect(rootTitles()).toEqual([
+      "Требует внимания",
+      "Вторая выполняется",
+      "Ожидает запуска",
+      "Первая выполняется",
+    ]);
+  });
+
+  it("keeps running child sessions stable within their branch", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const root = { ...baseThread, state: "running" } satisfies ThreadSummary;
+    const child = (
+      id: string,
+      title: string,
+      state: ThreadSummary["state"],
+      updatedAt: number,
+    ): ThreadSummary => ({
+      ...baseThread,
+      id,
+      title,
+      state,
+      updatedAt,
+      relation: {
+        kind: "subagent",
+        sessionId: `${id}-session`,
+        parentThreadId: root.id,
+        nickname: null,
+        role: null,
+      },
+    });
+    const runningFirst = child("child-first", "Первый агент", "running", 100);
+    const runningSecond = child("child-second", "Второй агент", "running", 90);
+    const queued = child("child-queued", "Агент в очереди", "queued", 80);
+    mockConnection(snapshot([root, runningFirst, runningSecond, queued]));
+
+    const view = renderApp("/threads/newer");
+    const childTitles = () =>
+      Array.from(
+        view.container.querySelectorAll(
+          ".active-session-list > .thread-branch > .thread-branch-children > .thread-branch > .thread-branch-row .thread-link-title",
+        ),
+      ).map((element) => element.textContent);
+    const context = connection.mock.results.at(-1)!.value;
+
+    expect(childTitles()).toEqual(["Первый агент", "Второй агент", "Агент в очереди"]);
+
+    context.state.snapshot = snapshot([
+      root,
+      runningFirst,
+      { ...runningSecond, updatedAt: 300 },
+      { ...queued, updatedAt: 400 },
+    ]);
+    context.state.snapshotEpoch += 1;
+    view.rerender(
+      <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
+        <App
+          settings={{ baseUrl: "https://pi.local", token: "secret" }}
+          onDisconnected={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(childTitles()).toEqual(["Первый агент", "Второй агент", "Агент в очереди"]);
+  });
+
   it("includes only eligible non-archived roots in active mode", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const threads = (
