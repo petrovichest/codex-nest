@@ -13,7 +13,7 @@
     "build": "npm run build -w @codexnest/protocol && npm run version:check && tsc -b && npm run build:chrome && npm run build:firefox",
     "build:chrome": "vite build --mode chrome",
     "build:firefox": "vite build --mode firefox",
-    "lint:firefox": "web-ext lint --source-dir dist/firefox --warnings-as-errors",
+    "lint:firefox": "npx --yes web-ext@10.6.0 lint --source-dir dist/firefox --warnings-as-errors",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test --config=playwright.config.ts",
@@ -29,7 +29,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.1.12",
     "vitest": "^3.2.4",
-    "web-ext": "^10.6.0",
     "ws": "^8.18.3"
   }
 }

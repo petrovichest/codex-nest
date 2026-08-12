@@ -184,7 +184,7 @@ jobs:
             fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
           ' "$RUNNER_TEMP/firefox-extension-source/manifest.json" "$signing_version"
           mkdir -p release/firefox-signed
-          npm exec -w @codexnest/extension -- web-ext sign \
+          npm exec --yes --package=web-ext@10.6.0 -- web-ext sign \
             --source-dir "$RUNNER_TEMP/firefox-extension-source" \
             --artifacts-dir "$GITHUB_WORKSPACE/release/firefox-signed" \
             --channel unlisted
@@ -358,7 +358,7 @@ jobs:
             manifest.version = process.argv[2];
             fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
           ' "$RUNNER_TEMP/firefox-extension-source/manifest.json" "$signing_version"
-          npm exec -w @codexnest/extension -- web-ext sign \
+          npm exec --yes --package=web-ext@10.6.0 -- web-ext sign \
             --source-dir "$RUNNER_TEMP/firefox-extension-source" \
             --artifacts-dir "$GITHUB_WORKSPACE/release/firefox-signed" \
             --channel unlisted
