@@ -14,9 +14,10 @@ CodexNest gives one owner an app-like workspace for Codex:
   artifacts while multiple sessions run concurrently;
 - keep drafts and recent session data available across temporary disconnects;
 - use English or Russian with system, light, and dark themes;
-- dictate prompts through configurable speech-to-text; and
+- dictate prompts through configurable speech-to-text;
 - receive browser and Android notifications when work finishes, fails, or needs
-  attention.
+  attention; and
+- attach Chrome tabs to a session so Codex can inspect and operate the browser.
 
 The React interface runs in a browser and is bundled into the Capacitor Android
 app. On iOS, the HTTPS site can also be added to the Home Screen as a web app.
@@ -62,6 +63,7 @@ The repository is an npm workspace:
 
 - `apps/server` — authenticated API/WebSocket server and Codex bridge;
 - `apps/client` — React/Vite UI and Capacitor Android project;
+- `apps/extension` — Chrome MV3 browser-control extension;
 - `packages/protocol` — the public client/server DTO contract; and
 - `deploy` — installer, service, proxy, STT, update, and recovery artifacts.
 
@@ -83,6 +85,29 @@ or repository-relative write access; writable work is normally isolated in
 detached worktrees until the root integrates it. Team parent and child sessions
 disable native agent tools to preserve this boundary. Native subagents elsewhere
 in the Codex projection are separate and are not the implementation of Team.
+
+## Chrome extension
+
+Download `codexnest-browser-<version>.zip` from the same GitHub release as the
+CodexNest server. Unpack it, open `chrome://extensions`, enable Developer mode,
+choose **Load unpacked**, and select the unpacked directory. The checked-in
+manifest key keeps the extension ID stable across releases.
+
+Open the popup and enter the CodexNest HTTP(S) address and owner token. For the
+current tab, choose either a new session in a project or an existing writable
+root session. CodexNest keeps one Chrome tab group per attached session; the
+popup can manage several sessions and open their chats in CodexNest.
+
+The extension uses `chrome.debugger` and intentionally gives the attached Codex
+session control over all ordinary Chrome tabs, including navigation, clicks,
+typing, JavaScript, screenshots, console/network metadata, and uploads. Install
+it only in a trusted Chrome profile. The owner token is stored in
+`chrome.storage.local`; plain HTTP exposes it on an untrusted network.
+
+Detaching preserves the tabs, removes their CodexNest group, and disconnects the
+debugger. The server retains ownership of the binding so only the same extension
+instance can attach it again. Losing the extension profile storage has no
+takeover or recovery flow in v1.
 
 ## Notifications
 
@@ -145,6 +170,19 @@ The real app-server smoke test is opt-in:
 
 ```bash
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
+```
+
+Build the load-unpacked directory and deterministic release ZIP with:
+
+```bash
+npm run package:build -w @codexnest/extension
+```
+
+The persistent-Chromium extension E2E test is:
+
+```bash
+npm exec -w @codexnest/extension -- playwright install chromium
+NODE_ENV=test npm run test:e2e -w @codexnest/extension
 ```
 
 ## Installation and operations

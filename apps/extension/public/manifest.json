@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "CodexNest Browser",
+  "short_name": "CodexNest",
+  "description": "Attach Chrome tabs to CodexNest sessions.",
+  "version": "0.1.7",
+  "minimum_chrome_version": "116",
+  "key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDWKijMNwTCbFtcSSwslEcwVYVbctnfIejtkoEEQODF057dQTJe+h+l8OvrhBYYNL1M8tTDXfz2OyA+XbfzfqPPtGx7ZEmCptRjgTybK2hw+LdENdR5/7sM56751xiC2jhJxi4likwz4jHbNhUPA2RHxla7sXP4+z40LRTd5ntASQIDAQAB",
+  "action": {
+    "default_title": "CodexNest Browser",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["debugger", "tabs", "tabGroups", "windows", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

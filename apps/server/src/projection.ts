@@ -7,6 +7,7 @@ import type {
   AttentionRequest,
   AttentionResponse,
   AppSnapshot,
+  BrowserThreadStatus,
   ModelOption,
   Project,
   QueuedMessage,
@@ -90,6 +91,8 @@ export class AppProjection extends EventEmitter {
   private managedRecoveryAttempt = 0;
   private managedRecoveryTimer?: NodeJS.Timeout;
   private readonly historyCache: HistoryCache;
+  private browserStatusProvider: (threadId: string) => BrowserThreadStatus = () => "disabled";
+  private threadResumeConfigProvider: (threadId: string) => Record<string, unknown> = () => ({});
 
   constructor(
     private readonly bridge: CodexBridge,
@@ -234,6 +237,14 @@ export class AppProjection extends EventEmitter {
     if (this.removedThreads.has(id)) return undefined;
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
+  }
+
+  setBrowserStatusProvider(provider: (threadId: string) => BrowserThreadStatus): void {
+    this.browserStatusProvider = provider;
+  }
+
+  setThreadResumeConfigProvider(provider: (threadId: string) => Record<string, unknown>): void {
+    this.threadResumeConfigProvider = provider;
   }
 
   hasExplicitName(id: string): boolean {
@@ -1204,7 +1215,11 @@ export class AppProjection extends EventEmitter {
     }
     try {
       const resumed = parseThreadResume(
-        await this.bridge.request<unknown>("thread/resume", { threadId: thread.id }, 30_000),
+        await this.bridge.request<unknown>(
+          "thread/resume",
+          { threadId: thread.id, ...this.threadResumeConfigProvider(thread.id) },
+          30_000,
+        ),
       );
       this.subscribedThreads.add(thread.id);
       return {
@@ -2024,6 +2039,7 @@ export class AppProjection extends EventEmitter {
       updatedAt,
       currentTurnId: cached.currentTurnId,
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
+      browserStatus: this.browserStatusProvider(cached.thread.id),
       settings: sessionSettings(meta.settings),
       relation: threadRelation(cached.thread, meta),
     };

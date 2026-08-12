@@ -221,9 +221,17 @@ export interface ThreadMetaState {
     parentThreadId: string;
     taskId: string;
   };
+  browserBinding?: BrowserBindingState;
   unmaterialized?: boolean;
   draft?: ThreadDraft;
   sessionSnapshot?: SessionSnapshotState;
+}
+
+export interface BrowserBindingState {
+  bindingId: string;
+  instanceId: string;
+  attachedAt: number;
+  detachedAt?: number;
 }
 
 export interface TranscriptionTimingSampleState {
@@ -1084,6 +1092,7 @@ function validateState(value: unknown): CodexNestState {
       (meta.sessionArtifacts !== undefined && meta.sessionArtifactsVersion !== 1) ||
       (meta.sessionArtifacts !== undefined && !isSessionArtifacts(meta.sessionArtifacts)) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
+      (meta.browserBinding !== undefined && !isBrowserBinding(meta.browserBinding)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||
       (meta.sessionSnapshot !== undefined && !isSessionSnapshot(meta.sessionSnapshot))
@@ -1161,6 +1170,17 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshotState {
     Number.isFinite(value.updatedAt) &&
     typeof value.archived === "boolean" &&
     (value.currentTurnId === null || typeof value.currentTurnId === "string")
+  );
+}
+
+function isBrowserBinding(value: unknown): value is BrowserBindingState {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["bindingId", "instanceId", "attachedAt", "detachedAt"]) &&
+    isBoundedString(value.bindingId, 200) &&
+    isBoundedString(value.instanceId, 200) &&
+    isNonNegativeFiniteNumber(value.attachedAt) &&
+    (value.detachedAt === undefined || isNonNegativeFiniteNumber(value.detachedAt))
   );
 }
 

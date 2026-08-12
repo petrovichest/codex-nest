@@ -4,4 +4,6 @@ apps/server/src/codex/generated/
 apps/client/android/
 apps/client/playwright-report/
 apps/client/test-results/
+apps/extension/playwright-report/
+apps/extension/test-results/
 package-lock.json

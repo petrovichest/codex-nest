@@ -233,6 +233,7 @@ function thread(state: ThreadSummary["state"], updatedAt: number): ThreadSummary
     updatedAt,
     currentTurnId: state === "running" ? "turn" : null,
     queuedMessageCount: 0,
+    browserStatus: "disabled",
     settings: { collaborationMode: "default" },
   };
 }

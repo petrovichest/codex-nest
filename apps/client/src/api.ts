@@ -260,6 +260,12 @@ export class ApiClient {
     });
   }
 
+  detachBrowser(id: string): Promise<void> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/browser-binding`, {
+      method: "DELETE",
+    });
+  }
+
   readTurnItems(threadId: string, turnId: string): Promise<TurnItemsResponse> {
     return this.request(
       `/api/v1/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/items`,

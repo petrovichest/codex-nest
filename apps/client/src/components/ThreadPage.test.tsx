@@ -59,6 +59,7 @@ const summary: ThreadSummary = {
   updatedAt: 2,
   currentTurnId: null,
   queuedMessageCount: 0,
+  browserStatus: "disabled",
   settings: { collaborationMode: "default" },
 };
 
@@ -1245,6 +1246,22 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
     expect(api.archive).toHaveBeenCalledWith("thread", true);
+  });
+
+  it("shows browser status and detaches the binding from the header", async () => {
+    const api = threadApi();
+    const browserThread = { ...summary, browserStatus: "connected" as const };
+    const context = mockThreadConnection(api, browserThread);
+    renderThread();
+
+    expect(screen.getByText("Браузер подключён")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отсоединить браузер от сессии" }));
+
+    await waitFor(() => expect(api.detachBrowser).toHaveBeenCalledWith("thread"));
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "thread",
+      thread: { ...browserThread, browserStatus: "disconnected" },
+    });
   });
 
   it("blocks an exact duplicate of the active turn user message and preserves the draft", async () => {
@@ -4409,6 +4426,7 @@ function threadApi() {
     updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),
     deleteQueued: vi.fn().mockResolvedValue(undefined),
     interrupt: vi.fn().mockResolvedValue(undefined),
+    detachBrowser: vi.fn().mockResolvedValue(undefined),
     updateThread: vi.fn().mockResolvedValue(undefined),
     updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>
       Promise.resolve({

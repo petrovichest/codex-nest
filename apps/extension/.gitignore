@@ -1,0 +1,4 @@
+.tmp/
+artifacts/
+playwright-report/
+test-results/

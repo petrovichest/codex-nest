@@ -51,6 +51,13 @@ const ENGLISH: Record<string, string> = {
   "Не удалось создать сессию": "Failed to create session",
   "Не удалось создать ответвление сессии": "Failed to fork session",
   "Не удалось создать Team-сессию": "Failed to create Team session",
+  "Браузер подключён": "Browser connected",
+  "Браузер отключён": "Browser disconnected",
+  "Расширение управляет вкладками этой сессии":
+    "The extension controls the tabs attached to this session",
+  "Расширение браузера не в сети": "The browser extension is offline",
+  "Отсоединить браузер от сессии": "Detach browser from session",
+  "Не удалось отключить браузер": "Failed to detach browser",
   "Нельзя удалить проект, пока его сессии выполняются, ждут решения или содержат сообщения в очереди":
     "A project cannot be removed while its sessions are running, awaiting a decision, or have queued messages",
   Архив: "Archive",

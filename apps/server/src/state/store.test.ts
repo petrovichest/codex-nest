@@ -253,6 +253,33 @@ describe("StateStore", () => {
     });
   });
 
+  it("persists browser ownership and detached state in thread metadata", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.browser = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserBinding: {
+          bindingId: "binding-1",
+          instanceId: "extension-instance-1",
+          attachedAt: 100,
+          detachedAt: 200,
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.browser?.browserBinding).toEqual({
+      bindingId: "binding-1",
+      instanceId: "extension-instance-1",
+      attachedAt: 100,
+      detachedAt: 200,
+    });
+  });
+
   it("persists pending Team results and their timeline notices", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

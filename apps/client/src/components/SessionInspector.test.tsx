@@ -22,6 +22,7 @@ const summary: ThreadSummary = {
   updatedAt: 2,
   currentTurnId: null,
   queuedMessageCount: 0,
+  browserStatus: "disabled",
   settings: { collaborationMode: "default" },
 };
 

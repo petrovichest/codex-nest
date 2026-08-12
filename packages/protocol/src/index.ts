@@ -235,6 +235,8 @@ export type ThreadOutcome = "completed" | "failed" | "interrupted";
 export type ThreadState =
   "needsAttention" | "queued" | "running" | ThreadOutcome | "idle" | "unavailable";
 
+export type BrowserThreadStatus = "disabled" | "disconnected" | "connected";
+
 export type ThreadRelation =
   | {
       kind: "session";
@@ -263,6 +265,7 @@ export type ThreadSummary = {
   updatedAt: number;
   currentTurnId: string | null;
   queuedMessageCount: number;
+  browserStatus: BrowserThreadStatus;
   settings: SessionSettings;
   relation: ThreadRelation;
 };
@@ -766,6 +769,169 @@ export type ServerFrame =
   | { type: "pong" }
   | { type: "error"; error: ApiError["error"] };
 
+export const BROWSER_EXTENSION_PROTOCOL = "codexnest.browser" as const;
+export const BROWSER_EXTENSION_PROTOCOL_VERSION = 1 as const;
+export const BROWSER_EXTENSION_WEBSOCKET_PATH = "/api/v1/browser-extension/events" as const;
+export const BROWSER_EXTENSION_ID = "icdkmpldakkmodggmjaohfiflnakmpoj" as const;
+export const BROWSER_EXTENSION_ORIGIN = `chrome-extension://${BROWSER_EXTENSION_ID}` as const;
+export const BROWSER_MAX_PROJECT_FILE_BYTES = 100 * 1024 * 1024;
+export const BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES = 64 * 1024;
+export const BROWSER_TOOL_RESULT_CHUNK_BYTES = 48 * 1024;
+export const BROWSER_MAX_TOOL_RESULT_BYTES = 8 * 1024 * 1024;
+export const BROWSER_MAX_TOOL_RESULT_CHUNKS = 512;
+
+export const BROWSER_TOOL_NAMES = [
+  "tabs_context",
+  "tabs_create",
+  "tabs_close",
+  "navigate",
+  "computer",
+  "read_page",
+  "get_page_text",
+  "find",
+  "form_input",
+  "javascript_tool",
+  "read_console_messages",
+  "read_network_requests",
+  "resize_window",
+  "upload_file",
+] as const;
+
+export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
+
+export type BrowserExtensionProjectSummary = {
+  id: string;
+  displayName: string;
+  path: string;
+};
+
+export type BrowserExtensionThreadSummary = {
+  id: string;
+  projectId: string;
+  title: string;
+  state: ThreadState;
+};
+
+export type BrowserTabSummary = {
+  id: number;
+  windowId: number;
+  groupId: number;
+  active: boolean;
+  title: string;
+  url: string;
+};
+
+export type BrowserExtensionBindingSummary = {
+  threadId: string;
+  projectId: string;
+  title: string;
+  groupId: number;
+  tabIds: number[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type BrowserSessionTarget =
+  { kind: "new"; projectId: string } | { kind: "existing"; threadId: string };
+
+export type BrowserProjectFileTransferDescriptor = {
+  kind: "project_file";
+  transferId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+};
+
+export type BrowserExtensionClientFrame =
+  | {
+      type: "client.hello";
+      protocol: typeof BROWSER_EXTENSION_PROTOCOL;
+      version: number;
+      token: string;
+      instanceId: string;
+      extensionVersion: string;
+      browser: { name: "chrome"; version: string };
+      capabilities: {
+        tools: readonly BrowserToolName[];
+        maxProjectFileBytes: number;
+        screenshots: readonly string[];
+      };
+      bindings: BrowserExtensionBindingSummary[];
+    }
+  | {
+      type: "session.request";
+      requestId: string;
+      target: BrowserSessionTarget;
+      tab: BrowserTabSummary;
+    }
+  | {
+      type: "binding.updated" | "binding.detached";
+      binding: BrowserExtensionBindingSummary;
+    }
+  | {
+      type: "tool.result";
+      requestId: string;
+      result: unknown;
+    }
+  | {
+      type: "tool.result.chunk";
+      requestId: string;
+      chunkIndex: number;
+      chunkCount: number;
+      data: string;
+    }
+  | {
+      type: "tool.error";
+      requestId: string;
+      error: { code: string; message: string; data?: unknown };
+    }
+  | { type: "file.request"; transferId: string }
+  | { type: "client.ping" | "client.pong"; at: number };
+
+export type BrowserExtensionServerFrame =
+  | {
+      type: "server.hello";
+      protocol: typeof BROWSER_EXTENSION_PROTOCOL;
+      version: typeof BROWSER_EXTENSION_PROTOCOL_VERSION;
+      locale: UiLanguage;
+      projects: BrowserExtensionProjectSummary[];
+      threads: BrowserExtensionThreadSummary[];
+    }
+  | {
+      type: "session.result";
+      requestId: string;
+      action: "created" | "attached";
+      thread: BrowserExtensionThreadSummary;
+    }
+  | {
+      type: "session.error";
+      requestId: string;
+      error: { code: string; message: string };
+    }
+  | { type: "binding.detach"; threadId: string }
+  | {
+      type: "tool.call";
+      requestId: string;
+      threadId: string;
+      tool: BrowserToolName;
+      arguments: unknown;
+    }
+  | {
+      type: "file.transfer";
+      transferId: string;
+      chunkIndex: number;
+      chunkCount: number;
+      data: string;
+    }
+  | { type: "file.error"; transferId: string; error: string }
+  | {
+      type: "catalog.updated";
+      projects: BrowserExtensionProjectSummary[];
+      threads: BrowserExtensionThreadSummary[];
+    }
+  | { type: "server.ping" | "server.pong"; at: number }
+  | { type: "protocol.error"; code: string; message: string };
+
 export type CreateProjectRequest = {
   path: string;
 };
@@ -863,6 +1029,215 @@ export function isServerFrame(value: unknown): value is ServerFrame {
   }
   if (value.type === "error") return isRecord(value.error);
   return value.type === "pong";
+}
+
+export function isBrowserToolName(value: unknown): value is BrowserToolName {
+  return typeof value === "string" && (BROWSER_TOOL_NAMES as readonly string[]).includes(value);
+}
+
+export function isBrowserExtensionClientFrame(
+  value: unknown,
+): value is BrowserExtensionClientFrame {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "client.hello") {
+    return (
+      value.protocol === BROWSER_EXTENSION_PROTOCOL &&
+      typeof value.version === "number" &&
+      Number.isInteger(value.version) &&
+      typeof value.token === "string" &&
+      value.token.length > 0 &&
+      isBrowserInstanceId(value.instanceId) &&
+      nonEmptyString(value.extensionVersion) &&
+      isRecord(value.browser) &&
+      value.browser.name === "chrome" &&
+      typeof value.browser.version === "string" &&
+      isRecord(value.capabilities) &&
+      Array.isArray(value.capabilities.tools) &&
+      value.capabilities.tools.every(isBrowserToolName) &&
+      typeof value.capabilities.maxProjectFileBytes === "number" &&
+      Number.isFinite(value.capabilities.maxProjectFileBytes) &&
+      Array.isArray(value.capabilities.screenshots) &&
+      value.capabilities.screenshots.every((item) => typeof item === "string") &&
+      Array.isArray(value.bindings) &&
+      value.bindings.every(isBrowserExtensionBinding)
+    );
+  }
+  if (value.type === "session.request") {
+    return (
+      nonEmptyString(value.requestId) &&
+      isBrowserSessionTarget(value.target) &&
+      isBrowserTabSummary(value.tab)
+    );
+  }
+  if (value.type === "binding.updated" || value.type === "binding.detached") {
+    return isBrowserExtensionBinding(value.binding);
+  }
+  if (value.type === "tool.result") {
+    return nonEmptyString(value.requestId);
+  }
+  if (value.type === "tool.result.chunk") {
+    return (
+      nonEmptyString(value.requestId) &&
+      Number.isInteger(value.chunkIndex) &&
+      Number(value.chunkIndex) >= 0 &&
+      Number.isInteger(value.chunkCount) &&
+      Number(value.chunkCount) >= 1 &&
+      Number(value.chunkIndex) < Number(value.chunkCount) &&
+      Number(value.chunkCount) <= BROWSER_MAX_TOOL_RESULT_CHUNKS &&
+      typeof value.data === "string" &&
+      value.data.length <= BROWSER_TOOL_RESULT_CHUNK_BYTES
+    );
+  }
+  if (value.type === "tool.error") {
+    return (
+      nonEmptyString(value.requestId) &&
+      isRecord(value.error) &&
+      nonEmptyString(value.error.code) &&
+      nonEmptyString(value.error.message)
+    );
+  }
+  if (value.type === "file.request") {
+    return nonEmptyString(value.transferId);
+  }
+  if (value.type === "client.ping" || value.type === "client.pong") {
+    return typeof value.at === "number" && Number.isFinite(value.at);
+  }
+  return false;
+}
+
+export function isBrowserExtensionServerFrame(
+  value: unknown,
+): value is BrowserExtensionServerFrame {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "server.hello") {
+    return (
+      value.protocol === BROWSER_EXTENSION_PROTOCOL &&
+      value.version === BROWSER_EXTENSION_PROTOCOL_VERSION &&
+      (value.locale === "en" || value.locale === "ru") &&
+      Array.isArray(value.projects) &&
+      value.projects.every(isBrowserProjectSummary) &&
+      Array.isArray(value.threads) &&
+      value.threads.every(isBrowserThreadSummary)
+    );
+  }
+  if (value.type === "session.result") {
+    return (
+      nonEmptyString(value.requestId) &&
+      (value.action === "created" || value.action === "attached") &&
+      isBrowserThreadSummary(value.thread)
+    );
+  }
+  if (value.type === "session.error") {
+    return (
+      nonEmptyString(value.requestId) &&
+      isRecord(value.error) &&
+      nonEmptyString(value.error.code) &&
+      nonEmptyString(value.error.message)
+    );
+  }
+  if (value.type === "binding.detach") return nonEmptyString(value.threadId);
+  if (value.type === "tool.call") {
+    return (
+      nonEmptyString(value.requestId) &&
+      nonEmptyString(value.threadId) &&
+      isBrowserToolName(value.tool)
+    );
+  }
+  if (value.type === "file.transfer") {
+    return (
+      nonEmptyString(value.transferId) &&
+      Number.isInteger(value.chunkIndex) &&
+      Number.isInteger(value.chunkCount) &&
+      typeof value.data === "string"
+    );
+  }
+  if (value.type === "file.error") {
+    return nonEmptyString(value.transferId) && nonEmptyString(value.error);
+  }
+  if (value.type === "catalog.updated") {
+    return (
+      Array.isArray(value.projects) &&
+      value.projects.every(isBrowserProjectSummary) &&
+      Array.isArray(value.threads) &&
+      value.threads.every(isBrowserThreadSummary)
+    );
+  }
+  if (value.type === "server.ping" || value.type === "server.pong") {
+    return typeof value.at === "number" && Number.isFinite(value.at);
+  }
+  if (value.type === "protocol.error") {
+    return nonEmptyString(value.code) && nonEmptyString(value.message);
+  }
+  return false;
+}
+
+function isBrowserExtensionBinding(value: unknown): value is BrowserExtensionBindingSummary {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.threadId) &&
+    nonEmptyString(value.projectId) &&
+    typeof value.title === "string" &&
+    Number.isInteger(value.groupId) &&
+    Array.isArray(value.tabIds) &&
+    value.tabIds.every((tabId) => Number.isInteger(tabId) && Number(tabId) >= 0) &&
+    typeof value.createdAt === "number" &&
+    Number.isFinite(value.createdAt) &&
+    typeof value.updatedAt === "number" &&
+    Number.isFinite(value.updatedAt)
+  );
+}
+
+function isBrowserSessionTarget(value: unknown): value is BrowserSessionTarget {
+  return (
+    isRecord(value) &&
+    ((value.kind === "new" && nonEmptyString(value.projectId)) ||
+      (value.kind === "existing" && nonEmptyString(value.threadId)))
+  );
+}
+
+function isBrowserTabSummary(value: unknown): value is BrowserTabSummary {
+  return (
+    isRecord(value) &&
+    Number.isInteger(value.id) &&
+    Number(value.id) >= 0 &&
+    Number.isInteger(value.windowId) &&
+    Number.isInteger(value.groupId) &&
+    typeof value.active === "boolean" &&
+    typeof value.title === "string" &&
+    typeof value.url === "string"
+  );
+}
+
+function isBrowserProjectSummary(value: unknown): value is BrowserExtensionProjectSummary {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.id) &&
+    typeof value.displayName === "string" &&
+    typeof value.path === "string"
+  );
+}
+
+function isBrowserThreadSummary(value: unknown): value is BrowserExtensionThreadSummary {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.id) &&
+    nonEmptyString(value.projectId) &&
+    typeof value.title === "string" &&
+    typeof value.state === "string"
+  );
+}
+
+function isBrowserInstanceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 8 &&
+    value.length <= 200 &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+  );
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 export function bearerHeader(token: string): string {

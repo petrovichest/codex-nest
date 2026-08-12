@@ -6,12 +6,16 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { LogController, type FastifyInstance } from "fastify";
 
+import { BROWSER_EXTENSION_ORIGIN, BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES } from "@codexnest/protocol";
+
 import { registerApi, type ApiServices } from "./api";
+import { BrowserExtensionServer } from "./browser-extension";
 import type { AppConfig } from "./config";
 import { isAllowedRequestOrigin } from "./origin";
 import { registerEventsWebSocket } from "./websocket";
 
 export async function buildApp(config: AppConfig, services: ApiServices): Promise<FastifyInstance> {
+  const allowedOrigins = new Set([...config.allowedOrigins, BROWSER_EXTENSION_ORIGIN]);
   const app = Fastify({
     logger: {
       level: process.env.CODEXNEST_LOG_LEVEL ?? "info",
@@ -21,6 +25,12 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
           "headers.authorization",
           "req.headers.x-codexnest-restart-token",
           "headers.x-codexnest-restart-token",
+          "req.headers.x-codexnest-browser-secret",
+          "headers.x-codexnest-browser-secret",
+          "req.body.params.arguments",
+          "body.params.arguments",
+          "arguments",
+          "result",
           "token",
           "input",
           "images",
@@ -43,13 +53,13 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
 
   await app.register(cors, {
     origin(origin, callback) {
-      callback(null, !origin || config.allowedOrigins.has(origin));
+      callback(null, !origin || allowedOrigins.has(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["authorization", "content-type", "x-codexnest-audio-duration-ms"],
   });
   await app.register(websocket, {
-    options: { maxPayload: 64 * 1024 },
+    options: { maxPayload: BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES },
     preClose(done) {
       for (const client of this.websocketServer.clients) client.terminate();
       this.websocketServer.close(() => done());
@@ -57,7 +67,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
   });
 
   app.addHook("onRequest", async (request, reply) => {
-    if (!isAllowedRequestOrigin(request, config.allowedOrigins)) {
+    if (!isAllowedRequestOrigin(request, allowedOrigins)) {
       return reply
         .code(403)
         .send({ error: { code: "unauthorized", message: "Origin not allowed" } });
@@ -74,12 +84,21 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
     return payload;
   });
 
-  registerApi(app, services);
+  const browserExtension = new BrowserExtensionServer({
+    app,
+    store: services.store,
+    projection: services.projection,
+    allowedOrigins,
+    port: config.port,
+    authTimeoutMs: config.websocketAuthTimeoutMs,
+  });
+  registerApi(app, { ...services, browserExtension });
+  browserExtension.registerRoutes();
   registerEventsWebSocket(
     app,
     services.projection,
     services.store,
-    config.allowedOrigins,
+    allowedOrigins,
     config.websocketAuthTimeoutMs,
   );
 

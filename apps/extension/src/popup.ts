@@ -1,0 +1,508 @@
+import "./popup.css";
+
+import type {
+  BindingSummary,
+  BrowserTabSummary,
+  ConnectionStatus,
+  ProjectSummary,
+  SessionTarget,
+  ThreadSummary,
+  UiLanguage,
+} from "./protocol";
+
+interface PopupSnapshot {
+  configured: boolean;
+  locale: UiLanguage;
+  status: ConnectionStatus;
+  error: string | null;
+  projects: ProjectSummary[];
+  threads: ThreadSummary[];
+  activeTab: BrowserTabSummary | null;
+  activeBinding: BindingSummary | null;
+  bindings: BindingSummary[];
+}
+
+interface BackgroundResponse<T> {
+  ok: boolean;
+  result?: T;
+  error?: string;
+}
+
+const copy = {
+  en: {
+    browser: "Browser",
+    setupTitle: "Connect this Chrome",
+    setupBody: "Use the address and owner token from your CodexNest instance.",
+    baseUrl: "CodexNest address",
+    token: "Owner token",
+    connect: "Connect",
+    connected: "Connected",
+    connecting: "Connecting",
+    reconnecting: "Reconnecting",
+    pending: "Setup needed",
+    error: "Connection error",
+    project: "Project",
+    session: "Session",
+    chooseProject: "Choose a project",
+    chooseSession: "Choose a new or existing session",
+    newSession: "New session",
+    existingSession: "Existing",
+    attach: "Create / attach current tab",
+    currentTab: "Current tab",
+    noTab: "No accessible active tab",
+    attached: "Attached",
+    detach: "Detach",
+    open: "Open in CodexNest",
+    otherSessions: "Other browser sessions",
+    noProjects: "No projects are available yet.",
+    editSetup: "Edit connection",
+    savePending: "Saving…",
+    working: "Working…",
+    tabCount: (count: number) => `${count} ${count === 1 ? "tab" : "tabs"}`,
+  },
+  ru: {
+    browser: "Браузер",
+    setupTitle: "Подключить Chrome",
+    setupBody: "Введите адрес и токен владельца из вашего CodexNest.",
+    baseUrl: "Адрес CodexNest",
+    token: "Токен владельца",
+    connect: "Подключить",
+    connected: "Подключено",
+    connecting: "Подключение",
+    reconnecting: "Переподключение",
+    pending: "Нужна настройка",
+    error: "Ошибка подключения",
+    project: "Проект",
+    session: "Сессия",
+    chooseProject: "Выберите проект",
+    chooseSession: "Выберите новую или существующую сессию",
+    newSession: "Новая сессия",
+    existingSession: "Существующая",
+    attach: "Создать / подключить вкладку",
+    currentTab: "Текущая вкладка",
+    noTab: "Нет доступной активной вкладки",
+    attached: "Подключена",
+    detach: "Отключить",
+    open: "Открыть в CodexNest",
+    otherSessions: "Другие браузерные сессии",
+    noProjects: "Проекты пока недоступны.",
+    editSetup: "Изменить подключение",
+    savePending: "Сохранение…",
+    working: "Выполняется…",
+    tabCount: (count: number) => `${count} ${pluralRu(count, "вкладка", "вкладки", "вкладок")}`,
+  },
+} as const;
+
+const app = requirePopupRoot();
+
+let snapshot: PopupSnapshot | null = null;
+let busy = false;
+let localError: string | null = null;
+let setupOverride = false;
+let selectedTarget = "";
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (!isRecord(message) || message.type !== "background.state" || !isRecord(message.state)) return;
+  snapshot = message.state as unknown as PopupSnapshot;
+  if (!targetAvailable(snapshot, selectedTarget)) selectedTarget = defaultTarget(snapshot);
+  render();
+});
+
+void request<PopupSnapshot>({ type: "popup.state" })
+  .then((state) => {
+    snapshot = state;
+    selectedTarget = defaultTarget(state);
+  })
+  .catch((error) => {
+    localError = errorMessage(error);
+  })
+  .finally(render);
+
+function render(): void {
+  app.replaceChildren();
+  const language = snapshot?.locale ?? browserLanguage();
+  document.documentElement.lang = language;
+  const text = copy[language];
+  document.body.dataset.status = snapshot?.status ?? "pending";
+
+  app.append(header(text.browser));
+  if (!snapshot) {
+    app.append(el("section", { className: "loading-panel", textContent: "CodexNest…" }));
+    return;
+  }
+  if (!snapshot.configured || setupOverride) {
+    app.append(setupView(snapshot, text));
+    return;
+  }
+  app.append(sessionView(snapshot, text));
+}
+
+function header(browserLabel: string): HTMLElement {
+  const wordmark = el("div", { className: "wordmark" }, [
+    el("span", { className: "nest-mark", ariaHidden: "true" }, [el("i"), el("i"), el("i")]),
+    el("span", { textContent: "CodexNest" }),
+    el("span", { className: "wordmark-context", textContent: browserLabel }),
+  ]);
+  return el("header", { className: "topbar" }, [wordmark]);
+}
+
+function setupView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
+  const form = el("form", { className: "setup" });
+  const title = el("h1", { textContent: text.setupTitle });
+  const description = el("p", { className: "lede", textContent: text.setupBody });
+  const baseUrl = inputField("url", text.baseUrl, "http://127.0.0.1:4310", "base-url", true);
+  const token = inputField("password", text.token, "••••••••••••", "owner-token", true);
+  const submit = el("button", {
+    className: "primary-button",
+    type: "submit",
+    textContent: busy ? text.savePending : text.connect,
+    disabled: busy,
+  });
+  form.append(title, description, baseUrl.wrapper, token.wrapper);
+  const setupError = errorNotice(localError ?? state.error);
+  if (setupError) form.append(setupError);
+  form.append(submit);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void act(async () => {
+      const next = await request<PopupSnapshot>({
+        type: "popup.configure",
+        baseUrl: baseUrl.input.value,
+        token: token.input.value,
+      });
+      snapshot = next;
+      setupOverride = false;
+    });
+  });
+  return form;
+}
+
+function sessionView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
+  const section = el("section", { className: "sessions" });
+  section.append(statusBar(state, text));
+  const current = el("div", { className: "section-heading" }, [
+    el("h1", { textContent: text.currentTab }),
+    state.activeBinding
+      ? el("span", { className: "attached-label", textContent: text.attached })
+      : null,
+  ]);
+  section.append(current);
+  if (!state.activeTab) {
+    section.append(el("p", { className: "empty", textContent: text.noTab }));
+  } else if (state.activeBinding) {
+    section.append(bindingCard(state.activeBinding, state.activeTab, text, true));
+  } else {
+    section.append(unboundCard(state, text));
+  }
+
+  const others = state.bindings.filter(
+    (binding) => binding.threadId !== state.activeBinding?.threadId,
+  );
+  if (others.length) {
+    section.append(el("h2", { className: "other-heading", textContent: text.otherSessions }));
+    const list = el("div", { className: "binding-list" });
+    for (const binding of others) list.append(bindingCard(binding, null, text, false));
+    section.append(list);
+  }
+  const edit = el("button", {
+    className: "text-button",
+    type: "button",
+    textContent: text.editSetup,
+  });
+  edit.addEventListener("click", () => {
+    setupOverride = true;
+    localError = null;
+    render();
+  });
+  section.append(edit);
+  return section;
+}
+
+function statusBar(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
+  const labels: Record<ConnectionStatus, string> = {
+    connected: text.connected,
+    connecting: text.connecting,
+    reconnecting: text.reconnecting,
+    pending: text.pending,
+    error: text.error,
+  };
+  const bar = el("div", { className: `status status-${state.status}` }, [
+    el("span", { className: "status-dot", ariaHidden: "true" }),
+    el("span", { textContent: labels[state.status] }),
+  ]);
+  if (state.error && state.status !== "connected") bar.title = state.error;
+  return bar;
+}
+
+function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
+  const tab = state.activeTab!;
+  const card = el("div", { className: "current-card" });
+  card.append(tabIdentity(tab));
+  const label = el("label", { className: "field compact-field" });
+  label.append(el("span", { textContent: text.session }));
+  const select = el("select", {
+    disabled: state.status !== "connected" || busy,
+  }) as HTMLSelectElement;
+  select.append(el("option", { value: "", textContent: text.chooseSession }));
+  for (const project of state.projects) {
+    const group = el("optgroup", {
+      label: project.displayName || project.path,
+    }) as HTMLOptGroupElement;
+    group.append(el("option", { value: `new:${project.id}`, textContent: text.newSession }));
+    for (const thread of state.threads.filter((candidate) => candidate.projectId === project.id)) {
+      group.append(
+        el("option", {
+          value: `existing:${thread.id}`,
+          textContent: `${text.existingSession} · ${thread.title}`,
+        }),
+      );
+    }
+    select.append(group);
+  }
+  if (targetAvailable(state, selectedTarget)) select.value = selectedTarget;
+  select.addEventListener("change", () => {
+    selectedTarget = select.value;
+  });
+  label.append(select);
+  const button = el("button", {
+    className: "primary-button",
+    type: "button",
+    textContent: busy ? text.working : text.attach,
+    disabled: busy || state.status !== "connected" || !state.projects.length,
+  });
+  button.addEventListener("click", () => {
+    void act(async () => {
+      if (!selectedTarget) throw new Error(text.chooseSession);
+      snapshot = await request<PopupSnapshot>({
+        type: "popup.createAttach",
+        target: parseTarget(selectedTarget),
+        tabId: tab.id,
+      });
+    });
+  });
+  card.append(label);
+  if (!state.projects.length)
+    card.append(el("p", { className: "empty-inline", textContent: text.noProjects }));
+  const cardError = errorNotice(localError ?? state.error);
+  if (cardError) card.append(cardError);
+  card.append(button);
+  return card;
+}
+
+function defaultTarget(state: PopupSnapshot): string {
+  const project = state.projects[0];
+  return project ? `new:${project.id}` : "";
+}
+
+function targetAvailable(state: PopupSnapshot, value: string): boolean {
+  if (!value) return false;
+  const target = parseTarget(value);
+  return target.kind === "new"
+    ? state.projects.some((project) => project.id === target.projectId)
+    : state.threads.some((thread) => thread.id === target.threadId);
+}
+
+function parseTarget(value: string): SessionTarget {
+  const separator = value.indexOf(":");
+  const kind = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  if (separator < 1 || !id) throw new Error("Select a browser session");
+  if (kind === "new") return { kind: "new", projectId: id };
+  if (kind === "existing") return { kind: "existing", threadId: id };
+  throw new Error("Select a browser session");
+}
+
+function bindingCard(
+  binding: BindingSummary,
+  activeTab: BrowserTabSummary | null,
+  text: (typeof copy)[UiLanguage],
+  prominent: boolean,
+): HTMLElement {
+  const card = el("article", { className: prominent ? "binding-card prominent" : "binding-card" });
+  const identity = activeTab
+    ? tabIdentity(activeTab)
+    : el("div", { className: "binding-identity" }, [
+        el("strong", { textContent: binding.title || "Browser session" }),
+        el("span", { textContent: text.tabCount(binding.tabIds.length) }),
+      ]);
+  const actions = el("div", { className: "card-actions" });
+  const open = el("button", {
+    className: prominent ? "secondary-button" : "icon-button",
+    type: "button",
+    textContent: prominent ? text.open : "↗",
+    title: text.open,
+    ariaLabel: text.open,
+  });
+  open.addEventListener(
+    "click",
+    () => void act(() => request({ type: "popup.open", threadId: binding.threadId })),
+  );
+  const detach = el("button", {
+    className: "danger-button",
+    type: "button",
+    textContent: text.detach,
+    disabled: busy,
+  });
+  detach.addEventListener(
+    "click",
+    () =>
+      void act(async () => {
+        snapshot = await request<PopupSnapshot>({
+          type: "popup.detach",
+          threadId: binding.threadId,
+        });
+      }),
+  );
+  actions.append(open, detach);
+  card.append(identity, actions);
+  return card;
+}
+
+function tabIdentity(tab: BrowserTabSummary): HTMLElement {
+  return el("div", { className: "tab-identity" }, [
+    el("span", {
+      className: "favicon-fallback",
+      textContent: hostnameInitial(tab.url),
+      ariaHidden: "true",
+    }),
+    el("span", { className: "tab-copy" }, [
+      el("strong", {
+        textContent: tab.title || hostname(tab.url) || "Untitled tab",
+        title: tab.title,
+      }),
+      el("small", { textContent: hostname(tab.url) || tab.url, title: tab.url }),
+    ]),
+  ]);
+}
+
+function inputField(
+  type: string,
+  labelText: string,
+  placeholder: string,
+  id: string,
+  required: boolean,
+): { wrapper: HTMLElement; input: HTMLInputElement } {
+  const wrapper = el("label", { className: "field", htmlFor: id });
+  const label = el("span", { textContent: labelText });
+  const input = el("input", {
+    id,
+    type,
+    placeholder,
+    required,
+    autocomplete: type === "password" ? "current-password" : "url",
+  }) as HTMLInputElement;
+  wrapper.append(label, input);
+  return { wrapper, input };
+}
+
+function errorNotice(message: string | null): HTMLElement | null {
+  return message
+    ? el("p", { className: "error-notice", textContent: message, role: "alert" })
+    : null;
+}
+
+async function act(operation: () => Promise<unknown>): Promise<void> {
+  if (busy) return;
+  busy = true;
+  localError = null;
+  render();
+  try {
+    await operation();
+  } catch (error) {
+    localError = errorMessage(error);
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function request<T = void>(message: Record<string, unknown>): Promise<T> {
+  const response = (await chrome.runtime.sendMessage(message)) as BackgroundResponse<T>;
+  if (!response?.ok) throw new Error(response?.error ?? "CodexNest Browser did not respond");
+  return response.result as T;
+}
+
+type ElementOptions = {
+  className?: string;
+  textContent?: string;
+  type?: string;
+  id?: string;
+  value?: string;
+  label?: string;
+  placeholder?: string;
+  title?: string;
+  role?: string;
+  ariaLabel?: string;
+  ariaHidden?: string;
+  htmlFor?: string;
+  autocomplete?: string;
+  required?: boolean;
+  disabled?: boolean;
+};
+
+function el<Tag extends keyof HTMLElementTagNameMap>(
+  tag: Tag,
+  options: ElementOptions = {},
+  children: Array<Node | null> = [],
+): HTMLElementTagNameMap[Tag] {
+  const element = document.createElement(tag);
+  for (const [key, value] of Object.entries(options)) {
+    if (value === undefined) continue;
+    if (
+      key === "className" ||
+      key === "textContent" ||
+      key === "title" ||
+      key === "id" ||
+      key === "role"
+    ) {
+      Object.assign(element, { [key]: value });
+    } else if (key === "ariaLabel") element.setAttribute("aria-label", String(value));
+    else if (key === "ariaHidden") element.setAttribute("aria-hidden", String(value));
+    else if (key === "htmlFor") element.setAttribute("for", String(value));
+    else if (key === "autocomplete") element.setAttribute("autocomplete", String(value));
+    else if (typeof value === "boolean")
+      (element as unknown as Record<string, unknown>)[key] = value;
+    else element.setAttribute(key, String(value));
+  }
+  for (const child of children) if (child) element.append(child);
+  return element;
+}
+
+function browserLanguage(): UiLanguage {
+  return navigator.language.toLowerCase().startsWith("ru") ? "ru" : "en";
+}
+
+function requirePopupRoot(): HTMLElement {
+  const root = document.querySelector<HTMLElement>("#app");
+  if (!root) throw new Error("Popup root is missing");
+  return root;
+}
+
+function hostname(value: string): string {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function hostnameInitial(value: string): string {
+  return (hostname(value)[0] ?? "•").toLocaleUpperCase();
+}
+
+function pluralRu(value: number, one: string, few: string, many: string): string {
+  const tens = value % 100;
+  const ones = value % 10;
+  if (tens >= 11 && tens <= 14) return many;
+  if (ones === 1) return one;
+  if (ones >= 2 && ones <= 4) return few;
+  return many;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

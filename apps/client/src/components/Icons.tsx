@@ -134,6 +134,14 @@ export const InfoIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const BrowserIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect width="18" height="15" x="3" y="4.5" rx="3" />
+    <path d="M3 9h18" />
+    <path d="M7 6.75h.01M10 6.75h.01" />
+  </Icon>
+);
+
 export const BellIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />

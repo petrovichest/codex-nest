@@ -79,6 +79,7 @@ const baseThread: ThreadSummary = {
   updatedAt: 20,
   currentTurnId: null,
   queuedMessageCount: 0,
+  browserStatus: "disabled",
   settings: { collaborationMode: "default" },
 };
 
@@ -831,6 +832,21 @@ describe("App routing and navigation", () => {
     expect(statusFor("Нужно внимание")).toHaveClass("status-needsAttention", "status-pulsing");
     expect(container.querySelectorAll(".thread-link .status")).toHaveLength(8);
     expect(container.querySelector(".unread")).toBeNull();
+  });
+
+  it("marks browser-enabled sessions in the sidebar", () => {
+    const browserThread = {
+      ...baseThread,
+      id: "browser-thread",
+      title: "С браузером",
+      browserStatus: "connected" as const,
+    };
+    mockConnection(snapshot([browserThread]));
+    const view = renderApp("/threads/browser-thread");
+
+    const marker = view.container.querySelector(".thread-browser-status");
+    expect(marker).toHaveClass("thread-browser-status-connected");
+    expect(marker).toHaveAttribute("title", "Браузер подключён");
   });
 
   it("restores and persists the theme from the settings page", async () => {

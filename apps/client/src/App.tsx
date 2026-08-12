@@ -34,6 +34,7 @@ import { Dialog } from "./components/Dialog";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  BrowserIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -1742,7 +1743,7 @@ function ThreadLink({
   onNavigate(): void;
   secondaryLabel?: string;
 }) {
-  const { language } = useI18n();
+  const { language, t } = useI18n();
   const location = useLocation();
   const title = localizeKnownServerText(language, thread.title) ?? thread.title;
   const target = `/threads/${encodeURIComponent(thread.id)}`;
@@ -1777,6 +1778,17 @@ function ThreadLink({
         </span>
       ) : (
         <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+      )}
+      {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
+        <span
+          aria-hidden="true"
+          className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
+          title={
+            thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер отключён")
+          }
+        >
+          <BrowserIcon />
+        </span>
       )}
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>

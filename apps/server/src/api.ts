@@ -65,6 +65,7 @@ import type {
 import { AttentionValidationError, type AttentionManager } from "./attention";
 import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
+import { BrowserExtensionError, type BrowserExtensionServer } from "./browser-extension";
 import { BridgeUnavailableError, type CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import type {
@@ -447,6 +448,7 @@ export interface ApiServices {
     "configuration" | "updateConfiguration" | "transcribe"
   >;
   projectRoot?: string;
+  browserExtension?: BrowserExtensionServer;
 }
 
 export function registerApi(app: FastifyInstance, services: ApiServices): void {
@@ -459,6 +461,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     appManager,
     lifecycle,
     threadTitles,
+    browserExtension,
   } = services;
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
@@ -575,9 +578,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             ...(store.view().threadMeta[threadId]?.sessionArtifactsVersion === 1
               ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
               : {}),
-            ...(summary.settings.collaborationMode === "team"
-              ? { config: teamRuntimeConfig() }
-              : {}),
+            ...runtimeConfigOverride(
+              browserExtension,
+              threadId,
+              summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {},
+            ),
           },
           30_000,
         );
@@ -723,6 +728,141 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     projectThreadCreations.set(projectId, request);
     return request;
   }
+
+  browserExtension?.setLifecycle({
+    create: async (instanceId, projectId, bindingId) => {
+      codexManager?.assertTurnsAllowed();
+      const project = store.view().projects.find((candidate) => candidate.id === projectId);
+      if (!project) throw new BrowserExtensionError("not_found", "Project not found");
+      const settings = projection.newSessionSettings;
+      const baseConfig = settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
+      const threadSource = `codexnest-browser:${bindingId}`;
+      let createdThreadId: string | undefined;
+      try {
+        let started: { thread: Thread };
+        try {
+          started = parseThreadStart(
+            await bridge.request<unknown>("thread/start", {
+              cwd: project.path,
+              ...threadSettings(settings),
+              developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
+              dynamicTools: ROOT_DYNAMIC_TOOLS,
+              threadSource,
+              config: browserExtension.mcpConfig(bindingId, baseConfig),
+            }),
+          );
+        } catch (error) {
+          const recovered = await findThreadBySource(bridge, threadSource).catch(() => null);
+          if (!recovered) throw error;
+          started = { thread: recovered };
+        }
+        createdThreadId = started.thread.id;
+        projection.upsertThread(started.thread);
+        await projection.markUnmaterialized(started.thread.id);
+        await markRootToolsAvailable(store, started.thread.id);
+        await projection.setSettings(started.thread.id, settings);
+        await store.update((state) => {
+          const meta = state.threadMeta[started.thread.id] ?? {
+            pinned: false,
+            lastReadUpdatedAt: 0,
+          };
+          meta.browserBinding = {
+            bindingId,
+            instanceId,
+            attachedAt: Date.now(),
+          };
+          state.threadMeta[started.thread.id] = meta;
+        });
+        projection.publishThreadState(started.thread.id);
+        return projection.summary(started.thread.id)!;
+      } catch (error) {
+        if (createdThreadId) {
+          await bridge
+            .request("thread/unsubscribe", { threadId: createdThreadId })
+            .catch(() => undefined);
+          await bridge
+            .request("thread/delete", { threadId: createdThreadId })
+            .catch(() => undefined);
+          await projection.removeOrphanedThread(createdThreadId).catch(() => undefined);
+        }
+        throw error;
+      }
+    },
+    attach: async (instanceId, threadId, bindingId) =>
+      withKeyLock(turnStartLocks, threadId, async () => {
+        const initial = projection.summary(threadId);
+        if (!initial) throw new BrowserExtensionError("not_found", "Thread not found");
+        assertBrowserWritable(initial, store);
+        await waitForBrowserIdle(projection, threadId);
+        const summary = projection.summary(threadId);
+        if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
+        assertBrowserWritable(summary, store);
+        const existing = store.view().threadMeta[threadId]?.browserBinding;
+        if (existing && existing.instanceId !== instanceId) {
+          throw new BrowserExtensionError(
+            "owned_by_another_instance",
+            "Browser binding belongs to another extension instance",
+          );
+        }
+        const effectiveBindingId = existing?.bindingId ?? bindingId;
+        const baseConfig = summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
+        const baselineConfig = existing
+          ? browserExtension.mcpConfig(existing.bindingId, baseConfig)
+          : baseConfig;
+        const browserConfig = browserExtension.mcpConfig(effectiveBindingId, baseConfig);
+        const baseParams = browserResumeParams(store, summary, baselineConfig);
+        const browserParams = browserResumeParams(store, summary, browserConfig);
+        await coldResumeThread(bridge, threadId, browserParams, baseParams, async () => {
+          await store.update((state) => {
+            const meta = state.threadMeta[threadId];
+            if (!meta) throw new BrowserExtensionError("not_found", "Thread not found");
+            const current = meta.browserBinding;
+            if (current && current.instanceId !== instanceId) {
+              throw new BrowserExtensionError(
+                "owned_by_another_instance",
+                "Browser binding belongs to another extension instance",
+              );
+            }
+            meta.browserBinding = {
+              bindingId: current?.bindingId ?? effectiveBindingId,
+              instanceId,
+              attachedAt: Date.now(),
+            };
+          });
+        });
+        projection.publishThreadState(threadId);
+        return projection.summary(threadId)!;
+      }),
+    deleteBinding: async (threadId) =>
+      withKeyLock(turnStartLocks, threadId, async () => {
+        const summary = projection.summary(threadId);
+        if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
+        if (!browserThreadIsIdle(summary)) {
+          throw new BrowserExtensionError(
+            "thread_busy",
+            "Browser binding cannot be removed while the thread is busy",
+          );
+        }
+        const binding = store.view().threadMeta[threadId]?.browserBinding;
+        if (!binding) throw new BrowserExtensionError("not_found", "Browser binding not found");
+        const baseConfig = summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
+        const browserParams = browserResumeParams(
+          store,
+          summary,
+          browserExtension.mcpConfig(binding.bindingId, baseConfig),
+        );
+        const baseParams = browserResumeParams(store, summary, baseConfig);
+        await coldResumeThread(bridge, threadId, baseParams, browserParams, async () => {
+          await store.update((state) => {
+            const meta = state.threadMeta[threadId];
+            if (!meta?.browserBinding || meta.browserBinding.bindingId !== binding.bindingId) {
+              throw new BrowserExtensionError("conflict", "Browser binding changed");
+            }
+            delete meta.browserBinding;
+          });
+        });
+      }),
+  });
 
   const pendingUserInput = (threadId: string, turnId: string) => {
     for (const request of attention.list()) {
@@ -1184,6 +1324,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     app.addHook("onClose", async () => voiceTranscriptions?.stop());
   }
   projection.setMissingThreadCleanup(async (threadId) => {
+    browserExtension?.forgetThread(threadId);
     if (!voiceTranscriptions) return;
     await voiceTranscriptions.cancelThread(threadId).catch((error: unknown) => {
       app.log.warn(
@@ -1350,7 +1491,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       request.method === "OPTIONS" ||
       parsed.pathname === "/api/v1/health" ||
       parsed.pathname.startsWith("/api/v1/internal/restart/") ||
-      parsed.pathname === "/api/v1/events"
+      parsed.pathname.startsWith("/api/v1/internal/browser-mcp/") ||
+      parsed.pathname === "/api/v1/events" ||
+      parsed.pathname === "/api/v1/browser-extension/events"
     )
       return;
     const token = bearerToken(request);
@@ -2142,6 +2285,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return reply.code(204).send();
   });
 
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/threads/:id/browser-binding",
+    async (request, reply) => {
+      if (!browserExtension) {
+        return apiError(reply, 503, "app_server_unavailable", "Browser extension is unavailable");
+      }
+      await browserExtension.detachThread(request.params.id);
+      return reply.code(204).send();
+    },
+  );
+
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/git-changes", async (request, reply) => {
     const summary = projection.summary(request.params.id);
     if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
@@ -2362,7 +2516,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           ...(store.view().threadMeta[request.params.id]?.sessionArtifactsVersion === 1
             ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
             : {}),
-          config: teamRuntimeConfig(),
+          config:
+            browserExtension?.runtimeConfig(request.params.id, teamRuntimeConfig()) ??
+            teamRuntimeConfig(),
         };
         try {
           await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
@@ -2672,6 +2828,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     if (error instanceof ProjectConflictError)
       return apiError(reply, 409, "conflict", error.message);
+    if (error instanceof BrowserExtensionError) {
+      if (error.code === "not_found") return apiError(reply, 404, "not_found", error.message);
+      if (error.code === "unavailable") {
+        return apiError(reply, 503, "app_server_unavailable", error.message);
+      }
+      return apiError(reply, 409, "conflict", error.message);
+    }
     return apiError(reply, 500, "internal_error", "Internal server error");
   });
 }
@@ -2874,7 +3037,7 @@ async function handleManagedTeamToolCall(
     if (!task) {
       const recoveredThread = prepared!.created
         ? null
-        : await findManagedThreadBySource(bridge, childThreadSource);
+        : await findThreadBySource(bridge, childThreadSource);
       if (!prepared!.created && !recoveredThread) {
         return finish(
           dynamicToolError(
@@ -2896,7 +3059,7 @@ async function handleManagedTeamToolCall(
           options,
         );
       } catch (error) {
-        const recoveredAfterError = await findManagedThreadBySource(bridge, childThreadSource);
+        const recoveredAfterError = await findThreadBySource(bridge, childThreadSource);
         if (!recoveredAfterError) {
           return finish(
             dynamicToolError(`Managed task creation failed: ${safeError(error).message}`),
@@ -4964,10 +5127,7 @@ async function pruneCompletedTeamToolOperations(
   });
 }
 
-async function findManagedThreadBySource(
-  bridge: CodexBridge,
-  source: string,
-): Promise<Thread | null> {
+async function findThreadBySource(bridge: CodexBridge, source: string): Promise<Thread | null> {
   const candidates: Thread[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
@@ -5569,6 +5729,110 @@ function threadSettings(settings?: SessionSettings): Record<string, unknown> {
     serviceTier: settings.serviceTier,
     personality: settings.personality,
   });
+}
+
+function runtimeConfigOverride(
+  browserExtension: BrowserExtensionServer | undefined,
+  threadId: string,
+  base: Record<string, unknown>,
+): Record<string, unknown> {
+  const config = browserExtension?.runtimeConfig(threadId, base) ?? base;
+  return Object.keys(config).length ? { config } : {};
+}
+
+function browserResumeParams(
+  store: StateStore,
+  summary: ThreadSummary,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    threadId: summary.id,
+    cwd: summary.cwd,
+    excludeTurns: true,
+    ...threadSettings(summary.settings),
+    ...(store.view().threadMeta[summary.id]?.sessionArtifactsVersion === 1
+      ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
+      : {}),
+    ...(Object.keys(config).length ? { config } : {}),
+  };
+}
+
+async function coldResumeThread(
+  bridge: CodexBridge,
+  threadId: string,
+  targetParams: Record<string, unknown>,
+  rollbackParams: Record<string, unknown>,
+  persist: () => Promise<void>,
+): Promise<void> {
+  await bridge.request("thread/unsubscribe", { threadId }, 30_000);
+  try {
+    await bridge.request<ThreadResumeResponse>("thread/resume", targetParams, 30_000);
+    await persist();
+  } catch (error) {
+    await bridge.request("thread/unsubscribe", { threadId }, 30_000).catch(() => undefined);
+    try {
+      await bridge.request<ThreadResumeResponse>("thread/resume", rollbackParams, 30_000);
+    } catch {
+      throw new BrowserExtensionError(
+        "rollback_failed",
+        "Browser configuration failed and the original thread subscription could not be restored",
+      );
+    }
+    throw error;
+  }
+}
+
+function assertBrowserWritable(summary: ThreadSummary, store: StateStore): void {
+  if (summary.relation.kind === "subagent" || store.view().threadMeta[summary.id]?.managedParent) {
+    throw new BrowserExtensionError(
+      "not_writable",
+      "Subagent and managed-child threads cannot use Browser MCP",
+    );
+  }
+  if (summary.archived) {
+    throw new BrowserExtensionError("not_writable", "Archived threads cannot use Browser MCP");
+  }
+  if (!summary.projectId) {
+    throw new BrowserExtensionError(
+      "not_writable",
+      "Thread is not in a writable CodexNest project",
+    );
+  }
+}
+
+function browserThreadIsIdle(summary: ThreadSummary): boolean {
+  return (
+    summary.currentTurnId === null &&
+    summary.state !== "running" &&
+    summary.state !== "queued" &&
+    summary.state !== "needsAttention"
+  );
+}
+
+async function waitForBrowserIdle(projection: AppProjection, threadId: string): Promise<void> {
+  for (;;) {
+    const current = projection.summary(threadId);
+    if (!current) throw new BrowserExtensionError("not_found", "Thread not found");
+    if (browserThreadIsIdle(current)) return;
+    await new Promise<void>((resolve) => {
+      const listener = (_sequence: number, event: ServerEvent) => {
+        if (
+          (event.type === "thread.upserted" && event.thread.id === threadId) ||
+          (event.type === "thread.removed" && event.threadId === threadId) ||
+          event.type === "resync.required"
+        ) {
+          projection.off("event", listener);
+          resolve();
+        }
+      };
+      projection.on("event", listener);
+      const latest = projection.summary(threadId);
+      if (!latest || browserThreadIsIdle(latest)) {
+        projection.off("event", listener);
+        resolve();
+      }
+    });
+  }
 }
 
 function turnSettings(

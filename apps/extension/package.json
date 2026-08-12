@@ -1,0 +1,28 @@
+{
+  "name": "@codexnest/extension",
+  "version": "0.1.7",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@codexnest/protocol": "0.1.7"
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "version:check": "node scripts/check-version.mjs",
+    "build": "npm run build -w @codexnest/protocol && npm run version:check && tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:e2e": "npm run build && playwright test --config=playwright.config.ts",
+    "package": "node scripts/package.mjs",
+    "package:build": "npm run build && npm run package"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
+  }
+}

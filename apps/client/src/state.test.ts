@@ -20,6 +20,7 @@ const baseThread: ThreadSummary = {
   updatedAt: 2,
   currentTurnId: "turn",
   queuedMessageCount: 0,
+  browserStatus: "disabled",
   settings: { collaborationMode: "default" },
 };
 

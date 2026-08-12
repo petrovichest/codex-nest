@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityItem, ThreadArtifactsResponse } from "./index.js";
-import { bearerHeader, isClientFrame, isServerFrame } from "./index.js";
+import {
+  BROWSER_EXTENSION_PROTOCOL,
+  BROWSER_EXTENSION_PROTOCOL_VERSION,
+  BROWSER_TOOL_RESULT_CHUNK_BYTES,
+  BROWSER_TOOL_NAMES,
+  bearerHeader,
+  isBrowserExtensionClientFrame,
+  isBrowserExtensionServerFrame,
+  isClientFrame,
+  isServerFrame,
+} from "./index.js";
 
 describe("protocol guards", () => {
   it("accepts authentication and ping client frames", () => {
@@ -33,6 +43,106 @@ describe("protocol guards", () => {
 
   it("formats bearer credentials without putting them in a URL", () => {
     expect(bearerHeader("abc")).toBe("Bearer abc");
+  });
+
+  it("guards the versioned browser-extension handshake and lifecycle requests", () => {
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "client.hello",
+        protocol: BROWSER_EXTENSION_PROTOCOL,
+        version: BROWSER_EXTENSION_PROTOCOL_VERSION,
+        token: "owner-token",
+        instanceId: "extension-instance-1",
+        extensionVersion: "0.1.6",
+        browser: { name: "chrome", version: "128" },
+        capabilities: {
+          tools: BROWSER_TOOL_NAMES,
+          maxProjectFileBytes: 100,
+          screenshots: ["image/jpeg"],
+        },
+        bindings: [],
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "session.request",
+        requestId: "request-1",
+        target: { kind: "new", projectId: "project-1" },
+        tab: { id: 1, windowId: 1, groupId: -1, active: true, title: "Tab", url: "https://x" },
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "session.request",
+        requestId: "request-2",
+        target: { kind: "existing", threadId: "thread-1" },
+        tab: { id: 1, windowId: 1, groupId: -1, active: true, title: "Tab", url: "https://x" },
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "client.hello",
+        protocol: BROWSER_EXTENSION_PROTOCOL,
+        version: 1,
+        token: "owner-token",
+        instanceId: "spaces are rejected",
+        extensionVersion: "0.1.6",
+        browser: { name: "chrome", version: "128" },
+        capabilities: { tools: [], maxProjectFileBytes: 100, screenshots: [] },
+        bindings: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("guards browser binding updates and tool calls", () => {
+    expect(BROWSER_TOOL_NAMES).toContain("tabs_context");
+    expect(BROWSER_TOOL_NAMES).toContain("upload_file");
+    expect(
+      isBrowserExtensionServerFrame({
+        type: "server.hello",
+        protocol: BROWSER_EXTENSION_PROTOCOL,
+        version: BROWSER_EXTENSION_PROTOCOL_VERSION,
+        locale: "en",
+        projects: [],
+        threads: [],
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionServerFrame({
+        type: "tool.call",
+        requestId: "call-1",
+        threadId: "thread-1",
+        tool: "navigate",
+        arguments: { url: "https://example.com" },
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionServerFrame({
+        type: "tool.call",
+        requestId: "call-1",
+        threadId: "thread-1",
+        tool: "steal_credentials",
+        arguments: {},
+      }),
+    ).toBe(false);
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "tool.result.chunk",
+        requestId: "call-1",
+        chunkIndex: 0,
+        chunkCount: 2,
+        data: "partial",
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserExtensionClientFrame({
+        type: "tool.result.chunk",
+        requestId: "call-1",
+        chunkIndex: 0,
+        chunkCount: 2,
+        data: "x".repeat(BROWSER_TOOL_RESULT_CHUNK_BYTES + 1),
+      }),
+    ).toBe(false);
   });
 
   it("keeps v1 orchestration notices valid while carrying optional v2 results", () => {

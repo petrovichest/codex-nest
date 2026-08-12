@@ -75,6 +75,7 @@ import { Dialog } from "./Dialog";
 import {
   ArchiveIcon,
   ArrowDownIcon,
+  BrowserIcon,
   CheckIcon,
   CopyIcon,
   FileIcon,
@@ -324,6 +325,7 @@ function pendingThreadSummary(project: Project, settings: SessionSettings): Thre
     updatedAt: 0,
     currentTurnId: null,
     queuedMessageCount: 0,
+    browserStatus: "disabled",
     settings,
     relation: { kind: "session", sessionId: "" },
   };
@@ -510,6 +512,7 @@ export function ThreadPage({
   const [forking, setForking] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [browserDetaching, setBrowserDetaching] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
@@ -2586,6 +2589,24 @@ export function ThreadPage({
     }
   }
 
+  async function detachBrowser() {
+    if (browserDetaching || !summary || summary.browserStatus === "disabled") return;
+    setBrowserDetaching(true);
+    setError(null);
+    try {
+      await api.detachBrowser(threadId);
+      dispatch({ type: "thread", thread: { ...summary, browserStatus: "disconnected" } });
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отключить браузер"),
+      );
+    } finally {
+      setBrowserDetaching(false);
+    }
+  }
+
   const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
   const toggleArchive = () => void api.archive(threadId, !summary!.archived);
 
@@ -2762,6 +2783,34 @@ export function ThreadPage({
           actions={
             showNewSessionChrome ? undefined : (
               <>
+                {(workspaceSummary.browserStatus === "connected" ||
+                  workspaceSummary.browserStatus === "disconnected") && (
+                  <div
+                    className={`browser-session-status browser-session-status-${workspaceSummary.browserStatus}`}
+                    title={
+                      workspaceSummary.browserStatus === "connected"
+                        ? t("Расширение управляет вкладками этой сессии")
+                        : t("Расширение браузера не в сети")
+                    }
+                  >
+                    <BrowserIcon />
+                    <span>
+                      {workspaceSummary.browserStatus === "connected"
+                        ? t("Браузер подключён")
+                        : t("Браузер отключён")}
+                    </span>
+                    <button
+                      aria-label={t("Отсоединить браузер от сессии")}
+                      className="browser-session-detach"
+                      disabled={browserDetaching}
+                      onClick={() => void detachBrowser()}
+                      title={t("Отсоединить браузер от сессии")}
+                      type="button"
+                    >
+                      <XIcon />
+                    </button>
+                  </div>
+                )}
                 {!isSubagent && (
                   <details className="thread-action-menu" data-dismiss-on-outside-click>
                     <summary className="icon-button" aria-label={t("Действия с задачей")}>

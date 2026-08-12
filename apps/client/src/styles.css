@@ -345,6 +345,28 @@
   white-space: nowrap;
 }
 
+.thread-browser-status {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.thread-browser-status svg {
+  width: 14px;
+  height: 14px;
+}
+
+.thread-browser-status-connected {
+  color: var(--status-complete);
+}
+
+.thread-browser-status-disconnected {
+  color: var(--status-attention);
+}
+
 .active-session-list {
   padding-top: 8px;
 }
@@ -1381,6 +1403,61 @@
   display: flex;
   align-items: center;
   gap: 3px;
+}
+
+.browser-session-status {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: 5px;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface) 88%, var(--color-canvas));
+  color: var(--muted-strong);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.browser-session-status > svg {
+  width: 15px;
+  height: 15px;
+}
+
+.browser-session-status-connected > svg {
+  color: var(--status-complete);
+}
+
+.browser-session-status-disconnected > svg {
+  color: var(--status-attention);
+}
+
+.browser-session-detach {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.browser-session-detach:hover {
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+
+.browser-session-detach svg {
+  width: 13px;
+  height: 13px;
+}
+
+.browser-session-detach:disabled {
+  opacity: 0.5;
 }
 
 .session-refresh.refreshing svg {
@@ -4709,6 +4786,16 @@
 
   .workspace-title p {
     max-width: min(48vw, 270px);
+  }
+
+  .browser-session-status {
+    gap: 3px;
+    margin-right: 2px;
+    padding-left: 8px;
+  }
+
+  .browser-session-status > span {
+    display: none;
   }
 
   .timeline {

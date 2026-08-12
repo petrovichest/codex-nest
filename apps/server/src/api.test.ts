@@ -19,6 +19,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WebSocket } from "ws";
+
+import {
+  BROWSER_EXTENSION_PROTOCOL,
+  BROWSER_EXTENSION_PROTOCOL_VERSION,
+  BROWSER_EXTENSION_WEBSOCKET_PATH,
+  BROWSER_TOOL_NAMES,
+} from "@codexnest/protocol";
 
 import { buildApp } from "./app";
 import { triggerTeamWatchdogs } from "./api";
@@ -2996,6 +3004,205 @@ describe("thread settings", () => {
   });
 });
 
+describe("browser thread lifecycle", () => {
+  it("waits for idle, rolls back failed attach, merges Team config, creates fresh, and deletes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.projects.push({
+        id: "project",
+        displayName: "Project",
+        path: "/work",
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      });
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    await projection.setSettings("thread", {
+      collaborationMode: "team",
+      model: "gpt-a",
+      reasoningEffort: "high",
+    });
+    await store.update((state) => {
+      state.threadMeta.thread!.managedTeamToolsAvailable = true;
+    });
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+      },
+    );
+    await app.ready();
+    const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
+      headers: { origin: "http://localhost" },
+    });
+    const frames = websocketFrames(socket);
+    socket.send(
+      JSON.stringify({
+        type: "client.hello",
+        protocol: BROWSER_EXTENSION_PROTOCOL,
+        version: BROWSER_EXTENSION_PROTOCOL_VERSION,
+        token: "correct",
+        instanceId: "extension-instance-1",
+        extensionVersion: "0.1.6",
+        browser: { name: "chrome", version: "128" },
+        capabilities: {
+          tools: BROWSER_TOOL_NAMES,
+          maxProjectFileBytes: 100 * 1024 * 1024,
+          screenshots: ["image/jpeg", "image/png"],
+        },
+        bindings: [],
+      }),
+    );
+    await frames.nextType("server.hello");
+
+    await projection.setCurrentTurn("thread", "busy-turn");
+    bridge.failBrowserResumeOnce = true;
+    socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-pending",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    let attachSettled = false;
+    const pendingAttach = frames.nextType("session.error").then((frame) => {
+      attachSettled = true;
+      return frame;
+    });
+    await nextImmediate();
+    expect(attachSettled).toBe(false);
+    await projection.markInterrupted("thread", ["busy-turn"]);
+    expect(await pendingAttach).toMatchObject({
+      requestId: "attach-pending",
+      error: expect.any(Object),
+    });
+    expect(store.view().threadMeta.thread?.browserBinding).toBeUndefined();
+    const rollbackCalls = bridge.request.mock.calls
+      .filter(([method]) => method === "thread/resume")
+      .slice(-2);
+    expect(rollbackCalls[0]?.[1]).toMatchObject({
+      config: {
+        agents: { enabled: false },
+        mcp_servers: { codexnest_browser: expect.any(Object) },
+      },
+    });
+    expect(rollbackCalls[1]?.[1]).toMatchObject({ config: { agents: { enabled: false } } });
+    expect(rollbackCalls[1]?.[1]).not.toHaveProperty("config.mcp_servers");
+
+    socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-success",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await frames.nextType("session.result")).toMatchObject({
+      requestId: "attach-success",
+      action: "attached",
+    });
+    const binding = store.view().threadMeta.thread?.browserBinding;
+    expect(binding).toMatchObject({ instanceId: "extension-instance-1" });
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).toMatchObject({
+      config: {
+        agents: { enabled: false },
+        mcp_servers: { codexnest_browser: expect.any(Object) },
+      },
+    });
+
+    const turn = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers: { authorization: "Bearer correct" },
+      payload: { input: "Use the attached browser" },
+    });
+    expect(turn.statusCode).toBe(201);
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).toMatchObject({
+      config: {
+        agents: { enabled: false },
+        mcp_servers: { codexnest_browser: expect.any(Object) },
+      },
+    });
+    const interrupted = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/interrupt",
+      headers: { authorization: "Bearer correct" },
+      payload: { turnId: turn.json().turnId },
+    });
+    expect(interrupted.statusCode).toBe(204);
+
+    const detached = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/threads/thread/browser-binding",
+      headers: { authorization: "Bearer correct" },
+    });
+    expect(detached.statusCode).toBe(204);
+    expect(await frames.nextType("binding.detach")).toMatchObject({ threadId: "thread" });
+    expect(store.view().threadMeta.thread?.browserBinding).toMatchObject({
+      instanceId: "extension-instance-1",
+      detachedAt: expect.any(Number),
+    });
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).toMatchObject({
+      config: {
+        agents: { enabled: false },
+        mcp_servers: { codexnest_browser: expect.any(Object) },
+      },
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "create-fresh",
+        target: { kind: "new", projectId: "project" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await frames.nextType("session.result")).toMatchObject({
+      requestId: "create-fresh",
+      action: "created",
+      thread: { id: "created" },
+    });
+    const browserStart = bridge.request.mock.calls.findLast(
+      ([method, params]) =>
+        method === "thread/start" &&
+        String((params as Record<string, unknown>).threadSource).startsWith("codexnest-browser:"),
+    );
+    expect(browserStart?.[1]).toMatchObject({
+      cwd: "/work",
+      threadSource: expect.stringMatching(/^codexnest-browser:/),
+      config: { mcp_servers: { codexnest_browser: expect.any(Object) } },
+      dynamicTools: expect.any(Array),
+    });
+    expect(store.view().threadMeta.created?.browserBinding).toMatchObject({
+      instanceId: "extension-instance-1",
+    });
+
+    socket.terminate();
+    await app.close();
+  });
+});
+
 describe("explicit session artifacts", () => {
   it("does not reuse an old empty root that lacks the artifact tool", async () => {
     const { app, bridge, headers } = await createTeamHarness();
@@ -4974,6 +5181,7 @@ class SettingsBridge extends EventEmitter {
     updatedAt: number;
   } | null = null;
   failNextTurnStart = false;
+  failBrowserResumeOnce = false;
   failNextGoalActivation = false;
   failInterrupts = 0;
   parentTurnStartEntered: (() => void) | null = null;
@@ -5077,8 +5285,19 @@ class SettingsBridge extends EventEmitter {
       if (this.missingRolloutThreadIds.delete(threadId)) {
         throw new RpcError(-32_600, `no rollout found for thread id ${threadId}`);
       }
+      const config = params.config;
+      if (
+        this.failBrowserResumeOnce &&
+        config &&
+        typeof config === "object" &&
+        "mcp_servers" in config
+      ) {
+        this.failBrowserResumeOnce = false;
+        throw new Error("browser resume failed");
+      }
       return {};
     }
+    if (method === "thread/unsubscribe") return {};
     if (method === "thread/metadata/update") {
       return { thread: testThread(String(params.threadId)) };
     }
@@ -5520,8 +5739,42 @@ function dynamicToolJson(response: TestDynamicToolResponse): Record<string, unkn
   return JSON.parse(text) as Record<string, unknown>;
 }
 
+function websocketFrames(socket: WebSocket) {
+  const queued: Array<Record<string, unknown>> = [];
+  const waiters: Array<(frame: Record<string, unknown>) => void> = [];
+  socket.on("message", (data) => {
+    const frame = JSON.parse(data.toString()) as Record<string, unknown>;
+    const waiter = waiters.shift();
+    if (waiter) waiter(frame);
+    else queued.push(frame);
+  });
+  const next = (): Promise<Record<string, unknown>> => {
+    const frame = queued.shift();
+    return frame ? Promise.resolve(frame) : new Promise((resolve) => waiters.push(resolve));
+  };
+  return {
+    async nextType(type: string): Promise<Record<string, unknown>> {
+      for (;;) {
+        const frame = await next();
+        if (frame.type === type) return frame;
+      }
+    },
+  };
+}
+
 function nextImmediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function browserTabSummary() {
+  return {
+    id: 1,
+    windowId: 1,
+    groupId: -1,
+    active: true,
+    title: "Tab",
+    url: "https://example.com",
+  };
 }
 
 function testModel(
