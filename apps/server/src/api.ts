@@ -730,74 +730,67 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   }
 
   browserExtension?.setLifecycle({
-    create: async (instanceId, projectId, bindingId) => {
-      codexManager?.assertTurnsAllowed();
-      const project = store.view().projects.find((candidate) => candidate.id === projectId);
-      if (!project) throw new BrowserExtensionError("not_found", "Project not found");
-      const settings = projection.newSessionSettings;
-      const baseConfig = settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
-      const threadSource = `codexnest-browser:${bindingId}`;
-      let createdThreadId: string | undefined;
-      try {
-        let started: { thread: Thread };
-        try {
-          started = parseThreadStart(
-            await bridge.request<unknown>("thread/start", {
-              cwd: project.path,
-              ...threadSettings(settings),
-              developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
-              dynamicTools: ROOT_DYNAMIC_TOOLS,
-              threadSource,
-              config: browserExtension.mcpConfig(bindingId, baseConfig),
-            }),
-          );
-        } catch (error) {
-          const recovered = await findThreadBySource(bridge, threadSource).catch(() => null);
-          if (!recovered) throw error;
-          started = { thread: recovered };
-        }
-        createdThreadId = started.thread.id;
-        projection.upsertThread(started.thread);
-        await projection.markUnmaterialized(started.thread.id);
-        await markRootToolsAvailable(store, started.thread.id);
-        await projection.setSettings(started.thread.id, settings);
-        await store.update((state) => {
-          const meta = state.threadMeta[started.thread.id] ?? {
-            pinned: false,
-            lastReadUpdatedAt: 0,
-          };
-          meta.browserBinding = {
-            bindingId,
-            instanceId,
-            attachedAt: Date.now(),
-          };
-          state.threadMeta[started.thread.id] = meta;
-        });
-        projection.publishThreadState(started.thread.id);
-        return projection.summary(started.thread.id)!;
-      } catch (error) {
-        if (createdThreadId) {
-          await bridge
-            .request("thread/unsubscribe", { threadId: createdThreadId })
-            .catch(() => undefined);
-          await bridge
-            .request("thread/delete", { threadId: createdThreadId })
-            .catch(() => undefined);
-          await projection.removeOrphanedThread(createdThreadId).catch(() => undefined);
-        }
-        throw error;
-      }
-    },
-    attach: async (instanceId, threadId, bindingId) =>
+    enable: async (threadId) =>
       withKeyLock(turnStartLocks, threadId, async () => {
-        const initial = projection.summary(threadId);
-        if (!initial) throw new BrowserExtensionError("not_found", "Thread not found");
-        assertBrowserWritable(initial, store);
-        await waitForBrowserIdle(projection, threadId);
         const summary = projection.summary(threadId);
         if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
         assertBrowserWritable(summary, store);
-        const existing = store.view().threadMeta[threadId]?.browserBinding;
+        const meta = store.view().threadMeta[threadId];
+        if (meta?.browserEnabled === true) return;
+        if (!browserThreadIsIdle(summary)) {
+          throw new BrowserExtensionError(
+            "thread_busy",
+            "Browser access cannot be enabled while the thread is busy",
+          );
+        }
+        const staleBinding = meta?.browserBinding;
+        const persist = async () => {
+          await store.update((state) => {
+            const current = state.threadMeta[threadId] ?? {
+              pinned: false,
+              lastReadUpdatedAt: 0,
+            };
+            if (staleBinding && current.browserBinding?.bindingId !== staleBinding.bindingId) {
+              throw new BrowserExtensionError("conflict", "Browser binding changed");
+            }
+            current.browserEnabled = true;
+            delete current.browserBinding;
+            state.threadMeta[threadId] = current;
+          });
+        };
+        if (!staleBinding) {
+          await persist();
+          return;
+        }
+        const baseConfig = summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
+        await coldResumeThread(
+          bridge,
+          threadId,
+          browserResumeParams(store, summary, baseConfig),
+          browserResumeParams(
+            store,
+            summary,
+            browserExtension.mcpConfig(staleBinding.bindingId, baseConfig),
+          ),
+          persist,
+        );
+      }),
+    attach: async (instanceId, threadId, bindingId) =>
+      withKeyLock(turnStartLocks, threadId, async () => {
+        const summary = projection.summary(threadId);
+        if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
+        assertBrowserWritable(summary, store);
+        const meta = store.view().threadMeta[threadId];
+        if (meta?.browserEnabled !== true) {
+          throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
+        }
+        if (!browserThreadIsIdle(summary)) {
+          throw new BrowserExtensionError(
+            "thread_busy",
+            "Browser extension cannot attach while the thread is busy",
+          );
+        }
+        const existing = meta.browserBinding;
         if (existing && existing.instanceId !== instanceId) {
           throw new BrowserExtensionError(
             "owned_by_another_instance",
@@ -816,6 +809,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           await store.update((state) => {
             const meta = state.threadMeta[threadId];
             if (!meta) throw new BrowserExtensionError("not_found", "Thread not found");
+            if (meta.browserEnabled !== true) {
+              throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
+            }
             const current = meta.browserBinding;
             if (current && current.instanceId !== instanceId) {
               throw new BrowserExtensionError(
@@ -833,18 +829,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         projection.publishThreadState(threadId);
         return projection.summary(threadId)!;
       }),
-    deleteBinding: async (threadId) =>
+    disable: async (threadId) =>
       withKeyLock(turnStartLocks, threadId, async () => {
         const summary = projection.summary(threadId);
         if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
+        assertBrowserWritable(summary, store);
+        const meta = store.view().threadMeta[threadId];
+        const binding = meta?.browserBinding;
+        if (meta?.browserEnabled !== true && !binding) return;
         if (!browserThreadIsIdle(summary)) {
           throw new BrowserExtensionError(
             "thread_busy",
-            "Browser binding cannot be removed while the thread is busy",
+            "Browser access cannot be disabled while the thread is busy",
           );
         }
-        const binding = store.view().threadMeta[threadId]?.browserBinding;
-        if (!binding) throw new BrowserExtensionError("not_found", "Browser binding not found");
+        if (!binding) {
+          await store.update((state) => {
+            const current = state.threadMeta[threadId];
+            if (!current) return;
+            delete current.browserEnabled;
+            delete current.browserBinding;
+          });
+          return;
+        }
         const baseConfig = summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
         const browserParams = browserResumeParams(
           store,
@@ -858,6 +865,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             if (!meta?.browserBinding || meta.browserBinding.bindingId !== binding.bindingId) {
               throw new BrowserExtensionError("conflict", "Browser binding changed");
             }
+            delete meta.browserEnabled;
             delete meta.browserBinding;
           });
         });
@@ -2447,17 +2455,29 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      if (body.browserEnabled !== undefined && typeof body.browserEnabled !== "boolean") {
+        return apiError(reply, 400, "validation_failed", "browserEnabled must be boolean");
+      }
+      if (body.name !== undefined && (typeof body.name !== "string" || !body.name.trim())) {
+        return apiError(reply, 400, "validation_failed", "name must not be empty");
+      }
+      if (body.pinned !== undefined && typeof body.pinned !== "boolean") {
+        return apiError(reply, 400, "validation_failed", "pinned must be boolean");
+      }
+      if (body.browserEnabled !== undefined) {
+        if (!browserExtension) {
+          return apiError(reply, 503, "app_server_unavailable", "Browser extension is unavailable");
+        }
+        if (body.browserEnabled) await browserExtension.enableThread(request.params.id);
+        else await browserExtension.disableThread(request.params.id);
+      }
       if (body.name !== undefined) {
-        if (typeof body.name !== "string" || !body.name.trim())
-          return apiError(reply, 400, "validation_failed", "name must not be empty");
         await bridge.request("thread/name/set", {
           threadId: request.params.id,
           name: body.name.trim(),
         });
       }
       if (body.pinned !== undefined) {
-        if (typeof body.pinned !== "boolean")
-          return apiError(reply, 400, "validation_failed", "pinned must be boolean");
         await projection.setPinned(request.params.id, body.pinned);
       }
       return projection.summary(request.params.id);
@@ -5807,32 +5827,6 @@ function browserThreadIsIdle(summary: ThreadSummary): boolean {
     summary.state !== "queued" &&
     summary.state !== "needsAttention"
   );
-}
-
-async function waitForBrowserIdle(projection: AppProjection, threadId: string): Promise<void> {
-  for (;;) {
-    const current = projection.summary(threadId);
-    if (!current) throw new BrowserExtensionError("not_found", "Thread not found");
-    if (browserThreadIsIdle(current)) return;
-    await new Promise<void>((resolve) => {
-      const listener = (_sequence: number, event: ServerEvent) => {
-        if (
-          (event.type === "thread.upserted" && event.thread.id === threadId) ||
-          (event.type === "thread.removed" && event.threadId === threadId) ||
-          event.type === "resync.required"
-        ) {
-          projection.off("event", listener);
-          resolve();
-        }
-      };
-      projection.on("event", listener);
-      const latest = projection.summary(threadId);
-      if (!latest || browserThreadIsIdle(latest)) {
-        projection.off("event", listener);
-        resolve();
-      }
-    });
-  }
 }
 
 function turnSettings(

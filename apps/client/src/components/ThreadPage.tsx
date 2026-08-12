@@ -512,7 +512,7 @@ export function ThreadPage({
   const [forking, setForking] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [browserDetaching, setBrowserDetaching] = useState(false);
+  const [browserUpdating, setBrowserUpdating] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
@@ -2589,21 +2589,32 @@ export function ThreadPage({
     }
   }
 
-  async function detachBrowser() {
-    if (browserDetaching || !summary || summary.browserStatus === "disabled") return;
-    setBrowserDetaching(true);
+  async function toggleBrowserAccess() {
+    if (
+      browserUpdating ||
+      !summary ||
+      summary.currentTurnId ||
+      summary.state === "running" ||
+      summary.state === "queued" ||
+      summary.state === "needsAttention"
+    ) {
+      return;
+    }
+    setBrowserUpdating(true);
     setError(null);
     try {
-      await api.detachBrowser(threadId);
-      dispatch({ type: "thread", thread: { ...summary, browserStatus: "disconnected" } });
+      const thread = await api.updateThread(threadId, {
+        browserEnabled: summary.browserStatus === "disabled",
+      });
+      dispatch({ type: "thread", thread });
     } catch (caught) {
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
-          : t("Не удалось отключить браузер"),
+          : t("Не удалось изменить доступ браузера"),
       );
     } finally {
-      setBrowserDetaching(false);
+      setBrowserUpdating(false);
     }
   }
 
@@ -2763,6 +2774,18 @@ export function ThreadPage({
   const latestPlanHasAnnotations = Boolean(
     latestPlanId && annotations.some((annotation) => annotation.messageId === latestPlanId),
   );
+  const browserSwitchLocked =
+    Boolean(workspaceSummary.currentTurnId) ||
+    workspaceSummary.state === "running" ||
+    workspaceSummary.state === "queued" ||
+    workspaceSummary.state === "needsAttention";
+  const browserEnabled = workspaceSummary.browserStatus !== "disabled";
+  const browserSwitchLabel = browserEnabled ? t("Выключить браузер") : t("Включить браузер");
+  const browserSwitchTitle = browserSwitchLocked
+    ? t("Дождитесь завершения текущего хода, чтобы изменить доступ браузера")
+    : browserUpdating
+      ? t("Изменяем доступ браузера…")
+      : browserSwitchLabel;
 
   return (
     <div className="thread-workspace">
@@ -2783,33 +2806,26 @@ export function ThreadPage({
           actions={
             showNewSessionChrome ? undefined : (
               <>
-                {(workspaceSummary.browserStatus === "connected" ||
-                  workspaceSummary.browserStatus === "disconnected") && (
-                  <div
+                {!isSubagent && !workspaceSummary.archived && (
+                  <button
+                    aria-busy={browserUpdating || undefined}
+                    aria-label={browserSwitchLabel}
+                    aria-pressed={browserEnabled}
                     className={`browser-session-status browser-session-status-${workspaceSummary.browserStatus}`}
-                    title={
-                      workspaceSummary.browserStatus === "connected"
-                        ? t("Расширение управляет вкладками этой сессии")
-                        : t("Расширение браузера не в сети")
-                    }
+                    disabled={browserUpdating || browserSwitchLocked}
+                    onClick={() => void toggleBrowserAccess()}
+                    title={browserSwitchTitle}
+                    type="button"
                   >
                     <BrowserIcon />
                     <span>
                       {workspaceSummary.browserStatus === "connected"
                         ? t("Браузер подключён")
-                        : t("Браузер отключён")}
+                        : workspaceSummary.browserStatus === "disconnected"
+                          ? t("Браузер включён")
+                          : t("Включить браузер")}
                     </span>
-                    <button
-                      aria-label={t("Отсоединить браузер от сессии")}
-                      className="browser-session-detach"
-                      disabled={browserDetaching}
-                      onClick={() => void detachBrowser()}
-                      title={t("Отсоединить браузер от сессии")}
-                      type="button"
-                    >
-                      <XIcon />
-                    </button>
-                  </div>
+                  </button>
                 )}
                 {!isSubagent && (
                   <details className="thread-action-menu" data-dismiss-on-outside-click>

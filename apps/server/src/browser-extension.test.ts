@@ -83,6 +83,13 @@ describe("browser extension transport", () => {
 
     const second = { ...summary("second"), state: "running" } satisfies ThreadSummary;
     harness.projection.summaries.set(second.id, second);
+    await harness.store.update((state) => {
+      state.threadMeta.second = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserEnabled: true,
+      };
+    });
     harness.projection.emit("event", 2, { type: "thread.upserted", thread: second });
 
     const catalog = await extension.nextType("catalog.updated");
@@ -93,21 +100,13 @@ describe("browser extension transport", () => {
     await harness.close();
   });
 
-  it("catalogs only active eligible root sessions owned by the extension", async () => {
+  it("catalogs enabled root project sessions regardless of activity", async () => {
     const harness = await createHarness();
     const summaries = [
       { ...summary("running"), state: "running" },
-      { ...summary("queued"), state: "queued" },
-      { ...summary("needs-attention"), state: "needsAttention" },
-      { ...summary("completed-unread"), state: "completed", unread: true },
-      { ...summary("failed-unread"), state: "failed", unread: true },
-      { ...summary("interrupted-unread"), state: "interrupted", unread: true },
-      { ...summary("queued-message"), queuedMessageCount: 1 },
-      { ...summary("owned-binding"), state: "running" },
       summary("idle"),
       { ...summary("completed-read"), state: "completed" },
-      { ...summary("failed-read"), state: "failed" },
-      { ...summary("interrupted-read"), state: "interrupted" },
+      summary("disabled"),
       { ...summary("archived"), state: "running", archived: true },
       {
         ...summary("subagent"),
@@ -120,32 +119,33 @@ describe("browser extension transport", () => {
           role: null,
         },
       },
-      { ...summary("managed-parent"), state: "running" },
-      { ...summary("foreign-binding"), state: "running" },
-      { ...summary("missing-project"), state: "running", projectId: null },
+      summary("managed-parent"),
+      summary("foreign-binding"),
+      { ...summary("missing-project"), projectId: null },
     ] satisfies ThreadSummary[];
     for (const thread of summaries) harness.projection.summaries.set(thread.id, thread);
     await harness.store.update((state) => {
+      for (const thread of summaries) {
+        if (thread.id === "disabled") continue;
+        state.threadMeta[thread.id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          browserEnabled: true,
+        };
+      }
       state.threadMeta["managed-parent"] = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         managedParent: { parentThreadId: "parent", taskId: "task" },
       };
       state.threadMeta["foreign-binding"] = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         browserBinding: {
           bindingId: "foreign-binding-id",
           instanceId: "extension-instance-2",
-          attachedAt: 1,
-        },
-      };
-      state.threadMeta["owned-binding"] = {
-        pinned: false,
-        lastReadUpdatedAt: 0,
-        browserBinding: {
-          bindingId: "owned-binding-id",
-          instanceId: "extension-instance-1",
           attachedAt: 1,
         },
       };
@@ -154,23 +154,16 @@ describe("browser extension transport", () => {
     const extension = await connect(harness.app, "extension-instance-1");
     const hello = await extension.nextType("server.hello");
 
-    expect(hello.threads.map((thread) => thread.id)).toEqual([
-      "running",
-      "queued",
-      "needs-attention",
-      "completed-unread",
-      "failed-unread",
-      "interrupted-unread",
-      "queued-message",
-      "owned-binding",
-    ]);
+    expect(hello.threads.map((thread) => thread.id)).toEqual(["running", "idle", "completed-read"]);
+    expect(hello.projects.map((project) => project.id)).toEqual(["project"]);
 
     extension.socket.close();
     await harness.close();
   });
 
-  it("creates, attaches, activates, detaches, reconnects, and preserves ownership", async () => {
+  it("rejects creation and attaches, detaches, reconnects, and preserves ownership", async () => {
     const harness = await createHarness();
+    harness.projection.summaries.set("thread", summary("thread"));
     const first = await connect(harness.app, "extension-instance-1");
     expect((await first.next()).type).toBe("server.hello");
 
@@ -182,25 +175,39 @@ describe("browser extension transport", () => {
         tab: tabSummary(),
       }),
     );
-    const created = await first.nextType("session.result");
-    expect(created).toMatchObject({ action: "created", thread: { id: "created" } });
-    const createdBinding = bindingSummary("created");
-    first.socket.send(JSON.stringify({ type: "binding.updated", binding: createdBinding }));
-    await vi.waitFor(() => expect(harness.status("created")).toBe("connected"));
-    expect(harness.status("created")).toBe("connected");
+    expect(await first.nextType("session.error")).toMatchObject({
+      requestId: "create-1",
+      error: { code: "unsupported", message: expect.stringContaining("no longer supported") },
+    });
+
+    await harness.browser.enableThread("thread");
+    expect(harness.status("thread")).toBe("disconnected");
+    first.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-1",
+        target: { kind: "existing", threadId: "thread" },
+        tab: tabSummary(),
+      }),
+    );
+    expect(await first.nextType("session.result")).toMatchObject({ action: "attached" });
+    const attachedBinding = bindingSummary("thread");
+    first.socket.send(JSON.stringify({ type: "binding.updated", binding: attachedBinding }));
+    await vi.waitFor(() => expect(harness.status("thread")).toBe("connected"));
 
     first.socket.send(
       JSON.stringify({
         type: "binding.detached",
-        binding: createdBinding,
+        binding: attachedBinding,
       }),
     );
     await vi.waitFor(() =>
-      expect(harness.store.view().threadMeta.created?.browserBinding?.detachedAt).toEqual(
+      expect(harness.store.view().threadMeta.thread?.browserBinding?.detachedAt).toEqual(
         expect.any(Number),
       ),
     );
-    expect(harness.status("created")).toBe("disconnected");
+    expect(harness.store.view().threadMeta.thread?.browserEnabled).toBe(true);
+    expect(harness.status("thread")).toBe("disconnected");
 
     const other = await connect(harness.app, "extension-instance-2");
     await other.next();
@@ -208,7 +215,7 @@ describe("browser extension transport", () => {
       JSON.stringify({
         type: "session.request",
         requestId: "attach-other",
-        target: { kind: "existing", threadId: "created" },
+        target: { kind: "existing", threadId: "thread" },
         tab: tabSummary(2),
       }),
     );
@@ -220,19 +227,19 @@ describe("browser extension transport", () => {
       JSON.stringify({
         type: "session.request",
         requestId: "reattach-owner",
-        target: { kind: "existing", threadId: "created" },
+        target: { kind: "existing", threadId: "thread" },
         tab: tabSummary(),
       }),
     );
     expect(await first.nextType("session.result")).toMatchObject({ action: "attached" });
-    first.socket.send(JSON.stringify({ type: "binding.updated", binding: createdBinding }));
-    await vi.waitFor(() => expect(harness.status("created")).toBe("connected"));
-    expect(harness.status("created")).toBe("connected");
-    expect(harness.store.view().threadMeta.created?.browserBinding?.detachedAt).toBeUndefined();
+    first.socket.send(JSON.stringify({ type: "binding.updated", binding: attachedBinding }));
+    await vi.waitFor(() => expect(harness.status("thread")).toBe("connected"));
+    expect(harness.store.view().threadMeta.thread?.browserBinding?.detachedAt).toBeUndefined();
 
-    await harness.browser.deleteBinding("created");
-    expect(harness.store.view().threadMeta.created?.browserBinding).toBeUndefined();
-    expect(harness.status("created")).toBe("disabled");
+    await harness.browser.deleteBinding("thread");
+    expect(harness.store.view().threadMeta.thread?.browserBinding).toBeUndefined();
+    expect(harness.store.view().threadMeta.thread?.browserEnabled).toBeUndefined();
+    expect(harness.status("thread")).toBe("disabled");
 
     const replaced = closeCode(first.socket);
     const replacement = await connect(harness.app, "extension-instance-1");
@@ -244,12 +251,70 @@ describe("browser extension transport", () => {
     await harness.close();
   });
 
+  it("denies legacy bindings until explicit enable and detaches stale clients", async () => {
+    const harness = await createHarness();
+    harness.projection.summaries.set("legacy", summary("legacy"));
+    await harness.store.update((state) => {
+      state.threadMeta.legacy = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserBinding: {
+          bindingId: "legacy-binding",
+          instanceId: "extension-instance-1",
+          attachedAt: 1,
+        },
+      };
+    });
+
+    expect(harness.status("legacy")).toBe("disabled");
+    expect(harness.browser.runtimeConfig("legacy")).not.toHaveProperty("mcp_servers");
+    const extension = await connect(harness.app, "extension-instance-1", [
+      bindingSummary("legacy"),
+    ]);
+    expect((await extension.nextType("server.hello")).threads).toEqual([]);
+    expect(await extension.nextType("binding.detach")).toMatchObject({ threadId: "legacy" });
+
+    const unlisted = await harness.mcp("legacy-binding", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(unlisted.json()).toMatchObject({ error: { message: "Browser binding not found" } });
+    const denied = await harness.mcp("legacy-binding", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "tabs_context", arguments: {} },
+    });
+    expect(denied.json()).toMatchObject({ error: { message: "Browser binding not found" } });
+
+    await harness.browser.enableThread("legacy");
+    expect(harness.store.view().threadMeta.legacy?.browserEnabled).toBe(true);
+    expect(harness.store.view().threadMeta.legacy?.browserBinding).toBeUndefined();
+    extension.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "fresh-attach",
+        target: { kind: "existing", threadId: "legacy" },
+        tab: tabSummary(),
+      }),
+    );
+    expect(await extension.nextType("session.result")).toMatchObject({ action: "attached" });
+    expect(harness.store.view().threadMeta.legacy?.browserBinding?.bindingId).not.toBe(
+      "legacy-binding",
+    );
+
+    extension.socket.close();
+    await harness.close();
+  });
+
   it("advertises MCP tools, proxies results, and reports unknown outcome after dispatch loss", async () => {
     const harness = await createHarness();
     await harness.store.update((state) => {
       state.threadMeta.thread = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         browserBinding: {
           bindingId: "binding-1",
           instanceId: "extension-instance-1",
@@ -360,6 +425,7 @@ describe("browser extension transport", () => {
       state.threadMeta.thread = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         browserBinding: {
           bindingId: "binding-offline",
           instanceId: "extension-instance-1",
@@ -392,6 +458,7 @@ describe("browser extension transport", () => {
       state.threadMeta.thread = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         browserBinding: {
           bindingId: "binding-upload",
           instanceId: "extension-instance-1",
@@ -502,19 +569,20 @@ async function createHarness(options: { disconnectWaitMs?: number } = {}) {
     internalSecret: "internal-secret",
   });
   browser.setLifecycle({
-    create: async (instanceId, _projectId, bindingId) => {
-      projection.summaries.set("created", summary("created"));
+    enable: async (threadId) => {
       await store.update((state) => {
-        state.threadMeta.created = {
-          pinned: false,
-          lastReadUpdatedAt: 0,
-          browserBinding: { bindingId, instanceId, attachedAt: Date.now() },
-        };
+        const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+        meta.browserEnabled = true;
+        delete meta.browserBinding;
+        state.threadMeta[threadId] = meta;
       });
-      return projection.summaries.get("created")!;
     },
     attach: async (instanceId, threadId, bindingId) => {
-      const existing = store.view().threadMeta[threadId]?.browserBinding;
+      const current = store.view().threadMeta[threadId];
+      if (current?.browserEnabled !== true) {
+        throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
+      }
+      const existing = current.browserBinding;
       if (existing && existing.instanceId !== instanceId) {
         throw new BrowserExtensionError(
           "owned_by_another_instance",
@@ -528,10 +596,13 @@ async function createHarness(options: { disconnectWaitMs?: number } = {}) {
       });
       return projection.summaries.get(threadId) ?? summary(threadId);
     },
-    deleteBinding: vi.fn(async (threadId: string) => {
+    disable: vi.fn(async (threadId: string) => {
       await store.update((state) => {
         const meta = state.threadMeta[threadId];
-        if (meta) delete meta.browserBinding;
+        if (meta) {
+          delete meta.browserEnabled;
+          delete meta.browserBinding;
+        }
       });
     }),
   });
@@ -584,6 +655,13 @@ class FakeProjection extends EventEmitter {
           id: "project",
           displayName: "Project",
           path: "/work",
+          createdAt: "2026-01-01",
+          updatedAt: "2026-01-01",
+        },
+        {
+          id: "unused-project",
+          displayName: "Unused",
+          path: "/unused",
           createdAt: "2026-01-01",
           updatedAt: "2026-01-01",
         },

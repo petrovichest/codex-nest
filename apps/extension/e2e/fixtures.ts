@@ -43,7 +43,14 @@ export const test = base.extend<ExtensionFixtures>({
               version: 1,
               locale: "en",
               projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
-              threads: [],
+              threads: [
+                {
+                  id: "thread-existing",
+                  projectId: "project-1",
+                  title: "Enabled Browser Session",
+                  state: "idle",
+                },
+              ],
             }),
           );
         } else if (frame.type === "session.request") {
@@ -56,7 +63,7 @@ export const test = base.extend<ExtensionFixtures>({
               thread: {
                 id: existing ? frame.target.threadId : "thread-1",
                 projectId: "project-1",
-                title: existing ? "Existing Browser Session" : "Browser E2E",
+                title: existing ? "Enabled Browser Session" : "Browser E2E",
                 state: "idle",
               },
             }),

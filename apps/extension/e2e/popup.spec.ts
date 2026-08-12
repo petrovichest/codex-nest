@@ -35,7 +35,30 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
   await page.locator("#owner-token").fill("owner-token");
   await page.getByRole("button", { name: "Connect" }).click();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await page.evaluate(async () => {
+    const tabs = await chrome.tabs.query({});
+    const target = tabs.find((tab) => tab.url === "http://browser.test/");
+    if (target?.id === undefined) throw new Error("E2E target tab is unavailable");
+    await chrome.tabs.update(target.id, { active: true });
+  });
+  browserServer.sendServerFrame({
+    type: "catalog.updated",
+    projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
+    threads: [
+      {
+        id: "thread-existing",
+        projectId: "project-1",
+        title: "Enabled Browser Session",
+        state: "idle",
+      },
+    ],
+  });
   await expect(page.locator('select optgroup[label="E2E Project"]')).toHaveCount(1);
+  await expect(page.locator('option[value^="new:"]')).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "New session" })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: /^Existing/ })).toHaveCount(0);
+  await expect(page.locator("select")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Attach current tab" })).toBeDisabled();
   await expect
     .poll(() => clientFrames.find((frame) => frame.type === "client.hello"))
     .toMatchObject({
@@ -44,17 +67,14 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
       instanceId: expect.any(String),
     });
 
-  const attachResponse = await page.evaluate(async () => {
-    const tabs = await chrome.tabs.query({});
-    const targetTab = tabs.find((tab) => tab.url === "http://browser.test/");
-    if (targetTab?.id === undefined) throw new Error("E2E target tab is unavailable");
-    return chrome.runtime.sendMessage({
-      type: "popup.createAttach",
-      target: { kind: "new", projectId: "project-1" },
-      tabId: targetTab.id,
-    });
-  });
-  expect(attachResponse).toMatchObject({ ok: true });
+  await page.locator("select").selectOption("thread-existing");
+  await page.getByRole("button", { name: "Attach current tab" }).click();
+  await expect
+    .poll(() => clientFrames.find((frame) => frame.type === "session.request")?.target)
+    .toEqual({ kind: "existing", threadId: "thread-existing" });
+  expect(
+    clientFrames.some((frame) => frame.type === "session.request" && frame.target.kind === "new"),
+  ).toBe(false);
   await expect
     .poll(() => {
       const result = clientFrames.find(
@@ -63,7 +83,7 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
       return result?.type === "tool.result" ? result.result : null;
     })
     .toMatchObject({ value: "CodexNest E2E" });
-  await expect(page.getByText("Browser E2E", { exact: true })).toBeVisible();
+  await expect(page.getByText("Attached", { exact: true })).toBeVisible();
   await page.locator(".binding-card .danger-button").click();
   await expect
     .poll(() => clientFrames.some((frame) => frame.type === "binding.detached"))
@@ -106,11 +126,25 @@ test("keeps the session select stable across background catalog updates", async 
   browserServer.sendServerFrame({
     type: "catalog.updated",
     projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
+    threads: [],
+  });
+  await expect(
+    page.getByText("Enable Browser in a CodexNest session to attach this tab.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("select optgroup")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Attach current tab" })).toBeDisabled();
+
+  browserServer.sendServerFrame({
+    type: "catalog.updated",
+    projects: [
+      { id: "project-1", displayName: "E2E Project", path: "/work" },
+      { id: "project-empty", displayName: "Empty Project", path: "/empty" },
+    ],
     threads: [
       {
         id: "thread-existing",
         projectId: "project-1",
-        title: "Existing Browser Session",
+        title: "Enabled Browser Session",
         state: "idle",
       },
       {
@@ -119,9 +153,19 @@ test("keeps the session select stable across background catalog updates", async 
         title: "Before Focus",
         state: "idle",
       },
+      {
+        id: "thread-busy",
+        projectId: "project-1",
+        title: "Busy Session",
+        state: "needsAttention",
+      },
     ],
   });
-  await expect(page.locator('option[value="existing:thread-before-focus"]')).toHaveCount(1);
+  await expect(page.locator('option[value="thread-before-focus"]')).toHaveCount(1);
+  await expect(page.locator('optgroup[label="Empty Project"]')).toHaveCount(0);
+  await expect(page.locator('option[value="thread-busy"]')).toHaveAttribute("disabled", "");
+  await expect(page.locator('option[value="thread-busy"]')).toHaveText("Busy Session — Busy");
+  await expect(page.locator('option[value^="new:"]')).toHaveCount(0);
 
   await page.evaluate(() => {
     const receivedThreadIds: string[] = [];
@@ -138,6 +182,8 @@ test("keeps the session select stable across background catalog updates", async 
   const select = page.locator("select");
   const originalSelect = await select.elementHandle();
   if (!originalSelect) throw new Error("Session select is unavailable");
+  await select.selectOption("thread-existing");
+  await expect(page.getByRole("button", { name: "Attach current tab" })).toBeEnabled();
   await select.focus();
   await expect(select).toBeFocused();
 
@@ -148,7 +194,7 @@ test("keeps the session select stable across background catalog updates", async 
       {
         id: "thread-existing",
         projectId: "project-1",
-        title: "Existing Browser Session",
+        title: "Enabled Browser Session",
         state: "idle",
       },
       {
@@ -172,9 +218,9 @@ test("keeps the session select stable across background catalog updates", async 
     await page.evaluate((node) => node === document.querySelector("select"), originalSelect),
   ).toBe(true);
   await expect(select).toBeFocused();
+  await expect(select).toHaveValue("thread-existing");
 
-  await select.selectOption("existing:thread-existing");
-  await page.getByRole("button", { name: "Create / attach current tab" }).click();
+  await page.getByRole("button", { name: "Attach current tab" }).click();
   await expect
     .poll(
       () => browserServer.clientFrames.find((frame) => frame.type === "session.request")?.target,

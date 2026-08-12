@@ -1014,6 +1014,7 @@ export type InterruptTurnRequest = {
 export type UpdateThreadRequest = {
   name?: string;
   pinned?: boolean;
+  browserEnabled?: boolean;
 };
 
 export type MarkReadRequest = {

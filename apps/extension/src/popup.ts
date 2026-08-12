@@ -41,23 +41,19 @@ const copy = {
     reconnecting: "Reconnecting",
     pending: "Setup needed",
     error: "Connection error",
-    project: "Project",
     session: "Session",
-    chooseProject: "Choose a project",
-    chooseSession: "Choose a new or existing session",
-    newSession: "New session",
-    existingSession: "Existing",
-    attach: "Create / attach current tab",
+    chooseSession: "Choose a session",
+    busySession: "Busy",
+    attach: "Attach current tab",
     currentTab: "Current tab",
     noTab: "No accessible active tab",
     attached: "Attached",
     detach: "Detach",
     open: "Open in CodexNest",
     otherSessions: "Other browser sessions",
-    noProjects: "No projects are available yet.",
+    emptyCatalog: "Enable Browser in a CodexNest session to attach this tab.",
     editSetup: "Edit connection",
     savePending: "Saving…",
-    working: "Working…",
     tabCount: (count: number) => `${count} ${count === 1 ? "tab" : "tabs"}`,
   },
   ru: {
@@ -72,23 +68,19 @@ const copy = {
     reconnecting: "Переподключение",
     pending: "Нужна настройка",
     error: "Ошибка подключения",
-    project: "Проект",
     session: "Сессия",
-    chooseProject: "Выберите проект",
-    chooseSession: "Выберите новую или существующую сессию",
-    newSession: "Новая сессия",
-    existingSession: "Существующая",
-    attach: "Создать / подключить вкладку",
+    chooseSession: "Выберите сессию",
+    busySession: "Занята",
+    attach: "Подключить вкладку",
     currentTab: "Текущая вкладка",
     noTab: "Нет доступной активной вкладки",
     attached: "Подключена",
     detach: "Отключить",
     open: "Открыть в CodexNest",
     otherSessions: "Другие браузерные сессии",
-    noProjects: "Проекты пока недоступны.",
+    emptyCatalog: "Включите Browser в сессии CodexNest, чтобы подключить эту вкладку.",
     editSetup: "Изменить подключение",
     savePending: "Сохранение…",
-    working: "Выполняется…",
     tabCount: (count: number) => `${count} ${pluralRu(count, "вкладка", "вкладки", "вкладок")}`,
   },
 } as const;
@@ -101,6 +93,7 @@ let localError: string | null = null;
 let setupOverride = false;
 let selectedTarget = "";
 let interactingSelect: HTMLSelectElement | null = null;
+let interactingAttachButton: HTMLButtonElement | null = null;
 let deferredBackgroundRender = false;
 let selectInteractionTimer: number | undefined;
 
@@ -123,9 +116,11 @@ function applyBackgroundSnapshot(state: PopupSnapshot, resetTarget = false): voi
   snapshot = state;
   if (interactingSelect) {
     deferredBackgroundRender = true;
+    if (interactingAttachButton)
+      interactingAttachButton.disabled = !canAttach(state, selectedTarget);
     return;
   }
-  if (resetTarget || !targetAvailable(state, selectedTarget)) selectedTarget = defaultTarget(state);
+  if (resetTarget || !targetAvailable(state, selectedTarget)) selectedTarget = "";
   render();
 }
 
@@ -133,6 +128,7 @@ function render(): void {
   if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
   selectInteractionTimer = undefined;
   interactingSelect = null;
+  interactingAttachButton = null;
   deferredBackgroundRender = false;
   app.replaceChildren();
   const language = snapshot?.locale ?? browserLanguage();
@@ -259,29 +255,42 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
     disabled: state.status !== "connected" || busy,
   }) as HTMLSelectElement;
   select.append(el("option", { value: "", textContent: text.chooseSession }));
+  let catalogThreadCount = 0;
   for (const project of state.projects) {
+    const projectThreads = state.threads.filter((candidate) => candidate.projectId === project.id);
+    if (!projectThreads.length) continue;
     const group = el("optgroup", {
       label: project.displayName || project.path,
     }) as HTMLOptGroupElement;
-    group.append(el("option", { value: `new:${project.id}`, textContent: text.newSession }));
-    for (const thread of state.threads.filter((candidate) => candidate.projectId === project.id)) {
+    for (const thread of projectThreads) {
+      const threadBusy = isBusyThread(thread);
       group.append(
         el("option", {
-          value: `existing:${thread.id}`,
-          textContent: `${text.existingSession} · ${thread.title}`,
+          value: thread.id,
+          textContent: threadBusy ? `${thread.title} — ${text.busySession}` : thread.title,
+          disabled: threadBusy,
         }),
       );
+      catalogThreadCount += 1;
     }
     select.append(group);
   }
   if (targetAvailable(state, selectedTarget)) select.value = selectedTarget;
+  const button = el("button", {
+    className: "primary-button",
+    type: "button",
+    textContent: text.attach,
+    disabled: !canAttach(state, select.value),
+  }) as HTMLButtonElement;
   select.addEventListener("focus", () => {
     if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
     selectInteractionTimer = undefined;
     interactingSelect = select;
+    interactingAttachButton = button;
   });
   select.addEventListener("change", () => {
     selectedTarget = select.value;
+    button.disabled = !canAttach(snapshot ?? state, selectedTarget);
   });
   select.addEventListener("blur", () => {
     selectedTarget = select.value;
@@ -293,21 +302,19 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
     }, 0);
   });
   label.append(select);
-  const button = el("button", {
-    className: "primary-button",
-    type: "button",
-    textContent: busy ? text.working : text.attach,
-    disabled: busy || state.status !== "connected" || !state.projects.length,
-  });
   button.addEventListener("mousedown", (event) => {
     if (interactingSelect === select) event.preventDefault();
   });
   button.addEventListener("click", () => {
     const target = select.value;
     selectedTarget = target;
+    const latestState = snapshot ?? state;
+    if (!canAttach(latestState, target)) {
+      finishSelectInteraction(select, true);
+      return;
+    }
     finishSelectInteraction(select, false);
     void act(async () => {
-      if (!target) throw new Error(text.chooseSession);
       snapshot = await request<PopupSnapshot>({
         type: "popup.createAttach",
         target: parseTarget(target),
@@ -316,8 +323,8 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
     });
   });
   card.append(label);
-  if (!state.projects.length)
-    card.append(el("p", { className: "empty-inline", textContent: text.noProjects }));
+  if (!catalogThreadCount)
+    card.append(el("p", { className: "empty-inline", textContent: text.emptyCatalog }));
   const cardError = errorNotice(localError ?? state.error);
   if (cardError) card.append(cardError);
   card.append(button);
@@ -329,33 +336,33 @@ function finishSelectInteraction(select: HTMLSelectElement, applyDeferredState: 
   if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
   selectInteractionTimer = undefined;
   interactingSelect = null;
+  interactingAttachButton = null;
   if (!applyDeferredState || !deferredBackgroundRender) return;
-  if (snapshot && !targetAvailable(snapshot, selectedTarget))
-    selectedTarget = defaultTarget(snapshot);
+  if (snapshot && !targetAvailable(snapshot, selectedTarget)) selectedTarget = "";
   render();
-}
-
-function defaultTarget(state: PopupSnapshot): string {
-  const project = state.projects[0];
-  return project ? `new:${project.id}` : "";
 }
 
 function targetAvailable(state: PopupSnapshot, value: string): boolean {
   if (!value) return false;
-  const target = parseTarget(value);
-  return target.kind === "new"
-    ? state.projects.some((project) => project.id === target.projectId)
-    : state.threads.some((thread) => thread.id === target.threadId);
+  const thread = state.threads.find((candidate) => candidate.id === value);
+  return Boolean(thread && state.projects.some((project) => project.id === thread.projectId));
 }
 
-function parseTarget(value: string): SessionTarget {
-  const separator = value.indexOf(":");
-  const kind = value.slice(0, separator);
-  const id = value.slice(separator + 1);
-  if (separator < 1 || !id) throw new Error("Select a browser session");
-  if (kind === "new") return { kind: "new", projectId: id };
-  if (kind === "existing") return { kind: "existing", threadId: id };
-  throw new Error("Select a browser session");
+function canAttach(state: PopupSnapshot, value: string): boolean {
+  if (busy || state.status !== "connected" || !targetAvailable(state, value)) return false;
+  const thread = state.threads.find((candidate) => candidate.id === value);
+  return Boolean(thread && !isBusyThread(thread));
+}
+
+function isBusyThread(thread: ThreadSummary): boolean {
+  return (
+    thread.state === "running" || thread.state === "queued" || thread.state === "needsAttention"
+  );
+}
+
+function parseTarget(value: string): Extract<SessionTarget, { kind: "existing" }> {
+  if (!value) throw new Error("Select a browser session");
+  return { kind: "existing", threadId: value };
 }
 
 function bindingCard(

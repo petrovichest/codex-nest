@@ -3005,7 +3005,7 @@ describe("thread settings", () => {
 });
 
 describe("browser thread lifecycle", () => {
-  it("waits for idle, rolls back failed attach, merges Team config, creates fresh, and deletes", async () => {
+  it("requires explicit opt-in, rejects busy changes, rolls back attach, and fully disables", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-api-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -3046,6 +3046,40 @@ describe("browser thread lifecycle", () => {
       },
     );
     await app.ready();
+    projection.upsertThread({ ...testThread("native-child"), parentThreadId: "thread" });
+    projection.upsertThread(testThread("archived-browser"), true);
+    projection.upsertThread({ ...testThread("outside-project"), cwd: "/outside" });
+    projection.upsertThread(testThread("managed-child"));
+    await store.update((state) => {
+      state.threadMeta["managed-child"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "thread", taskId: "task" },
+      };
+    });
+    for (const threadId of [
+      "native-child",
+      "archived-browser",
+      "outside-project",
+      "managed-child",
+    ]) {
+      const rejected = await app.inject({
+        method: "PATCH",
+        url: `/api/v1/threads/${threadId}`,
+        headers: { authorization: "Bearer correct" },
+        payload: { browserEnabled: true },
+      });
+      expect(rejected.statusCode).toBe(409);
+      expect(store.view().threadMeta[threadId]?.browserEnabled).toBeUndefined();
+    }
+    await store.update((state) => {
+      state.threadMeta.thread!.browserBinding = {
+        bindingId: "legacy-binding",
+        instanceId: "extension-instance-1",
+        attachedAt: 1,
+      };
+    });
+    expect(projection.summary("thread")?.browserStatus).toBe("disabled");
     const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
       headers: { origin: "http://localhost" },
     });
@@ -3069,26 +3103,66 @@ describe("browser thread lifecycle", () => {
     );
     await frames.nextType("server.hello");
 
+    const invalidCombinedPatch = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread",
+      headers: { authorization: "Bearer correct" },
+      payload: { browserEnabled: true, pinned: "yes" },
+    });
+    expect(invalidCombinedPatch.statusCode).toBe(400);
+    expect(store.view().threadMeta.thread?.browserEnabled).toBeUndefined();
+
     await projection.setCurrentTurn("thread", "busy-turn");
-    bridge.failBrowserResumeOnce = true;
+    const busyEnable = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread",
+      headers: { authorization: "Bearer correct" },
+      payload: { browserEnabled: true },
+    });
+    expect(busyEnable.statusCode).toBe(409);
+    expect(store.view().threadMeta.thread?.browserEnabled).toBeUndefined();
+    await projection.markInterrupted("thread", ["busy-turn"]);
+
+    const enabled = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread",
+      headers: { authorization: "Bearer correct" },
+      payload: { browserEnabled: true },
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json()).toMatchObject({ browserStatus: "disconnected" });
+    expect(store.view().threadMeta.thread?.browserEnabled).toBe(true);
+    expect(store.view().threadMeta.thread?.browserBinding).toBeUndefined();
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).not.toHaveProperty("config.mcp_servers");
+
+    await projection.setCurrentTurn("thread", "busy-attach");
     socket.send(
       JSON.stringify({
         type: "session.request",
-        requestId: "attach-pending",
+        requestId: "attach-busy",
         target: { kind: "existing", threadId: "thread" },
         tab: browserTabSummary(),
       }),
     );
-    let attachSettled = false;
-    const pendingAttach = frames.nextType("session.error").then((frame) => {
-      attachSettled = true;
-      return frame;
+    expect(await frames.nextType("session.error")).toMatchObject({
+      requestId: "attach-busy",
+      error: { code: "thread_busy" },
     });
-    await nextImmediate();
-    expect(attachSettled).toBe(false);
-    await projection.markInterrupted("thread", ["busy-turn"]);
-    expect(await pendingAttach).toMatchObject({
-      requestId: "attach-pending",
+    await projection.markInterrupted("thread", ["busy-attach"]);
+
+    bridge.failBrowserResumeOnce = true;
+    socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-failed",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await frames.nextType("session.error")).toMatchObject({
+      requestId: "attach-failed",
       error: expect.any(Object),
     });
     expect(store.view().threadMeta.thread?.browserBinding).toBeUndefined();
@@ -3142,6 +3216,15 @@ describe("browser thread lifecycle", () => {
         mcp_servers: { codexnest_browser: expect.any(Object) },
       },
     });
+    const detached = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread",
+      headers: { authorization: "Bearer correct" },
+      payload: { browserEnabled: false },
+    });
+    expect(detached.statusCode).toBe(409);
+    expect(store.view().threadMeta.thread?.browserEnabled).toBe(true);
+
     const interrupted = await app.inject({
       method: "POST",
       url: "/api/v1/threads/thread/interrupt",
@@ -3150,25 +3233,23 @@ describe("browser thread lifecycle", () => {
     });
     expect(interrupted.statusCode).toBe(204);
 
-    const detached = await app.inject({
+    const disabled = await app.inject({
       method: "DELETE",
       url: "/api/v1/threads/thread/browser-binding",
       headers: { authorization: "Bearer correct" },
     });
-    expect(detached.statusCode).toBe(204);
+    expect(disabled.statusCode).toBe(204);
     expect(await frames.nextType("binding.detach")).toMatchObject({ threadId: "thread" });
-    expect(store.view().threadMeta.thread?.browserBinding).toMatchObject({
-      instanceId: "extension-instance-1",
-      detachedAt: expect.any(Number),
-    });
+    expect(store.view().threadMeta.thread?.browserBinding).toBeUndefined();
+    expect(store.view().threadMeta.thread?.browserEnabled).toBeUndefined();
     expect(
       bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
     ).toMatchObject({
-      config: {
-        agents: { enabled: false },
-        mcp_servers: { codexnest_browser: expect.any(Object) },
-      },
+      config: { agents: { enabled: false } },
     });
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).not.toHaveProperty("config.mcp_servers");
 
     socket.send(
       JSON.stringify({
@@ -3178,24 +3259,9 @@ describe("browser thread lifecycle", () => {
         tab: browserTabSummary(),
       }),
     );
-    expect(await frames.nextType("session.result")).toMatchObject({
+    expect(await frames.nextType("session.error")).toMatchObject({
       requestId: "create-fresh",
-      action: "created",
-      thread: { id: "created" },
-    });
-    const browserStart = bridge.request.mock.calls.findLast(
-      ([method, params]) =>
-        method === "thread/start" &&
-        String((params as Record<string, unknown>).threadSource).startsWith("codexnest-browser:"),
-    );
-    expect(browserStart?.[1]).toMatchObject({
-      cwd: "/work",
-      threadSource: expect.stringMatching(/^codexnest-browser:/),
-      config: { mcp_servers: { codexnest_browser: expect.any(Object) } },
-      dynamicTools: expect.any(Array),
-    });
-    expect(store.view().threadMeta.created?.browserBinding).toMatchObject({
-      instanceId: "extension-instance-1",
+      error: { code: "unsupported" },
     });
 
     socket.terminate();

@@ -1785,7 +1785,7 @@ function ThreadLink({
           aria-hidden="true"
           className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
           title={
-            thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер отключён")
+            thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
           }
         >
           <BrowserIcon />

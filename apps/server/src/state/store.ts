@@ -221,6 +221,7 @@ export interface ThreadMetaState {
     parentThreadId: string;
     taskId: string;
   };
+  browserEnabled?: true;
   browserBinding?: BrowserBindingState;
   unmaterialized?: boolean;
   draft?: ThreadDraft;
@@ -1092,6 +1093,7 @@ function validateState(value: unknown): CodexNestState {
       (meta.sessionArtifacts !== undefined && meta.sessionArtifactsVersion !== 1) ||
       (meta.sessionArtifacts !== undefined && !isSessionArtifacts(meta.sessionArtifacts)) ||
       (meta.managedParent !== undefined && !isManagedParent(meta.managedParent)) ||
+      (meta.browserEnabled !== undefined && meta.browserEnabled !== true) ||
       (meta.browserBinding !== undefined && !isBrowserBinding(meta.browserBinding)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||

@@ -1248,20 +1248,108 @@ describe("Activity", () => {
     expect(api.archive).toHaveBeenCalledWith("thread", true);
   });
 
-  it("shows browser status and detaches the binding from the header", async () => {
+  it.each([
+    ["disabled", "Включить браузер", "Включить браузер", "false"],
+    ["disconnected", "Браузер включён", "Выключить браузер", "true"],
+    ["connected", "Браузер подключён", "Выключить браузер", "true"],
+  ] as const)(
+    "shows the %s browser state as a single accessible header button",
+    (browserStatus, visibleLabel, accessibleLabel, pressed) => {
+      const api = threadApi();
+      mockThreadConnection(api, { ...summary, browserStatus });
+      renderThread();
+
+      const button = screen.getByRole("button", { name: accessibleLabel });
+      expect(button).toHaveTextContent(visibleLabel);
+      expect(button).toHaveAttribute("aria-pressed", pressed);
+      expect(button).toHaveClass(`browser-session-status-${browserStatus}`);
+      expect(button).toHaveAttribute("title", accessibleLabel);
+    },
+  );
+
+  it("waits for the browser update response, dispatches it, and blocks a second request", async () => {
     const api = threadApi();
-    const browserThread = { ...summary, browserStatus: "connected" as const };
+    const browserThread = { ...summary, browserStatus: "disabled" as const };
+    const updatedThread = { ...browserThread, browserStatus: "disconnected" as const };
+    let resolveUpdate: ((thread: ThreadSummary) => void) | undefined;
+    api.updateThread.mockImplementationOnce(
+      () => new Promise<ThreadSummary>((resolve) => (resolveUpdate = resolve)),
+    );
     const context = mockThreadConnection(api, browserThread);
     renderThread();
 
-    expect(screen.getByText("Браузер подключён")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Отсоединить браузер от сессии" }));
+    const button = screen.getByRole("button", { name: "Включить браузер" });
+    fireEvent.click(button);
+    fireEvent.click(button);
 
-    await waitFor(() => expect(api.detachBrowser).toHaveBeenCalledWith("thread"));
-    expect(context.dispatch).toHaveBeenCalledWith({
-      type: "thread",
-      thread: { ...browserThread, browserStatus: "disconnected" },
-    });
+    expect(api.updateThread).toHaveBeenCalledOnce();
+    expect(api.updateThread).toHaveBeenCalledWith("thread", { browserEnabled: true });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button).toHaveTextContent("Включить браузер");
+    expect(context.dispatch).not.toHaveBeenCalled();
+
+    await act(async () => resolveUpdate?.(updatedThread));
+
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: updatedThread });
+  });
+
+  it("requests browser opt-out from a pressed state", async () => {
+    const api = threadApi();
+    const browserThread = { ...summary, browserStatus: "connected" as const };
+    const updatedThread = { ...browserThread, browserStatus: "disabled" as const };
+    api.updateThread.mockResolvedValueOnce(updatedThread);
+    const context = mockThreadConnection(api, browserThread);
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Выключить браузер" }));
+
+    await waitFor(() =>
+      expect(api.updateThread).toHaveBeenCalledWith("thread", { browserEnabled: false }),
+    );
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: updatedThread });
+  });
+
+  it.each([
+    ["active turn", "idle", "active-turn"],
+    ["running state", "running", null],
+    ["queued state", "queued", null],
+    ["attention state", "needsAttention", null],
+  ] as const)("locks browser switching for %s", (_label, state, currentTurnId) => {
+    const api = threadApi();
+    mockThreadConnection(api, { ...summary, state, currentTurnId });
+    renderThread();
+
+    const button = screen.getByRole("button", { name: "Включить браузер" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      "title",
+      "Дождитесь завершения текущего хода, чтобы изменить доступ браузера",
+    );
+    fireEvent.click(button);
+    expect(api.updateThread).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["archived", { archived: true }],
+    [
+      "subagent",
+      {
+        relation: {
+          kind: "subagent" as const,
+          sessionId: "session",
+          parentThreadId: "parent",
+          nickname: null,
+          role: null,
+        },
+      },
+    ],
+  ])("hides browser switching for %s sessions", (_label, patch) => {
+    const api = threadApi();
+    mockThreadConnection(api, { ...summary, ...patch });
+    renderThread();
+
+    expect(screen.queryByRole("button", { name: "Включить браузер" })).not.toBeInTheDocument();
   });
 
   it("blocks an exact duplicate of the active turn user message and preserves the draft", async () => {
@@ -4426,8 +4514,7 @@ function threadApi() {
     updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),
     deleteQueued: vi.fn().mockResolvedValue(undefined),
     interrupt: vi.fn().mockResolvedValue(undefined),
-    detachBrowser: vi.fn().mockResolvedValue(undefined),
-    updateThread: vi.fn().mockResolvedValue(undefined),
+    updateThread: vi.fn().mockResolvedValue(summary),
     updateThreadSettings: vi.fn().mockImplementation((_id, patch) =>
       Promise.resolve({
         ...summary,

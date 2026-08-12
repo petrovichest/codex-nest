@@ -16,7 +16,6 @@ import {
   BROWSER_MAX_PROJECT_FILE_BYTES,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
-  isActiveFeedEligible,
   isBrowserExtensionClientFrame,
   type BrowserExtensionBindingSummary,
   type BrowserExtensionClientFrame,
@@ -41,9 +40,9 @@ const INTERNAL_SECRET_HEADER = "x-codexnest-browser-secret";
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 
 export interface BrowserExtensionLifecycle {
-  create(instanceId: string, projectId: string, bindingId: string): Promise<ThreadSummary>;
+  enable(threadId: string): Promise<void>;
   attach(instanceId: string, threadId: string, bindingId: string): Promise<ThreadSummary>;
-  deleteBinding(threadId: string): Promise<void>;
+  disable(threadId: string): Promise<void>;
 }
 
 export interface BrowserExtensionOptions {
@@ -111,6 +110,7 @@ export class BrowserExtensionServer {
   private readonly connections = new Map<string, ExtensionConnection>();
   private readonly pendingTools = new Map<string, PendingToolCall>();
   private readonly pendingFileTransfers = new Map<string, PendingFileTransfer>();
+  private readonly pendingBindingThreads = new Map<string, string>();
   private readonly connectionEvents = new EventEmitter();
   private lifecycle?: BrowserExtensionLifecycle;
   private heartbeat?: NodeJS.Timeout;
@@ -186,13 +186,17 @@ export class BrowserExtensionServer {
   }
 
   browserStatus(threadId: string): BrowserThreadStatus {
-    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
-    if (!binding) return "disabled";
+    const meta = this.store.view().threadMeta[threadId];
+    if (meta?.browserEnabled !== true) return "disabled";
+    const binding = meta.browserBinding;
+    if (!binding) return "disconnected";
     return this.isBindingConnected(threadId, binding) ? "connected" : "disconnected";
   }
 
   bindingForThread(threadId: string): BrowserBindingState | undefined {
-    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
+    const meta = this.store.view().threadMeta[threadId];
+    if (meta?.browserEnabled !== true) return undefined;
+    const binding = meta.browserBinding;
     return binding ? structuredClone(binding) : undefined;
   }
 
@@ -211,7 +215,8 @@ export class BrowserExtensionServer {
   }
 
   runtimeConfig(threadId: string, base: Record<string, unknown> = {}): Record<string, unknown> {
-    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
+    const meta = this.store.view().threadMeta[threadId];
+    const binding = meta?.browserEnabled === true ? meta.browserBinding : undefined;
     return binding ? this.mcpConfig(binding.bindingId, base) : base;
   }
 
@@ -228,9 +233,10 @@ export class BrowserExtensionServer {
   }
 
   async detachThread(threadId: string): Promise<ThreadSummary> {
-    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
-    if (!binding) throw new BrowserExtensionError("not_found", "Browser binding not found");
-    return this.markDetached(binding.instanceId, threadId, binding.bindingId, true);
+    await this.disableThread(threadId);
+    const summary = this.projection.summary(threadId);
+    if (!summary) throw new BrowserExtensionError("not_found", "Thread not found");
+    return summary;
   }
 
   private async markDetached(
@@ -275,20 +281,38 @@ export class BrowserExtensionServer {
     return summary;
   }
 
-  async deleteBinding(threadId: string): Promise<void> {
-    if (!this.store.view().threadMeta[threadId]?.browserBinding) {
-      throw new BrowserExtensionError("not_found", "Browser binding not found");
-    }
+  async enableThread(threadId: string): Promise<void> {
     if (!this.lifecycle)
       throw new BrowserExtensionError("unavailable", "Browser lifecycle unavailable");
-    const binding = this.store.view().threadMeta[threadId]!.browserBinding!;
-    await this.lifecycle.deleteBinding(threadId);
+    const staleBinding =
+      this.store.view().threadMeta[threadId]?.browserEnabled === true
+        ? undefined
+        : this.store.view().threadMeta[threadId]?.browserBinding;
+    await this.lifecycle.enable(threadId);
+    if (staleBinding) this.detachConnection(threadId, staleBinding);
+    this.projection.publishThreadState(threadId);
+    this.connectionEvents.emit("changed");
+  }
+
+  async disableThread(threadId: string): Promise<void> {
+    if (!this.lifecycle)
+      throw new BrowserExtensionError("unavailable", "Browser lifecycle unavailable");
+    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
+    await this.lifecycle.disable(threadId);
+    if (binding) this.detachConnection(threadId, binding);
+    this.projection.publishThreadState(threadId);
+    this.connectionEvents.emit("changed");
+  }
+
+  async deleteBinding(threadId: string): Promise<void> {
+    await this.disableThread(threadId);
+  }
+
+  private detachConnection(threadId: string, binding: BrowserBindingState): void {
     const connection = this.connections.get(binding.instanceId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     connection?.bindingThreadIds.delete(threadId);
     this.send(connection?.socket, { type: "binding.detach", threadId });
-    this.projection.publishThreadState(threadId);
-    this.connectionEvents.emit("changed");
   }
 
   forgetThread(threadId: string): void {
@@ -356,8 +380,11 @@ export class BrowserExtensionServer {
         const previous = this.connections.get(frame.instanceId);
         const bindingThreadIds = new Set(
           frame.bindings.flatMap((binding) => {
-            const stored = this.store.view().threadMeta[binding.threadId]?.browserBinding;
-            return stored?.instanceId === frame.instanceId && stored.detachedAt === undefined
+            const meta = this.store.view().threadMeta[binding.threadId];
+            const stored = meta?.browserBinding;
+            return meta?.browserEnabled === true &&
+              stored?.instanceId === frame.instanceId &&
+              stored.detachedAt === undefined
               ? [binding.threadId]
               : [];
           }),
@@ -379,13 +406,9 @@ export class BrowserExtensionServer {
           locale: this.store.view().uiLanguage,
           ...catalog,
         });
-        for (const [threadId, meta] of Object.entries(this.store.view().threadMeta)) {
-          if (
-            meta.browserBinding?.instanceId === frame.instanceId &&
-            meta.browserBinding.detachedAt !== undefined &&
-            frame.bindings.some((binding) => binding.threadId === threadId)
-          ) {
-            this.send(socket, { type: "binding.detach", threadId });
+        for (const binding of frame.bindings) {
+          if (!bindingThreadIds.has(binding.threadId)) {
+            this.send(socket, { type: "binding.detach", threadId: binding.threadId });
           }
         }
         this.publishInstanceBindings(frame.instanceId);
@@ -445,31 +468,34 @@ export class BrowserExtensionServer {
     frame: Extract<BrowserExtensionClientFrame, { type: "session.request" }>,
   ): Promise<void> {
     try {
+      if (frame.target.kind === "new") {
+        throw new BrowserExtensionError(
+          "unsupported",
+          "Creating browser sessions from the extension is no longer supported",
+        );
+      }
       if (!this.lifecycle) {
         throw new BrowserExtensionError("unavailable", "Browser lifecycle unavailable");
       }
+      const existing = this.bindingForThread(frame.target.threadId);
+      const bindingId = existing?.bindingId ?? randomUUID();
+      this.pendingBindingThreads.set(bindingId, frame.target.threadId);
       let thread: ThreadSummary;
-      let action: "created" | "attached";
-      if (frame.target.kind === "new") {
-        thread = await this.lifecycle.create(
-          connection.instanceId,
-          frame.target.projectId,
-          randomUUID(),
-        );
-        action = "created";
-      } else {
-        const existing = this.bindingForThread(frame.target.threadId);
+      try {
         thread = await this.lifecycle.attach(
           connection.instanceId,
           frame.target.threadId,
-          existing?.bindingId ?? randomUUID(),
+          bindingId,
         );
-        action = "attached";
+      } finally {
+        if (this.pendingBindingThreads.get(bindingId) === frame.target.threadId) {
+          this.pendingBindingThreads.delete(bindingId);
+        }
       }
       this.send(connection.socket, {
         type: "session.result",
         requestId: frame.requestId,
-        action,
+        action: "attached",
         thread: browserThreadSummary(thread),
       });
     } catch (error) {
@@ -489,8 +515,12 @@ export class BrowserExtensionServer {
     connection: ExtensionConnection,
     binding: BrowserExtensionBindingSummary,
   ): void {
-    const stored = this.store.view().threadMeta[binding.threadId]?.browserBinding;
-    if (!stored || stored.instanceId !== connection.instanceId) return;
+    const meta = this.store.view().threadMeta[binding.threadId];
+    const stored = meta?.browserBinding;
+    if (meta?.browserEnabled !== true || !stored || stored.instanceId !== connection.instanceId) {
+      this.send(connection.socket, { type: "binding.detach", threadId: binding.threadId });
+      return;
+    }
     if (stored.detachedAt !== undefined) {
       this.send(connection.socket, { type: "binding.detach", threadId: binding.threadId });
       return;
@@ -509,8 +539,9 @@ export class BrowserExtensionServer {
   ): Promise<void> {
     connection.bindingThreadIds.delete(binding.threadId);
     if (connection.activeThreadId === binding.threadId) connection.activeThreadId = null;
-    const stored = this.store.view().threadMeta[binding.threadId]?.browserBinding;
-    if (stored?.instanceId !== connection.instanceId) return;
+    const meta = this.store.view().threadMeta[binding.threadId];
+    const stored = meta?.browserBinding;
+    if (meta?.browserEnabled !== true || stored?.instanceId !== connection.instanceId) return;
     await this.detach(connection.instanceId, binding.threadId).catch(() => undefined);
   }
 
@@ -520,11 +551,13 @@ export class BrowserExtensionServer {
   } {
     const snapshot = this.projection.snapshot();
     const threads = snapshot.threads.flatMap((thread) => {
-      const binding = this.store.view().threadMeta[thread.id]?.browserBinding;
+      const meta = this.store.view().threadMeta[thread.id];
+      const binding = meta?.browserBinding;
       if (
         thread.relation.kind !== "session" ||
-        this.store.view().threadMeta[thread.id]?.managedParent ||
-        !isActiveFeedEligible(thread) ||
+        meta?.managedParent ||
+        meta?.browserEnabled !== true ||
+        thread.archived ||
         !thread.projectId ||
         (binding && binding.instanceId !== instanceId)
       ) {
@@ -532,8 +565,11 @@ export class BrowserExtensionServer {
       }
       return [browserThreadSummary(thread)];
     });
+    const projectIds = new Set(threads.map((thread) => thread.projectId));
     return {
-      projects: snapshot.projects.map(({ id, displayName, path }) => ({ id, displayName, path })),
+      projects: snapshot.projects.flatMap(({ id, displayName, path }) =>
+        projectIds.has(id) ? [{ id, displayName, path }] : [],
+      ),
       threads,
     };
   }
@@ -548,6 +584,9 @@ export class BrowserExtensionServer {
     const id = typeof message.id === "string" || typeof message.id === "number" ? message.id : null;
     if (typeof message.method !== "string") return jsonRpcError(id, -32600, "Invalid Request");
     if (id === null) return null;
+    if (!this.bindingIsAuthorized(bindingId)) {
+      return jsonRpcError(id, -32_001, "Browser binding not found");
+    }
     if (message.method === "initialize") {
       const requestedVersion = isRecord(message.params)
         ? message.params.protocolVersion
@@ -682,8 +721,13 @@ export class BrowserExtensionServer {
     deadline: number,
   ): Promise<ExtensionConnection> {
     for (;;) {
-      const currentBinding = this.store.view().threadMeta[threadId]?.browserBinding;
-      if (!currentBinding || currentBinding.bindingId !== binding.bindingId) {
+      const meta = this.store.view().threadMeta[threadId];
+      const currentBinding = meta?.browserBinding;
+      if (
+        meta?.browserEnabled !== true ||
+        !currentBinding ||
+        currentBinding.bindingId !== binding.bindingId
+      ) {
         throw new BrowserExtensionError("not_found", "Browser binding was removed");
       }
       const connection = this.connections.get(binding.instanceId);
@@ -844,7 +888,11 @@ export class BrowserExtensionServer {
   }
 
   private assertOwnedBinding(instanceId: string, threadId: string): BrowserBindingState {
-    const binding = this.store.view().threadMeta[threadId]?.browserBinding;
+    const meta = this.store.view().threadMeta[threadId];
+    if (meta?.browserEnabled !== true) {
+      throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
+    }
+    const binding = meta.browserBinding;
     if (!binding) throw new BrowserExtensionError("not_found", "Browser binding not found");
     if (binding.instanceId !== instanceId) {
       throw new BrowserExtensionError(
@@ -859,11 +907,19 @@ export class BrowserExtensionServer {
     bindingId: string,
   ): { threadId: string; binding: BrowserBindingState } | undefined {
     for (const [threadId, meta] of Object.entries(this.store.view().threadMeta)) {
-      if (meta.browserBinding?.bindingId === bindingId) {
+      if (meta.browserEnabled === true && meta.browserBinding?.bindingId === bindingId) {
         return { threadId, binding: structuredClone(meta.browserBinding) };
       }
     }
     return undefined;
+  }
+
+  private bindingIsAuthorized(bindingId: string): boolean {
+    if (this.threadForBinding(bindingId)) return true;
+    const threadId = this.pendingBindingThreads.get(bindingId);
+    return (
+      threadId !== undefined && this.store.view().threadMeta[threadId]?.browserEnabled === true
+    );
   }
 
   private isBindingConnected(threadId: string, binding: BrowserBindingState): boolean {
@@ -872,13 +928,14 @@ export class BrowserExtensionServer {
       binding.detachedAt === undefined &&
       connection?.socket.readyState === 1 &&
       connection.bindingThreadIds.has(threadId) &&
+      this.store.view().threadMeta[threadId]?.browserEnabled === true &&
       this.store.view().threadMeta[threadId]?.browserBinding?.bindingId === binding.bindingId
     );
   }
 
   private publishInstanceBindings(instanceId: string): void {
     for (const [threadId, meta] of Object.entries(this.store.view().threadMeta)) {
-      if (meta.browserBinding?.instanceId === instanceId)
+      if (meta.browserEnabled === true && meta.browserBinding?.instanceId === instanceId)
         this.projection.publishThreadState(threadId);
     }
   }

@@ -882,18 +882,31 @@ describe("App routing and navigation", () => {
   });
 
   it("marks browser-enabled sessions in the sidebar", () => {
-    const browserThread = {
+    const connectedThread = {
       ...baseThread,
-      id: "browser-thread",
-      title: "С браузером",
+      id: "connected-browser-thread",
+      title: "Подключённый браузер",
       browserStatus: "connected" as const,
     };
-    mockConnection(snapshot([browserThread]));
-    const view = renderApp("/threads/browser-thread");
+    const enabledThread = {
+      ...baseThread,
+      id: "enabled-browser-thread",
+      title: "Включённый браузер",
+      browserStatus: "disconnected" as const,
+    };
+    mockConnection(snapshot([connectedThread, enabledThread]));
+    const view = renderApp("/threads/connected-browser-thread");
 
-    const marker = view.container.querySelector(".thread-browser-status");
-    expect(marker).toHaveClass("thread-browser-status-connected");
-    expect(marker).toHaveAttribute("title", "Браузер подключён");
+    const connectedMarker = view.container.querySelector(
+      'a[href="/threads/connected-browser-thread"] .thread-browser-status',
+    );
+    const enabledMarker = view.container.querySelector(
+      'a[href="/threads/enabled-browser-thread"] .thread-browser-status',
+    );
+    expect(connectedMarker).toHaveClass("thread-browser-status-connected");
+    expect(connectedMarker).toHaveAttribute("title", "Браузер подключён");
+    expect(enabledMarker).toHaveClass("thread-browser-status-disconnected");
+    expect(enabledMarker).toHaveAttribute("title", "Браузер включён");
   });
 
   it("restores and persists the theme from the settings page", async () => {

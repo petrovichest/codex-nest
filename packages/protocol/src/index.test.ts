@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { ActivityItem, ThreadArtifactsResponse, ThreadSummary } from "./index.js";
+import type {
+  ActivityItem,
+  ThreadArtifactsResponse,
+  ThreadSummary,
+  UpdateThreadRequest,
+} from "./index.js";
 import {
   BROWSER_EXTENSION_PROTOCOL,
   BROWSER_EXTENSION_PROTOCOL_VERSION,
@@ -79,6 +84,11 @@ describe("active feed eligibility", () => {
 });
 
 describe("protocol guards", () => {
+  it("carries browser opt-in on thread updates", () => {
+    const update: UpdateThreadRequest = { browserEnabled: true };
+    expect(update).toEqual({ browserEnabled: true });
+  });
+
   it("accepts authentication and ping client frames", () => {
     expect(isClientFrame({ type: "authenticate", token: "secret" })).toBe(true);
     expect(isClientFrame({ type: "ping" })).toBe(true);

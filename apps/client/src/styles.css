@@ -1411,7 +1411,7 @@
   align-items: center;
   gap: 7px;
   margin-right: 5px;
-  padding: 0 4px 0 9px;
+  padding: 0 9px;
   border: 1px solid var(--color-line);
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-surface) 88%, var(--color-canvas));
@@ -1431,33 +1431,6 @@
 
 .browser-session-status-disconnected > svg {
   color: var(--status-attention);
-}
-
-.browser-session-detach {
-  width: 24px;
-  height: 24px;
-  min-height: 24px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-}
-
-.browser-session-detach:hover {
-  background: var(--sidebar-hover);
-  color: var(--text);
-}
-
-.browser-session-detach svg {
-  width: 13px;
-  height: 13px;
-}
-
-.browser-session-detach:disabled {
-  opacity: 0.5;
 }
 
 .session-refresh.refreshing svg {

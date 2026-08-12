@@ -261,6 +261,7 @@ describe("StateStore", () => {
       state.threadMeta.browser = {
         pinned: false,
         lastReadUpdatedAt: 0,
+        browserEnabled: true,
         browserBinding: {
           bindingId: "binding-1",
           instanceId: "extension-instance-1",
@@ -272,6 +273,7 @@ describe("StateStore", () => {
 
     const reloaded = new StateStore(path);
     await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.browser?.browserEnabled).toBe(true);
     expect(reloaded.snapshot().threadMeta.browser?.browserBinding).toEqual({
       bindingId: "binding-1",
       instanceId: "extension-instance-1",
