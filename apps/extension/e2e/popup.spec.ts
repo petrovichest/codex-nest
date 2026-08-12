@@ -75,3 +75,110 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
   });
   expect(targetGroupId).toBe(-1);
 });
+
+test("keeps the session select stable across background catalog updates", async ({
+  browserServer,
+  context,
+  extensionId,
+}) => {
+  await context.route("http://dropdown.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><title>Dropdown target</title><main>Browser target</main>",
+    }),
+  );
+  const targetPage = await context.newPage();
+  await targetPage.goto("http://dropdown.test/");
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/popup.html`);
+
+  await page.locator("#base-url").fill(browserServer.baseUrl);
+  await page.locator("#owner-token").fill("owner-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+  await page.evaluate(async () => {
+    const tabs = await chrome.tabs.query({});
+    const target = tabs.find((tab) => tab.url === "http://dropdown.test/");
+    if (target?.id === undefined) throw new Error("Dropdown target tab is unavailable");
+    await chrome.tabs.update(target.id, { active: true });
+  });
+  browserServer.sendServerFrame({
+    type: "catalog.updated",
+    projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
+    threads: [
+      {
+        id: "thread-existing",
+        projectId: "project-1",
+        title: "Existing Browser Session",
+        state: "idle",
+      },
+      {
+        id: "thread-before-focus",
+        projectId: "project-1",
+        title: "Before Focus",
+        state: "idle",
+      },
+    ],
+  });
+  await expect(page.locator('option[value="existing:thread-before-focus"]')).toHaveCount(1);
+
+  await page.evaluate(() => {
+    const receivedThreadIds: string[] = [];
+    Object.assign(window, { receivedThreadIds });
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type !== "background.state" || !Array.isArray(message.state?.threads)) return;
+      receivedThreadIds.splice(
+        0,
+        receivedThreadIds.length,
+        ...message.state.threads.map((thread: { id: string }) => thread.id),
+      );
+    });
+  });
+  const select = page.locator("select");
+  const originalSelect = await select.elementHandle();
+  if (!originalSelect) throw new Error("Session select is unavailable");
+  await select.focus();
+  await expect(select).toBeFocused();
+
+  browserServer.sendServerFrame({
+    type: "catalog.updated",
+    projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
+    threads: [
+      {
+        id: "thread-existing",
+        projectId: "project-1",
+        title: "Existing Browser Session",
+        state: "idle",
+      },
+      {
+        id: "thread-background",
+        projectId: "project-1",
+        title: "Background Update",
+        state: "idle",
+      },
+    ],
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as Window & { receivedThreadIds?: string[] }).receivedThreadIds?.includes(
+          "thread-background",
+        ),
+      ),
+    )
+    .toBe(true);
+  expect(
+    await page.evaluate((node) => node === document.querySelector("select"), originalSelect),
+  ).toBe(true);
+  await expect(select).toBeFocused();
+
+  await select.selectOption("existing:thread-existing");
+  await page.getByRole("button", { name: "Create / attach current tab" }).click();
+  await expect
+    .poll(
+      () => browserServer.clientFrames.find((frame) => frame.type === "session.request")?.target,
+    )
+    .toEqual({ kind: "existing", threadId: "thread-existing" });
+  await expect(page.getByText("Attached", { exact: true })).toBeVisible();
+});

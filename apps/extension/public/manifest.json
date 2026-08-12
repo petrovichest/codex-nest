@@ -3,7 +3,7 @@
   "name": "CodexNest Browser",
   "short_name": "CodexNest",
   "description": "Attach Chrome tabs to CodexNest sessions.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "minimum_chrome_version": "116",
   "key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDWKijMNwTCbFtcSSwslEcwVYVbctnfIejtkoEEQODF057dQTJe+h+l8OvrhBYYNL1M8tTDXfz2OyA+XbfzfqPPtGx7ZEmCptRjgTybK2hw+LdENdR5/7sM56751xiC2jhJxi4likwz4jHbNhUPA2RHxla7sXP4+z40LRTd5ntASQIDAQAB",
   "action": {

@@ -1,11 +1,11 @@
 {
   "name": "@codexnest/extension",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "dependencies": {
-    "@codexnest/protocol": "0.1.7"
+    "@codexnest/protocol": "0.1.8"
   },
   "scripts": {
     "dev": "vite build --watch",

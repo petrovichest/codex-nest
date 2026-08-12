@@ -81,7 +81,7 @@ describe("browser extension transport", () => {
     const extension = await connect(harness.app, "extension-instance-1");
     expect((await extension.nextType("server.hello")).threads).toEqual([]);
 
-    const second = summary("second");
+    const second = { ...summary("second"), state: "running" } satisfies ThreadSummary;
     harness.projection.summaries.set(second.id, second);
     harness.projection.emit("event", 2, { type: "thread.upserted", thread: second });
 
@@ -89,6 +89,82 @@ describe("browser extension transport", () => {
     expect(catalog.threads).toEqual([
       expect.objectContaining({ id: "second", projectId: "project" }),
     ]);
+    extension.socket.close();
+    await harness.close();
+  });
+
+  it("catalogs only active eligible root sessions owned by the extension", async () => {
+    const harness = await createHarness();
+    const summaries = [
+      { ...summary("running"), state: "running" },
+      { ...summary("queued"), state: "queued" },
+      { ...summary("needs-attention"), state: "needsAttention" },
+      { ...summary("completed-unread"), state: "completed", unread: true },
+      { ...summary("failed-unread"), state: "failed", unread: true },
+      { ...summary("interrupted-unread"), state: "interrupted", unread: true },
+      { ...summary("queued-message"), queuedMessageCount: 1 },
+      { ...summary("owned-binding"), state: "running" },
+      summary("idle"),
+      { ...summary("completed-read"), state: "completed" },
+      { ...summary("failed-read"), state: "failed" },
+      { ...summary("interrupted-read"), state: "interrupted" },
+      { ...summary("archived"), state: "running", archived: true },
+      {
+        ...summary("subagent"),
+        state: "running",
+        relation: {
+          kind: "subagent",
+          sessionId: "subagent-session",
+          parentThreadId: "running",
+          nickname: null,
+          role: null,
+        },
+      },
+      { ...summary("managed-parent"), state: "running" },
+      { ...summary("foreign-binding"), state: "running" },
+      { ...summary("missing-project"), state: "running", projectId: null },
+    ] satisfies ThreadSummary[];
+    for (const thread of summaries) harness.projection.summaries.set(thread.id, thread);
+    await harness.store.update((state) => {
+      state.threadMeta["managed-parent"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "parent", taskId: "task" },
+      };
+      state.threadMeta["foreign-binding"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserBinding: {
+          bindingId: "foreign-binding-id",
+          instanceId: "extension-instance-2",
+          attachedAt: 1,
+        },
+      };
+      state.threadMeta["owned-binding"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserBinding: {
+          bindingId: "owned-binding-id",
+          instanceId: "extension-instance-1",
+          attachedAt: 1,
+        },
+      };
+    });
+
+    const extension = await connect(harness.app, "extension-instance-1");
+    const hello = await extension.nextType("server.hello");
+
+    expect(hello.threads.map((thread) => thread.id)).toEqual([
+      "running",
+      "queued",
+      "needs-attention",
+      "completed-unread",
+      "failed-unread",
+      "interrupted-unread",
+      "queued-message",
+      "owned-binding",
+    ]);
+
     extension.socket.close();
     await harness.close();
   });

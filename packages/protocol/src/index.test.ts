@@ -1,17 +1,82 @@
 import { describe, expect, it } from "vitest";
 
-import type { ActivityItem, ThreadArtifactsResponse } from "./index.js";
+import type { ActivityItem, ThreadArtifactsResponse, ThreadSummary } from "./index.js";
 import {
   BROWSER_EXTENSION_PROTOCOL,
   BROWSER_EXTENSION_PROTOCOL_VERSION,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
   bearerHeader,
+  isActiveFeedEligible,
   isBrowserExtensionClientFrame,
   isBrowserExtensionServerFrame,
   isClientFrame,
   isServerFrame,
 } from "./index.js";
+
+const activeFeedThread: ThreadSummary = {
+  id: "thread",
+  projectId: "project",
+  title: "Thread",
+  preview: "",
+  cwd: "/work",
+  state: "idle",
+  unread: false,
+  unseen: false,
+  pinned: false,
+  archived: false,
+  createdAt: 1,
+  updatedAt: 1,
+  currentTurnId: null,
+  queuedMessageCount: 0,
+  browserStatus: "disabled",
+  settings: { collaborationMode: "default" },
+  relation: { kind: "session", sessionId: "session" },
+};
+
+describe("active feed eligibility", () => {
+  it.each([
+    { name: "running", overrides: { state: "running" }, eligible: true },
+    { name: "queued", overrides: { state: "queued" }, eligible: true },
+    { name: "needs attention", overrides: { state: "needsAttention" }, eligible: true },
+    {
+      name: "queued message on an idle session",
+      overrides: { queuedMessageCount: 1 },
+      eligible: true,
+    },
+    {
+      name: "unread completion",
+      overrides: { state: "completed", unread: true },
+      eligible: true,
+    },
+    {
+      name: "unread failure",
+      overrides: { state: "failed", unread: true },
+      eligible: true,
+    },
+    {
+      name: "unread interruption",
+      overrides: { state: "interrupted", unread: true },
+      eligible: true,
+    },
+    { name: "idle", overrides: {}, eligible: false },
+    { name: "unavailable", overrides: { state: "unavailable" }, eligible: false },
+    { name: "read completion", overrides: { state: "completed" }, eligible: false },
+    { name: "read failure", overrides: { state: "failed" }, eligible: false },
+    { name: "read interruption", overrides: { state: "interrupted" }, eligible: false },
+    {
+      name: "archived active session",
+      overrides: { state: "running", queuedMessageCount: 1, unread: true, archived: true },
+      eligible: false,
+    },
+  ] satisfies Array<{
+    name: string;
+    overrides: Partial<ThreadSummary>;
+    eligible: boolean;
+  }>)("returns $eligible for $name", ({ overrides, eligible }) => {
+    expect(isActiveFeedEligible({ ...activeFeedThread, ...overrides })).toBe(eligible);
+  });
+});
 
 describe("protocol guards", () => {
   it("accepts authentication and ping client frames", () => {

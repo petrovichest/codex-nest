@@ -11,6 +11,7 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "reac
 
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
+import { isActiveFeedEligible } from "@codexnest/protocol";
 import type {
   AppUpdateStatus,
   CodexRateLimitWindow,
@@ -1797,12 +1798,6 @@ function ThreadLink({
 
 function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
   return threads.filter((thread) => thread.relation.kind === "session");
-}
-
-function isActiveFeedEligible(thread: ThreadSummary): boolean {
-  return (
-    !thread.archived && (hasAlwaysVisibleThreadStatus(thread) || thread.queuedMessageCount > 0)
-  );
 }
 
 function isActiveChildFeedEligible(thread: ThreadSummary): boolean {

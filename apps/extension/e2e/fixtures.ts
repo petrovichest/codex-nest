@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { expect, test as base, type BrowserContext } from "@playwright/test";
-import type { BrowserExtensionClientFrame } from "@codexnest/protocol";
-import { WebSocketServer } from "ws";
+import type { BrowserExtensionClientFrame, BrowserExtensionServerFrame } from "@codexnest/protocol";
+import { WebSocket, WebSocketServer } from "ws";
 
 interface BrowserServerFixture {
   baseUrl: string;
   clientFrames: BrowserExtensionClientFrame[];
+  sendServerFrame: (frame: BrowserExtensionServerFrame) => void;
 }
 
 interface ExtensionFixtures {
@@ -46,15 +47,16 @@ export const test = base.extend<ExtensionFixtures>({
             }),
           );
         } else if (frame.type === "session.request") {
+          const existing = frame.target.kind === "existing";
           socket.send(
             JSON.stringify({
               type: "session.result",
               requestId: frame.requestId,
-              action: "created",
+              action: existing ? "attached" : "created",
               thread: {
-                id: "thread-1",
+                id: existing ? frame.target.threadId : "thread-1",
                 projectId: "project-1",
-                title: "Browser E2E",
+                title: existing ? "Existing Browser Session" : "Browser E2E",
                 state: "idle",
               },
             }),
@@ -80,8 +82,17 @@ export const test = base.extend<ExtensionFixtures>({
     const address = server.address();
     if (!address || typeof address === "string")
       throw new Error("Mock browser server did not bind");
+    const sendServerFrame = (frame: BrowserExtensionServerFrame): void => {
+      for (const client of webSockets.clients) {
+        if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(frame));
+      }
+    };
     try {
-      await use({ baseUrl: `http://127.0.0.1:${address.port}`, clientFrames });
+      await use({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        clientFrames,
+        sendServerFrame,
+      });
     } finally {
       for (const client of webSockets.clients) client.terminate();
       await new Promise<void>((resolveClose) => webSockets.close(() => resolveClose()));

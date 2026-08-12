@@ -100,25 +100,40 @@ let busy = false;
 let localError: string | null = null;
 let setupOverride = false;
 let selectedTarget = "";
+let interactingSelect: HTMLSelectElement | null = null;
+let deferredBackgroundRender = false;
+let selectInteractionTimer: number | undefined;
 
 chrome.runtime.onMessage.addListener((message) => {
   if (!isRecord(message) || message.type !== "background.state" || !isRecord(message.state)) return;
-  snapshot = message.state as unknown as PopupSnapshot;
-  if (!targetAvailable(snapshot, selectedTarget)) selectedTarget = defaultTarget(snapshot);
-  render();
+  applyBackgroundSnapshot(message.state as unknown as PopupSnapshot);
 });
 
 void request<PopupSnapshot>({ type: "popup.state" })
   .then((state) => {
-    snapshot = state;
-    selectedTarget = defaultTarget(state);
+    applyBackgroundSnapshot(state, true);
   })
   .catch((error) => {
     localError = errorMessage(error);
-  })
-  .finally(render);
+    if (interactingSelect) deferredBackgroundRender = true;
+    else render();
+  });
+
+function applyBackgroundSnapshot(state: PopupSnapshot, resetTarget = false): void {
+  snapshot = state;
+  if (interactingSelect) {
+    deferredBackgroundRender = true;
+    return;
+  }
+  if (resetTarget || !targetAvailable(state, selectedTarget)) selectedTarget = defaultTarget(state);
+  render();
+}
 
 function render(): void {
+  if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
+  selectInteractionTimer = undefined;
+  interactingSelect = null;
+  deferredBackgroundRender = false;
   app.replaceChildren();
   const language = snapshot?.locale ?? browserLanguage();
   document.documentElement.lang = language;
@@ -260,8 +275,22 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
     select.append(group);
   }
   if (targetAvailable(state, selectedTarget)) select.value = selectedTarget;
+  select.addEventListener("focus", () => {
+    if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
+    selectInteractionTimer = undefined;
+    interactingSelect = select;
+  });
   select.addEventListener("change", () => {
     selectedTarget = select.value;
+  });
+  select.addEventListener("blur", () => {
+    selectedTarget = select.value;
+    if (interactingSelect !== select) return;
+    if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
+    selectInteractionTimer = globalThis.setTimeout(() => {
+      selectInteractionTimer = undefined;
+      finishSelectInteraction(select, true);
+    }, 0);
   });
   label.append(select);
   const button = el("button", {
@@ -270,12 +299,18 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
     textContent: busy ? text.working : text.attach,
     disabled: busy || state.status !== "connected" || !state.projects.length,
   });
+  button.addEventListener("mousedown", (event) => {
+    if (interactingSelect === select) event.preventDefault();
+  });
   button.addEventListener("click", () => {
+    const target = select.value;
+    selectedTarget = target;
+    finishSelectInteraction(select, false);
     void act(async () => {
-      if (!selectedTarget) throw new Error(text.chooseSession);
+      if (!target) throw new Error(text.chooseSession);
       snapshot = await request<PopupSnapshot>({
         type: "popup.createAttach",
-        target: parseTarget(selectedTarget),
+        target: parseTarget(target),
         tabId: tab.id,
       });
     });
@@ -287,6 +322,17 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
   if (cardError) card.append(cardError);
   card.append(button);
   return card;
+}
+
+function finishSelectInteraction(select: HTMLSelectElement, applyDeferredState: boolean): void {
+  if (interactingSelect !== select) return;
+  if (selectInteractionTimer !== undefined) clearTimeout(selectInteractionTimer);
+  selectInteractionTimer = undefined;
+  interactingSelect = null;
+  if (!applyDeferredState || !deferredBackgroundRender) return;
+  if (snapshot && !targetAvailable(snapshot, selectedTarget))
+    selectedTarget = defaultTarget(snapshot);
+  render();
 }
 
 function defaultTarget(state: PopupSnapshot): string {

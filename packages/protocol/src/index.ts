@@ -270,6 +270,20 @@ export type ThreadSummary = {
   relation: ThreadRelation;
 };
 
+export function isActiveFeedEligible(thread: ThreadSummary): boolean {
+  return (
+    !thread.archived &&
+    (thread.queuedMessageCount > 0 ||
+      thread.state === "running" ||
+      thread.state === "queued" ||
+      thread.state === "needsAttention" ||
+      ((thread.state === "completed" ||
+        thread.state === "failed" ||
+        thread.state === "interrupted") &&
+        thread.unread))
+  );
+}
+
 export type QueuedMessage = {
   id: string;
   threadId: string;

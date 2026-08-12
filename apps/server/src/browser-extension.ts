@@ -16,6 +16,7 @@ import {
   BROWSER_MAX_PROJECT_FILE_BYTES,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
+  isActiveFeedEligible,
   isBrowserExtensionClientFrame,
   type BrowserExtensionBindingSummary,
   type BrowserExtensionClientFrame,
@@ -523,7 +524,7 @@ export class BrowserExtensionServer {
       if (
         thread.relation.kind !== "session" ||
         this.store.view().threadMeta[thread.id]?.managedParent ||
-        thread.archived ||
+        !isActiveFeedEligible(thread) ||
         !thread.projectId ||
         (binding && binding.instanceId !== instanceId)
       ) {

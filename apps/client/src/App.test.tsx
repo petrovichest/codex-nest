@@ -461,7 +461,35 @@ describe("App routing and navigation", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const threads = (
       [
-        { ...baseThread, id: "eligible", title: "Выполняется", state: "running" },
+        { ...baseThread, id: "running", title: "Выполняется", state: "running" },
+        { ...baseThread, id: "queued", title: "Ожидает", state: "queued" },
+        {
+          ...baseThread,
+          id: "needs-attention",
+          title: "Требует внимания",
+          state: "needsAttention",
+        },
+        {
+          ...baseThread,
+          id: "completed-unread",
+          title: "Новый результат",
+          state: "completed",
+          unread: true,
+        },
+        {
+          ...baseThread,
+          id: "failed-unread",
+          title: "Новая ошибка",
+          state: "failed",
+          unread: true,
+        },
+        {
+          ...baseThread,
+          id: "interrupted-unread",
+          title: "Новое прерывание",
+          state: "interrupted",
+          unread: true,
+        },
         {
           ...baseThread,
           id: "queued-defensively",
@@ -470,7 +498,19 @@ describe("App routing and navigation", () => {
           queuedMessageCount: 2,
         },
         { ...baseThread, id: "gray", title: "Обычная история", state: "idle" },
-        { ...baseThread, id: "finished-error", title: "Законченная ошибка", state: "failed" },
+        {
+          ...baseThread,
+          id: "completed-read",
+          title: "Прочитанный результат",
+          state: "completed",
+        },
+        { ...baseThread, id: "failed-read", title: "Прочитанная ошибка", state: "failed" },
+        {
+          ...baseThread,
+          id: "interrupted-read",
+          title: "Прочитанное прерывание",
+          state: "interrupted",
+        },
         {
           ...baseThread,
           id: "archived-active",
@@ -485,12 +525,19 @@ describe("App routing and navigation", () => {
     }));
     mockConnection(snapshot(threads));
 
-    const view = renderApp("/threads/eligible");
+    const view = renderApp("/threads/running");
 
     expect(screen.getByRole("link", { name: /Выполняется/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Ожидает/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Требует внимания/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Новый результат/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Новая ошибка/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Новое прерывание/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Есть очередь/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Обычная история/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /Законченная ошибка/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Прочитанный результат/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Прочитанная ошибка/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Прочитанное прерывание/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Активная в архиве/ })).not.toBeInTheDocument();
     expect(view.container.querySelector(".project-title")).toBeNull();
     expect(view.container.querySelector(".project-action-menu")).toBeNull();
