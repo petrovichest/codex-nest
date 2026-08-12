@@ -138,6 +138,14 @@ jobs:
         with:
           name: codexnest-browser-${{ github.sha }}
           path: release
+      - name: Prepare rolling browser extension
+        if: steps.head.outputs.current == 'true'
+        run: |
+          shopt -s nullglob
+          extension_archives=(release/codexnest-browser-*.zip)
+          test "${#extension_archives[@]}" -eq 1
+          cp "${extension_archives[0]}" release/codexnest-browser-latest.zip
+          unzip -t release/codexnest-browser-latest.zip
       - if: steps.head.outputs.current == 'true'
         run: npm ci
       - if: steps.head.outputs.current == 'true'
@@ -216,7 +224,7 @@ jobs:
           ROLLING_VERSION: ${{ steps.apk.outputs.version }}
         run: |
           notes="$(printf \
-            'Automatically updated after successful CI for `%s`.\n\nCommit: `%s`\n\nLinux install:\n\n```bash\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | bash\n```\n\nThe APK and installer are built from the same tested commit.' \
+            'Automatically updated after successful CI for `%s`.\n\nCommit: `%s`\n\nLinux install:\n\n```bash\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | bash\n```\n\nThe APK, browser extension, and installer are built from the same tested commit.' \
             "$ROLLING_VERSION" "$GITHUB_SHA" "$GITHUB_REPOSITORY")"
           if gh release view android-latest >/dev/null 2>&1; then
             gh release upload android-latest \

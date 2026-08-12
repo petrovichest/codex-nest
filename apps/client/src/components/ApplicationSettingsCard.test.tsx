@@ -55,7 +55,7 @@ describe("ApplicationSettingsCard", () => {
     expect(getAppInfo).not.toHaveBeenCalled();
     expect(
       screen.getByText(
-        "Сервер и APK обновляются из одной проверенной CI-сборки с автоматическим откатом.",
+        "Сервер, APK и расширение для Chrome обновляются из одной проверенной CI-сборки с автоматическим откатом.",
       ),
     ).toBeInTheDocument();
   });
@@ -146,6 +146,28 @@ describe("ApplicationSettingsCard", () => {
     expect(api.updateApp).not.toHaveBeenCalled();
   });
 
+  it("opens the rolling Chrome extension download without another API request", async () => {
+    const api = {
+      settings: { baseUrl: "https://codex.home.arpa" },
+      readAppSettings: vi.fn(async () => updateStatus({ supported: false })),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Скачать расширение для Chrome" }));
+
+    await waitFor(() =>
+      expect(openDownloadUrl).toHaveBeenCalledWith(
+        "https://codex.home.arpa",
+        "https://github.com/petrovichest/codex-nest/releases/download/android-latest/codexnest-browser-latest.zip",
+      ),
+    );
+    expect(api.checkAppUpdate).not.toHaveBeenCalled();
+    expect(api.updateApp).not.toHaveBeenCalled();
+  });
+
   it("allows the update while daemon turns are active", async () => {
     const current = updateStatus({
       latestVersion: "0.1.4-abcdef0",
@@ -228,6 +250,24 @@ describe("ApplicationSettingsCard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Скачать свежий APK" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось открыть загрузку APK");
+  });
+
+  it("shows an error when the Chrome extension download cannot be opened", async () => {
+    openDownloadUrl.mockRejectedValueOnce(new Error("browser failed"));
+    const api = {
+      settings: { baseUrl: "https://codex.home.arpa" },
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Скачать расширение для Chrome" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Не удалось открыть загрузку расширения для Chrome",
+    );
   });
 
   it("keeps polling across a restart and shows the final updater result", async () => {
