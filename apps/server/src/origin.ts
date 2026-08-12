@@ -20,3 +20,22 @@ export function isAllowedRequestOrigin(
     return false;
   }
 }
+
+export function isFirefoxExtensionOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return (
+      parsed.protocol === "moz-extension:" &&
+      !parsed.username &&
+      !parsed.password &&
+      /^[a-z\d-]{8,200}$/iu.test(parsed.hostname) &&
+      parsed.port === "" &&
+      (parsed.pathname === "" || parsed.pathname === "/") &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+}

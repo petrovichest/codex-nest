@@ -57,7 +57,13 @@ codexnest repair
 codexnest update
 codexnest rollback
 codexnest restart
+codexnest firefox
 ```
+
+`codexnest firefox` требует Firefox 146 или новее и запускает его с отдельным
+профилем CodexNest и WebDriver BiDi на `127.0.0.1:9222`. Если Firefox не найден
+через `PATH`, укажите полный путь в `CODEXNEST_FIREFOX_BIN`. Для Snap launcher
+автоматически размещает профиль в доступном Firefox каталоге.
 
 Managed install слушает `0.0.0.0:4310`. Собственный origin браузера разрешается
 динамически для LAN/VPN IP и приватного DNS. Installer не меняет firewall, не
@@ -392,6 +398,7 @@ accept-all certificate handler). Android-клиент доверяет сист�
 | `CODEXNEST_CODEX_PROXY_ENV_FILE` | Приватный env-файл proxy для wrapper              | `~/.config/codex/app-server.env`              |
 | `CODEXNEST_SERVER_ENV_FILE`      | Env-файл, обновляемый серверными настройками      | `~/.config/codexnest/server.env`              |
 | `CODEXNEST_CODEX_TRANSPORT`      | `daemon` сохраняет активные turn при рестарте     | `stdio`                                       |
+| `CODEXNEST_FIREFOX_BIN`          | Firefox 146+ для локального BiDi-адаптера         | `firefox` из `PATH`                           |
 | `CODEXNEST_CLIENT_DIST`          | Собранный браузерный интерфейс                    | `apps/client/dist` относительно рабочей папки |
 | `CODEXNEST_UPDATE_CHANNEL`       | Канал обновлений: `rolling` или `stable`          | `rolling`                                     |
 | `CODEXNEST_LOG_LEVEL`            | Уровень логов Fastify                             | `info`                                        |

@@ -1,4 +1,6 @@
 import { DebuggerController } from "./cdp";
+import { FirefoxController } from "./firefox";
+import { streamNetworkCapture, streamNetworkCaptureDrop } from "./network-stream";
 import {
   BROWSER_PROTOCOL,
   BROWSER_PROTOCOL_VERSION,
@@ -21,6 +23,7 @@ import {
 } from "./protocol";
 import { ExtensionStore, type ExtensionSettings, type PersistedState } from "./storage";
 import { BrowserToolDispatcher, BrowserToolError } from "./tools";
+import { browserDisplayName, browserTarget, webext } from "./webext";
 
 const RECONNECT_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -54,7 +57,7 @@ interface PendingSessionRequest {
   timeout: number;
 }
 
-const store = new ExtensionStore(chrome.storage.local);
+const store = new ExtensionStore(webext.storage.local);
 let persisted: PersistedState;
 let connectionStatus: ConnectionStatus = "pending";
 let connectionError: string | null = null;
@@ -71,7 +74,18 @@ let intentionalClose = false;
 let reconcileTimer: number | undefined;
 const pendingSessions = new Map<string, PendingSessionRequest>();
 const readyBindingThreadIds = new Set<string>();
-const debuggerController = new DebuggerController((tabId) => invalidateRefs(tabId));
+const firefoxController =
+  browserTarget === "firefox" ? new FirefoxController((frame) => sendPendingFrame(frame)) : null;
+const debuggerController =
+  firefoxController ??
+  new DebuggerController(
+    (tabId) => invalidateRefs(tabId),
+    (capture) => streamNetworkCapture(capture, sendPendingFrame),
+    (tabId) =>
+      Object.values(persisted?.bindings ?? {}).find((binding) => binding.tabIds.includes(tabId))
+        ?.threadId ?? null,
+    (capture) => streamNetworkCaptureDrop(capture, sendPendingFrame),
+  );
 const dispatcher = new BrowserToolDispatcher(
   debuggerController,
   async () => (await store.load()).bindings,
@@ -82,29 +96,31 @@ const dispatcher = new BrowserToolDispatcher(
 
 const ready = initialise();
 
-chrome.runtime.onInstalled.addListener(() => void wake());
-chrome.runtime.onStartup.addListener(() => void wake());
-chrome.alarms.onAlarm.addListener((alarm) => {
+webext.runtime.onInstalled.addListener(() => void wake());
+webext.runtime.onStartup.addListener(() => void wake());
+webext.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONCILE_ALARM) void wake();
 });
-chrome.tabs.onRemoved.addListener((tabId) => void onTabRemoved(tabId));
-chrome.tabs.onUpdated.addListener((tabId, change) => {
+webext.tabs.onRemoved.addListener((tabId) => void onTabRemoved(tabId));
+webext.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status === "loading" || typeof change.url === "string") invalidateRefs(tabId);
   if ("groupId" in change) scheduleReconcile();
 });
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+webext.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!isPopupRequest(message)) return;
-  void ready
+  const operation = ready
     .then(() => handlePopupRequest(message))
-    .then((result) => sendResponse({ ok: true, result }))
-    .catch((error) => sendResponse({ ok: false, error: errorMessage(error) }));
+    .then((result) => ({ ok: true, result }))
+    .catch((error) => ({ ok: false, error: errorMessage(error) }));
+  if (browserTarget === "firefox") return operation;
+  void operation.then(sendResponse);
   return true;
 });
 
 async function initialise(): Promise<void> {
   persisted = await store.load();
   await reconcileBindings();
-  await chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 1 });
+  await webext.alarms.create(RECONCILE_ALARM, { periodInMinutes: 1 });
   if (persisted.settings) connect(persisted.settings);
   else await setConnectionState("pending", null);
 }
@@ -199,8 +215,8 @@ async function sendHello(settings: ExtensionSettings): Promise<void> {
     version: BROWSER_PROTOCOL_VERSION,
     token: settings.token,
     instanceId: persisted.instanceId,
-    extensionVersion: chrome.runtime.getManifest().version,
-    browser: { name: "chrome", version: chromeVersion() },
+    extensionVersion: webext.runtime.getManifest().version,
+    browser: { name: browserTarget, version: browserVersion() },
     capabilities: {
       tools: BROWSER_TOOLS,
       maxProjectFileBytes: MAX_PROJECT_FILE_BYTES,
@@ -230,6 +246,7 @@ function acceptMessage(generation: number, data: unknown): void {
   }
   if (frame.type === "server.hello") {
     helloAccepted = true;
+    firefoxController?.setConnected();
     reconnectAttempt = 0;
     projects = frame.projects;
     threads = frame.threads;
@@ -255,6 +272,7 @@ function acceptMessage(generation: number, data: unknown): void {
 }
 
 function routeServerFrame(frame: ServerFrame): void {
+  if (firefoxController?.acceptFrame(frame)) return;
   if (frame.type === "server.ping") {
     trySend({ type: "client.pong", at: frame.at });
     return;
@@ -324,9 +342,9 @@ async function createOrAttach(tabId: number, target: SessionTarget): Promise<voi
   if (target.kind === "existing" && !threads.some((thread) => thread.id === target.threadId)) {
     throw new Error("Select an available session");
   }
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await webext.tabs.get(tabId);
   if (!isAccessibleTab(tab))
-    throw new Error("Chrome does not allow extensions to control this page");
+    throw new Error(`${browserDisplayName} does not allow extensions to control this page`);
   const current = await store.load();
   const owner = Object.values(current.bindings).find((binding) => binding.tabIds.includes(tabId));
   if (owner) throw new Error(`This tab already belongs to “${owner.title}”`);
@@ -339,9 +357,9 @@ async function createOrAttach(tabId: number, target: SessionTarget): Promise<voi
     const anchor = await firstLiveTab(existing.tabIds);
     if (!anchor || anchor.windowId !== tab.windowId)
       throw new Error("This session already has a tab group in another window");
-    groupId = await chrome.tabs.group({ tabIds: tabId, groupId: existing.groupId });
+    groupId = await webext.tabs.group({ tabIds: tabId, groupId: existing.groupId });
   } else {
-    groupId = await chrome.tabs.group({
+    groupId = await webext.tabs.group({
       tabIds: tabId,
       createProperties: { windowId: tab.windowId },
     });
@@ -402,10 +420,10 @@ async function detachBinding(threadId: string, notifyServer = true): Promise<voi
   if (!binding) return;
   const live: number[] = [];
   for (const tabId of binding.tabIds) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tab = await webext.tabs.get(tabId).catch(() => null);
     if (tab) live.push(tabId);
   }
-  if (live.length) await chrome.tabs.ungroup(live).catch(() => undefined);
+  if (live.length) await webext.tabs.ungroup(live).catch(() => undefined);
   await dispatcher.releaseThread(threadId);
   readyBindingThreadIds.delete(threadId);
   persisted = await store.update((draft) => {
@@ -422,7 +440,7 @@ async function openInCodexNest(threadId: string): Promise<void> {
     `/threads/${encodeURIComponent(threadId)}`,
     `${current.settings.baseUrl}/`,
   ).toString();
-  await chrome.tabs.create({ url, active: true });
+  await webext.tabs.create({ url, active: true });
 }
 
 async function addTabToBinding(threadId: string, tabId: number, groupId: number): Promise<void> {
@@ -466,7 +484,7 @@ async function onTabRemoved(tabId: number): Promise<void> {
 
 async function reconcileBindings(): Promise<void> {
   const current = await store.load();
-  const allTabs = await chrome.tabs.query({});
+  const allTabs = await webext.tabs.query({});
   const byId = new Map(
     allTabs.flatMap((tab) => (tab.id === undefined ? [] : [[tab.id, tab] as const])),
   );
@@ -485,8 +503,8 @@ async function reconcileBindings(): Promise<void> {
     try {
       groupId =
         groupId >= 0
-          ? await chrome.tabs.group({ tabIds: tabs.map((tab) => tab.id!), groupId })
-          : await chrome.tabs.group({
+          ? await webext.tabs.group({ tabIds: tabs.map((tab) => tab.id!), groupId })
+          : await webext.tabs.group({
               tabIds: tabs.map((tab) => tab.id!),
               createProperties: { windowId },
             });
@@ -550,7 +568,7 @@ function scheduleReconcile(): void {
 }
 
 function invalidateRefs(tabId: number): void {
-  void chrome.tabs
+  void webext.tabs
     .sendMessage(
       tabId,
       { type: "codexnest.content", action: "invalidate_refs", arguments: {} },
@@ -562,7 +580,7 @@ function invalidateRefs(tabId: number): void {
 async function popupSnapshot(): Promise<PopupSnapshot> {
   persisted = await store.load();
   const activeTab =
-    (await chrome.tabs.query({ active: true, currentWindow: true }))
+    (await webext.tabs.query({ active: true, currentWindow: true }))
       .map(tabSummary)
       .find(Boolean) ?? null;
   const bindings = Object.values(persisted.bindings).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -593,9 +611,9 @@ async function setConnectionState(status: ConnectionStatus, error: string | null
     error: { text: "!", color: "#c53b43" },
   }[status];
   await Promise.all([
-    chrome.action.setBadgeText({ text: badge.text }),
-    chrome.action.setBadgeBackgroundColor({ color: badge.color }),
-    chrome.action.setTitle({ title: `CodexNest Browser — ${status}` }),
+    webext.action.setBadgeText({ text: badge.text }),
+    webext.action.setBadgeBackgroundColor({ color: badge.color }),
+    webext.action.setTitle({ title: `CodexNest Browser — ${status}` }),
   ]).catch(() => undefined);
   await broadcastState();
 }
@@ -603,7 +621,7 @@ async function setConnectionState(status: ConnectionStatus, error: string | null
 async function broadcastState(): Promise<void> {
   const state = await popupSnapshot().catch(() => null);
   if (state)
-    await chrome.runtime.sendMessage({ type: "background.state", state }).catch(() => undefined);
+    await webext.runtime.sendMessage({ type: "background.state", state }).catch(() => undefined);
 }
 
 function scheduleHeartbeat(generation: number): void {
@@ -663,6 +681,14 @@ function closeSocket(intentional: boolean): void {
     pendingSessions.delete(requestId);
   }
   dispatcher.transfers.clear();
+  firefoxController?.clear();
+}
+
+function sendPendingFrame(frame: ClientFrame): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN || !helloAccepted) {
+    throw new Error("CodexNest browser connection is not open");
+  }
+  socket.send(JSON.stringify(frame));
 }
 
 function send(frame: ClientFrame): void {
@@ -702,27 +728,28 @@ function tabSummary(tab: ChromeTab): BrowserTabSummary | null {
 
 function isAccessibleTab(tab: ChromeTab): boolean {
   const url = tab.url ?? tab.pendingUrl ?? "";
-  return !/^(chrome|chrome-extension|devtools|edge|about):/i.test(url);
+  return !/^(chrome|chrome-extension|moz-extension|devtools|edge|about):/i.test(url);
 }
 
 async function firstLiveTab(tabIds: number[]): Promise<ChromeTab | null> {
   for (const tabId of tabIds) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tab = await webext.tabs.get(tabId).catch(() => null);
     if (tab) return tab;
   }
   return null;
 }
 
 async function decorateGroup(groupId: number, title: string): Promise<void> {
-  await chrome.tabGroups.update(groupId, {
+  await webext.tabGroups.update(groupId, {
     title: `CodexNest · ${title || "Browser session"}`.slice(0, 80),
     color: "purple",
     collapsed: false,
   });
 }
 
-function chromeVersion(): string {
-  return /Chrome\/(\d+(?:\.\d+)*)/.exec(navigator.userAgent)?.[1] ?? "unknown";
+function browserVersion(): string {
+  const product = browserTarget === "firefox" ? "Firefox" : "Chrome";
+  return new RegExp(`${product}/(\\d+(?:\\.\\d+)*)`).exec(navigator.userAgent)?.[1] ?? "unknown";
 }
 
 function errorMessage(error: unknown): string {

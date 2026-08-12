@@ -38,6 +38,13 @@ afterEach(() => {
 });
 
 describe("popup session catalog", () => {
+  it("uses Firefox-specific setup wording in the Firefox target", async () => {
+    vi.stubGlobal("navigator", { language: "en", userAgent: "Firefox/146.0" });
+    await loadPopup(snapshot({ configured: false }));
+
+    expect(document.querySelector("h1")?.textContent).toBe("Connect this Firefox");
+  });
+
   it("starts on the placeholder and groups only enabled sessions under non-empty projects", async () => {
     await loadPopup(
       snapshot({
@@ -164,7 +171,7 @@ async function loadPopup(initial: TestSnapshot): Promise<{
   });
 
   await import("./popup");
-  await vi.waitFor(() => expect(document.querySelector("select")).not.toBeNull());
+  await vi.waitFor(() => expect(document.querySelector("h1")).not.toBeNull());
   return {
     publish: (state) => listener?.({ type: "background.state", state }),
     sendMessage,

@@ -2,19 +2,24 @@ import {
   BROWSER_EXTENSION_PROTOCOL,
   BROWSER_EXTENSION_PROTOCOL_VERSION,
   BROWSER_EXTENSION_WEBSOCKET_PATH,
+  BROWSER_MAX_AUTOMATION_RESULT_CHUNKS,
+  BROWSER_MAX_NETWORK_BODY_BYTES,
   BROWSER_MAX_TOOL_RESULT_BYTES,
   BROWSER_MAX_PROJECT_FILE_BYTES,
   BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
+  BROWSER_NETWORK_CAPTURE_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
   isBrowserExtensionServerFrame,
 } from "@codexnest/protocol";
 import type {
   BrowserExtensionBindingSummary,
+  BrowserAutomationRequestFrame,
   BrowserExtensionClientFrame,
   BrowserExtensionProjectSummary,
   BrowserExtensionServerFrame,
   BrowserExtensionThreadSummary,
+  BrowserNetworkCaptureFrame,
   BrowserProjectFileTransferDescriptor,
   BrowserSessionTarget,
   BrowserTabSummary as SharedBrowserTabSummary,
@@ -26,6 +31,9 @@ export const BROWSER_PROTOCOL = BROWSER_EXTENSION_PROTOCOL;
 export const BROWSER_PROTOCOL_VERSION = BROWSER_EXTENSION_PROTOCOL_VERSION;
 export const BROWSER_WEBSOCKET_PATH = BROWSER_EXTENSION_WEBSOCKET_PATH;
 export const MAX_PROJECT_FILE_BYTES = BROWSER_MAX_PROJECT_FILE_BYTES;
+export const MAX_NETWORK_BODY_BYTES = BROWSER_MAX_NETWORK_BODY_BYTES;
+export const NETWORK_CAPTURE_CHUNK_BYTES = BROWSER_NETWORK_CAPTURE_CHUNK_BYTES;
+export const MAX_AUTOMATION_RESULT_CHUNKS = BROWSER_MAX_AUTOMATION_RESULT_CHUNKS;
 export const MAX_TOOL_RESULT_BYTES = BROWSER_MAX_TOOL_RESULT_BYTES;
 export const MAX_WEBSOCKET_MESSAGE_BYTES = BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES;
 export const TOOL_RESULT_CHUNK_BYTES = BROWSER_TOOL_RESULT_CHUNK_BYTES;
@@ -42,6 +50,8 @@ export type SessionTarget = BrowserSessionTarget;
 export type ProjectFileTransferDescriptor = BrowserProjectFileTransferDescriptor;
 export type ClientFrame = BrowserExtensionClientFrame;
 export type ServerFrame = BrowserExtensionServerFrame;
+export type NetworkCaptureFrame = BrowserNetworkCaptureFrame;
+export type AutomationRequestFrame = BrowserAutomationRequestFrame;
 export type ServerFileTransferFrame = Extract<ServerFrame, { type: "file.transfer" }>;
 
 export interface CapturedImageDescriptor {

@@ -2024,7 +2024,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (request.query.path !== undefined && typeof request.query.path !== "string") {
       throw new ProjectValidationError("path must be a string");
     }
-    return listDirectories(request.query.path, services.projectRoot);
+    const listing = await listDirectories(request.query.path, services.projectRoot);
+    if (!browserExtension) return listing;
+    if (pathContains(browserExtension.captureRoot, listing.path)) {
+      throw new ProjectForbiddenError("Browser capture storage cannot be used as a project");
+    }
+    return {
+      ...listing,
+      directories: listing.directories.filter(
+        (directory) => resolve(directory.path) !== resolve(browserExtension.captureRoot),
+      ),
+    };
   });
 
   app.post<{ Body: CreateDirectoryRequest }>("/api/v1/directories", async (request, reply) => {

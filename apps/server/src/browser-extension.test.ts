@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -72,6 +73,20 @@ describe("browser extension transport", () => {
     acceptedExtensionOrigin.send(JSON.stringify(helloFrame("extension-instance-1")));
     expect((await acceptedFrames.next()).type).toBe("server.hello");
     acceptedExtensionOrigin.close();
+
+    const firefoxOrigin = await harness.app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
+      headers: { origin: "moz-extension://123e4567-e89b-12d3-a456-426614174000" },
+    });
+    const firefoxFrames = frameReader(firefoxOrigin);
+    firefoxOrigin.send(
+      JSON.stringify({
+        ...helloFrame("firefox-instance-1"),
+        version: 2,
+        browser: { name: "firefox", version: "141" },
+      }),
+    );
+    expect((await firefoxFrames.next()).type).toBe("server.hello");
+    firefoxOrigin.close();
 
     await harness.close();
   });
@@ -448,6 +463,203 @@ describe("browser extension transport", () => {
     await harness.close();
   });
 
+  it("stores protocol-v2 captures and serves exchange and ranged body reads locally", async () => {
+    const harness = await createHarness();
+    await harness.store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserEnabled: true,
+        browserBinding: {
+          bindingId: "binding-v2",
+          instanceId: "extension-instance-1",
+          attachedAt: Date.now(),
+        },
+      };
+    });
+    const extension = await connect(
+      harness.app,
+      "extension-instance-1",
+      [bindingSummary("thread")],
+      2,
+    );
+    await extension.nextType("server.hello");
+    const requestBody = Buffer.from("captured request");
+    const metadata = Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        provider: "chrome",
+        exchange: {
+          exchangeId: "exchange-v2",
+          threadId: "thread",
+          tabId: 1,
+          redirect: {
+            chainId: "chain-v2",
+            index: 0,
+            redirectedFromExchangeId: null,
+            redirectedToExchangeId: null,
+          },
+          request: {
+            url: "https://example.com/api",
+            method: "POST",
+            headers: [],
+            timestamp: 10,
+            wallTime: null,
+            httpVersion: "h2",
+            resourceType: "fetch",
+            initiator: { type: "script" },
+            body: {
+              bodyId: "body-v2-request",
+              byteLength: requestBody.length,
+              sha256: digest(requestBody),
+              mediaType: "text/plain",
+              encoding: null,
+            },
+          },
+          response: { body: null },
+          failure: null,
+          startedAt: 10,
+          completedAt: 20,
+        },
+        rawEvents: [{ event: "Network.requestWillBeSent", payload: { providerSpecific: true } }],
+      }),
+    );
+    extension.socket.send(
+      JSON.stringify({
+        type: "network.capture.start",
+        captureId: "capture-v2",
+        threadId: "thread",
+        tabId: 1,
+        exchangeId: "exchange-v2",
+        provider: "chrome",
+        parts: {
+          metadata: { byteLength: metadata.length, sha256: digest(metadata) },
+          requestBody: { byteLength: requestBody.length, sha256: digest(requestBody) },
+        },
+      }),
+    );
+    extension.socket.send(
+      JSON.stringify({
+        type: "network.capture.chunk",
+        captureId: "capture-v2",
+        part: "metadata",
+        offset: 0,
+        data: metadata.toString("base64"),
+      }),
+    );
+    extension.socket.send(
+      JSON.stringify({
+        type: "network.capture.chunk",
+        captureId: "capture-v2",
+        part: "requestBody",
+        offset: 0,
+        data: requestBody.toString("base64"),
+      }),
+    );
+    extension.socket.send(
+      JSON.stringify({ type: "network.capture.commit", captureId: "capture-v2" }),
+    );
+
+    const listed = await pollNetworkList(harness, "binding-v2");
+    expect(listed).toMatchObject({
+      requests: [{ exchangeId: "exchange-v2" }],
+      stats: { retained: 1, evicted: 0, dropped: 0 },
+    });
+    const exchange = mcpText(
+      await harness.mcp("binding-v2", {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: { name: "read_network_request", arguments: { exchangeId: "exchange-v2" } },
+      }),
+    );
+    expect(exchange).toMatchObject({
+      metadata: { rawEvents: [{ payload: { providerSpecific: true } }] },
+      requestBody: { bodyId: "body-v2-request" },
+    });
+    const body = mcpText(
+      await harness.mcp("binding-v2", {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: {
+          name: "read_network_body",
+          arguments: { bodyId: "body-v2-request", offset: 2, length: 5 },
+        },
+      }),
+    ) as { data: string };
+    expect(Buffer.from(body.data, "base64").toString()).toBe("pture");
+
+    extension.socket.close();
+    await harness.close();
+  });
+
+  it("keeps v1 Chrome network fallback and reports update-required for v2-only tools", async () => {
+    const harness = await createHarness();
+    await harness.store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserEnabled: true,
+        browserBinding: {
+          bindingId: "binding-v1",
+          instanceId: "extension-instance-1",
+          attachedAt: Date.now(),
+        },
+      };
+    });
+    const socket = await harness.app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
+      headers: { origin: "http://allowed" },
+    });
+    const frames = frameReader(socket);
+    socket.send(
+      JSON.stringify({
+        ...helloFrame("extension-instance-1", [bindingSummary("thread")]),
+        version: 1,
+        capabilities: {
+          ...helloFrame("extension-instance-1").capabilities,
+          tools: BROWSER_TOOL_NAMES.filter(
+            (name) => name !== "read_network_request" && name !== "read_network_body",
+          ),
+        },
+      }),
+    );
+    await frames.nextType("server.hello");
+    const fallback = harness.mcp("binding-v1", {
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: { name: "read_network_requests", arguments: {} },
+    });
+    const call = await frames.nextType("tool.call");
+    expect(call.tool).toBe("read_network_requests");
+    socket.send(
+      JSON.stringify({
+        type: "tool.result",
+        requestId: call.requestId,
+        result: { requests: [{ requestId: "legacy" }] },
+      }),
+    );
+    expect((await fallback).json()).toMatchObject({ result: { content: expect.any(Array) } });
+    const updateRequired = await harness.mcp("binding-v1", {
+      jsonrpc: "2.0",
+      id: 24,
+      method: "tools/call",
+      params: {
+        name: "read_network_request",
+        arguments: { exchangeId: "legacy" },
+      },
+    });
+    expect(updateRequired.json()).toMatchObject({
+      result: {
+        isError: true,
+        content: [{ text: expect.stringContaining("protocol v2") }],
+      },
+    });
+    socket.close();
+    await harness.close();
+  });
+
   it("validates and streams project files without exposing paths to the extension", async () => {
     const harness = await createHarness();
     const project = join(harness.directory, "project");
@@ -699,12 +911,13 @@ async function connect(
   app: ReturnType<typeof Fastify>,
   instanceId: string,
   bindings: BrowserExtensionBindingSummary[] = [],
+  version = BROWSER_EXTENSION_PROTOCOL_VERSION,
 ) {
   const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
     headers: { origin: "http://allowed" },
   });
   const frames = frameReader(socket);
-  socket.send(JSON.stringify(helloFrame(instanceId, bindings)));
+  socket.send(JSON.stringify({ ...helloFrame(instanceId, bindings), version }));
   return { socket, ...frames };
 }
 
@@ -776,4 +989,35 @@ function frameReader(socket: WebSocket) {
 
 function closeCode(socket: WebSocket): Promise<number> {
   return new Promise((resolve) => socket.once("close", (code) => resolve(code)));
+}
+
+async function pollNetworkList(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  bindingId: string,
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await harness.mcp(bindingId, {
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: { name: "read_network_requests", arguments: { limit: 10 } },
+    });
+    const value = mcpText(response) as { requests?: unknown[] };
+    if (value.requests?.length) return value as Record<string, unknown>;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the committed network capture");
+}
+
+function mcpText(response: { json(): unknown }): unknown {
+  const payload = response.json() as {
+    result?: { content?: Array<{ type?: string; text?: string }> };
+  };
+  const text = payload.result?.content?.find((item) => item.type === "text")?.text;
+  if (!text) throw new Error("Expected an MCP text result");
+  return JSON.parse(text);
+}
+
+function digest(value: Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
 }

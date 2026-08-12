@@ -1,4 +1,5 @@
-import type { DebuggerController, StoredImage } from "./cdp";
+import type { AutomationController } from "./automation";
+import type { StoredImage } from "./cdp";
 import {
   isRecord,
   MAX_PROJECT_FILE_BYTES,
@@ -10,6 +11,7 @@ import {
 } from "./protocol";
 import { KeyedSerialQueue } from "./serial";
 import { FileTransferRegistry, type ProjectFileData } from "./transfers";
+import { browserDisplayName, webext } from "./webext";
 
 interface ContentResponse {
   ok: boolean;
@@ -41,7 +43,7 @@ export class BrowserToolDispatcher {
   private readonly detachedThreads = new Set<string>();
 
   constructor(
-    private readonly debuggerController: DebuggerController,
+    private readonly debuggerController: AutomationController,
     private readonly getBindings: () => Promise<Record<string, BindingSummary>>,
     private readonly addTabToBinding: (
       threadId: string,
@@ -81,9 +83,9 @@ export class BrowserToolDispatcher {
         case "javascript_tool":
           return this.javascript(tabId, args);
         case "read_console_messages":
-          return { tabId, messages: this.debuggerController.readConsole(tabId, args) };
+          return { tabId, messages: await this.debuggerController.readConsole(tabId, args) };
         case "read_network_requests":
-          return { tabId, requests: this.debuggerController.readNetwork(tabId, args) };
+          return { tabId, requests: await this.debuggerController.readNetwork(tabId, args) };
         case "resize_window":
           return this.resizeWindow(tabId, args);
         case "upload_file":
@@ -98,7 +100,7 @@ export class BrowserToolDispatcher {
     if (this.detachedThreads.has(threadId)) {
       throw new BrowserToolError("session_detached", "This browser session is no longer attached");
     }
-    await this.debuggerController.ensureAttached(tabId);
+    await this.debuggerController.ensureAttached(tabId, threadId);
     if (this.detachedThreads.has(threadId)) {
       if (![...this.debuggerTabs.values()].some((candidate) => candidate.has(tabId))) {
         await this.debuggerController.detach(tabId).catch(() => undefined);
@@ -133,7 +135,7 @@ export class BrowserToolDispatcher {
   }
 
   private async tabsContext(binding: BindingSummary): Promise<unknown> {
-    const tabs = await chrome.tabs.query({});
+    const tabs = await webext.tabs.query({});
     const bindings = await this.getBindings();
     const owners = new Map<number, string>();
     for (const candidate of Object.values(bindings)) {
@@ -154,21 +156,27 @@ export class BrowserToolDispatcher {
   ): Promise<BrowserTabSummary> {
     const url = optionalString(args.url) ?? "about:blank";
     const current = await this.resolveTabId(binding, args.tabId);
-    const source = await chrome.tabs.get(current);
-    const tab = await chrome.tabs.create({
+    const source = await webext.tabs.get(current);
+    const tab = await webext.tabs.create({
       url,
       active: args.active !== false,
       windowId: source.windowId,
     });
     if (tab.id === undefined)
-      throw new BrowserToolError("tab_create_failed", "Chrome did not return the new tab ID");
-    const groupId = await chrome.tabs.group({ tabIds: tab.id, groupId: binding.groupId });
+      throw new BrowserToolError(
+        "tab_create_failed",
+        `${browserDisplayName} did not return the new tab ID`,
+      );
+    const groupId = await webext.tabs.group({ tabIds: tab.id, groupId: binding.groupId });
     await this.addTabToBinding(binding.threadId, tab.id, groupId);
     await this.attachTab(binding.threadId, tab.id).catch(() => undefined);
-    const grouped = await chrome.tabs.get(tab.id);
+    const grouped = await webext.tabs.get(tab.id);
     const summary = tabSummary(grouped);
     if (!summary)
-      throw new BrowserToolError("tab_create_failed", "Chrome did not return the new tab");
+      throw new BrowserToolError(
+        "tab_create_failed",
+        `${browserDisplayName} did not return the new tab`,
+      );
     return summary;
   }
 
@@ -181,7 +189,7 @@ export class BrowserToolDispatcher {
       : [await this.resolveTabId(binding, args.tabId)];
     const unique = [...new Set(requested)];
     await Promise.all(
-      unique.map((tabId) => this.queue.run(tabId, () => chrome.tabs.remove(tabId))),
+      unique.map((tabId) => this.queue.run(tabId, () => webext.tabs.remove(tabId))),
     );
     return { closed: unique };
   }
@@ -191,20 +199,20 @@ export class BrowserToolDispatcher {
     this.invalidateRefs(tabId);
     if (action === "url") {
       const url = requireString(args.url, "url");
-      await chrome.tabs.update(tabId, { url });
+      await webext.tabs.update(tabId, { url });
     } else if (action === "back") {
-      await chrome.tabs.goBack(tabId);
+      await webext.tabs.goBack(tabId);
     } else if (action === "forward") {
-      await chrome.tabs.goForward(tabId);
+      await webext.tabs.goForward(tabId);
     } else if (action === "reload") {
-      await chrome.tabs.reload(tabId, { bypassCache: args.bypassCache === true });
+      await webext.tabs.reload(tabId, { bypassCache: args.bypassCache === true });
     } else {
       throw new BrowserToolError(
         "invalid_arguments",
         "navigate.action must be url, back, forward, or reload",
       );
     }
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await webext.tabs.get(tabId);
     const summary = tabSummary(tab);
     if (!summary) throw new BrowserToolError("tab_not_found", `Tab ${tabId} no longer exists`);
     return summary;
@@ -226,7 +234,7 @@ export class BrowserToolDispatcher {
     }
     if (action === "zoom") {
       const factor = Math.max(0.25, Math.min(5, numberValue(args.factor, 1)));
-      await chrome.tabs.setZoom(tabId, factor);
+      await webext.tabs.setZoom(tabId, factor);
       return { tabId, zoom: factor };
     }
     if (action === "scroll_to") {
@@ -319,10 +327,14 @@ export class BrowserToolDispatcher {
   }
 
   private async resizeWindow(tabId: number, args: Record<string, unknown>): Promise<unknown> {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await webext.tabs.get(tabId);
     const width = boundedInteger(args.width, 1280, 320, 10_000);
     const height = boundedInteger(args.height, 800, 240, 10_000);
-    const updated = await chrome.windows.update(tab.windowId, { width, height, state: "normal" });
+    const updated = await webext.windows.update(tab.windowId, {
+      width,
+      height,
+      state: "normal",
+    });
     return { windowId: tab.windowId, width: updated.width, height: updated.height };
   }
 
@@ -361,7 +373,7 @@ export class BrowserToolDispatcher {
     drop: boolean,
   ): Promise<void> {
     await this.ensureContentScript(tabId);
-    const port = chrome.tabs.connect(tabId, { name: "codexnest.upload", frameId: 0 });
+    const port = webext.tabs.connect(tabId, { name: "codexnest.upload", frameId: 0 });
     const completion = new Promise<void>((resolve, reject) => {
       const timeout = globalThis.setTimeout(
         () => reject(new Error("File injection timed out")),
@@ -406,10 +418,10 @@ export class BrowserToolDispatcher {
     const request = { type: "codexnest.content", action, arguments: args };
     let response: unknown;
     try {
-      response = await chrome.tabs.sendMessage(tabId, request, { frameId: 0 });
+      response = await webext.tabs.sendMessage(tabId, request, { frameId: 0 });
     } catch {
       await this.ensureContentScript(tabId);
-      response = await chrome.tabs.sendMessage(tabId, request, { frameId: 0 });
+      response = await webext.tabs.sendMessage(tabId, request, { frameId: 0 });
     }
     const parsed = response as ContentResponse | undefined;
     if (!parsed?.ok)
@@ -422,7 +434,7 @@ export class BrowserToolDispatcher {
 
   private async ensureContentScript(tabId: number): Promise<void> {
     try {
-      await chrome.scripting.executeScript({
+      await webext.scripting.executeScript({
         target: { tabId, frameIds: [0] },
         files: ["content.js"],
       });
@@ -550,20 +562,20 @@ export class BrowserToolDispatcher {
   private async resolveTabId(binding: BindingSummary, value: unknown): Promise<number> {
     if (value !== undefined) {
       const requested = requireTabId(value);
-      await chrome.tabs.get(requested).catch(() => {
+      await webext.tabs.get(requested).catch(() => {
         throw new BrowserToolError("tab_not_found", `Tab ${requested} does not exist`);
       });
       return requested;
     }
     let firstLive: ChromeTab | null = null;
     for (const candidate of binding.tabIds) {
-      firstLive = await chrome.tabs.get(candidate).catch(() => null);
+      firstLive = await webext.tabs.get(candidate).catch(() => null);
       if (firstLive) break;
     }
     if (!firstLive || firstLive.id === undefined) {
       throw new BrowserToolError("session_detached", "The browser session has no tabs");
     }
-    const tabs = await chrome.tabs.query({ active: true, windowId: firstLive.windowId });
+    const tabs = await webext.tabs.query({ active: true, windowId: firstLive.windowId });
     const active = tabs.find((tab) => tab.id !== undefined && binding.tabIds.includes(tab.id));
     return active?.id ?? firstLive.id;
   }

@@ -8,28 +8,40 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 
 import {
+  BROWSER_AUTOMATION_RESULT_CHUNK_BYTES,
   BROWSER_EXTENSION_ORIGIN,
   BROWSER_EXTENSION_PROTOCOL,
-  BROWSER_EXTENSION_PROTOCOL_VERSION,
+  BROWSER_EXTENSION_PROTOCOL_VERSION_V1,
+  BROWSER_EXTENSION_PROTOCOL_VERSION_V2,
   BROWSER_EXTENSION_WEBSOCKET_PATH,
+  BROWSER_MAX_AUTOMATION_RESULT_CHUNKS,
   BROWSER_MAX_TOOL_RESULT_BYTES,
   BROWSER_MAX_PROJECT_FILE_BYTES,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
   isBrowserExtensionClientFrame,
+  type BrowserAutomationRequestFrame,
   type BrowserExtensionBindingSummary,
   type BrowserExtensionClientFrame,
+  type BrowserExtensionProtocolVersion,
   type BrowserExtensionProjectSummary,
   type BrowserExtensionServerFrame,
   type BrowserExtensionThreadSummary,
   type BrowserThreadStatus,
+  type BrowserName,
+  type BrowserNetworkCaptureAbortFrame,
+  type BrowserNetworkCaptureChunkFrame,
+  type BrowserNetworkCaptureCommitFrame,
+  type BrowserNetworkCaptureStartFrame,
   type BrowserToolName,
   type ServerEvent,
   type ThreadSummary,
 } from "@codexnest/protocol";
 
 import { verifyToken } from "./auth";
-import { isAllowedRequestOrigin } from "./origin";
+import { BrowserCaptureStore, MAX_NETWORK_BODY_READ_BYTES } from "./browser-capture-store";
+import { FirefoxBidiClient } from "./firefox-bidi";
+import { isAllowedRequestOrigin, isFirefoxExtensionOrigin } from "./origin";
 import type { AppProjection } from "./projection";
 import type { BrowserBindingState, StateStore } from "./state/store";
 
@@ -38,6 +50,14 @@ const DEFAULT_DISCONNECT_WAIT_MS = 30_000;
 const DEFAULT_TOOL_RESPONSE_MS = 120_000;
 const INTERNAL_SECRET_HEADER = "x-codexnest-browser-secret";
 const MCP_PROTOCOL_VERSION = "2025-11-25";
+type ServerBrowserToolName = BrowserToolName;
+const LEGACY_EXTENSION_TOOL_NAMES = BROWSER_TOOL_NAMES.filter(
+  (name) =>
+    !("read_network_request" === (name as string) || "read_network_body" === (name as string)),
+);
+const SERVER_BROWSER_TOOL_NAMES = BROWSER_TOOL_NAMES;
+
+type PendingAutomationRequest = { socket: WebSocket; timer: NodeJS.Timeout };
 
 export interface BrowserExtensionLifecycle {
   enable(threadId: string): Promise<void>;
@@ -56,6 +76,8 @@ export interface BrowserExtensionOptions {
   disconnectWaitMs?: number;
   toolResponseMs?: number;
   internalSecret?: string;
+  captureStore?: BrowserCaptureStore;
+  firefoxBidi?: FirefoxBidiClient;
 }
 
 interface ExtensionConnection {
@@ -63,6 +85,9 @@ interface ExtensionConnection {
   instanceId: string;
   activeThreadId: string | null;
   bindingThreadIds: Set<string>;
+  bindingTabIds: Map<string, Set<string>>;
+  protocolVersion: BrowserExtensionProtocolVersion;
+  browser: BrowserName;
   lastPongAt: number;
 }
 
@@ -107,8 +132,11 @@ export class BrowserExtensionServer {
   private readonly disconnectWaitMs: number;
   private readonly toolResponseMs: number;
   private readonly secret: string;
+  private readonly captures: BrowserCaptureStore;
+  private readonly firefox: FirefoxBidiClient;
   private readonly connections = new Map<string, ExtensionConnection>();
   private readonly pendingTools = new Map<string, PendingToolCall>();
+  private readonly pendingAutomation = new Map<string, PendingAutomationRequest>();
   private readonly pendingFileTransfers = new Map<string, PendingFileTransfer>();
   private readonly pendingBindingThreads = new Map<string, string>();
   private readonly connectionEvents = new EventEmitter();
@@ -126,6 +154,12 @@ export class BrowserExtensionServer {
     this.disconnectWaitMs = options.disconnectWaitMs ?? DEFAULT_DISCONNECT_WAIT_MS;
     this.toolResponseMs = options.toolResponseMs ?? DEFAULT_TOOL_RESPONSE_MS;
     this.secret = options.internalSecret ?? randomBytes(32).toString("base64url");
+    this.captures = options.captureStore ?? new BrowserCaptureStore(options.store.path);
+    this.firefox = options.firefoxBidi ?? new FirefoxBidiClient({ captures: this.captures });
+  }
+
+  get captureRoot(): string {
+    return this.captures.root;
   }
 
   setLifecycle(lifecycle: BrowserExtensionLifecycle): void {
@@ -133,6 +167,9 @@ export class BrowserExtensionServer {
   }
 
   registerRoutes(): void {
+    void this.captures.initialize().catch((error) => {
+      this.app.log.error({ err: error }, "Failed to initialize browser capture storage");
+    });
     this.projection.setBrowserStatusProvider((threadId) => this.browserStatus(threadId));
     this.projection.setThreadResumeConfigProvider((threadId) => this.resumeOverrides(threadId));
 
@@ -180,7 +217,10 @@ export class BrowserExtensionServer {
         pending.reject(new BrowserExtensionError("disconnected", "Browser tool outcome unknown"));
       }
       this.pendingTools.clear();
+      for (const pending of this.pendingAutomation.values()) clearTimeout(pending.timer);
+      this.pendingAutomation.clear();
       this.pendingFileTransfers.clear();
+      await this.firefox.close();
       this.connectionEvents.removeAllListeners();
     });
   }
@@ -252,6 +292,8 @@ export class BrowserExtensionServer {
     });
     const connection = this.connections.get(instanceId);
     connection?.bindingThreadIds.delete(threadId);
+    connection?.bindingTabIds.delete(bindingId);
+    if (connection?.browser === "firefox") this.firefox.detachBinding(bindingId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     this.projection.publishThreadState(threadId);
     this.connectionEvents.emit("changed");
@@ -312,6 +354,8 @@ export class BrowserExtensionServer {
     const connection = this.connections.get(binding.instanceId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     connection?.bindingThreadIds.delete(threadId);
+    connection?.bindingTabIds.delete(binding.bindingId);
+    if (connection?.browser === "firefox") this.firefox.detachBinding(binding.bindingId);
     this.send(connection?.socket, { type: "binding.detach", threadId });
   }
 
@@ -320,13 +364,18 @@ export class BrowserExtensionServer {
     if (!binding) return;
     const connection = this.connections.get(binding.instanceId);
     connection?.bindingThreadIds.delete(threadId);
+    connection?.bindingTabIds.delete(binding.bindingId);
+    if (connection?.browser === "firefox") this.firefox.detachBinding(binding.bindingId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     this.send(connection?.socket, { type: "binding.detach", threadId });
     this.connectionEvents.emit("changed");
   }
 
   private acceptSocket(socket: WebSocket, request: FastifyRequest): void {
-    if (!isAllowedRequestOrigin(request, this.allowedOrigins)) {
+    if (
+      !isAllowedRequestOrigin(request, this.allowedOrigins) &&
+      !isFirefoxExtensionOrigin(request.headers.origin)
+    ) {
       socket.close(1008, "Origin not allowed");
       return;
     }
@@ -351,6 +400,20 @@ export class BrowserExtensionServer {
         return;
       }
       if (!isBrowserExtensionClientFrame(frame)) {
+        if (
+          !connection &&
+          isRecord(frame) &&
+          frame.type === "client.hello" &&
+          frame.protocol === BROWSER_EXTENSION_PROTOCOL &&
+          typeof frame.token === "string" &&
+          verifyToken(frame.token, this.store.view().auth.tokenSha256) &&
+          typeof frame.version === "number" &&
+          frame.version !== BROWSER_EXTENSION_PROTOCOL_VERSION_V1 &&
+          frame.version !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2
+        ) {
+          socket.close(1002, "Unsupported browser protocol version");
+          return;
+        }
         socket.close(1008, "Invalid frame");
         return;
       }
@@ -364,13 +427,17 @@ export class BrowserExtensionServer {
         }
         if (
           frame.protocol !== BROWSER_EXTENSION_PROTOCOL ||
-          frame.version !== BROWSER_EXTENSION_PROTOCOL_VERSION
+          (frame.version !== BROWSER_EXTENSION_PROTOCOL_VERSION_V1 &&
+            frame.version !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2)
         ) {
           socket.close(1002, "Unsupported browser protocol version");
           return;
         }
         if (
-          BROWSER_TOOL_NAMES.some((tool) => !frame.capabilities.tools.includes(tool)) ||
+          (frame.version === BROWSER_EXTENSION_PROTOCOL_VERSION_V1
+            ? LEGACY_EXTENSION_TOOL_NAMES
+            : BROWSER_TOOL_NAMES
+          ).some((tool) => !frame.capabilities.tools.includes(tool as BrowserToolName)) ||
           frame.capabilities.maxProjectFileBytes < BROWSER_MAX_PROJECT_FILE_BYTES
         ) {
           socket.close(1002, "Unsupported browser capabilities");
@@ -389,11 +456,22 @@ export class BrowserExtensionServer {
               : [];
           }),
         );
+        const bindingTabIds = new Map<string, Set<string>>();
+        for (const binding of frame.bindings) {
+          if (!bindingThreadIds.has(binding.threadId)) continue;
+          const bindingId =
+            this.store.view().threadMeta[binding.threadId]?.browserBinding?.bindingId;
+          if (!bindingId) continue;
+          bindingTabIds.set(bindingId, new Set(binding.tabIds.map(String)));
+        }
         connection = {
           socket,
           instanceId: frame.instanceId,
           activeThreadId: null,
           bindingThreadIds,
+          bindingTabIds,
+          protocolVersion: frame.version,
+          browser: frame.browser.name,
           lastPongAt: Date.now(),
         };
         this.connections.set(frame.instanceId, connection);
@@ -402,7 +480,7 @@ export class BrowserExtensionServer {
         this.send(socket, {
           type: "server.hello",
           protocol: BROWSER_EXTENSION_PROTOCOL,
-          version: BROWSER_EXTENSION_PROTOCOL_VERSION,
+          version: frame.version,
           locale: this.store.view().uiLanguage,
           ...catalog,
         });
@@ -434,6 +512,39 @@ export class BrowserExtensionServer {
         void this.acceptBindingDetached(connection, frame.binding);
       } else if (frame.type === "file.request") {
         void this.sendProjectFile(socket, frame.transferId);
+      } else if (frame.type === "network.capture.start") {
+        if (connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2) {
+          socket.close(1008, "Protocol v2 frame on a v1 connection");
+          return;
+        }
+        void this.acceptNetworkCaptureStart(connection, frame);
+      } else if (frame.type === "network.capture.chunk") {
+        if (connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2) {
+          socket.close(1008, "Protocol v2 frame on a v1 connection");
+          return;
+        }
+        void this.acceptNetworkCaptureChunk(connection, frame);
+      } else if (frame.type === "network.capture.commit") {
+        if (connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2) {
+          socket.close(1008, "Protocol v2 frame on a v1 connection");
+          return;
+        }
+        void this.acceptNetworkCaptureCommit(connection, frame);
+      } else if (frame.type === "network.capture.abort") {
+        if (connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2) {
+          socket.close(1008, "Protocol v2 frame on a v1 connection");
+          return;
+        }
+        void this.acceptNetworkCaptureAbort(connection, frame);
+      } else if (frame.type === "automation.request") {
+        if (
+          connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2 ||
+          connection.browser !== "firefox"
+        ) {
+          socket.close(1008, "Firefox protocol v2 automation required");
+          return;
+        }
+        this.acceptAutomationRequest(connection, frame);
       } else {
         socket.close(1008, "Unexpected frame");
       }
@@ -458,9 +569,188 @@ export class BrowserExtensionServer {
       for (const [transferId, transfer] of this.pendingFileTransfers) {
         if (transfer.socket === socket) this.pendingFileTransfers.delete(transferId);
       }
+      for (const [requestId, pending] of this.pendingAutomation) {
+        if (pending.socket !== socket) continue;
+        clearTimeout(pending.timer);
+        this.pendingAutomation.delete(requestId);
+      }
+      if (connection.browser === "firefox") {
+        for (const bindingId of connection.bindingTabIds.keys()) {
+          this.firefox.detachBinding(bindingId);
+        }
+      }
+      void this.captures.abortOwner(socket).catch(() => undefined);
       this.publishInstanceBindings(connection.instanceId);
       this.connectionEvents.emit("changed");
     });
+  }
+
+  private async acceptNetworkCaptureStart(
+    connection: ExtensionConnection,
+    frame: BrowserNetworkCaptureStartFrame,
+  ): Promise<void> {
+    try {
+      const binding = this.assertConnectionOwnsThreadTab(connection, frame.threadId, frame.tabId);
+      if (frame.provider !== connection.browser) {
+        throw new BrowserExtensionError(
+          "forbidden",
+          "Network capture provider does not match the connected browser",
+        );
+      }
+      await this.captures.startStream(
+        {
+          captureId: frame.captureId,
+          bindingId: binding.bindingId,
+          threadId: frame.threadId,
+          tabId: frame.tabId,
+          exchangeId: frame.exchangeId,
+          provider: frame.provider,
+          parts: frame.parts,
+        },
+        connection.socket,
+      );
+    } catch (error) {
+      this.sendProtocolError(connection.socket, "network_capture_rejected", error);
+    }
+  }
+
+  private async acceptNetworkCaptureChunk(
+    connection: ExtensionConnection,
+    frame: BrowserNetworkCaptureChunkFrame,
+  ): Promise<void> {
+    try {
+      await this.captures.appendStream(
+        frame.captureId,
+        connection.socket,
+        frame.part,
+        frame.offset,
+        decodeBase64(frame.data),
+      );
+    } catch (error) {
+      await this.captures.abortStream(frame.captureId, connection.socket).catch(() => undefined);
+      this.sendProtocolError(connection.socket, "network_capture_rejected", error);
+    }
+  }
+
+  private async acceptNetworkCaptureCommit(
+    connection: ExtensionConnection,
+    frame: BrowserNetworkCaptureCommitFrame,
+  ): Promise<void> {
+    try {
+      await this.captures.commitStream(frame.captureId, connection.socket);
+    } catch (error) {
+      this.sendProtocolError(connection.socket, "network_capture_rejected", error);
+    }
+  }
+
+  private async acceptNetworkCaptureAbort(
+    connection: ExtensionConnection,
+    frame: BrowserNetworkCaptureAbortFrame,
+  ): Promise<void> {
+    try {
+      await this.captures.abortStream(frame.captureId, connection.socket);
+    } catch (error) {
+      this.sendProtocolError(connection.socket, "network_capture_rejected", error);
+    }
+  }
+
+  private acceptAutomationRequest(
+    connection: ExtensionConnection,
+    frame: BrowserAutomationRequestFrame,
+  ): void {
+    let binding: BrowserBindingState;
+    try {
+      binding = this.assertConnectionOwnsThreadTab(connection, frame.threadId, frame.tabId);
+    } catch (error) {
+      this.sendAutomationError(connection.socket, frame.requestId, "forbidden", error);
+      return;
+    }
+    if (this.pendingAutomation.has(frame.requestId)) {
+      this.sendAutomationError(
+        connection.socket,
+        frame.requestId,
+        "duplicate_request",
+        new Error("Automation request ID is already active"),
+      );
+      return;
+    }
+    const timer = setTimeout(() => {
+      const pending = this.pendingAutomation.get(frame.requestId);
+      if (!pending || pending.socket !== connection.socket) return;
+      this.pendingAutomation.delete(frame.requestId);
+      this.sendAutomationError(
+        connection.socket,
+        frame.requestId,
+        "timeout",
+        new Error("Firefox automation request timed out"),
+      );
+    }, this.toolResponseMs);
+    timer.unref();
+    this.pendingAutomation.set(frame.requestId, { socket: connection.socket, timer });
+    void this.firefox
+      .execute({
+        bindingId: binding.bindingId,
+        threadId: frame.threadId,
+        tabId: frame.tabId,
+        operation: frame.operation,
+        arguments: frame.arguments,
+      })
+      .then((result) => this.finishAutomationRequest(connection.socket, frame.requestId, result))
+      .catch((error) => {
+        const pending = this.pendingAutomation.get(frame.requestId);
+        if (!pending || pending.socket !== connection.socket) return;
+        this.pendingAutomation.delete(frame.requestId);
+        clearTimeout(pending.timer);
+        this.sendAutomationError(connection.socket, frame.requestId, "automation_failed", error);
+      });
+  }
+
+  private finishAutomationRequest(socket: WebSocket, requestId: string, result: unknown): void {
+    const pending = this.pendingAutomation.get(requestId);
+    if (!pending || pending.socket !== socket) return;
+    this.pendingAutomation.delete(requestId);
+    clearTimeout(pending.timer);
+    const serialized = JSON.stringify(result ?? null);
+    if (Buffer.byteLength(serialized) <= BROWSER_AUTOMATION_RESULT_CHUNK_BYTES) {
+      this.send(socket, { type: "automation.result", requestId, result });
+      return;
+    }
+    const chunks = splitUtf8(serialized, BROWSER_AUTOMATION_RESULT_CHUNK_BYTES);
+    if (chunks.length > BROWSER_MAX_AUTOMATION_RESULT_CHUNKS) {
+      this.sendAutomationError(
+        socket,
+        requestId,
+        "result_too_large",
+        new Error("Firefox automation result is too large"),
+      );
+      return;
+    }
+    for (const [chunkIndex, data] of chunks.entries()) {
+      this.send(socket, {
+        type: "automation.result.chunk",
+        requestId,
+        chunkIndex,
+        chunkCount: chunks.length,
+        data,
+      });
+    }
+  }
+
+  private sendAutomationError(
+    socket: WebSocket,
+    requestId: string,
+    code: string,
+    error: unknown,
+  ): void {
+    this.send(socket, {
+      type: "automation.error",
+      requestId,
+      error: { code, message: safePublicMessage(error) },
+    });
+  }
+
+  private sendProtocolError(socket: WebSocket, code: string, error: unknown): void {
+    this.send(socket, { type: "protocol.error", code, message: safePublicMessage(error) });
   }
 
   private async handleSessionRequest(
@@ -527,6 +817,7 @@ export class BrowserExtensionServer {
     }
     const previous = connection.activeThreadId;
     connection.bindingThreadIds.add(binding.threadId);
+    connection.bindingTabIds.set(stored.bindingId, new Set(binding.tabIds.map(String)));
     connection.activeThreadId = binding.threadId;
     if (previous && previous !== binding.threadId) this.projection.publishThreadState(previous);
     this.projection.publishThreadState(binding.threadId);
@@ -541,6 +832,7 @@ export class BrowserExtensionServer {
     if (connection.activeThreadId === binding.threadId) connection.activeThreadId = null;
     const meta = this.store.view().threadMeta[binding.threadId];
     const stored = meta?.browserBinding;
+    if (stored) connection.bindingTabIds.delete(stored.bindingId);
     if (meta?.browserEnabled !== true || stored?.instanceId !== connection.instanceId) return;
     await this.detach(connection.instanceId, binding.threadId).catch(() => undefined);
   }
@@ -623,15 +915,65 @@ export class BrowserExtensionServer {
 
   private async callTool(
     bindingId: string,
-    tool: BrowserToolName,
+    tool: ServerBrowserToolName,
     args: Record<string, unknown>,
   ): Promise<unknown> {
     const owned = this.threadForBinding(bindingId);
     if (!owned) throw new BrowserExtensionError("not_found", "Browser binding not found");
     const deadline = Date.now() + this.disconnectWaitMs;
     const connection = await this.waitForConnection(owned.threadId, owned.binding, deadline);
+    if (tool === "read_network_request" || tool === "read_network_body") {
+      if (connection.protocolVersion < BROWSER_EXTENSION_PROTOCOL_VERSION_V2) {
+        throw new BrowserExtensionError(
+          "update_required",
+          "This browser tool requires extension protocol v2; update the CodexNest extension",
+        );
+      }
+      if (tool === "read_network_request") {
+        if (typeof args.exchangeId !== "string" || !args.exchangeId) {
+          throw new BrowserExtensionError(
+            "invalid_arguments",
+            "read_network_request requires exchangeId",
+          );
+        }
+        return this.captures.get(bindingId, args.exchangeId);
+      }
+      if (typeof args.bodyId !== "string" || !args.bodyId) {
+        throw new BrowserExtensionError("invalid_arguments", "read_network_body requires bodyId");
+      }
+      return this.captures.readBody(
+        bindingId,
+        args.bodyId,
+        args.offset === undefined
+          ? 0
+          : requireBoundedInteger(args.offset, 0, Number.MAX_SAFE_INTEGER, "offset"),
+        args.length === undefined
+          ? MAX_NETWORK_BODY_READ_BYTES
+          : requireBoundedInteger(args.length, 1, MAX_NETWORK_BODY_READ_BYTES, "length"),
+      );
+    }
+    if (
+      tool === "read_network_requests" &&
+      connection.protocolVersion === BROWSER_EXTENSION_PROTOCOL_VERSION_V2
+    ) {
+      if (args.tabId !== undefined)
+        this.assertConnectionOwnsTab(connection, bindingId, requireTabId(args.tabId));
+      return this.captures.list(bindingId, {
+        ...(args.tabId !== undefined ? { tabId: requireTabId(args.tabId) } : {}),
+        ...(args.since !== undefined ? { since: requireFiniteNumber(args.since, "since") } : {}),
+        ...(typeof args.search === "string" ? { search: args.search } : {}),
+        ...(args.limit !== undefined
+          ? { limit: requireBoundedInteger(args.limit, 1, 1_000, "limit") }
+          : {}),
+      });
+    }
     const callId = randomUUID();
-    const prepared = await this.prepareToolArguments(connection.socket, owned.threadId, tool, args);
+    const prepared = await this.prepareToolArguments(
+      connection.socket,
+      owned.threadId,
+      tool as BrowserToolName,
+      args,
+    );
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingTools.delete(callId);
@@ -655,7 +997,7 @@ export class BrowserExtensionServer {
         type: "tool.call",
         requestId: callId,
         threadId: owned.threadId,
-        tool,
+        tool: tool as BrowserToolName,
         arguments: prepared.arguments,
       });
     });
@@ -903,6 +1245,48 @@ export class BrowserExtensionServer {
     return structuredClone(binding);
   }
 
+  private assertConnectionOwnsTab(
+    connection: ExtensionConnection,
+    bindingId: string,
+    tabId: string | number,
+  ): void {
+    const owned = this.threadForBinding(bindingId);
+    if (
+      !owned ||
+      owned.binding.instanceId !== connection.instanceId ||
+      owned.binding.detachedAt !== undefined ||
+      !connection.bindingThreadIds.has(owned.threadId)
+    ) {
+      throw new BrowserExtensionError(
+        "forbidden",
+        "Browser binding is not owned by this connection",
+      );
+    }
+    const tabs = connection.bindingTabIds.get(bindingId);
+    if (!tabs?.has(String(tabId))) {
+      throw new BrowserExtensionError("forbidden", "Browser tab is not owned by this binding");
+    }
+  }
+
+  private assertConnectionOwnsThreadTab(
+    connection: ExtensionConnection,
+    threadId: string,
+    tabId: number,
+  ): BrowserBindingState {
+    const binding = this.assertOwnedBinding(connection.instanceId, threadId);
+    if (
+      binding.detachedAt !== undefined ||
+      !connection.bindingThreadIds.has(threadId) ||
+      !connection.bindingTabIds.get(binding.bindingId)?.has(String(tabId))
+    ) {
+      throw new BrowserExtensionError(
+        "forbidden",
+        "Browser tab is not owned by this connection and binding",
+      );
+    }
+    return binding;
+  }
+
   private threadForBinding(
     bindingId: string,
   ): { threadId: string; binding: BrowserBindingState } | undefined {
@@ -948,19 +1332,22 @@ export class BrowserExtensionServer {
     return actual.length === expected.length && timingSafeEqual(actual, expected);
   }
 
-  private send(socket: WebSocket | undefined, frame: BrowserExtensionServerFrame): void {
+  private send(
+    socket: WebSocket | undefined,
+    frame: BrowserExtensionServerFrame | Record<string, unknown>,
+  ): void {
     if (socket?.readyState === 1) socket.send(JSON.stringify(frame));
   }
 }
 
-const MCP_TOOLS = BROWSER_TOOL_NAMES.map((name) => ({
+const MCP_TOOLS = SERVER_BROWSER_TOOL_NAMES.map((name) => ({
   name,
   description: browserToolDescription(name),
   inputSchema: browserToolInputSchema(name),
 }));
 
-function browserToolDescription(name: BrowserToolName): string {
-  const descriptions: Record<BrowserToolName, string> = {
+function browserToolDescription(name: ServerBrowserToolName): string {
+  const descriptions: Record<ServerBrowserToolName, string> = {
     tabs_context: "List browser tabs and identify the active tab.",
     tabs_create: "Create a browser tab.",
     tabs_close: "Close one or more browser tabs.",
@@ -972,20 +1359,25 @@ function browserToolDescription(name: BrowserToolName): string {
     form_input: "Set a value on a page form control.",
     javascript_tool: "Execute JavaScript in the current page.",
     read_console_messages: "Read browser console messages.",
-    read_network_requests: "Read browser network requests.",
+    read_network_requests:
+      "List complete browser network exchanges. Protocol v2 reads the server capture store; v1 Chrome uses the extension fallback.",
+    read_network_request:
+      "Read one complete server-stored network exchange and its request/response body references.",
+    read_network_body:
+      "Read a byte range from a server-stored request or response body (at most 512 KiB).",
     resize_window: "Resize the browser window.",
     upload_file: "Upload a workspace file through a page file input.",
   };
   return descriptions[name];
 }
 
-function browserToolInputSchema(name: BrowserToolName): Record<string, unknown> {
+function browserToolInputSchema(name: ServerBrowserToolName): Record<string, unknown> {
   const tabId = {
     type: "integer",
     minimum: 0,
-    description: "Chrome tab ID; defaults to the active tab.",
+    description: "Browser tab ID; defaults to the active tab.",
   };
-  const schemas: Record<BrowserToolName, Record<string, unknown>> = {
+  const schemas: Record<ServerBrowserToolName, Record<string, unknown>> = {
     tabs_context: objectSchema({}),
     tabs_create: objectSchema({
       url: { type: "string", description: "URL to open; defaults to about:blank." },
@@ -1079,6 +1471,28 @@ function browserToolInputSchema(name: BrowserToolName): Record<string, unknown> 
       search: { type: "string" },
       limit: boundedIntegerSchema(1, 1_000),
     }),
+    read_network_request: objectSchema(
+      {
+        exchangeId: {
+          type: "string",
+          description: "Exchange ID returned by read_network_requests.",
+        },
+      },
+      ["exchangeId"],
+    ),
+    read_network_body: objectSchema(
+      {
+        bodyId: { type: "string", description: "Body ID returned by read_network_request." },
+        offset: { type: "integer", minimum: 0, description: "Zero-based byte offset." },
+        length: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_NETWORK_BODY_READ_BYTES,
+          description: "Number of bytes to read; defaults to 512 KiB.",
+        },
+      },
+      ["bodyId"],
+    ),
     resize_window: objectSchema({
       tabId,
       width: boundedIntegerSchema(320, 10_000),
@@ -1142,8 +1556,10 @@ function jsonRpcError(
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function isBrowserTool(value: unknown): value is BrowserToolName {
-  return typeof value === "string" && (BROWSER_TOOL_NAMES as readonly string[]).includes(value);
+function isBrowserTool(value: unknown): value is ServerBrowserToolName {
+  return (
+    typeof value === "string" && (SERVER_BROWSER_TOOL_NAMES as readonly string[]).includes(value)
+  );
 }
 
 function isBrowserCatalogEvent(event: ServerEvent): boolean {
@@ -1159,6 +1575,73 @@ function isBrowserCatalogEvent(event: ServerEvent): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeBase64(value: string): Buffer {
+  if (!isValidBase64(value)) throw new Error("Invalid base64 capture chunk");
+  return Buffer.from(value, "base64");
+}
+
+function isValidBase64(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length % 4 === 0 &&
+    /^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/u.test(value)
+  );
+}
+
+function splitUtf8(value: string, maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > maxBytes && current) {
+      chunks.push(current);
+      current = "";
+      bytes = 0;
+    }
+    current += character;
+    bytes += characterBytes;
+  }
+  if (current || chunks.length === 0) chunks.push(current);
+  return chunks;
+}
+
+function requireBoundedInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    throw new BrowserExtensionError(
+      "invalid_arguments",
+      `${name} must be an integer from ${minimum} to ${maximum}`,
+    );
+  }
+  return Number(value);
+}
+
+function requireFiniteNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new BrowserExtensionError("invalid_arguments", `${name} must be a finite number`);
+  }
+  return value;
+}
+
+function requireTabId(value: unknown): string | number {
+  if (!validTabId(value)) {
+    throw new BrowserExtensionError("invalid_arguments", "tabId must be a browser tab ID");
+  }
+  return value;
+}
+
+function validTabId(value: unknown): value is string | number {
+  return (
+    (typeof value === "string" && value.length > 0 && value.length <= 1_024) ||
+    (Number.isSafeInteger(value) && Number(value) >= 0)
+  );
 }
 
 function isLoopbackAddress(value: string): boolean {

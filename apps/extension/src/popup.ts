@@ -9,6 +9,7 @@ import type {
   ThreadSummary,
   UiLanguage,
 } from "./protocol";
+import { browserDisplayName, webext } from "./webext";
 
 interface PopupSnapshot {
   configured: boolean;
@@ -30,8 +31,8 @@ interface BackgroundResponse<T> {
 
 const copy = {
   en: {
-    browser: "Browser",
-    setupTitle: "Connect this Chrome",
+    browser: browserDisplayName,
+    setupTitle: `Connect this ${browserDisplayName}`,
     setupBody: "Use the address and owner token from your CodexNest instance.",
     baseUrl: "CodexNest address",
     token: "Owner token",
@@ -57,8 +58,8 @@ const copy = {
     tabCount: (count: number) => `${count} ${count === 1 ? "tab" : "tabs"}`,
   },
   ru: {
-    browser: "Браузер",
-    setupTitle: "Подключить Chrome",
+    browser: browserDisplayName,
+    setupTitle: `Подключить ${browserDisplayName}`,
     setupBody: "Введите адрес и токен владельца из вашего CodexNest.",
     baseUrl: "Адрес CodexNest",
     token: "Токен владельца",
@@ -97,7 +98,7 @@ let interactingAttachButton: HTMLButtonElement | null = null;
 let deferredBackgroundRender = false;
 let selectInteractionTimer: number | undefined;
 
-chrome.runtime.onMessage.addListener((message) => {
+webext.runtime.onMessage.addListener((message) => {
   if (!isRecord(message) || message.type !== "background.state" || !isRecord(message.state)) return;
   applyBackgroundSnapshot(message.state as unknown as PopupSnapshot);
 });
@@ -470,7 +471,7 @@ async function act(operation: () => Promise<unknown>): Promise<void> {
 }
 
 async function request<T = void>(message: Record<string, unknown>): Promise<T> {
-  const response = (await chrome.runtime.sendMessage(message)) as BackgroundResponse<T>;
+  const response = (await webext.runtime.sendMessage(message)) as BackgroundResponse<T>;
   if (!response?.ok) throw new Error(response?.error ?? "CodexNest Browser did not respond");
   return response.result as T;
 }

@@ -2383,6 +2383,7 @@
 .turn-timing.active {
   display: flex;
   align-items: center;
+  justify-self: end;
   justify-content: flex-end;
   gap: 7px;
 }

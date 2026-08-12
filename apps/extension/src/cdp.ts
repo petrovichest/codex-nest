@@ -4,6 +4,13 @@ const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
 const MAX_STORED_SCREENSHOT_BYTES = 24 * 1024 * 1024;
 const MAX_STORED_SCREENSHOTS = 16;
 
+import {
+  CdpNetworkCaptureAssembler,
+  type CompletedNetworkCapture,
+  type DroppedNetworkCapture,
+} from "./network-capture";
+import { webext } from "./webext";
+
 export interface ConsoleRecord {
   id: number;
   at: number;
@@ -13,10 +20,11 @@ export interface ConsoleRecord {
   line?: number;
 }
 
-export interface NetworkRecord {
+export interface NetworkExchangeRecord {
   id: number;
   at: number;
   requestId: string;
+  exchangeId: string;
   method: string;
   url: string;
   resourceType?: string;
@@ -82,16 +90,39 @@ export class DebuggerController {
   private readonly attached = new Set<number>();
   private readonly attaching = new Map<number, Promise<void>>();
   private readonly consoleRecords = new Map<number, ConsoleRecord[]>();
-  private readonly networkRecords = new Map<number, NetworkRecord[]>();
-  private readonly requests = new Map<number, Map<string, NetworkRecord>>();
+  private readonly networkRecords = new Map<number, NetworkExchangeRecord[]>();
+  private readonly networkCapture: CdpNetworkCaptureAssembler;
   private recordId = 1;
 
-  constructor(private readonly navigationListener: (tabId: number) => void) {
-    chrome.debugger.onEvent.addListener((source, method, parameters) => {
+  constructor(
+    private readonly navigationListener: (tabId: number) => void,
+    private readonly networkCaptureListener: (
+      capture: CompletedNetworkCapture,
+    ) => void | Promise<void> = () => undefined,
+    threadForTab: (tabId: number) => string | null = () => null,
+    networkCaptureDropListener: (capture: DroppedNetworkCapture) => void | Promise<void> = () =>
+      undefined,
+  ) {
+    this.networkCapture = new CdpNetworkCaptureAssembler(
+      async <T>(tabId: number, method: string, parameters?: Record<string, unknown>) =>
+        (await webext.debugger.sendCommand({ tabId }, method, parameters)) as T,
+      threadForTab,
+      (capture) => {
+        this.pushNetwork(capture.tabId, {
+          id: this.recordId++,
+          requestId: capture.requestId,
+          exchangeId: capture.exchangeId,
+          ...capture.summary,
+        });
+        void this.networkCaptureListener(capture);
+      },
+      (capture) => void networkCaptureDropListener(capture),
+    );
+    webext.debugger.onEvent.addListener((source, method, parameters) => {
       if (source.tabId === undefined) return;
       this.onEvent(source.tabId, method, parameters);
     });
-    chrome.debugger.onDetach.addListener((source) => {
+    webext.debugger.onDetach.addListener((source) => {
       if (source.tabId !== undefined) {
         this.attached.delete(source.tabId);
         this.attaching.delete(source.tabId);
@@ -115,7 +146,7 @@ export class DebuggerController {
   async detach(tabId: number): Promise<void> {
     if (!this.attached.has(tabId)) return;
     try {
-      await chrome.debugger.detach({ tabId });
+      await webext.debugger.detach({ tabId });
     } finally {
       this.attached.delete(tabId);
     }
@@ -127,7 +158,7 @@ export class DebuggerController {
     parameters?: Record<string, unknown>,
   ): Promise<T> {
     await this.ensureAttached(tabId);
-    return (await chrome.debugger.sendCommand({ tabId }, method, parameters)) as T;
+    return (await webext.debugger.sendCommand({ tabId }, method, parameters)) as T;
   }
 
   async captureScreenshot(tabId: number): Promise<StoredImage> {
@@ -172,7 +203,7 @@ export class DebuggerController {
       .slice(-limit);
   }
 
-  readNetwork(tabId: number, options: Record<string, unknown>): NetworkRecord[] {
+  readNetwork(tabId: number, options: Record<string, unknown>): NetworkExchangeRecord[] {
     const since = typeof options.since === "number" ? options.since : 0;
     const search = typeof options.search === "string" ? options.search.toLocaleLowerCase() : "";
     const limit = boundedInteger(options.limit, 200, 1, 1_000);
@@ -187,11 +218,11 @@ export class DebuggerController {
   forget(tabId: number): void {
     this.consoleRecords.delete(tabId);
     this.networkRecords.delete(tabId);
-    this.requests.delete(tabId);
+    this.networkCapture.forget(tabId);
   }
 
   private async attach(tabId: number): Promise<void> {
-    await chrome.debugger.attach({ tabId }, CDP_VERSION);
+    await webext.debugger.attach({ tabId }, CDP_VERSION);
     this.attached.add(tabId);
     try {
       await Promise.all([
@@ -251,37 +282,15 @@ export class DebuggerController {
       });
       return;
     }
-    if (method === "Network.requestWillBeSent") {
-      const request = isRecord(parameters.request) ? parameters.request : {};
-      const record: NetworkRecord = {
-        id: this.recordId++,
-        at: Date.now(),
-        requestId: String(parameters.requestId ?? ""),
-        method: typeof request.method === "string" ? request.method : "GET",
-        url: trimMetadata(typeof request.url === "string" ? request.url : ""),
-        resourceType: typeof parameters.type === "string" ? parameters.type : undefined,
-      };
-      const requests = this.requests.get(tabId) ?? new Map<string, NetworkRecord>();
-      requests.set(record.requestId, record);
-      this.requests.set(tabId, requests);
-      this.pushNetwork(tabId, record);
-      return;
-    }
-    if (method === "Network.responseReceived") {
-      const response = isRecord(parameters.response) ? parameters.response : {};
-      const record = this.requests.get(tabId)?.get(String(parameters.requestId ?? ""));
-      if (record) {
-        record.status = typeof response.status === "number" ? response.status : undefined;
-        record.mimeType = typeof response.mimeType === "string" ? response.mimeType : undefined;
-      }
-      return;
-    }
-    if (method === "Network.loadingFailed") {
-      const record = this.requests.get(tabId)?.get(String(parameters.requestId ?? ""));
-      if (record)
-        record.failed = trimMetadata(
-          typeof parameters.errorText === "string" ? parameters.errorText : "Failed",
-        );
+    if (
+      method === "Network.requestWillBeSent" ||
+      method === "Network.requestWillBeSentExtraInfo" ||
+      method === "Network.responseReceived" ||
+      method === "Network.responseReceivedExtraInfo" ||
+      method === "Network.loadingFinished" ||
+      method === "Network.loadingFailed"
+    ) {
+      this.networkCapture.accept(tabId, method, parameters);
     }
   }
 
@@ -293,13 +302,11 @@ export class DebuggerController {
     this.consoleRecords.set(tabId, records);
   }
 
-  private pushNetwork(tabId: number, record: NetworkRecord): void {
+  private pushNetwork(tabId: number, record: NetworkExchangeRecord): void {
     const records = this.networkRecords.get(tabId) ?? [];
     records.push(record);
     if (records.length > MAX_RECORDS_PER_TAB) {
-      const removed = records.splice(0, records.length - MAX_RECORDS_PER_TAB);
-      const requests = this.requests.get(tabId);
-      for (const item of removed) requests?.delete(item.requestId);
+      records.splice(0, records.length - MAX_RECORDS_PER_TAB);
     }
     this.networkRecords.set(tabId, records);
   }

@@ -23,7 +23,7 @@ describe("browser protocol", () => {
     expect(() => normaliseBaseUrl("file:///tmp/nest")).toThrow(/HTTP or HTTPS/);
   });
 
-  it("requires the exact hello protocol and version", () => {
+  it("requires the exact hello protocol and a supported version", () => {
     expect(
       isServerFrame({
         type: "server.hello",
@@ -38,7 +38,7 @@ describe("browser protocol", () => {
       isServerFrame({
         type: "server.hello",
         protocol: BROWSER_PROTOCOL,
-        version: 2,
+        version: 999,
         locale: "en",
         projects: [],
         threads: [],

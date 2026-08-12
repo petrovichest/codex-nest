@@ -14,8 +14,10 @@ type Action = "checking" | "updating" | null;
 
 const LATEST_ANDROID_APK_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk";
-const LATEST_BROWSER_EXTENSION_URL =
+const LATEST_CHROME_EXTENSION_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/codexnest-browser-latest.zip";
+const LATEST_FIREFOX_EXTENSION_URL =
+  "https://github.com/petrovichest/codex-nest/releases/download/android-latest/codexnest-browser-firefox-latest.xpi";
 
 export function ApplicationSettingsCard({
   initialStatus,
@@ -150,12 +152,21 @@ export function ApplicationSettingsCard({
     }
   }
 
-  async function downloadBrowserExtension() {
+  async function downloadChromeExtension() {
     setError(null);
     try {
-      await openDownloadUrl(api.settings.baseUrl, LATEST_BROWSER_EXTENSION_URL);
+      await openDownloadUrl(api.settings.baseUrl, LATEST_CHROME_EXTENSION_URL);
     } catch {
       setError(t("Не удалось открыть загрузку расширения для Chrome"));
+    }
+  }
+
+  async function downloadFirefoxExtension() {
+    setError(null);
+    try {
+      await openDownloadUrl(api.settings.baseUrl, LATEST_FIREFOX_EXTENSION_URL);
+    } catch {
+      setError(t("Не удалось открыть загрузку расширения для Firefox"));
     }
   }
 
@@ -168,7 +179,7 @@ export function ApplicationSettingsCard({
     <SettingsGroup
       className="application-settings-card"
       description={t(
-        "Сервер, APK и расширение для Chrome обновляются из одной проверенной CI-сборки с автоматическим откатом.",
+        "Сервер, APK и расширения для Chrome и Firefox обновляются из одной проверенной CI-сборки с автоматическим откатом.",
       )}
       icon={<ServerIcon />}
       title={t("Обновление CodexNest")}
@@ -234,8 +245,11 @@ export function ApplicationSettingsCard({
             <button type="button" onClick={() => void downloadApk()}>
               {t("Скачать свежий APK")}
             </button>
-            <button type="button" onClick={() => void downloadBrowserExtension()}>
+            <button type="button" onClick={() => void downloadChromeExtension()}>
               {t("Скачать расширение для Chrome")}
+            </button>
+            <button type="button" onClick={() => void downloadFirefoxExtension()}>
+              {t("Скачать расширение для Firefox")}
             </button>
             <button
               disabled={!status?.supported || busy}

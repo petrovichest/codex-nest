@@ -3,75 +3,90 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { deflateRawSync } from "node:zlib";
 
 const packageRoot = resolve(import.meta.dirname, "..");
-const distRoot = join(packageRoot, "dist");
-const manifest = JSON.parse(await readFile(join(distRoot, "manifest.json"), "utf8"));
-const output = join(packageRoot, "artifacts", `codexnest-browser-${manifest.version}.zip`);
-const files = (await walk(distRoot)).sort((left, right) => left.localeCompare(right));
-if (!files.some((file) => relative(distRoot, file) === "manifest.json")) {
-  throw new Error("dist/manifest.json is required at the ZIP archive root");
+const requestedTarget = process.argv[2];
+if (requestedTarget && requestedTarget !== "chrome" && requestedTarget !== "firefox") {
+  throw new Error("Package target must be chrome or firefox");
 }
 
-const localParts = [];
-const centralParts = [];
-let offset = 0;
-const now = dosDateTime(new Date("1980-01-01T00:00:00.000Z"));
-
-for (const file of files) {
-  const name = relative(distRoot, file).split(sep).join("/");
-  const nameBytes = Buffer.from(name, "utf8");
-  const source = await readFile(file);
-  const compressed = deflateRawSync(source, { level: 9 });
-  const checksum = crc32(source);
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50, 0);
-  local.writeUInt16LE(20, 4);
-  local.writeUInt16LE(0x0800, 6);
-  local.writeUInt16LE(8, 8);
-  local.writeUInt16LE(now.time, 10);
-  local.writeUInt16LE(now.date, 12);
-  local.writeUInt32LE(checksum, 14);
-  local.writeUInt32LE(compressed.length, 18);
-  local.writeUInt32LE(source.length, 22);
-  local.writeUInt16LE(nameBytes.length, 26);
-  local.writeUInt16LE(0, 28);
-  localParts.push(local, nameBytes, compressed);
-
-  const central = Buffer.alloc(46);
-  central.writeUInt32LE(0x02014b50, 0);
-  central.writeUInt16LE(20, 4);
-  central.writeUInt16LE(20, 6);
-  central.writeUInt16LE(0x0800, 8);
-  central.writeUInt16LE(8, 10);
-  central.writeUInt16LE(now.time, 12);
-  central.writeUInt16LE(now.date, 14);
-  central.writeUInt32LE(checksum, 16);
-  central.writeUInt32LE(compressed.length, 20);
-  central.writeUInt32LE(source.length, 24);
-  central.writeUInt16LE(nameBytes.length, 28);
-  central.writeUInt16LE(0, 30);
-  central.writeUInt16LE(0, 32);
-  central.writeUInt16LE(0, 34);
-  central.writeUInt16LE(0, 36);
-  central.writeUInt32LE(0, 38);
-  central.writeUInt32LE(offset, 42);
-  centralParts.push(central, nameBytes);
-  offset += local.length + nameBytes.length + compressed.length;
+for (const target of requestedTarget ? [requestedTarget] : ["chrome", "firefox"]) {
+  process.stdout.write(`${await packageTarget(target)}\n`);
 }
 
-const centralDirectory = Buffer.concat(centralParts);
-const end = Buffer.alloc(22);
-end.writeUInt32LE(0x06054b50, 0);
-end.writeUInt16LE(0, 4);
-end.writeUInt16LE(0, 6);
-end.writeUInt16LE(files.length, 8);
-end.writeUInt16LE(files.length, 10);
-end.writeUInt32LE(centralDirectory.length, 12);
-end.writeUInt32LE(offset, 16);
-end.writeUInt16LE(0, 20);
+async function packageTarget(target) {
+  const distRoot = join(packageRoot, "dist", target);
+  const manifest = JSON.parse(await readFile(join(distRoot, "manifest.json"), "utf8"));
+  const artifactName =
+    target === "firefox"
+      ? `codexnest-browser-firefox-${manifest.version}.xpi`
+      : `codexnest-browser-${manifest.version}.zip`;
+  const output = join(packageRoot, "artifacts", artifactName);
+  const files = (await walk(distRoot)).sort((left, right) => left.localeCompare(right));
+  if (!files.some((file) => relative(distRoot, file) === "manifest.json")) {
+    throw new Error(`dist/${target}/manifest.json is required at the archive root`);
+  }
 
-await mkdir(dirname(output), { recursive: true });
-await writeFile(output, Buffer.concat([...localParts, centralDirectory, end]));
-process.stdout.write(`${output}\n`);
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const now = dosDateTime(new Date("1980-01-01T00:00:00.000Z"));
+
+  for (const file of files) {
+    const name = relative(distRoot, file).split(sep).join("/");
+    const nameBytes = Buffer.from(name, "utf8");
+    const source = await readFile(file);
+    const compressed = deflateRawSync(source, { level: 9 });
+    const checksum = crc32(source);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(now.time, 10);
+    local.writeUInt16LE(now.date, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(source.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, nameBytes, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(now.time, 12);
+    central.writeUInt16LE(now.date, 14);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(source.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, nameBytes);
+    offset += local.length + nameBytes.length + compressed.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, Buffer.concat([...localParts, centralDirectory, end]));
+  return output;
+}
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

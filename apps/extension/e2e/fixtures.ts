@@ -110,7 +110,7 @@ export const test = base.extend<ExtensionFixtures>({
   },
   context: async ({ playwright }, use) => {
     const profile = await mkdtemp(join(tmpdir(), "codexnest-extension-"));
-    const extensionPath = resolve(import.meta.dirname, "../dist");
+    const extensionPath = resolve(import.meta.dirname, "../dist/chrome");
     const context = await playwright.chromium.launchPersistentContext(profile, {
       channel: "chromium",
       headless: true,

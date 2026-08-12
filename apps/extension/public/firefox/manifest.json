@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "CodexNest Browser",
+  "short_name": "CodexNest",
+  "description": "Attach Firefox tabs to CodexNest sessions.",
+  "version": "0.1.8",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "codexnest-browser@petrovichest",
+      "strict_min_version": "146.0",
+      "data_collection_permissions": {
+        "required": [
+          "personallyIdentifyingInfo",
+          "healthInfo",
+          "financialAndPaymentInfo",
+          "authenticationInfo",
+          "personalCommunications",
+          "locationInfo",
+          "browsingActivity",
+          "websiteContent",
+          "websiteActivity",
+          "searchTerms"
+        ]
+      }
+    }
+  },
+  "action": {
+    "default_title": "CodexNest Browser",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["tabs", "tabGroups", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

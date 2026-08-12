@@ -32,8 +32,11 @@ const refPrefix = Math.random().toString(36).slice(2, 8);
 let nextRef = 1;
 let refGeneration = 1;
 
+const contentApi =
+  (globalThis as typeof globalThis & { browser?: ChromeApi; chrome?: ChromeApi }).browser ?? chrome;
+
 if (window.top === window) {
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  contentApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!isContentRequest(message)) return;
     try {
       sendResponse({ ok: true, result: dispatch(message) });
@@ -42,7 +45,7 @@ if (window.top === window) {
     }
   });
 
-  chrome.runtime.onConnect.addListener((port) => {
+  contentApi.runtime.onConnect.addListener((port) => {
     if (port.name !== "codexnest.upload") return;
     let start: UploadStart | null = null;
     const chunks: Uint8Array[] = [];

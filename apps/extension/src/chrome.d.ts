@@ -42,7 +42,10 @@ interface ChromeDebuggerTarget {
 
 interface ChromeApi {
   runtime: {
-    getManifest(): { version: string };
+    getManifest(): {
+      version: string;
+      browser_specific_settings?: { gecko?: { id?: string; strict_min_version?: string } };
+    };
     getURL(path: string): string;
     onInstalled: ChromeEvent<[]>;
     onStartup: ChromeEvent<[]>;
