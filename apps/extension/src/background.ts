@@ -387,12 +387,12 @@ async function createOrAttach(tabId: number, target: SessionTarget): Promise<voi
     draft.bindings[binding.threadId] = binding;
   });
   dispatcher.activateThread(binding.threadId);
+  trySend({ type: "binding.updated", binding });
   await dispatcher.attachTab(binding.threadId, tabId).catch(async (error) => {
     await detachBinding(binding.threadId);
     throw error;
   });
   readyBindingThreadIds.add(binding.threadId);
-  trySend({ type: "binding.updated", binding });
   await broadcastState();
 }
 

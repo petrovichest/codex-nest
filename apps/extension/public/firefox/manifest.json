@@ -3,7 +3,7 @@
   "name": "CodexNest Browser",
   "short_name": "CodexNest",
   "description": "Attach Firefox tabs to CodexNest sessions.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "browser_specific_settings": {
     "gecko": {
       "id": "codexnest-browser@petrovichest",

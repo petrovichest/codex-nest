@@ -24,6 +24,7 @@ import {
 
 import { hashToken } from "./auth";
 import { BrowserExtensionError, BrowserExtensionServer } from "./browser-extension";
+import type { FirefoxBidiClient } from "./firefox-bidi";
 import type { AppProjection } from "./projection";
 import { StateStore } from "./state/store";
 
@@ -263,6 +264,57 @@ describe("browser extension transport", () => {
 
     replacement.socket.close();
     other.socket.close();
+    await harness.close();
+  });
+
+  it("accepts the initial Firefox automation request after the binding update", async () => {
+    const firefoxBidi = {
+      execute: vi.fn(async () => ({ context: "context-1" })),
+      detachBinding: vi.fn(),
+      close: vi.fn(async () => undefined),
+    } as unknown as FirefoxBidiClient;
+    const harness = await createHarness({ firefoxBidi });
+    harness.projection.summaries.set("thread", summary("thread"));
+    await harness.browser.enableThread("thread");
+
+    const extension = await connect(harness.app, "extension-instance-1", [], 2, "firefox");
+    await extension.nextType("server.hello");
+    extension.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-firefox",
+        target: { kind: "existing", threadId: "thread" },
+        tab: tabSummary(),
+      }),
+    );
+    await extension.nextType("session.result");
+
+    const binding = bindingSummary("thread");
+    extension.socket.send(JSON.stringify({ type: "binding.updated", binding }));
+    extension.socket.send(
+      JSON.stringify({
+        type: "automation.request",
+        requestId: "automation-firefox",
+        threadId: "thread",
+        tabId: 1,
+        operation: "attach",
+        arguments: { marker: "marker-1" },
+      }),
+    );
+
+    expect(await extension.nextType("automation.result")).toMatchObject({
+      requestId: "automation-firefox",
+      result: { context: "context-1" },
+    });
+    expect(firefoxBidi.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: "thread",
+        tabId: 1,
+        operation: "attach",
+      }),
+    );
+
+    extension.socket.close();
     await harness.close();
   });
 
@@ -758,7 +810,9 @@ describe("browser extension transport", () => {
   });
 });
 
-async function createHarness(options: { disconnectWaitMs?: number } = {}) {
+async function createHarness(
+  options: { disconnectWaitMs?: number; firefoxBidi?: FirefoxBidiClient } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-extension-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -779,6 +833,7 @@ async function createHarness(options: { disconnectWaitMs?: number } = {}) {
     heartbeatMs: 10_000,
     disconnectWaitMs: options.disconnectWaitMs,
     internalSecret: "internal-secret",
+    firefoxBidi: options.firefoxBidi,
   });
   browser.setLifecycle({
     enable: async (threadId) => {
@@ -912,12 +967,19 @@ async function connect(
   instanceId: string,
   bindings: BrowserExtensionBindingSummary[] = [],
   version = BROWSER_EXTENSION_PROTOCOL_VERSION,
+  browser: "chrome" | "firefox" = "chrome",
 ) {
   const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
     headers: { origin: "http://allowed" },
   });
   const frames = frameReader(socket);
-  socket.send(JSON.stringify({ ...helloFrame(instanceId, bindings), version }));
+  socket.send(
+    JSON.stringify({
+      ...helloFrame(instanceId, bindings),
+      version,
+      browser: { name: browser, version: "128" },
+    }),
+  );
   return { socket, ...frames };
 }
 
