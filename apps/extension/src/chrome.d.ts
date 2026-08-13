@@ -77,6 +77,7 @@ interface ChromeApi {
     setZoom(tabId: number, zoomFactor: number): Promise<void>;
     sendMessage(tabId: number, message: unknown, options?: { frameId?: number }): Promise<unknown>;
     connect(tabId: number, options: { name: string; frameId?: number }): ChromePort;
+    onActivated: ChromeEvent<[{ tabId: number; windowId: number }]>;
     onRemoved: ChromeEvent<[number, { windowId: number; isWindowClosing: boolean }]>;
     onUpdated: ChromeEvent<[number, Record<string, unknown>, ChromeTab]>;
   };
@@ -84,6 +85,7 @@ interface ChromeApi {
     update(groupId: number, properties: Record<string, unknown>): Promise<unknown>;
   };
   windows: {
+    getCurrent(): Promise<ChromeWindow>;
     get(windowId: number): Promise<ChromeWindow>;
     update(windowId: number, properties: Record<string, unknown>): Promise<ChromeWindow>;
   };
@@ -105,6 +107,12 @@ interface ChromeApi {
     setBadgeText(details: { text: string }): Promise<void>;
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;
     setTitle(details: { title: string }): Promise<void>;
+  };
+  sidePanel?: {
+    open(options: { windowId: number }): Promise<void>;
+  };
+  sidebarAction?: {
+    open(): Promise<void>;
   };
   alarms: {
     create(name: string, information: Record<string, unknown>): Promise<void>;

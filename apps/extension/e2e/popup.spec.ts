@@ -168,15 +168,13 @@ test("keeps the session select stable across background catalog updates", async 
   await expect(page.locator('option[value^="new:"]')).toHaveCount(0);
 
   await page.evaluate(() => {
-    const receivedThreadIds: string[] = [];
-    Object.assign(window, { receivedThreadIds });
+    Object.assign(window, { stateChangeCount: 0 });
     chrome.runtime.onMessage.addListener((message) => {
-      if (message?.type !== "background.state" || !Array.isArray(message.state?.threads)) return;
-      receivedThreadIds.splice(
-        0,
-        receivedThreadIds.length,
-        ...message.state.threads.map((thread: { id: string }) => thread.id),
-      );
+      if (message?.type !== "background.stateChanged") return;
+      Object.assign(window, {
+        stateChangeCount:
+          ((window as Window & { stateChangeCount?: number }).stateChangeCount ?? 0) + 1,
+      });
     });
   });
   const select = page.locator("select");
@@ -207,13 +205,9 @@ test("keeps the session select stable across background catalog updates", async 
   });
   await expect
     .poll(() =>
-      page.evaluate(() =>
-        (window as Window & { receivedThreadIds?: string[] }).receivedThreadIds?.includes(
-          "thread-background",
-        ),
-      ),
+      page.evaluate(() => (window as Window & { stateChangeCount?: number }).stateChangeCount ?? 0),
     )
-    .toBe(true);
+    .toBeGreaterThan(0);
   expect(
     await page.evaluate((node) => node === document.querySelector("select"), originalSelect),
   ).toBe(true);
@@ -227,4 +221,54 @@ test("keeps the session select stable across background catalog updates", async 
     )
     .toEqual({ kind: "existing", threadId: "thread-existing" });
   await expect(page.getByText("Attached", { exact: true })).toBeVisible();
+});
+
+test("keeps the panel open and follows the active tab", async ({
+  browserServer,
+  context,
+  extensionId,
+}) => {
+  await context.route("http://panel-first.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><title>Panel first</title><main>First target</main>",
+    }),
+  );
+  await context.route("http://panel-second.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><title>Panel second</title><main>Second target</main>",
+    }),
+  );
+  const first = await context.newPage();
+  await first.goto("http://panel-first.test/");
+  const second = await context.newPage();
+  await second.goto("http://panel-second.test/");
+  const panel = await context.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/panel.html`);
+
+  await panel.locator("#base-url").fill(browserServer.baseUrl);
+  await panel.locator("#owner-token").fill("owner-token");
+  await panel.getByRole("button", { name: "Connect" }).click();
+  await expect(panel.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Open side panel" })).toHaveCount(0);
+
+  await panel.evaluate(async () => {
+    const tab = (await chrome.tabs.query({})).find((candidate) =>
+      candidate.url?.startsWith("http://panel-first.test/"),
+    );
+    if (tab?.id === undefined) throw new Error("First panel target is unavailable");
+    await chrome.tabs.update(tab.id, { active: true });
+  });
+  await expect(panel.getByText("Panel first", { exact: true })).toBeVisible();
+
+  await panel.evaluate(async () => {
+    const tab = (await chrome.tabs.query({})).find((candidate) =>
+      candidate.url?.startsWith("http://panel-second.test/"),
+    );
+    if (tab?.id === undefined) throw new Error("Second panel target is unavailable");
+    await chrome.tabs.update(tab.id, { active: true });
+  });
+  await expect(panel.getByText("Panel second", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Panel first", { exact: true })).toHaveCount(0);
 });

@@ -43,13 +43,14 @@ interface PopupSnapshot {
   bindings: BindingSummary[];
 }
 
-type PopupRequest =
+type PopupRequest = { windowId: number } & (
   | { type: "popup.state" }
   | { type: "popup.configure"; baseUrl: string; token: string }
   | { type: "popup.reset" }
   | { type: "popup.createAttach"; target: SessionTarget; tabId: number }
   | { type: "popup.detach"; threadId: string }
-  | { type: "popup.open"; threadId: string };
+  | { type: "popup.open"; threadId: string }
+);
 
 interface PendingSessionRequest {
   resolve: (result: { action: "created" | "attached"; thread: ThreadSummary }) => void;
@@ -102,9 +103,12 @@ webext.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONCILE_ALARM) void wake();
 });
 webext.tabs.onRemoved.addListener((tabId) => void onTabRemoved(tabId));
-webext.tabs.onUpdated.addListener((tabId, change) => {
+webext.tabs.onActivated.addListener(() => void broadcastState());
+webext.tabs.onUpdated.addListener((tabId, change, tab) => {
   if (change.status === "loading" || typeof change.url === "string") invalidateRefs(tabId);
   if ("groupId" in change) scheduleReconcile();
+  if (tab.active && (typeof change.url === "string" || typeof change.title === "string"))
+    void broadcastState();
 });
 webext.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!isPopupRequest(message)) return;
@@ -136,7 +140,7 @@ async function wake(): Promise<void> {
 async function handlePopupRequest(request: PopupRequest): Promise<unknown> {
   switch (request.type) {
     case "popup.state":
-      return popupSnapshot();
+      return popupSnapshot(request.windowId);
     case "popup.configure": {
       const settings = validateSettings(request.baseUrl, request.token);
       persisted = await store.update((draft) => {
@@ -144,7 +148,7 @@ async function handlePopupRequest(request: PopupRequest): Promise<unknown> {
       });
       reconnectAttempt = 0;
       connect(settings);
-      return popupSnapshot();
+      return popupSnapshot(request.windowId);
     }
     case "popup.reset":
       closeSocket(true);
@@ -154,13 +158,13 @@ async function handlePopupRequest(request: PopupRequest): Promise<unknown> {
         draft.settings = null;
       });
       await setConnectionState("pending", null);
-      return popupSnapshot();
+      return popupSnapshot(request.windowId);
     case "popup.createAttach":
       await createOrAttach(request.tabId, request.target);
-      return popupSnapshot();
+      return popupSnapshot(request.windowId);
     case "popup.detach":
       await detachBinding(request.threadId);
-      return popupSnapshot();
+      return popupSnapshot(request.windowId);
     case "popup.open":
       await openInCodexNest(request.threadId);
       return undefined;
@@ -577,12 +581,10 @@ function invalidateRefs(tabId: number): void {
     .catch(() => undefined);
 }
 
-async function popupSnapshot(): Promise<PopupSnapshot> {
+async function popupSnapshot(windowId: number): Promise<PopupSnapshot> {
   persisted = await store.load();
   const activeTab =
-    (await webext.tabs.query({ active: true, currentWindow: true }))
-      .map(tabSummary)
-      .find(Boolean) ?? null;
+    (await webext.tabs.query({ active: true, windowId })).map(tabSummary).find(Boolean) ?? null;
   const bindings = Object.values(persisted.bindings).sort((a, b) => b.updatedAt - a.updatedAt);
   const activeBinding = activeTab
     ? (bindings.find((binding) => binding.tabIds.includes(activeTab.id)) ?? null)
@@ -619,9 +621,7 @@ async function setConnectionState(status: ConnectionStatus, error: string | null
 }
 
 async function broadcastState(): Promise<void> {
-  const state = await popupSnapshot().catch(() => null);
-  if (state)
-    await webext.runtime.sendMessage({ type: "background.state", state }).catch(() => undefined);
+  await webext.runtime.sendMessage({ type: "background.stateChanged" }).catch(() => undefined);
 }
 
 function scheduleHeartbeat(generation: number): void {
@@ -711,7 +711,14 @@ function validateSettings(baseUrl: string, token: string): ExtensionSettings {
 }
 
 function isPopupRequest(value: unknown): value is PopupRequest {
-  return isRecord(value) && typeof value.type === "string" && value.type.startsWith("popup.");
+  return (
+    isRecord(value) &&
+    typeof value.type === "string" &&
+    value.type.startsWith("popup.") &&
+    typeof value.windowId === "number" &&
+    Number.isInteger(value.windowId) &&
+    value.windowId >= 0
+  );
 }
 
 function tabSummary(tab: ChromeTab): BrowserTabSummary | null {

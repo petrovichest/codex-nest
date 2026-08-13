@@ -9,7 +9,7 @@ import type {
   ThreadSummary,
   UiLanguage,
 } from "./protocol";
-import { browserDisplayName, webext } from "./webext";
+import { browserDisplayName, browserTarget, webext } from "./webext";
 
 interface PopupSnapshot {
   configured: boolean;
@@ -54,6 +54,7 @@ const copy = {
     otherSessions: "Other browser sessions",
     emptyCatalog: "Enable Browser in a CodexNest session to attach this tab.",
     editSetup: "Edit connection",
+    openSidePanel: "Open side panel",
     savePending: "Saving…",
     tabCount: (count: number) => `${count} ${count === 1 ? "tab" : "tabs"}`,
   },
@@ -81,14 +82,17 @@ const copy = {
     otherSessions: "Другие браузерные сессии",
     emptyCatalog: "Включите Browser в сессии CodexNest, чтобы подключить эту вкладку.",
     editSetup: "Изменить подключение",
+    openSidePanel: "Открыть сбоку",
     savePending: "Сохранение…",
     tabCount: (count: number) => `${count} ${pluralRu(count, "вкладка", "вкладки", "вкладок")}`,
   },
 } as const;
 
 const app = requirePopupRoot();
+const surface = document.body.dataset.surface === "panel" ? "panel" : "popup";
 
 let snapshot: PopupSnapshot | null = null;
+let browserWindowId: number | null = null;
 let busy = false;
 let localError: string | null = null;
 let setupOverride = false;
@@ -97,21 +101,36 @@ let interactingSelect: HTMLSelectElement | null = null;
 let interactingAttachButton: HTMLButtonElement | null = null;
 let deferredBackgroundRender = false;
 let selectInteractionTimer: number | undefined;
+let refreshGeneration = 0;
 
 webext.runtime.onMessage.addListener((message) => {
-  if (!isRecord(message) || message.type !== "background.state" || !isRecord(message.state)) return;
-  applyBackgroundSnapshot(message.state as unknown as PopupSnapshot);
+  if (!isRecord(message) || message.type !== "background.stateChanged") return;
+  if (browserWindowId === null) return;
+  void refreshSnapshot().catch(showLocalError);
 });
 
-void request<PopupSnapshot>({ type: "popup.state" })
-  .then((state) => {
-    applyBackgroundSnapshot(state, true);
-  })
-  .catch((error) => {
-    localError = errorMessage(error);
-    if (interactingSelect) deferredBackgroundRender = true;
-    else render();
-  });
+render();
+void initialise().catch(showLocalError);
+
+async function initialise(): Promise<void> {
+  const currentWindow = await webext.windows.getCurrent();
+  if (currentWindow.id === undefined) throw new Error("The current browser window is unavailable");
+  browserWindowId = currentWindow.id;
+  await refreshSnapshot(true);
+}
+
+async function refreshSnapshot(resetTarget = false): Promise<void> {
+  const generation = ++refreshGeneration;
+  const state = await request<PopupSnapshot>({ type: "popup.state" });
+  if (generation !== refreshGeneration) return;
+  applyBackgroundSnapshot(state, resetTarget);
+}
+
+function showLocalError(error: unknown): void {
+  localError = errorMessage(error);
+  if (interactingSelect) deferredBackgroundRender = true;
+  else render();
+}
 
 function applyBackgroundSnapshot(state: PopupSnapshot, resetTarget = false): void {
   snapshot = state;
@@ -137,7 +156,7 @@ function render(): void {
   const text = copy[language];
   document.body.dataset.status = snapshot?.status ?? "pending";
 
-  app.append(header(text.browser));
+  app.append(header(text));
   if (!snapshot) {
     app.append(el("section", { className: "loading-panel", textContent: "CodexNest…" }));
     return;
@@ -149,13 +168,43 @@ function render(): void {
   app.append(sessionView(snapshot, text));
 }
 
-function header(browserLabel: string): HTMLElement {
+function header(text: (typeof copy)[UiLanguage]): HTMLElement {
   const wordmark = el("div", { className: "wordmark" }, [
     el("span", { className: "nest-mark", ariaHidden: "true" }, [el("i"), el("i"), el("i")]),
     el("span", { textContent: "CodexNest" }),
-    el("span", { className: "wordmark-context", textContent: browserLabel }),
+    el("span", { className: "wordmark-context", textContent: text.browser }),
   ]);
-  return el("header", { className: "topbar" }, [wordmark]);
+  const topbar = el("header", { className: "topbar" }, [wordmark]);
+  if (surface === "popup") {
+    const openPanel = el("button", {
+      className: "open-panel-button",
+      type: "button",
+      textContent: text.openSidePanel,
+      ariaLabel: text.openSidePanel,
+      disabled: browserWindowId === null,
+    });
+    openPanel.addEventListener("click", openPersistentPanel);
+    topbar.append(openPanel);
+  }
+  return topbar;
+}
+
+function openPersistentPanel(): void {
+  if (browserWindowId === null) return;
+  let opening: Promise<void>;
+  try {
+    if (browserTarget === "chrome") {
+      if (!webext.sidePanel) throw new Error("Chrome Side Panel is unavailable");
+      opening = webext.sidePanel.open({ windowId: browserWindowId });
+    } else {
+      if (!webext.sidebarAction) throw new Error("Firefox Sidebar is unavailable");
+      opening = webext.sidebarAction.open();
+    }
+  } catch (error) {
+    showLocalError(error);
+    return;
+  }
+  void opening.catch(showLocalError);
 }
 
 function setupView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
@@ -192,6 +241,8 @@ function setupView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLE
 function sessionView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {
   const section = el("section", { className: "sessions" });
   section.append(statusBar(state, text));
+  const actionError = errorNotice(localError);
+  if (actionError) section.append(actionError);
   const current = el("div", { className: "section-heading" }, [
     el("h1", { textContent: text.currentTab }),
     state.activeBinding
@@ -326,7 +377,7 @@ function unboundCard(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTM
   card.append(label);
   if (!catalogThreadCount)
     card.append(el("p", { className: "empty-inline", textContent: text.emptyCatalog }));
-  const cardError = errorNotice(localError ?? state.error);
+  const cardError = errorNotice(state.error);
   if (cardError) card.append(cardError);
   card.append(button);
   return card;
@@ -471,7 +522,11 @@ async function act(operation: () => Promise<unknown>): Promise<void> {
 }
 
 async function request<T = void>(message: Record<string, unknown>): Promise<T> {
-  const response = (await webext.runtime.sendMessage(message)) as BackgroundResponse<T>;
+  if (browserWindowId === null) throw new Error("The current browser window is unavailable");
+  const response = (await webext.runtime.sendMessage({
+    ...message,
+    windowId: browserWindowId,
+  })) as BackgroundResponse<T>;
   if (!response?.ok) throw new Error(response?.error ?? "CodexNest Browser did not respond");
   return response.result as T;
 }

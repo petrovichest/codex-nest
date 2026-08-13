@@ -28,6 +28,11 @@
     "default_title": "CodexNest Browser",
     "default_popup": "popup.html"
   },
+  "sidebar_action": {
+    "default_title": "CodexNest Browser",
+    "default_panel": "panel.html",
+    "open_at_install": false
+  },
   "background": {
     "scripts": ["background.js"],
     "type": "module"

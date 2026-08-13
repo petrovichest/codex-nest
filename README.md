@@ -92,6 +92,11 @@ Chrome and Firefox are delivered as two separate extensions. They expose the
 same browser-control tools and complete network-exchange storage to CodexNest;
 install only the artifact for the browser in which it will run.
 
+The toolbar icon opens a compact popup. Choose **Open side panel** there to keep
+the same controls open in Chrome Side Panel or Firefox Sidebar while working
+with web pages. The panel follows the active tab and stays open until you close
+it with the browser's native control; the extension never opens it automatically.
+
 ### Chrome
 
 Download `codexnest-browser-<version>.zip` from the same GitHub release as the
@@ -100,9 +105,9 @@ choose **Load unpacked**, and select the unpacked directory. The checked-in
 manifest key keeps the extension ID stable across releases.
 
 Open the popup and enter the CodexNest HTTP(S) address and owner token. For the
-current tab, choose either a new session in a project or an existing writable
-root session. CodexNest keeps one Chrome tab group per attached session; the
-popup can manage several sessions and open their chats in CodexNest.
+current tab, choose an available writable root session. CodexNest keeps one
+Chrome tab group per attached session; the popup and side panel can manage
+several sessions and open their chats in CodexNest.
 
 The extension uses `chrome.debugger` and intentionally gives the attached Codex
 session control over all ordinary Chrome tabs, including navigation, clicks,
@@ -116,7 +121,7 @@ Firefox 146 or newer is required. Download the signed
 `codexnest-browser-firefox-<version>.xpi` from the same release. Run
 `codexnest firefox` to start the dedicated CodexNest Firefox profile with its
 WebDriver BiDi endpoint restricted to loopback, install the XPI in that profile,
-and use the popup in the same way as the Chrome extension.
+and use the popup or sidebar in the same way as the Chrome extension.
 
 The Firefox extension and the local BiDi adapter intentionally provide the
 attached Codex session with the same navigation, click, input, JavaScript,

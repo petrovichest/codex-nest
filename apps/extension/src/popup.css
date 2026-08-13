@@ -34,13 +34,21 @@
 }
 
 body {
-  width: 360px;
+  width: 100%;
   min-height: 180px;
   margin: 0;
   color: var(--ink);
   background: var(--canvas);
   border-left: 3px solid var(--muted);
   transition: border-color 160ms ease;
+}
+
+body[data-surface="popup"] {
+  width: 360px;
+}
+
+body[data-surface="panel"] {
+  min-height: 100vh;
 }
 
 body[data-status="connected"] {
@@ -102,6 +110,25 @@ select:focus-visible {
   font-size: 11px;
   font-weight: 540;
   letter-spacing: 0.01em;
+}
+
+.open-panel-button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 6px 8px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgb(118 96 173 / 18%);
+  border-radius: 7px;
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.open-panel-button:hover:not(:disabled) {
+  color: #604a99;
+  border-color: rgb(118 96 173 / 34%);
 }
 
 .nest-mark {

@@ -10,6 +10,9 @@
     "default_title": "CodexNest Browser",
     "default_popup": "popup.html"
   },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -22,7 +25,16 @@
       "all_frames": false
     }
   ],
-  "permissions": ["debugger", "tabs", "tabGroups", "windows", "scripting", "storage", "alarms"],
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "windows",
+    "scripting",
+    "storage",
+    "alarms",
+    "sidePanel"
+  ],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'"

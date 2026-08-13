@@ -13,6 +13,7 @@ export default ({ mode }: { mode: string }) => {
       rollupOptions: {
         input: {
           popup: "popup.html",
+          panel: "panel.html",
           background: "src/background.ts",
           content: "src/content.ts",
         },
