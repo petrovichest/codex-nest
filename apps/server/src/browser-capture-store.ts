@@ -53,8 +53,7 @@ export interface BrowserCaptureBodyDeclaration {
   mimeType?: string;
 }
 
-export interface BrowserCaptureStart {
-  captureId: string;
+interface StoredManifestFields {
   bindingId: string;
   tabId: string | number;
   exchangeId: string;
@@ -98,22 +97,6 @@ interface IndexedExchange {
   directory: string;
 }
 
-interface PendingBody {
-  declaration: BrowserCaptureBodyDeclaration;
-  handle: FileHandle;
-  path: string;
-  offset: number;
-  hash: ReturnType<typeof createHash>;
-}
-
-interface PendingCapture {
-  owner: object;
-  start: BrowserCaptureStart;
-  directory: string;
-  request?: PendingBody;
-  response?: PendingBody;
-}
-
 interface PendingStreamPart {
   declaration: BrowserCapturePartDeclaration;
   handle: FileHandle;
@@ -143,7 +126,6 @@ export class BrowserCaptureStore {
   private readonly maxExchangesPerTab: number;
   private readonly maxBytesPerBinding: number;
   private readonly maxBodyBytes: number;
-  private readonly pending = new Map<string, PendingCapture>();
   private readonly pendingStreams = new Map<string, PendingStreamCapture>();
   private readonly exchanges = new Map<string, IndexedExchange>();
   private readonly bodyIndex = new Map<string, IndexedExchange>();
@@ -163,55 +145,11 @@ export class BrowserCaptureStore {
     return this.initialized;
   }
 
-  start(input: BrowserCaptureStart, owner: object): Promise<void> {
-    return this.enqueue(async () => {
-      await this.initialize();
-      validateCaptureStart(input, this.maxBodyBytes);
-      if (this.pending.has(input.captureId) || this.pendingStreams.has(input.captureId)) {
-        await this.recordDropped(input.bindingId);
-        throw new Error("Capture ID is already active");
-      }
-      const key = exchangeKey(input.bindingId, input.tabId, input.exchangeId);
-      if (this.exchanges.has(key)) {
-        await this.recordDropped(input.bindingId);
-        throw new Error("Exchange is already stored");
-      }
-
-      const tabDirectory = this.tabDirectory(input.bindingId, input.tabId);
-      await secureDirectory(tabDirectory);
-      const directory = join(tabDirectory, `.tmp-${randomUUID()}`);
-      await secureDirectory(directory);
-      let request: PendingBody | undefined;
-      let response: PendingBody | undefined;
-      try {
-        request = input.requestBody
-          ? await openPendingBody(directory, "request", input.requestBody)
-          : undefined;
-        response = input.responseBody
-          ? await openPendingBody(directory, "response", input.responseBody)
-          : undefined;
-        this.pending.set(input.captureId, {
-          owner,
-          start: structuredClone(input),
-          directory,
-          request,
-          response,
-        });
-      } catch (error) {
-        await closePendingBody(request);
-        await closePendingBody(response);
-        await removeTemporaryDirectory(directory);
-        await this.recordDropped(input.bindingId);
-        throw error;
-      }
-    });
-  }
-
   startStream(input: BrowserCaptureStreamStart, owner: object): Promise<void> {
     return this.enqueue(async () => {
       await this.initialize();
       validateStreamStart(input, this.maxBodyBytes);
-      if (this.pending.has(input.captureId) || this.pendingStreams.has(input.captureId)) {
+      if (this.pendingStreams.has(input.captureId)) {
         await this.recordDropped(input.bindingId);
         throw new Error("Capture ID is already active");
       }
@@ -254,32 +192,6 @@ export class BrowserCaptureStore {
     });
   }
 
-  append(
-    captureId: string,
-    owner: object,
-    kind: BrowserCaptureBodyKind,
-    offset: number,
-    data: Buffer,
-  ): Promise<void> {
-    return this.enqueue(async () => {
-      await this.initialize();
-      const capture = this.ownedPending(captureId, owner);
-      const body = capture[kind];
-      if (!body) throw new Error(`Capture did not declare a ${kind} body`);
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset !== body.offset) {
-        throw new Error(`Non-sequential ${kind} body offset`);
-      }
-      if (body.offset + data.byteLength > body.declaration.length) {
-        throw new Error(`${kind} body exceeds its declared length`);
-      }
-      if (data.byteLength === 0) return;
-      const { bytesWritten } = await body.handle.write(data, 0, data.byteLength, body.offset);
-      if (bytesWritten !== data.byteLength) throw new Error(`Incomplete ${kind} body write`);
-      body.hash.update(data);
-      body.offset += bytesWritten;
-    });
-  }
-
   appendStream(
     captureId: string,
     owner: object,
@@ -303,59 +215,6 @@ export class BrowserCaptureStore {
       if (bytesWritten !== data.byteLength) throw new Error(`Incomplete ${part} write`);
       pending.hash.update(data);
       pending.offset += bytesWritten;
-    });
-  }
-
-  commit(
-    captureId: string,
-    owner: object,
-  ): Promise<{ exchange: StoredBrowserExchange; stats: BrowserCaptureStats }> {
-    return this.enqueue(async () => {
-      await this.initialize();
-      const capture = this.ownedPending(captureId, owner);
-      this.pending.delete(captureId);
-      try {
-        const requestBody = await finishPendingBody(capture.request, "request");
-        const responseBody = await finishPendingBody(capture.response, "response");
-        const completedAt = Date.now();
-        const manifest: StoredManifest = {
-          version: 1,
-          bindingId: capture.start.bindingId,
-          tabId: capture.start.tabId,
-          exchangeId: capture.start.exchangeId,
-          createdAt: capture.start.createdAt ?? completedAt,
-          completedAt,
-          metadata: structuredClone(capture.start.metadata),
-          ...(requestBody ? { requestBody } : {}),
-          ...(responseBody ? { responseBody } : {}),
-          storedBytes: 0,
-        };
-        const manifestPath = join(capture.directory, "manifest.json");
-        this.assertBodyIdsAvailable(manifest);
-        const serialized = serializeManifestWithSize(manifest);
-        await writeFile(manifestPath, serialized, { mode: 0o600, flag: "wx" });
-        await chmod(manifestPath, 0o600);
-
-        const finalDirectory = this.exchangeDirectory(
-          manifest.bindingId,
-          manifest.tabId,
-          manifest.exchangeId,
-        );
-        if (await pathExists(finalDirectory)) throw new Error("Exchange is already stored");
-        await rename(capture.directory, finalDirectory);
-        const indexed = { manifest, directory: finalDirectory };
-        this.indexExchange(indexed);
-        const evicted = await this.enforceLimits(manifest.bindingId, manifest.tabId);
-        const current = this.recalculateStats(manifest.bindingId, evicted, 0);
-        await this.persistStats(manifest.bindingId);
-        return { exchange: publicExchange(manifest), stats: current };
-      } catch (error) {
-        await closePendingBody(capture.request);
-        await closePendingBody(capture.response);
-        await removeTemporaryDirectory(capture.directory);
-        await this.recordDropped(capture.start.bindingId);
-        throw error;
-      }
     });
   }
 
@@ -430,18 +289,6 @@ export class BrowserCaptureStore {
     });
   }
 
-  abort(captureId: string, owner: object): Promise<void> {
-    return this.enqueue(async () => {
-      await this.initialize();
-      const capture = this.ownedPending(captureId, owner);
-      this.pending.delete(captureId);
-      await closePendingBody(capture.request);
-      await closePendingBody(capture.response);
-      await removeTemporaryDirectory(capture.directory);
-      await this.recordDropped(capture.start.bindingId);
-    });
-  }
-
   abortStream(captureId: string, owner: object): Promise<void> {
     return this.enqueue(async () => {
       await this.initialize();
@@ -458,14 +305,6 @@ export class BrowserCaptureStore {
   abortOwner(owner: object): Promise<void> {
     return this.enqueue(async () => {
       await this.initialize();
-      const captures = [...this.pending.entries()].filter(([, capture]) => capture.owner === owner);
-      for (const [captureId, capture] of captures) {
-        this.pending.delete(captureId);
-        await closePendingBody(capture.request);
-        await closePendingBody(capture.response);
-        await removeTemporaryDirectory(capture.directory);
-        await this.recordDropped(capture.start.bindingId);
-      }
       const streams = [...this.pendingStreams.entries()].filter(
         ([, capture]) => capture.owner === owner,
       );
@@ -477,31 +316,6 @@ export class BrowserCaptureStore {
         await removeTemporaryDirectory(capture.directory);
         await this.recordDropped(capture.start.bindingId);
       }
-    });
-  }
-
-  async storeComplete(
-    input: BrowserCaptureStart,
-    bodies: Partial<Record<BrowserCaptureBodyKind, Buffer>>,
-  ): Promise<{ exchange: StoredBrowserExchange; stats: BrowserCaptureStats }> {
-    const owner = {};
-    await this.start(input, owner);
-    try {
-      for (const kind of ["request", "response"] as const) {
-        const body = bodies[kind];
-        if (body) await this.append(input.captureId, owner, kind, 0, body);
-      }
-      return await this.commit(input.captureId, owner);
-    } catch (error) {
-      await this.abort(input.captureId, owner).catch(() => undefined);
-      throw error;
-    }
-  }
-
-  recordDrop(bindingId: string): Promise<void> {
-    return this.enqueue(async () => {
-      await this.initialize();
-      await this.recordDropped(bindingId);
     });
   }
 
@@ -665,13 +479,6 @@ export class BrowserCaptureStore {
     }
   }
 
-  private ownedPending(captureId: string, owner: object): PendingCapture {
-    const capture = this.pending.get(captureId);
-    if (!capture) throw new Error("Capture is not active");
-    if (capture.owner !== owner) throw new Error("Capture belongs to another connection");
-    return capture;
-  }
-
   private ownedPendingStream(captureId: string, owner: object): PendingStreamCapture {
     const capture = this.pendingStreams.get(captureId);
     if (!capture) throw new Error("Capture is not active");
@@ -830,23 +637,6 @@ export class BrowserCaptureStore {
   }
 }
 
-async function openPendingBody(
-  directory: string,
-  kind: BrowserCaptureBodyKind,
-  declaration: BrowserCaptureBodyDeclaration,
-): Promise<PendingBody> {
-  const path = join(directory, `${kind}.body`);
-  const handle = await open(path, "wx", 0o600);
-  await chmod(path, 0o600);
-  return {
-    declaration: structuredClone(declaration),
-    handle,
-    path,
-    offset: 0,
-    hash: createHash("sha256"),
-  };
-}
-
 async function openPendingStreamPart(
   directory: string,
   part: BrowserCapturePartKind,
@@ -862,28 +652,6 @@ async function openPendingStreamPart(
     offset: 0,
     hash: createHash("sha256"),
   };
-}
-
-async function finishPendingBody(
-  pending: PendingBody | undefined,
-  kind: BrowserCaptureBodyKind,
-): Promise<(StoredBrowserCaptureBody & { file: string }) | undefined> {
-  if (!pending) return undefined;
-  await pending.handle.sync();
-  await pending.handle.close();
-  if (pending.offset !== pending.declaration.length) {
-    throw new Error(`${kind} body length does not match its declaration`);
-  }
-  const digest = pending.hash.digest("hex");
-  if (digest !== pending.declaration.sha256.toLowerCase()) {
-    throw new Error(`${kind} body SHA-256 does not match its declaration`);
-  }
-  return { ...pending.declaration, kind, file: `${kind}.body` };
-}
-
-async function closePendingBody(body: PendingBody | undefined): Promise<void> {
-  if (!body) return;
-  await body.handle.close().catch(() => undefined);
 }
 
 async function finishPendingStreamPart(
@@ -1069,9 +837,7 @@ function publicBody(body: StoredBrowserCaptureBody): StoredBrowserCaptureBody {
   return { bodyId, kind, length, sha256, ...(mimeType ? { mimeType } : {}) };
 }
 
-function validateCaptureStart(input: BrowserCaptureStart, maxBodyBytes: number): void {
-  if (!nonEmptyString(input.captureId) || input.captureId.length > 256)
-    throw new Error("Invalid captureId");
+function validateStoredManifestFields(input: StoredManifestFields, maxBodyBytes: number): void {
   if (!nonEmptyString(input.bindingId) || input.bindingId.length > 256)
     throw new Error("Invalid bindingId");
   if (!nonEmptyString(input.exchangeId) || input.exchangeId.length > 1_024)
@@ -1113,9 +879,8 @@ function validateCaptureStart(input: BrowserCaptureStart, maxBodyBytes: number):
 function isStoredManifest(value: unknown): value is StoredManifest {
   if (!isRecord(value)) return false;
   try {
-    validateCaptureStart(
+    validateStoredManifestFields(
       {
-        captureId: "stored",
         bindingId: value.bindingId as string,
         tabId: value.tabId as string | number,
         exchangeId: value.exchangeId as string,
