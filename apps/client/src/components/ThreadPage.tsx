@@ -503,9 +503,13 @@ export function ThreadPage({
         }
       : emptyComposerDraft(),
   }));
+  const composerDraftRef = useRef<ComposerDraftState>(composerDraftState);
   const activeComposerDraft =
-    composerDraftState.threadId === threadId ? composerDraftState.value : emptyComposerDraft();
+    composerDraftRef.current.threadId === threadId
+      ? composerDraftRef.current.value
+      : emptyComposerDraft();
   const { input, images, goalMode, annotations } = activeComposerDraft;
+  const [composerInputSyncRevision, setComposerInputSyncRevision] = useState(0);
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
@@ -570,7 +574,6 @@ export function ThreadPage({
     value: GitChangesView;
   } | null>(null);
   const gitChangesRequest = useRef(0);
-  const composerDraftRef = useRef<ComposerDraftState>(composerDraftState);
   const draftTimerRef = useRef<{ threadId: string; timer: number } | null>(null);
   const pendingDraftsRef = useRef(
     new Map<
@@ -581,6 +584,17 @@ export function ThreadPage({
   const savedDraftUpdatedAtRef = useRef(new Map<string, number | null>());
   const draftRevisionRef = useRef(0);
   const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const flushComposerDraftRef = useRef<
+    (targetThreadId?: string, keepalive?: boolean) => Promise<void>
+  >(() => Promise.resolve());
+  const flushComposerDraftEvent = useCallback(
+    (targetThreadId?: string, keepalive = false) =>
+      flushComposerDraftRef.current(targetThreadId, keepalive),
+    [],
+  );
+  const onDraftFlush = useCallback(() => {
+    void flushComposerDraftEvent();
+  }, [flushComposerDraftEvent]);
   const draftTouchedThreadsRef = useRef(new Set<string>());
   const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
   const legacyAnnotationThreadsRef = useRef(new Set<string>());
@@ -692,6 +706,35 @@ export function ThreadPage({
         ),
       ),
     [detail?.turns, isSubagent],
+  );
+  const forkFromTurnRef = useRef(forkFromTurn);
+  forkFromTurnRef.current = forkFromTurn;
+  const forkFromTurnEvent = useCallback((lastTurnId: string, agentMessageId: string) => {
+    void forkFromTurnRef.current(lastTurnId, agentMessageId);
+  }, []);
+  const completedTurnForkActions = useMemo(() => {
+    const actions = new Map<
+      string,
+      { responseId: string; action: { disabled: boolean; onFork(): void } }
+    >();
+    if (isSubagent) return actions;
+    for (const turn of detail?.turns ?? []) {
+      const responseId = findForkResponseId(turn);
+      if (!responseId) continue;
+      actions.set(turn.id, {
+        responseId,
+        action: {
+          disabled: forking,
+          onFork: () => forkFromTurnEvent(turn.id, responseId),
+        },
+      });
+    }
+    return actions;
+  }, [detail?.turns, forking, forkFromTurnEvent, isSubagent]);
+  const completedLatestPlanId = useMemo(() => findLatestCompletedPlan(detail), [detail]);
+  const latestAnnotatableId = useMemo(
+    () => findLatestAnnotatable(detail, summary?.currentTurnId ?? null),
+    [detail, summary?.currentTurnId],
   );
   const voiceMessageMaterialized = activeVoiceJob
     ? hasMaterializedVoiceMessage(detail, optimisticMessages, activeVoiceJob.id)
@@ -877,6 +920,29 @@ export function ThreadPage({
     return enqueuePreparationSave(snapshotPreparation());
   }
 
+  function schedulePreparationDraftSave(): void {
+    if (
+      !preparationRef.current.active ||
+      !newSessionHydrated ||
+      !newSessionAdmitted ||
+      preparationDiscardRef.current
+    ) {
+      return;
+    }
+    if (preparationDraftTimerRef.current !== null) {
+      window.clearTimeout(preparationDraftTimerRef.current);
+    }
+    const timer = window.setTimeout(() => {
+      if (preparationDraftTimerRef.current === timer) {
+        preparationDraftTimerRef.current = null;
+      }
+      if (!preparationDiscardRef.current) {
+        void enqueuePreparationSave(snapshotPreparation());
+      }
+    }, DRAFT_SAVE_DELAY_MS);
+    preparationDraftTimerRef.current = timer;
+  }
+
   function setPendingAttachments(pending: boolean, scope = attachmentScopeRef.current): void {
     if (pending) {
       pendingAttachmentScopesRef.current.add(scope);
@@ -904,7 +970,7 @@ export function ThreadPage({
     return new Promise((resolve) => attachmentWaitersRef.current.add({ scope, resolve }));
   }
 
-  function replacePreparationDraft(value: UpdateThreadDraftRequest): void {
+  function replacePreparationDraft(value: UpdateThreadDraftRequest, updateState = true): void {
     preparationDraftTouchedRef.current = true;
     preparationRef.current = {
       ...preparationRef.current,
@@ -912,8 +978,8 @@ export function ThreadPage({
       revision: preparationRef.current.revision + 1,
     };
     const next = { threadId, value };
-    composerDraftRef.current = next;
-    setComposerDraftState(next);
+    if (updateState) commitComposerDraft(next);
+    else composerDraftRef.current = next;
   }
 
   function preparationDraftTransferActive(transfer: PreparationDraftTransfer): boolean {
@@ -1077,8 +1143,7 @@ export function ThreadPage({
     hydratedDraftSourcesRef.current.set(targetThreadId, draft);
     const value = composerDraftRef.current.value;
     const next = { threadId: targetThreadId, value };
-    composerDraftRef.current = next;
-    setComposerDraftState(next);
+    commitComposerDraft(next);
     setCreatedThreadId(targetThreadId);
     if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) {
       return false;
@@ -1175,6 +1240,12 @@ export function ThreadPage({
       : emptyComposerDraft();
   }
 
+  function commitComposerDraft(next: ComposerDraftState): void {
+    composerDraftRef.current = next;
+    setComposerDraftState(next);
+    setComposerInputSyncRevision((revision) => revision + 1);
+  }
+
   function persistPendingDraft(targetThreadId: string, keepalive = false): Promise<void> {
     if (!pendingDraftsRef.current.has(targetThreadId)) return draftSaveChainRef.current;
     const request = draftSaveChainRef.current
@@ -1183,6 +1254,8 @@ export function ThreadPage({
         const pending = pendingDraftsRef.current.get(targetThreadId);
         if (!pending) return;
         try {
+          await saveLocalDraft(api.settings, targetThreadId, pending.value, pending.localUpdatedAt);
+          if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
           const saved = await api.updateThreadDraft(targetThreadId, pending.value, { keepalive });
           if (pendingDraftsRef.current.get(targetThreadId)?.revision !== pending.revision) return;
           pendingDraftsRef.current.delete(targetThreadId);
@@ -1218,7 +1291,6 @@ export function ThreadPage({
     const revision = ++draftRevisionRef.current;
     const localUpdatedAt = Date.now();
     pendingDraftsRef.current.set(targetThreadId, { revision, value, localUpdatedAt });
-    void saveLocalDraft(api.settings, targetThreadId, value, localUpdatedAt);
     if (draftTimerRef.current) {
       window.clearTimeout(draftTimerRef.current.timer);
       draftTimerRef.current = null;
@@ -1237,15 +1309,17 @@ export function ThreadPage({
   function replaceComposerDraft(
     value: UpdateThreadDraftRequest,
     persistence: "debounced" | "immediate" | false,
+    updateState = true,
   ): void {
     if (preparationRef.current.active) {
-      replacePreparationDraft(value);
+      replacePreparationDraft(value, updateState);
+      if (!updateState) schedulePreparationDraftSave();
       return;
     }
     const targetThreadId = activeThreadIdRef.current;
     const next = { threadId: targetThreadId, value };
-    composerDraftRef.current = next;
-    setComposerDraftState(next);
+    if (updateState) commitComposerDraft(next);
+    else composerDraftRef.current = next;
     if (!persistence) return;
     draftTouchedThreadsRef.current.add(targetThreadId);
     scheduleDraftSave(targetThreadId, value, persistence === "immediate");
@@ -1253,7 +1327,7 @@ export function ThreadPage({
 
   function setInput(value: string): void {
     composerEditRevisionRef.current += 1;
-    replaceComposerDraft({ ...currentComposerDraft(), input: value }, "debounced");
+    replaceComposerDraft({ ...currentComposerDraft(), input: value }, "debounced", false);
   }
 
   function setImages(value: ComposerImage[], sourceScope = attachmentScopeRef.current): void {
@@ -1290,6 +1364,16 @@ export function ThreadPage({
     }
     return persistPendingDraft(targetThreadId, keepalive);
   }
+
+  function flushComposerDraft(
+    targetThreadId = activeThreadIdRef.current,
+    keepalive = false,
+  ): Promise<void> {
+    return preparationRef.current.active
+      ? flushPreparation()
+      : flushDraft(targetThreadId, keepalive);
+  }
+  flushComposerDraftRef.current = flushComposerDraft;
 
   async function beginTranscription(
     targetThreadId: string,
@@ -1436,8 +1520,7 @@ export function ThreadPage({
       };
       if (stored && !preparationDraftTouchedRef.current) {
         const next = { threadId, value };
-        composerDraftRef.current = next;
-        setComposerDraftState(next);
+        commitComposerDraft(next);
       }
       setNewSessionAdmitted(true);
       await enqueuePreparationSave(snapshotPreparation());
@@ -1449,27 +1532,8 @@ export function ThreadPage({
   }, [api.settings, newSessionProject?.id]);
 
   useEffect(() => {
-    if (
-      !preparationRef.current.active ||
-      !newSessionHydrated ||
-      !newSessionAdmitted ||
-      preparationDiscardRef.current
-    ) {
-      return;
-    }
-    if (preparationDraftTimerRef.current !== null) {
-      window.clearTimeout(preparationDraftTimerRef.current);
-    }
-    const timer = window.setTimeout(() => {
-      if (preparationDraftTimerRef.current === timer) {
-        preparationDraftTimerRef.current = null;
-      }
-      if (!preparationDiscardRef.current) {
-        void enqueuePreparationSave(snapshotPreparation());
-      }
-    }, DRAFT_SAVE_DELAY_MS);
-    preparationDraftTimerRef.current = timer;
-  }, [activeComposerDraft, newSessionAdmitted, newSessionHydrated]);
+    schedulePreparationDraftSave();
+  }, [composerDraftState, newSessionAdmitted, newSessionHydrated]);
 
   useEffect(() => {
     if (
@@ -1525,19 +1589,16 @@ export function ThreadPage({
 
   useEffect(() => {
     preparationAliveRef.current = true;
-    const flushBeforePageExit = () => {
-      if (!preparationDiscardRef.current) void flushPreparation();
-    };
-    window.addEventListener("pagehide", flushBeforePageExit);
     return () => {
+      if (!preparationDiscardRef.current && preparationRef.current.active) {
+        void flushComposerDraftEvent();
+      }
       invalidatePreparation();
-      window.removeEventListener("pagehide", flushBeforePageExit);
-      if (!preparationDiscardRef.current) void flushPreparation();
-      else if (preparationDraftTimerRef.current !== null) {
+      if (preparationDiscardRef.current && preparationDraftTimerRef.current !== null) {
         window.clearTimeout(preparationDraftTimerRef.current);
       }
     };
-  }, []);
+  }, [flushComposerDraftEvent]);
 
   useEffect(() => {
     const startedAt = activeVoiceJob
@@ -1603,9 +1664,9 @@ export function ThreadPage({
       hydratedDraftSourcesRef.current.delete(threadId);
     }
     return () => {
-      void flushDraft(threadId);
+      if (threadId) void flushComposerDraftEvent(threadId);
     };
-  }, [threadId]);
+  }, [flushComposerDraftEvent, threadId]);
 
   useEffect(() => {
     if (isSubagent) return;
@@ -1653,11 +1714,18 @@ export function ThreadPage({
 
   useEffect(() => {
     const flushBeforePageExit = () => {
-      void flushDraft(threadId, true);
+      void flushComposerDraftEvent(undefined, true);
+    };
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushBeforePageExit();
     };
     window.addEventListener("pagehide", flushBeforePageExit);
-    return () => window.removeEventListener("pagehide", flushBeforePageExit);
-  }, [threadId]);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("pagehide", flushBeforePageExit);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  }, [flushComposerDraftEvent]);
 
   useEffect(() => {
     if (!threadId || isSubagent || createdInWorkspaceRef.current === threadId) {
@@ -2135,7 +2203,7 @@ export function ThreadPage({
     dispatch({ type: "optimistic.add", message: optimisticMessage });
     replaceComposerDraft(emptyComposerDraft(), false);
     try {
-      await flushDraft(targetThreadId);
+      await flushComposerDraftEvent(targetThreadId);
       const delivery = await sendReliable(targetThreadId, {
         input: submittedInput,
         ...(submittedDraft.images.length
@@ -2216,7 +2284,6 @@ export function ThreadPage({
     ) {
       return;
     }
-
     const clientMessageId = createClientMessageId();
     let messageClaimKey = claimSubmittedMessage(
       {
@@ -2227,6 +2294,7 @@ export function ThreadPage({
       clientMessageId,
     );
     if (!messageClaimKey) return;
+    const preparationFlush = flushComposerDraftEvent();
     earlySubmitRef.current = true;
     preparationClaimedForSubmitRef.current = true;
     preparationDraftTransferGenerationRef.current += 1;
@@ -2256,6 +2324,7 @@ export function ThreadPage({
     let activatedThreadId: string | null = null;
     let accepted = false;
     try {
+      await preparationFlush;
       await waitForPendingAttachments(submittedAttachmentScope);
       assertPreparationGeneration(generation);
       const submission = earlySubmissionRef.current;
@@ -2379,9 +2448,8 @@ export function ThreadPage({
       if (!activatedThreadId) preparationClaimedForSubmitRef.current = false;
       if (activatedThreadId) {
         const restored = { threadId: activatedThreadId, value: restore };
-        composerDraftRef.current = restored;
+        commitComposerDraft(restored);
         draftTouchedThreadsRef.current.add(activatedThreadId);
-        setComposerDraftState(restored);
         const savedLocally = await preserveAcceptedDraft(activatedThreadId, restore);
         if (savedLocally) await deletePreparationPersistence(activeProject.id);
       } else {
@@ -2768,9 +2836,8 @@ export function ThreadPage({
   const showNewSessionChrome = preparationRef.current.active || showEmptySessionHero;
   const latestPlanId =
     !workspaceSummary.currentTurnId && workspaceSummary.settings.collaborationMode === "plan"
-      ? findLatestCompletedPlan(detail)
+      ? completedLatestPlanId
       : null;
-  const latestAnnotatableId = findLatestAnnotatable(detail, workspaceSummary.currentTurnId);
   const latestPlanHasAnnotations = Boolean(
     latestPlanId && annotations.some((annotation) => annotation.messageId === latestPlanId),
   );
@@ -2938,7 +3005,7 @@ export function ThreadPage({
                 {detail?.turns.map((turn) => {
                   const entries = groupedTurnActivities.get(turn.id)!;
                   const technicalItems = technicalTurnActivities.get(turn.id)!;
-                  const forkResponseId = findForkResponseId(turn);
+                  const forkTarget = completedTurnForkActions.get(turn.id);
                   const turnOptimisticMessages = optimisticTurnMessages.filter(
                     (message) =>
                       message.turnId === turn.id ||
@@ -2983,12 +3050,7 @@ export function ThreadPage({
                               onOpenArtifact={openLinkedArtifact}
                               onLoadImage={loadLocalImage}
                               forkAction={
-                                !isSubagent && entry.id === forkResponseId
-                                  ? {
-                                      disabled: forking,
-                                      onFork: () => void forkFromTurn(turn.id, entry.id),
-                                    }
-                                  : undefined
+                                entry.id === forkTarget?.responseId ? forkTarget.action : undefined
                               }
                               annotations={annotations}
                               annotationEnabled={
@@ -3125,8 +3187,10 @@ export function ThreadPage({
             sessionIdentity={
               initialNewSessionRef.current.active ? "new-session-workspace" : threadId
             }
+            inputSyncRevision={composerInputSyncRevision}
             input={input}
             onInput={setInput}
+            onDraftFlush={onDraftFlush}
             cwd={workspaceSummary.cwd}
             skillsEpoch={state.skillsEpoch}
             images={images}

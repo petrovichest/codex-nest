@@ -116,7 +116,8 @@ beforeEach(() => {
 describe("Composer", () => {
   it("opens filtered skill suggestions for a dollar token and inserts with Enter", async () => {
     const api = connection().api;
-    render(<Harness cwd="/work/project" />);
+    const onInput = vi.fn();
+    render(<Harness cwd="/work/project" input="" onInput={onInput} />);
     const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
 
     expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
@@ -131,7 +132,68 @@ describe("Composer", () => {
 
     fireEvent.keyDown(textarea, { key: "Enter" });
     await waitFor(() => expect(textarea).toHaveValue("$review "));
+    expect(onInput.mock.calls).toEqual([["$rev"], ["$review "]]);
     expect(screen.queryByRole("listbox", { name: "Доступные скиллы" })).toBeNull();
+  });
+
+  it("owns local typing until the parent supplies a new draft or requests synchronization", () => {
+    const onInput = vi.fn();
+    const view = render(
+      <Harness input="Сохранено" inputSyncRevision={0} onInput={onInput} sessionIdentity="one" />,
+    );
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textarea, { target: { value: "Локальный текст" } });
+    expect(textarea).toHaveValue("Локальный текст");
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+    expect(onInput).toHaveBeenCalledOnce();
+    expect(onInput).toHaveBeenCalledWith("Локальный текст");
+
+    view.rerender(
+      <Harness input="Сохранено" onInput={onInput} sessionIdentity="one" hasSupplementalContent />,
+    );
+    expect(textarea).toHaveValue("Локальный текст");
+
+    view.rerender(
+      <Harness input="Сохранено" inputSyncRevision={1} onInput={onInput} sessionIdentity="one" />,
+    );
+    expect(textarea).toHaveValue("Сохранено");
+
+    fireEvent.change(textarea, { target: { value: "Ещё один локальный текст" } });
+    view.rerender(
+      <Harness
+        input="Сохранено"
+        inputSyncRevision={1}
+        onInput={onInput}
+        sessionIdentity="one"
+        hasSupplementalContent
+      />,
+    );
+    expect(textarea).toHaveValue("Ещё один локальный текст");
+
+    view.rerender(
+      <Harness input="" inputSyncRevision={2} onInput={onInput} sessionIdentity="one" />,
+    );
+    expect(textarea).toHaveValue("");
+    view.rerender(<Harness input="Восстановлено" onInput={onInput} sessionIdentity="one" />);
+    expect(textarea).toHaveValue("Восстановлено");
+
+    fireEvent.change(textarea, { target: { value: "Черновик первой сессии" } });
+    view.rerender(<Harness input="Восстановлено" onInput={onInput} sessionIdentity="two" />);
+    expect(textarea).toHaveValue("Восстановлено");
+    view.rerender(<Harness input="Черновик второй сессии" sessionIdentity="two" />);
+    expect(textarea).toHaveValue("Черновик второй сессии");
+  });
+
+  it("flushes the parent draft callback when the textarea blurs", () => {
+    const onDraftFlush = vi.fn();
+    render(<Harness onDraftFlush={onDraftFlush} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.focus(textarea);
+    fireEvent.blur(textarea);
+
+    expect(onDraftFlush).toHaveBeenCalledOnce();
   });
 
   it("replaces only the active skill token and preserves following punctuation", async () => {
@@ -438,20 +500,65 @@ describe("Composer", () => {
     ).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("starts at two rows, grows to its cap, and then enables internal scrolling", () => {
+  it("uses native field sizing without scheduling JavaScript measurement", () => {
+    vi.stubGlobal("CSS", { supports: vi.fn(() => true) });
+    const requestFrame = vi.fn();
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
     render(<Harness />);
     const textarea = screen.getByRole("textbox", {
       name: "Сообщение для Codex",
     }) as HTMLTextAreaElement;
     expect(textarea).toHaveAttribute("rows", "2");
 
-    Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 240 });
+    const scrollHeight = vi.fn(() => 240);
+    Object.defineProperty(textarea, "scrollHeight", { configurable: true, get: scrollHeight });
     fireEvent.change(textarea, { target: { value: "Длинное\n".repeat(30) } });
+
+    expect(requestFrame).not.toHaveBeenCalled();
+    expect(scrollHeight).not.toHaveBeenCalled();
+    expect(textarea.style.height).toBe("");
+  });
+
+  it("coalesces fallback auto-sizing, reads once, caps height, and cancels stale frames", () => {
+    vi.stubGlobal("CSS", { supports: vi.fn(() => false) });
+    const frames = installAnimationFrames();
+    const view = render(<Harness input="" sessionIdentity="one" />);
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+
+    expect(frames.request).toHaveBeenCalledOnce();
+    act(() => frames.runNext());
+
+    let measuredHeight = 240;
+    const scrollHeight = vi.fn(() => measuredHeight);
+    Object.defineProperty(textarea, "scrollHeight", { configurable: true, get: scrollHeight });
+    fireEvent.change(textarea, { target: { value: "Длинное\n".repeat(30) } });
+    fireEvent.change(textarea, { target: { value: "Ещё длиннее\n".repeat(30) } });
+    expect(frames.request).toHaveBeenCalledTimes(2);
+    expect(frames.pending()).toHaveLength(1);
+    expect(scrollHeight).not.toHaveBeenCalled();
+
+    act(() => frames.runNext());
+    expect(scrollHeight).toHaveBeenCalledOnce();
     expect(textarea).toHaveStyle({ height: "190px", overflowY: "auto" });
 
-    Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 52 });
+    measuredHeight = 52;
     fireEvent.change(textarea, { target: { value: "Короткое" } });
+    act(() => frames.runNext());
+    expect(scrollHeight).toHaveBeenCalledTimes(2);
     expect(textarea).toHaveStyle({ height: "52px", overflowY: "hidden" });
+
+    fireEvent.change(textarea, { target: { value: "Ожидает замера" } });
+    const staleFrame = frames.pending()[0]!;
+    view.rerender(<Harness input="" sessionIdentity="two" />);
+    expect(frames.cancel).toHaveBeenCalledWith(staleFrame);
+    expect(frames.pending()).toHaveLength(1);
+
+    const pendingFrame = frames.pending()[0]!;
+    view.unmount();
+    expect(frames.cancel).toHaveBeenCalledWith(pendingFrame);
+    expect(frames.pending()).toHaveLength(0);
   });
 
   it("opens draft images as a gallery and keeps their remove buttons visible", async () => {
@@ -612,9 +719,11 @@ describe("Composer", () => {
           resolveTranscription = resolve;
         }),
     );
+    const onInput = vi.fn();
     const view = render(
       <Harness
-        initialInput="Начало конец"
+        input="Начало конец"
+        onInput={onInput}
         transcriptionConfig={transcriptionConfig}
         onTranscribe={onTranscribe}
       />,
@@ -622,6 +731,7 @@ describe("Composer", () => {
     const textarea = screen.getByRole("textbox", {
       name: "Сообщение для Codex",
     }) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "Начало новое конец" } });
     textarea.focus();
     textarea.setSelectionRange(7, 7);
     fireEvent.select(textarea);
@@ -641,19 +751,22 @@ describe("Composer", () => {
     view.rerender(
       <Harness
         busy
-        initialInput="Начало конец"
+        input="Начало конец"
+        onInput={onInput}
         transcriptionConfig={transcriptionConfig}
         onTranscribe={onTranscribe}
       />,
     );
     expect(stop).toBeEnabled();
+    expect(textarea).toHaveValue("Начало новое конец");
 
     fireEvent.click(stop);
     const transcribing = await screen.findByRole("button", { name: "Распознаём запись" });
     expect(within(transcribing).getByText("0:00")).toBeInTheDocument();
     expect(transcribing).toHaveClass("timing");
     await act(async () => resolveTranscription?.("голос"));
-    await waitFor(() => expect(textarea).toHaveValue("Начало голос конец"));
+    await waitFor(() => expect(textarea).toHaveValue("Начало голос новое конец"));
+    expect(onInput.mock.calls).toEqual([["Начало новое конец"], ["Начало голос новое конец"]]);
     expect(onTranscribe).toHaveBeenCalledWith(
       expect.objectContaining({ type: "audio/webm;codecs=opus" }),
       expect.any(Number),
@@ -662,7 +775,8 @@ describe("Composer", () => {
     expect(textarea).not.toHaveAttribute("readonly");
     view.rerender(
       <Harness
-        initialInput="Начало конец"
+        input="Начало конец"
+        onInput={onInput}
         transcriptionConfig={transcriptionConfig}
         onTranscribe={onTranscribe}
       />,
@@ -670,6 +784,7 @@ describe("Composer", () => {
     expect(
       screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
     ).toBeEnabled();
+    expect(textarea).toHaveValue("Начало голос новое конец");
   });
 
   it.each(["local", "background"] as const)(
@@ -842,11 +957,16 @@ function Harness({
   hasSupplementalContent = false,
   initialImages = [],
   initialInput = "",
+  input: controlledInput,
+  inputSyncRevision,
   initialProjectId,
+  onDraftFlush,
   onGoalModeChange,
+  onInput,
   onSettingsChange,
   onSubmit = () => undefined,
   projects: projectOptions,
+  sessionIdentity,
   transcriptionConfig: speechConfig,
   onTranscribe,
   onRecordingReady,
@@ -860,11 +980,16 @@ function Harness({
   hasSupplementalContent?: boolean;
   initialImages?: ComposerImage[];
   initialInput?: string;
+  input?: string;
+  inputSyncRevision?: number;
   initialProjectId?: string;
+  onDraftFlush?(): void;
   onGoalModeChange?(value: boolean): void;
+  onInput?(value: string): void;
   onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
   onSubmit?(intent: ComposerSubmitIntent): void;
   projects?: Project[];
+  sessionIdentity?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   onRecordingReady?: Parameters<typeof Composer>[0]["onRecordingReady"];
@@ -878,8 +1003,13 @@ function Harness({
   const [voiceMode, setVoiceMode] = useState<"draft" | "send">("draft");
   return (
     <Composer
-      input={input}
-      onInput={setInput}
+      input={controlledInput ?? input}
+      onInput={(value) => {
+        onInput?.(value);
+        if (controlledInput === undefined) setInput(value);
+      }}
+      onDraftFlush={onDraftFlush}
+      inputSyncRevision={inputSyncRevision}
       images={images}
       onImagesChange={setImages}
       onSubmit={onSubmit}
@@ -911,12 +1041,37 @@ function Harness({
       onVoiceModeChange={setVoiceMode}
       voiceInputLocked={voiceInputLocked}
       transcriptionStatus={transcriptionStatus}
+      sessionIdentity={sessionIdentity}
       error={null}
       hasSupplementalContent={hasSupplementalContent}
     >
       {children}
     </Composer>
   );
+}
+
+function installAnimationFrames() {
+  let nextId = 1;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const id = nextId++;
+    callbacks.set(id, callback);
+    return id;
+  });
+  const cancel = vi.fn((id: number) => callbacks.delete(id));
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  return {
+    request,
+    cancel,
+    pending: () => [...callbacks.keys()],
+    runNext: () => {
+      const next = callbacks.entries().next().value as [number, FrameRequestCallback] | undefined;
+      if (!next) throw new Error("No animation frame is pending");
+      callbacks.delete(next[0]);
+      next[1](0);
+    },
+  };
 }
 
 function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {

@@ -32,6 +32,16 @@ const openDownloadUrl = vi.hoisted(() => vi.fn());
 const deleteLocalDraft = vi.hoisted(() =>
   vi.fn<(settings: unknown, threadId: string) => Promise<void>>(() => Promise.resolve()),
 );
+const saveLocalDraft = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _settings: unknown,
+      threadId: string,
+      value: UpdateThreadDraftRequest,
+      updatedAt = Date.now(),
+    ) => ({ key: threadId, connectionKey: "test", threadId, value, updatedAt }),
+  ),
+);
 const acknowledgePendingThread = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 const releaseActiveThread = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 
@@ -41,6 +51,7 @@ vi.mock("../push", () => ({ acknowledgePendingThread, releaseActiveThread }));
 vi.mock("../offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteLocalDraft,
+  saveLocalDraft,
 }));
 
 const summary: ThreadSummary = {
@@ -2670,40 +2681,62 @@ describe("Activity", () => {
     expect(team).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("restores the complete server draft and debounces text autosave", async () => {
-    const api = threadApi();
-    const annotation = pendingAnnotation();
-    mockThreadConnection(api, summary, {
-      turns: [completedAgentTurn()],
-      draft: {
-        input: "Сохранённый текст",
-        images: [
-          {
-            id: "draft-image",
-            name: "draft.png",
-            url: "data:image/png;base64,AA==",
-          },
-        ],
-        goalMode: true,
-        annotations: [annotation],
-        updatedAt: 10,
-      },
-    });
-    renderThread();
+  it("restores the complete draft and debounces rapid text into one latest local and server save", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = threadApi();
+      const annotation = pendingAnnotation();
+      mockThreadConnection(api, summary, {
+        turns: [completedAgentTurn()],
+        draft: {
+          input: "Сохранённый текст",
+          images: [
+            {
+              id: "draft-image",
+              name: "draft.png",
+              url: "data:image/png;base64,AA==",
+            },
+          ],
+          goalMode: true,
+          annotations: [annotation],
+          updatedAt: 10,
+        },
+      });
+      renderThread();
 
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
-    expect(textbox).toHaveValue("Сохранённый текст");
-    expect(screen.getByAltText("draft.png")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Выключить режим цели" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByRole("button", { name: "Аннотация 1" })).toBeInTheDocument();
+      const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+      expect(textbox).toHaveValue("Сохранённый текст");
+      expect(screen.getByAltText("draft.png")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Выключить режим цели" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(screen.getByRole("button", { name: "Аннотация 1" })).toBeInTheDocument();
 
-    fireEvent.change(textbox, { target: { value: "Обновлённый текст" } });
-    expect(api.updateThreadDraft).not.toHaveBeenCalled();
-    await new Promise((resolve) => window.setTimeout(resolve, 520));
-    await waitFor(() =>
+      fireEvent.change(textbox, { target: { value: "О" } });
+      fireEvent.change(textbox, { target: { value: "Обновлённый" } });
+      fireEvent.change(textbox, { target: { value: "Обновлённый текст" } });
+      expect(saveLocalDraft).not.toHaveBeenCalled();
+      expect(api.updateThreadDraft).not.toHaveBeenCalled();
+
+      await act(async () => vi.advanceTimersByTimeAsync(499));
+      expect(saveLocalDraft).not.toHaveBeenCalled();
+      expect(api.updateThreadDraft).not.toHaveBeenCalled();
+
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(saveLocalDraft).toHaveBeenCalledTimes(1);
+      expect(saveLocalDraft).toHaveBeenCalledWith(
+        api.settings,
+        "thread",
+        expect.objectContaining({
+          input: "Обновлённый текст",
+          images: [expect.objectContaining({ name: "draft.png" })],
+          goalMode: true,
+          annotations: [annotation],
+        }),
+        expect.any(Number),
+      );
+      expect(api.updateThreadDraft).toHaveBeenCalledTimes(1);
       expect(api.updateThreadDraft).toHaveBeenCalledWith(
         "thread",
         expect.objectContaining({
@@ -2713,36 +2746,101 @@ describe("Activity", () => {
           annotations: [annotation],
         }),
         { keepalive: false },
-      ),
-    );
+      );
+      expect(saveLocalDraft.mock.invocationCallOrder[0]!).toBeLessThan(
+        api.updateThreadDraft.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("does not rerender unchanged history while the composer draft changes", () => {
-    let textReads = 0;
-    const userMessage: Parameters<typeof Activity>[0]["item"] = {
-      type: "userMessage",
-      id: "older-user-message",
+  it("keeps completed agent and plan history memoized across input and unrelated state", () => {
+    let agentTextReads = 0;
+    let planTextReads = 0;
+    const agentMessage: Parameters<typeof Activity>[0]["item"] = {
+      ...completedAgentTurn().items[0]!,
+      get text() {
+        agentTextReads += 1;
+        return "Старый ответ";
+      },
+    };
+    const planMessage: Parameters<typeof Activity>[0]["item"] = {
+      type: "plan",
+      id: "stable-plan",
       status: "completed",
       get text() {
-        textReads += 1;
-        return "Старое сообщение";
+        planTextReads += 1;
+        return "# Стабильный план";
       },
       images: [],
-      timestamp: 1,
+      timestamp: 2,
       phase: null,
     };
-    const turn = completedAgentTurn();
-    mockThreadConnection(threadApi(), summary, {
-      turns: [{ ...turn, items: [userMessage, ...turn.items] }],
-    });
-    renderThread();
-    const readsAfterInitialRender = textReads;
+    mockThreadConnection(
+      threadApi(),
+      { ...summary, settings: { collaborationMode: "plan" } },
+      {
+        turns: [
+          { ...completedAgentTurn(), id: "agent-turn", items: [agentMessage] },
+          { ...completedAgentTurn(), id: "plan-turn", items: [planMessage] },
+        ],
+      },
+    );
+    const view = renderThread();
+    const readsAfterInitialRender = { agent: agentTextReads, plan: planTextReads };
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, {
       target: { value: "Новый черновик" },
     });
+    expect({ agent: agentTextReads, plan: planTextReads }).toEqual(readsAfterInitialRender);
 
-    expect(textReads).toBe(readsAfterInitialRender);
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 100 },
+    });
+    scroll.scrollTop = 0;
+    fireEvent.scroll(scroll);
+
+    expect(
+      screen.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
+    ).toBeInTheDocument();
+    expect(textbox).toHaveValue("Новый черновик");
+    expect({ agent: agentTextReads, plan: planTextReads }).toEqual(readsAfterInitialRender);
+  });
+
+  it("flushes the latest text immediately when the document becomes hidden", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary);
+    renderThread();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textbox, { target: { value: "Черновик" } });
+    fireEvent.change(textbox, { target: { value: "Последний скрытый черновик" } });
+    expect(saveLocalDraft).not.toHaveBeenCalled();
+    expect(api.updateThreadDraft).not.toHaveBeenCalled();
+
+    const previousVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await waitFor(() => expect(saveLocalDraft).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(api.updateThreadDraft).toHaveBeenCalledWith(
+          "thread",
+          expect.objectContaining({ input: "Последний скрытый черновик" }),
+          { keepalive: true },
+        ),
+      );
+    } finally {
+      if (previousVisibility) {
+        Object.defineProperty(document, "visibilityState", previousVisibility);
+      } else {
+        delete (document as unknown as Record<string, unknown>).visibilityState;
+      }
+    }
   });
 
   it("coalesces draft revisions queued behind a slow save", async () => {

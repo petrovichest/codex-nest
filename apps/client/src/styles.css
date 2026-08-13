@@ -2860,13 +2860,14 @@
   min-height: 52px;
   max-height: 190px;
   height: auto;
+  field-sizing: content;
   margin: 0;
   padding: var(--space-3) var(--space-4) var(--space-1);
   border: 0;
   outline: 0;
   background: transparent;
   font-size: 15px;
-  overflow-y: hidden;
+  overflow-y: auto;
 }
 
 .composer-toolbar {

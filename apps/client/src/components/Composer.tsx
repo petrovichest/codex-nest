@@ -68,6 +68,7 @@ function viewportHeight(): number {
 export function Composer({
   input,
   onInput,
+  onDraftFlush,
   images,
   onImagesChange,
   attachmentScope = 0,
@@ -107,11 +108,13 @@ export function Composer({
   error,
   autoFocus = false,
   sessionIdentity,
+  inputSyncRevision = 0,
   hasSupplementalContent = false,
   children,
 }: {
   input: string;
   onInput(value: string): void;
+  onDraftFlush?(): void;
   images: ComposerImage[];
   onImagesChange(value: ComposerImage[], attachmentScope?: number): void;
   attachmentScope?: number;
@@ -151,12 +154,26 @@ export function Composer({
   error: string | null;
   autoFocus?: boolean;
   sessionIdentity?: string;
+  inputSyncRevision?: number;
   hasSupplementalContent?: boolean;
   children?: ReactNode;
 }) {
   const { language, t } = useI18n();
   const creating = projects !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [draftInput, setDraftInput] = useState(input);
+  const draftInputRef = useRef(input);
+  const inputPropRef = useRef(input);
+  const inputSyncRevisionRef = useRef(inputSyncRevision);
+  const draftSessionIdentityRef = useRef(sessionIdentity);
+  const resizeFrameRef = useRef<number | null>(null);
+  const nativeFieldSizing = useMemo(
+    () =>
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      CSS.supports("field-sizing", "content"),
+    [],
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const restoreTextareaAfterProjectChangeRef = useRef(false);
   const viewportBaselineRef = useRef(viewportHeight());
@@ -186,7 +203,7 @@ export function Composer({
     attachmentScope,
     goalMode,
     images,
-    input,
+    input: draftInput,
     language,
     onImagesChange,
     onInput,
@@ -201,7 +218,7 @@ export function Composer({
     attachmentScope,
     goalMode,
     images,
-    input,
+    input: draftInput,
     language,
     onImagesChange,
     onInput,
@@ -223,9 +240,11 @@ export function Composer({
   const speechBusy =
     localSpeechBusy || voiceUploadPending || voiceInputLocked || Boolean(transcriptionStatus);
   const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
-  const hasContent = Boolean(input.trim()) || images.length > 0 || hasSupplementalContent;
+  const hasContent = Boolean(draftInput.trim()) || images.length > 0 || hasSupplementalContent;
   const activeSkillToken =
-    !goalMode && !busy && !speechBusy && composerFocused ? skillTokenAt(input, skillCaret) : null;
+    !goalMode && !busy && !speechBusy && composerFocused
+      ? skillTokenAt(draftInput, skillCaret)
+      : null;
   const activeSkillTokenKey = skillTokenKey(activeSkillToken);
   const skillMenuOpen =
     Boolean(cwd && activeSkillToken) && activeSkillTokenKey !== skillDismissedToken;
@@ -236,7 +255,7 @@ export function Composer({
   );
   const canSubmit =
     hasContent &&
-    (!goalMode || Boolean(input.trim())) &&
+    (!goalMode || Boolean(draftInput.trim())) &&
     !busy &&
     !speechBusy &&
     (!creating || Boolean(projectId));
@@ -304,13 +323,26 @@ export function Composer({
               : null));
 
   useLayoutEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    const height = Math.min(textarea.scrollHeight, 190);
-    textarea.style.height = `${height}px`;
-    textarea.style.overflowY = textarea.scrollHeight > 190 ? "auto" : "hidden";
-  }, [input]);
+    const sessionChanged = draftSessionIdentityRef.current !== sessionIdentity;
+    const inputChanged = inputPropRef.current !== input;
+    const syncRequested = inputSyncRevisionRef.current !== inputSyncRevision;
+    if (!sessionChanged && !inputChanged && !syncRequested) return;
+    draftSessionIdentityRef.current = sessionIdentity;
+    inputPropRef.current = input;
+    inputSyncRevisionRef.current = inputSyncRevision;
+    draftInputRef.current = input;
+    setDraftInput(input);
+  }, [input, inputSyncRevision, sessionIdentity]);
+
+  useEffect(() => {
+    if (nativeFieldSizing) return;
+    scheduleTextareaResize();
+  }, [draftInput, nativeFieldSizing]);
+
+  useEffect(() => {
+    if (!nativeFieldSizing) scheduleTextareaResize();
+    return cancelTextareaResize;
+  }, [nativeFieldSizing, sessionIdentity]);
 
   useLayoutEffect(() => {
     if (autoFocus) textareaRef.current?.focus();
@@ -563,12 +595,13 @@ export function Composer({
 
   function captureInsertionPoint() {
     const textarea = textareaRef.current;
+    const currentInput = draftInputRef.current;
     insertionRef.current = textarea
       ? { start: textarea.selectionStart, end: textarea.selectionEnd }
-      : { start: input.length, end: input.length };
-    const caret = textarea?.selectionStart ?? input.length;
+      : { start: currentInput.length, end: currentInput.length };
+    const caret = textarea?.selectionStart ?? currentInput.length;
     setSkillCaret(caret);
-    requestSkillsForToken(input, caret);
+    requestSkillsForToken(currentInput, caret);
   }
 
   function requestSkillsForToken(value: string, caret: number) {
@@ -576,9 +609,11 @@ export function Composer({
   }
 
   function insertSkill(skill: SkillCatalogItem) {
-    if (!activeSkillToken) return;
-    const replacement = replaceSkillToken(input, activeSkillToken, skill.name);
-    onInput(replacement.value);
+    const currentInput = draftInputRef.current;
+    const currentToken = skillTokenAt(currentInput, skillCaret);
+    if (!currentToken) return;
+    const replacement = replaceSkillToken(currentInput, currentToken, skill.name);
+    publishDraft(replacement.value);
     setSkillCaret(replacement.caret);
     setSkillDismissedToken(skillTokenKey(skillTokenAt(replacement.value, replacement.caret)));
     insertionRef.current = { start: replacement.caret, end: replacement.caret };
@@ -615,7 +650,7 @@ export function Composer({
       return;
     }
     if (!insertionRef.current) {
-      const latestInput = latestPropsRef.current.input;
+      const latestInput = draftInputRef.current;
       insertionRef.current = { start: latestInput.length, end: latestInput.length };
     }
     const recordingIdentity = latestPropsRef.current.sessionIdentity;
@@ -742,7 +777,7 @@ export function Composer({
       }
       return;
     }
-    const latestInput = latestPropsRef.current.input;
+    const latestInput = draftInputRef.current;
     const recording = {
       audio: new Blob(chunks, { type: mimeType }),
       durationMs: Math.max(1, Date.now() - recordingStartedAtRef.current),
@@ -803,18 +838,19 @@ export function Composer({
 
   function insertTranscript(transcript: string) {
     const latest = latestPropsRef.current;
+    const currentInput = draftInputRef.current;
     const selection = insertionRef.current ?? {
-      start: latest.input.length,
-      end: latest.input.length,
+      start: currentInput.length,
+      end: currentInput.length,
     };
     const inserted = insertTranscriptAtSelection(
-      latest.input,
+      currentInput,
       transcript,
       selection,
       latest.goalMode ? 4_000 : undefined,
     );
     if (!inserted) throw new Error(latest.t("Распознавание не вернуло текст"));
-    latest.onInput(inserted.value);
+    publishDraft(inserted.value);
     window.setTimeout(() => {
       const textarea = textareaRef.current;
       textarea?.focus();
@@ -849,6 +885,32 @@ export function Composer({
     if (transcriptionTimerRef.current === undefined) return;
     window.clearInterval(transcriptionTimerRef.current);
     transcriptionTimerRef.current = undefined;
+  }
+
+  function publishDraft(value: string) {
+    draftInputRef.current = value;
+    latestPropsRef.current.input = value;
+    setDraftInput(value);
+    latestPropsRef.current.onInput(value);
+  }
+
+  function scheduleTextareaResize() {
+    if (resizeFrameRef.current !== null) return;
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.style.height = "auto";
+      const scrollHeight = textarea.scrollHeight;
+      textarea.style.height = `${Math.min(Math.max(scrollHeight, 52), 190)}px`;
+      textarea.style.overflowY = scrollHeight > 190 ? "auto" : "hidden";
+    });
+  }
+
+  function cancelTextareaResize() {
+    if (resizeFrameRef.current === null) return;
+    window.cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = null;
   }
 
   function preserveTextareaFocus(event: ReactPointerEvent<HTMLElement>) {
@@ -957,7 +1019,7 @@ export function Composer({
           maxLength={goalMode ? 4_000 : undefined}
           readOnly={speechBusy}
           aria-busy={speechBusy}
-          value={input}
+          value={draftInput}
           aria-autocomplete={skillMenuOpen ? "list" : undefined}
           aria-controls={skillMenuOpen ? "composer-skill-list" : undefined}
           aria-expanded={skillMenuOpen || undefined}
@@ -968,11 +1030,12 @@ export function Composer({
           }
           onChange={(event) => {
             const caret = event.currentTarget.selectionStart;
+            const value = event.currentTarget.value;
+            publishDraft(value);
             setSkillCaret(caret);
             setActiveSkillIndex(0);
             setSkillDismissedToken(null);
-            requestSkillsForToken(event.currentTarget.value, caret);
-            onInput(event.currentTarget.value);
+            requestSkillsForToken(value, caret);
           }}
           onFocus={(event) => {
             setComposerFocused(true);
@@ -981,7 +1044,10 @@ export function Composer({
             setSkillCaret(caret);
             requestSkillsForToken(event.currentTarget.value, caret);
           }}
-          onBlur={() => setComposerFocused(false)}
+          onBlur={() => {
+            setComposerFocused(false);
+            onDraftFlush?.();
+          }}
           onPaste={pasteImages}
           onSelect={captureInsertionPoint}
           onKeyDown={keyboardSubmit}
