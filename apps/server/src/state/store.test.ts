@@ -204,6 +204,39 @@ describe("StateStore", () => {
     });
   });
 
+  it("persists user-input drafts inside existing thread metadata", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    const key = "a".repeat(64);
+    await store.update((state) => {
+      state.threadMeta.thread = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        userInputDrafts: {
+          [key]: {
+            turnId: "turn",
+            itemId: "item",
+            fingerprint: "b".repeat(64),
+            answers: { question: ["answer"] },
+            currentQuestionId: "question",
+            revision: 3,
+            updatedAt: 123,
+          },
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().threadMeta.thread?.userInputDrafts?.[key]).toMatchObject({
+      turnId: "turn",
+      itemId: "item",
+      answers: { question: ["answer"] },
+      revision: 3,
+    });
+  });
+
   it("loads legacy state and queued messages without the new optional fields", async () => {
     const { path } = await temporaryState();
     await writeFile(

@@ -13,6 +13,7 @@ import type {
   TaskDefaults,
   ThreadDraft,
   ThreadOutcome,
+  UserInputDraft,
   UiLanguage,
   VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
@@ -203,6 +204,12 @@ export interface SessionSnapshotState {
   currentTurnId: string | null;
 }
 
+export interface UserInputDraftState extends UserInputDraft {
+  turnId: string;
+  itemId: string;
+  fingerprint: string;
+}
+
 export interface ThreadMetaState {
   pinned: boolean;
   lastReadUpdatedAt: number;
@@ -225,6 +232,7 @@ export interface ThreadMetaState {
   browserBinding?: BrowserBindingState;
   unmaterialized?: boolean;
   draft?: ThreadDraft;
+  userInputDrafts?: Record<string, UserInputDraftState>;
   sessionSnapshot?: SessionSnapshotState;
 }
 
@@ -1097,6 +1105,7 @@ function validateState(value: unknown): CodexNestState {
       (meta.browserBinding !== undefined && !isBrowserBinding(meta.browserBinding)) ||
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||
+      (meta.userInputDrafts !== undefined && !isUserInputDrafts(meta.userInputDrafts)) ||
       (meta.sessionSnapshot !== undefined && !isSessionSnapshot(meta.sessionSnapshot))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
@@ -1155,6 +1164,41 @@ function validateState(value: unknown): CodexNestState {
     ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
     ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
   };
+}
+
+function isUserInputDrafts(value: unknown): value is Record<string, UserInputDraftState> {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(
+    ([key, draft]) =>
+      /^[a-f\d]{64}$/iu.test(key) &&
+      isRecord(draft) &&
+      hasOnlyKeys(draft, [
+        "turnId",
+        "itemId",
+        "fingerprint",
+        "answers",
+        "currentQuestionId",
+        "revision",
+        "updatedAt",
+      ]) &&
+      isBoundedString(draft.turnId, 500) &&
+      isBoundedString(draft.itemId, 500) &&
+      typeof draft.fingerprint === "string" &&
+      /^[a-f\d]{64}$/iu.test(draft.fingerprint) &&
+      isRecord(draft.answers) &&
+      Object.values(draft.answers).every(
+        (answers) =>
+          Array.isArray(answers) &&
+          answers.length === 1 &&
+          typeof answers[0] === "string" &&
+          Boolean(answers[0].trim()),
+      ) &&
+      (draft.currentQuestionId === null || typeof draft.currentQuestionId === "string") &&
+      typeof draft.revision === "number" &&
+      Number.isSafeInteger(draft.revision) &&
+      draft.revision > 0 &&
+      isNonNegativeFiniteNumber(draft.updatedAt),
+  );
 }
 
 function isSessionSnapshot(value: unknown): value is SessionSnapshotState {

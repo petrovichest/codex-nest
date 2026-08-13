@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ActivityItem, ThreadGoal } from "@codexnest/protocol";
+import type { ActivityItem, ServerEvent, ThreadGoal } from "@codexnest/protocol";
 
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
@@ -2580,6 +2580,141 @@ describe("AppProjection", () => {
     });
   });
 
+  it("persists, enriches, reattaches, fingerprints, and cleans up user-input drafts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const path = join(directory, "state.json");
+    const store = new StateStore(path);
+    await store.load();
+    const bridge = new FakeBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    projection.upsertThread(thread("one", "/work", 10, { type: "active", activeFlags: [] }, []));
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const request = attention.receive(userInputServerRequest(701), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    if (request.kind !== "userInput") throw new Error("Expected user input");
+    expect(events.findLast((event) => event.type === "attention.upserted")).toMatchObject({
+      attention: { id: request.id, draft: null },
+    });
+
+    await expect(
+      projection.updateUserInputDraft(request, {
+        answers: { choice: ["First"] },
+        currentQuestionId: "choice",
+      }),
+    ).resolves.toMatchObject({ revision: 1 });
+    const second = await projection.updateUserInputDraft(request, {
+      answers: { choice: ["Second"] },
+      currentQuestionId: null,
+    });
+    expect(second).toMatchObject({
+      answers: { choice: ["Second"] },
+      currentQuestionId: null,
+      revision: 2,
+    });
+    expect(projection.snapshot().attention).toMatchObject([
+      { id: request.id, draft: { answers: { choice: ["Second"] }, revision: 2 } },
+    ]);
+    expect(events.findLast((event) => event.type === "attention.upserted")).toMatchObject({
+      attention: { id: request.id, draft: { revision: 2 } },
+    });
+
+    attention.expireAll();
+    expect(Object.values(store.snapshot().threadMeta.one?.userInputDrafts ?? {})).toMatchObject([
+      { revision: 2 },
+    ]);
+    await store.flushed();
+
+    const reloadedStore = new StateStore(path);
+    await reloadedStore.load();
+    const replayBridge = new FakeBridge();
+    const replayAttention = new AttentionManager();
+    const replayProjection = new AppProjection(
+      replayBridge as unknown as CodexBridge,
+      reloadedStore,
+      replayAttention,
+    );
+    replayProjection.upsertThread(
+      thread("one", "/work", 10, { type: "active", activeFlags: [] }, []),
+    );
+    const replayed = replayAttention.receive(userInputServerRequest(702), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    if (replayed.kind !== "userInput") throw new Error("Expected user input");
+    expect(replayProjection.snapshot().attention).toMatchObject([
+      { id: replayed.id, draft: { answers: { choice: ["Second"] }, revision: 2 } },
+    ]);
+
+    const mismatchAttention = new AttentionManager();
+    const mismatchProjection = new AppProjection(
+      new FakeBridge() as unknown as CodexBridge,
+      reloadedStore,
+      mismatchAttention,
+    );
+    mismatchProjection.upsertThread(thread("one", "/work", 10));
+    mismatchAttention.receive(userInputServerRequest(703, "Changed descriptor"), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    expect(mismatchProjection.snapshot().attention).toMatchObject([{ draft: null }]);
+
+    const response = { kind: "userInput" as const, answers: { choice: ["Final"] } };
+    expect(replayAttention.resolve(replayed.id, response)).toBe(replayed);
+    await replayProjection.recordAttentionResponse(replayed, response);
+    expect(reloadedStore.snapshot().threadMeta.one?.userInputDrafts).toBeUndefined();
+
+    const externallyResolved = replayAttention.receive(userInputServerRequest(704), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    if (externallyResolved.kind !== "userInput") throw new Error("Expected user input");
+    await replayProjection.updateUserInputDraft(externallyResolved, {
+      answers: { choice: ["External"] },
+      currentQuestionId: "choice",
+    });
+    replayBridge.emit("notification", {
+      method: "serverRequest/resolved",
+      params: { requestId: 704 },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(reloadedStore.snapshot().threadMeta.one?.userInputDrafts).toBeUndefined(),
+    );
+
+    const completed = replayAttention.receive(userInputServerRequest(705), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    if (completed.kind !== "userInput") throw new Error("Expected user input");
+    await replayProjection.updateUserInputDraft(completed, {
+      answers: { choice: ["Turn"] },
+      currentQuestionId: null,
+    });
+    replayBridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("question-turn", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(reloadedStore.snapshot().threadMeta.one?.userInputDrafts).toBeUndefined(),
+    );
+
+    const deleted = replayAttention.receive(userInputServerRequest(706), {
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    } as unknown as JsonlTransport);
+    if (deleted.kind !== "userInput") throw new Error("Expected user input");
+    await replayProjection.updateUserInputDraft(deleted, {
+      answers: { choice: ["Delete"] },
+      currentQuestionId: null,
+    });
+    await replayProjection.removeOrphanedThread("one");
+    expect(reloadedStore.snapshot().threadMeta.one).toBeUndefined();
+  });
+
   it("keeps an active goal running between turns and releases terminal state when stopped", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -3771,6 +3906,29 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 });
+
+function userInputServerRequest(id: number, question = "Which one?"): ServerRequest {
+  return {
+    method: "item/tool/requestUserInput",
+    id,
+    params: {
+      threadId: "one",
+      turnId: "question-turn",
+      itemId: "question-item",
+      autoResolutionMs: null,
+      questions: [
+        {
+          id: "choice",
+          header: "Choice",
+          question,
+          isOther: true,
+          isSecret: false,
+          options: [{ label: "First", description: "Pick first" }],
+        },
+      ],
+    },
+  } as ServerRequest;
+}
 
 function thread(
   id: string,

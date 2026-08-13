@@ -89,9 +89,10 @@ describe("AttentionPanel", () => {
     expect(screen.getByText("Вопрос 1 из 2")).toBeInTheDocument();
     expect(screen.getByText("Где хранить вложения?")).toBeInTheDocument();
     expect(screen.queryByText("Как выбирать изображение?")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Далее" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Далее" }).parentElement).toHaveClass(
-      "user-input-actions",
+    expect(screen.getByRole("button", { name: "Далее" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Вопрос 1 из 2: Хранение/ })).toHaveAttribute(
+      "aria-current",
+      "step",
     );
 
     fireEvent.click(screen.getByRole("radio", { name: /На сервере/ }));
@@ -100,7 +101,8 @@ describe("AttentionPanel", () => {
     expect(screen.getByText("Вопрос 2 из 2")).toBeInTheDocument();
     expect(screen.queryByText("Где хранить вложения?")).not.toBeInTheDocument();
     expect(screen.getByText("Как выбирать изображение?")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Отправить ответы" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отправить ответы" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Назад" })).toBeEnabled();
     expect(respond).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("radio", { name: /Галерея/ }));
@@ -112,6 +114,106 @@ describe("AttentionPanel", () => {
         answers: { storage: ["На сервере"], source: ["Галерея"] },
       }),
     );
+  });
+
+  it("supports direct unanswered navigation, clearing, and an empty final submit", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const updateUserInputDraft = vi.fn();
+    connection.mockReturnValue({
+      api: { respond },
+      updateUserInputDraft,
+      clearUserInputDraft: vi.fn(),
+    });
+    render(<AttentionPanel requests={[multiQuestionRequest()]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 3 из 3: Итог/ }));
+    expect(screen.getByText("Что отправить?")).toBeInTheDocument();
+    expect(updateUserInputDraft).toHaveBeenLastCalledWith(
+      "questions",
+      { answers: {}, currentQuestionId: "final" },
+      "immediate",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 1 из 3: Режим/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Быстро/ }));
+    expect(screen.getByRole("button", { name: "Очистить ответ" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Очистить ответ" }));
+    expect(screen.queryByRole("button", { name: "Очистить ответ" })).toBeNull();
+    expect(updateUserInputDraft).toHaveBeenLastCalledWith(
+      "questions",
+      { answers: {}, currentQuestionId: "mode" },
+      "immediate",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 2 из 3: Детали/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Свой ответ" }), {
+      target: { value: "   " },
+    });
+    expect(screen.queryByRole("button", { name: "Очистить ответ" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 3 из 3: Итог/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
+    await waitFor(() =>
+      expect(respond).toHaveBeenCalledWith("questions", { kind: "userInput", answers: {} }),
+    );
+  });
+
+  it("debounces freeform persistence mode and blocks navigation while speech is requesting", async () => {
+    installMediaRecorder(() => new Promise<MediaStream>(() => undefined));
+    const updateUserInputDraft = vi.fn();
+    connection.mockReturnValue({
+      api: { respond: vi.fn(), transcribe: vi.fn() },
+      updateUserInputDraft,
+    });
+    render(
+      <AttentionPanel
+        requests={[multiQuestionRequest()]}
+        transcriptionConfig={transcriptionConfig}
+        transcriptionProvider="local"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 2 из 3: Детали/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Свой ответ" }), {
+      target: { value: "Текст" },
+    });
+    expect(updateUserInputDraft).toHaveBeenLastCalledWith(
+      "questions",
+      { answers: { details: ["Текст"] }, currentQuestionId: "details" },
+      "debounced",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    expect(screen.getByRole("button", { name: "Назад" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Далее" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Очистить ответ" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Вопрос 1 из 3/ })).toBeDisabled();
+  });
+
+  it("replaces clean answers and jumps when a newer provider draft arrives", async () => {
+    const request = multiQuestionRequest();
+    const providerDraft = (answers: Record<string, string[]>, currentQuestionId: string) => ({
+      answers,
+      currentQuestionId,
+      serverRevision: 1,
+      localVersion: 0,
+      savedVersion: 0,
+      saving: false,
+      error: null,
+    });
+    connection.mockReturnValue({
+      api: { respond: vi.fn() },
+      state: { userInputDrafts: { questions: providerDraft({ mode: ["Быстро"] }, "mode") } },
+    });
+    const view = render(<AttentionPanel requests={[request]} />);
+    expect(screen.getByText("Как работать?")).toBeInTheDocument();
+
+    connection.mockReturnValue({
+      api: { respond: vi.fn() },
+      state: { userInputDrafts: { questions: providerDraft({ final: ["Всё"] }, "final") } },
+    });
+    view.rerender(<AttentionPanel requests={[request]} />);
+    expect(await screen.findByText("Что отправить?")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Всё/ })).toBeChecked();
+    expect(screen.getByRole("button", { name: /Вопрос 1 из 3/ })).not.toHaveClass("answered");
   });
 
   it("records a freeform answer, inserts the transcript at the cursor, and waits for submit", async () => {
@@ -378,6 +480,44 @@ function freeformRequest() {
         isOther: true,
         isSecret: false,
         options: null,
+      },
+    ],
+  };
+}
+
+function multiQuestionRequest() {
+  return {
+    id: "questions",
+    threadId: "thread",
+    turnId: "turn",
+    itemId: "item",
+    createdAt: 1,
+    kind: "userInput" as const,
+    autoResolutionMs: null,
+    questions: [
+      {
+        id: "mode",
+        header: "Режим",
+        question: "Как работать?",
+        isOther: false,
+        isSecret: false,
+        options: [{ label: "Быстро", description: "Без задержек." }],
+      },
+      {
+        id: "details",
+        header: "Детали",
+        question: "Что учесть?",
+        isOther: true,
+        isSecret: false,
+        options: null,
+      },
+      {
+        id: "final",
+        header: "Итог",
+        question: "Что отправить?",
+        isOther: false,
+        isSecret: false,
+        options: [{ label: "Всё", description: "Отправить всё." }],
       },
     ],
   };

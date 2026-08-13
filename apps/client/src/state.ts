@@ -9,6 +9,8 @@ import type {
   ThreadDraft,
   ThreadGoal,
   ThreadSummary,
+  UpdateUserInputDraftRequest,
+  UserInputDraft,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
@@ -17,6 +19,7 @@ export interface ClientState {
   details: Record<string, ThreadDetail>;
   expandedHistory: Record<string, boolean>;
   optimisticMessages: Record<string, OptimisticMessage[]>;
+  userInputDrafts: Record<string, ClientUserInputDraft>;
   goals: Record<string, ThreadGoal | null>;
   voiceRemovals: Record<string, { jobId: string; outcome: "draft" | "send" | "cancelled" }>;
   network: "connecting" | "connected" | "offline";
@@ -24,6 +27,14 @@ export interface ClientState {
   snapshotEpoch: number;
   skillsEpoch: number;
 }
+
+export type ClientUserInputDraft = UpdateUserInputDraftRequest & {
+  serverRevision: number;
+  localVersion: number;
+  savedVersion: number;
+  saving: boolean;
+  error: string | null;
+};
 
 export type OptimisticMessage = {
   id: string;
@@ -62,6 +73,21 @@ export type ClientAction =
   | { type: "optimistic.add"; message: OptimisticMessage }
   | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
   | { type: "optimistic.remove"; threadId: string; messageId: string }
+  | {
+      type: "userInputDraft.edit";
+      attentionId: string;
+      draft: UpdateUserInputDraftRequest;
+      version: number;
+    }
+  | { type: "userInputDraft.saving"; attentionId: string; version: number }
+  | {
+      type: "userInputDraft.saved";
+      attentionId: string;
+      version: number;
+      draft: UserInputDraft;
+    }
+  | { type: "userInputDraft.failed"; attentionId: string; error: string }
+  | { type: "userInputDraft.clear"; attentionId: string }
   | { type: "clear" };
 
 export const initialState: ClientState = {
@@ -69,6 +95,7 @@ export const initialState: ClientState = {
   details: {},
   expandedHistory: {},
   optimisticMessages: {},
+  userInputDrafts: {},
   goals: {},
   voiceRemovals: {},
   network: "connecting",
@@ -87,6 +114,9 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return {
         ...state,
         snapshot: action.snapshot,
+        userInputDrafts: action.snapshot
+          ? reconcileUserInputDrafts(state.userInputDrafts, action.snapshot.attention, true)
+          : state.userInputDrafts,
         goals: action.goals,
       };
     case "hydrate.detail":
@@ -104,6 +134,7 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
                 taskDefaults: state.snapshot.taskDefaults,
               }
             : action.snapshot,
+        userInputDrafts: reconcileUserInputDrafts(state.userInputDrafts, action.snapshot.attention),
         network: "connected",
         error: null,
         snapshotEpoch: state.snapshotEpoch + 1,
@@ -178,6 +209,73 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       }));
     case "optimistic.remove":
       return removeOptimisticMessage(state, action.threadId, action.messageId);
+    case "userInputDraft.edit": {
+      const current = state.userInputDrafts[action.attentionId];
+      return {
+        ...state,
+        userInputDrafts: {
+          ...state.userInputDrafts,
+          [action.attentionId]: {
+            ...action.draft,
+            serverRevision: current?.serverRevision ?? 0,
+            localVersion: action.version,
+            savedVersion: current?.savedVersion ?? 0,
+            saving: current?.saving ?? false,
+            error: null,
+          },
+        },
+      };
+    }
+    case "userInputDraft.saving": {
+      const current = state.userInputDrafts[action.attentionId];
+      if (!current || action.version > current.localVersion) return state;
+      return {
+        ...state,
+        userInputDrafts: {
+          ...state.userInputDrafts,
+          [action.attentionId]: { ...current, saving: true, error: null },
+        },
+      };
+    }
+    case "userInputDraft.saved": {
+      const current = state.userInputDrafts[action.attentionId];
+      if (!current) return state;
+      return {
+        ...state,
+        userInputDrafts: {
+          ...state.userInputDrafts,
+          [action.attentionId]: {
+            ...(current.localVersion === action.version
+              ? {
+                  answers: cloneAnswers(action.draft.answers),
+                  currentQuestionId: action.draft.currentQuestionId,
+                }
+              : current),
+            serverRevision: Math.max(current.serverRevision, action.draft.revision),
+            localVersion: current.localVersion,
+            savedVersion: Math.max(current.savedVersion, action.version),
+            saving: false,
+            error: null,
+          },
+        },
+      };
+    }
+    case "userInputDraft.failed": {
+      const current = state.userInputDrafts[action.attentionId];
+      if (!current) return state;
+      return {
+        ...state,
+        userInputDrafts: {
+          ...state.userInputDrafts,
+          [action.attentionId]: { ...current, saving: false, error: action.error },
+        },
+      };
+    }
+    case "userInputDraft.clear":
+      return {
+        ...state,
+        userInputDrafts: withoutKey(state.userInputDrafts, action.attentionId),
+      };
     case "event":
       if (!state.snapshot) return state;
       return applyEvent(state, action.sequence, action.event);
@@ -208,6 +306,56 @@ function applyChanges(
   }
   const merged = mergeThreadDetailChanges(current, changes);
   return applyDetail(state, merged, changes.resetLatest ? "reset" : "latest", preserveLive);
+}
+
+function reconcileUserInputDrafts(
+  current: Record<string, ClientUserInputDraft>,
+  attention: AppSnapshot["attention"],
+  preserveMissing = false,
+): Record<string, ClientUserInputDraft> {
+  const next: Record<string, ClientUserInputDraft> = {};
+  for (const request of attention) {
+    if (request.kind !== "userInput") continue;
+    const local = current[request.id];
+    const dirty = local && (local.saving || local.localVersion > local.savedVersion);
+    if (dirty) {
+      next[request.id] = request.draft
+        ? { ...local, serverRevision: Math.max(local.serverRevision, request.draft.revision) }
+        : local;
+      continue;
+    }
+    if (request.draft === undefined) {
+      if (local) next[request.id] = local;
+      continue;
+    }
+    if (request.draft === null) {
+      continue;
+    }
+    if (local && request.draft.revision <= local.serverRevision) {
+      next[request.id] = local;
+      continue;
+    }
+    const version = local?.localVersion ?? 0;
+    next[request.id] = {
+      answers: cloneAnswers(request.draft.answers),
+      currentQuestionId: request.draft.currentQuestionId,
+      serverRevision: request.draft.revision,
+      localVersion: version,
+      savedVersion: version,
+      saving: false,
+      error: null,
+    };
+  }
+  if (preserveMissing) {
+    for (const [attentionId, draft] of Object.entries(current)) {
+      next[attentionId] ??= draft;
+    }
+  }
+  return next;
+}
+
+function cloneAnswers(answers: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, [...values]]));
 }
 
 export function mergeThreadDetailChanges(
@@ -265,10 +413,18 @@ function applyEvent(state: ClientState, sequence: number, event: ServerEvent): C
       return removeThreadState({ ...state, snapshot }, event.threadId);
     case "attention.upserted":
       snapshot.attention = upsert(snapshot.attention, event.attention);
-      break;
+      return {
+        ...state,
+        snapshot,
+        userInputDrafts: reconcileUserInputDrafts(state.userInputDrafts, snapshot.attention),
+      };
     case "attention.removed":
       snapshot.attention = snapshot.attention.filter((item) => item.id !== event.attentionId);
-      break;
+      return {
+        ...state,
+        snapshot,
+        userInputDrafts: withoutKey(state.userInputDrafts, event.attentionId),
+      };
     case "models.changed":
       snapshot.models = event.models;
       break;

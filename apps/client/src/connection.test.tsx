@@ -1409,6 +1409,187 @@ describe("ConnectionProvider", () => {
     expect(screen.queryByText("Устарело")).toBeNull();
     view.unmount();
   });
+
+  it("persists choices immediately, debounces typing, and flushes pending text on pagehide", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (_url: URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        answers: Record<string, string[]>;
+        currentQuestionId: string | null;
+      };
+      return new Response(
+        JSON.stringify({ ...body, revision: fetchMock.mock.calls.length, updatedAt: Date.now() }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <DraftProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+
+    act(() =>
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["Да"] }, currentQuestionId: "first" },
+        "immediate",
+      ),
+    );
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "PUT", keepalive: true });
+
+    act(() =>
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["Да"], second: ["т"] }, currentQuestionId: "second" },
+        "debounced",
+      ),
+    );
+    act(() => vi.advanceTimersByTime(499));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(1));
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    act(() =>
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { second: ["готово"] }, currentQuestionId: "second" },
+        "debounced",
+      ),
+    );
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      answers: { second: ["готово"] },
+      currentQuestionId: "second",
+    });
+    view.unmount();
+  });
+
+  it("coalesces sequential saves and sends only the newest pending snapshot", async () => {
+    const responses: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn<(url: URL, init?: RequestInit) => Promise<Response>>(
+      () =>
+        new Promise<Response>((resolve) => {
+          responses.push(resolve);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <DraftProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+
+    act(() => {
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["A"] }, currentQuestionId: "first" },
+        "immediate",
+      );
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["C"] }, currentQuestionId: "third" },
+        "immediate",
+      );
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["D"] }, currentQuestionId: "fourth" },
+        "immediate",
+      );
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    act(() =>
+      responses[0]?.(
+        new Response(
+          JSON.stringify({
+            answers: { first: ["A"] },
+            currentQuestionId: "first",
+            revision: 1,
+            updatedAt: 1,
+          }),
+        ),
+      ),
+    );
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      answers: { first: ["D"] },
+      currentQuestionId: "fourth",
+    });
+    act(() =>
+      responses[1]?.(
+        new Response(
+          JSON.stringify({
+            answers: { first: ["D"] },
+            currentQuestionId: "fourth",
+            revision: 2,
+            updatedAt: 2,
+          }),
+        ),
+      ),
+    );
+    await flushPromises();
+    view.unmount();
+  });
+
+  it("keeps an optimistic draft across route unmount and retries a failure on the next edit", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "offline", message: "offline" } }), {
+          status: 503,
+        }),
+      )
+      .mockImplementation(async (_url: URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ ...body, revision: 1, updatedAt: 1 }));
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const settings = { baseUrl: "https://codexnest.example", token: "token" };
+    const content = (show: boolean) => (
+      <ConnectionProvider settings={settings}>
+        {show && <DraftProbe onConnection={(value) => (controls = value)} flushOnUnmount />}
+      </ConnectionProvider>
+    );
+    const view = render(content(true));
+
+    act(() =>
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["Локально"] }, currentQuestionId: "first" },
+        "immediate",
+      ),
+    );
+    await flushPromises();
+    expect(screen.getByRole("status")).toHaveTextContent("offline");
+    expect(screen.getByText("Локально")).toBeInTheDocument();
+
+    act(() =>
+      controls!.updateUserInputDraft(
+        "questions",
+        { answers: { first: ["Исправлено"] }, currentQuestionId: "first" },
+        "debounced",
+      ),
+    );
+    view.rerender(content(false));
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    view.rerender(content(true));
+    expect(screen.getByText("Исправлено")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("ok");
+    view.unmount();
+  });
 });
 
 function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSnapshot {
@@ -1441,6 +1622,38 @@ function AppActiveProbe() {
 function ThreadTitleProbe() {
   const { state } = useConnection();
   return <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>;
+}
+
+function DraftProbe({
+  onConnection,
+  flushOnUnmount = false,
+}: {
+  onConnection(value: ReturnType<typeof useConnection>): void;
+  flushOnUnmount?: boolean;
+}) {
+  const connection = useConnection();
+  const flush = connection.flushUserInputDraft;
+  onConnection(connection);
+  useEffect(
+    () => () => {
+      if (flushOnUnmount) flush("questions");
+    },
+    [flush, flushOnUnmount],
+  );
+  const draft = connection.state.userInputDrafts.questions;
+  return (
+    <>
+      <span>{draft?.answers.first?.[0] ?? "empty"}</span>
+      <span role="status">{draft?.error ?? "ok"}</span>
+    </>
+  );
+}
+
+async function flushPromises(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 class FakeWebSocket extends EventTarget {

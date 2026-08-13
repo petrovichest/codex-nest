@@ -64,7 +64,8 @@ function AttentionCard({
   transcriptionProvider: TranscriptionProvider | null;
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
 }) {
-  const { api } = useConnection();
+  const connection = useConnection();
+  const { api } = connection;
   const { language, t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +75,7 @@ function AttentionCard({
     setError(null);
     try {
       await api.respond(request.id, response);
+      if (response.kind === "userInput") connection.clearUserInputDraft?.(request.id);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -289,10 +291,13 @@ function UserInputForm({
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
   respond(response: AttentionResponse): Promise<void>;
 }) {
-  const { api } = useConnection();
+  const connection = useConnection();
+  const { api } = connection;
+  const updateUserInputDraft = connection.updateUserInputDraft;
+  const flushUserInputDraft = connection.flushUserInputDraft;
   const { language, t } = useI18n();
-  const [answers, setAnswers] = useState<Record<string, string[]>>({});
-  const [questionIndex, setQuestionIndex] = useState(0);
+  const providerDraft = connection.state?.userInputDrafts?.[request.id];
+  const [viewDraft, setViewDraft] = useState(() => initialUserInputDraft(request, providerDraft));
   const [speechState, setSpeechState] = useState<
     "idle" | "requesting" | "recording" | "transcribing"
   >("idle");
@@ -321,10 +326,15 @@ function UserInputForm({
     selection: TextSelection;
     value: string;
   } | null>(null);
+  const requestedQuestionIndex = request.questions.findIndex(
+    (candidate) => candidate.id === viewDraft.currentQuestionId,
+  );
+  const questionIndex = requestedQuestionIndex >= 0 ? requestedQuestionIndex : 0;
   const question = request.questions[questionIndex];
   const currentQuestionIdRef = useRef(question?.id ?? null);
   currentQuestionIdRef.current = question?.id ?? null;
   const isLastQuestion = questionIndex === request.questions.length - 1;
+  const answers = viewDraft.answers;
   const currentAnswer = question ? answers[question.id]?.[0]?.trim() : "";
   const selectedOption = question?.options?.some(
     (option) => option.label === answers[question.id]?.[0],
@@ -344,8 +354,39 @@ function UserInputForm({
         ? formatEstimatedTranscriptionTime(speechSeconds, speechEstimatedTotalSeconds)
         : null;
 
-  function updateAnswer(questionId: string, answer: string) {
-    setAnswers((current) => ({ ...current, [questionId]: [answer] }));
+  function updateDraft(
+    draft: { answers: Record<string, string[]>; currentQuestionId: string | null },
+    timing: "immediate" | "debounced",
+  ) {
+    setViewDraft(draft);
+    updateUserInputDraft?.(request.id, draft, timing);
+  }
+
+  function updateAnswer(questionId: string, answer: string, timing: "immediate" | "debounced") {
+    updateDraft(
+      {
+        answers: { ...answers, [questionId]: [answer] },
+        currentQuestionId: question?.id ?? null,
+      },
+      timing,
+    );
+  }
+
+  function navigateTo(index: number) {
+    const target = request.questions[index];
+    if (!target || busy || speechBusy) return;
+    setSpeechError(null);
+    recordingTargetRef.current = null;
+    updateDraft({ answers, currentQuestionId: target.id }, "immediate");
+  }
+
+  function clearAnswer() {
+    if (!question || busy || speechBusy) return;
+    const nextAnswers = { ...answers };
+    delete nextAnswers[question.id];
+    setSpeechError(null);
+    recordingTargetRef.current = null;
+    updateDraft({ answers: nextAnswers, currentQuestionId: question.id }, "immediate");
   }
 
   function captureAnswerSelection() {
@@ -523,7 +564,7 @@ function UserInputForm({
       }
       const inserted = insertTranscriptAtSelection(target.value, response.text, target.selection);
       if (!inserted) throw new Error(t("Распознавание не вернуло текст"));
-      updateAnswer(target.questionId, inserted.value);
+      updateAnswer(target.questionId, inserted.value, "debounced");
       setSpeechError(null);
       window.setTimeout(() => {
         if (!aliveRef.current || currentQuestionIdRef.current !== target.questionId) return;
@@ -549,8 +590,14 @@ function UserInputForm({
   }, [transcriptionConfig?.timingEstimate]);
 
   useEffect(() => {
+    if (!providerDraft) return;
+    setViewDraft(initialUserInputDraft(request, providerDraft));
+  }, [providerDraft, request]);
+
+  useEffect(() => {
     aliveRef.current = true;
     return () => {
+      flushUserInputDraft?.(request.id);
       aliveRef.current = false;
       discardRecordingRef.current = true;
       clearSpeechTimer();
@@ -559,20 +606,18 @@ function UserInputForm({
       if (recorder && recorder.state !== "inactive") recorder.stop();
       stopMediaStream();
     };
-  }, []);
+  }, [flushUserInputDraft, request.id]);
 
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (!question || !currentAnswer || speechBusy) return;
+        if (!question || busy || speechBusy) return;
         if (!isLastQuestion) {
-          setSpeechError(null);
-          recordingTargetRef.current = null;
-          setQuestionIndex((current) => current + 1);
+          navigateTo(questionIndex + 1);
           return;
         }
-        void respond({ kind: "userInput", answers });
+        void respond({ kind: "userInput", answers: answeredUserInputValues(answers) });
       }}
     >
       <h3>{t("Codex просит уточнение")}</h3>
@@ -587,6 +632,30 @@ function UserInputForm({
               total: request.questions.length,
             })}
           </div>
+          <nav className="user-input-steps" aria-label={t("Навигация по вопросам")}>
+            {request.questions.map((candidate, index) => {
+              const answered = Boolean(answers[candidate.id]?.[0]?.trim());
+              const current = index === questionIndex;
+              return (
+                <button
+                  aria-current={current ? "step" : undefined}
+                  aria-label={t("Вопрос {{current}} из {{total}}: {{header}}{{answered}}", {
+                    current: index + 1,
+                    total: request.questions.length,
+                    header: candidate.header,
+                    answered: answered ? t(", есть ответ") : t(", без ответа"),
+                  })}
+                  className={`${current ? "current" : ""}${answered ? " answered" : ""}`}
+                  disabled={busy || speechBusy}
+                  key={candidate.id}
+                  type="button"
+                  onClick={() => navigateTo(index)}
+                >
+                  {index + 1}
+                </button>
+              );
+            })}
+          </nav>
           <fieldset key={question.id}>
             <legend>{question.header}</legend>
             <p>{question.question}</p>
@@ -597,9 +666,8 @@ function UserInputForm({
                   name={question.id}
                   value={option.label}
                   checked={answers[question.id]?.[0] === option.label}
-                  onChange={() => updateAnswer(question.id, option.label)}
+                  onChange={() => updateAnswer(question.id, option.label, "immediate")}
                   disabled={busy || speechBusy}
-                  required={!question.isOther}
                 />
                 <span>
                   {option.label}
@@ -616,11 +684,10 @@ function UserInputForm({
                     type={question.isSecret ? "password" : "text"}
                     placeholder={t("Свой ответ")}
                     value={freeformAnswer}
-                    onChange={(event) => updateAnswer(question.id, event.target.value)}
+                    onChange={(event) => updateAnswer(question.id, event.target.value, "debounced")}
                     onSelect={captureAnswerSelection}
                     disabled={busy}
                     readOnly={speechBusy}
-                    required={!answers[question.id]?.[0]}
                   />
                   {transcriptionConfig && (
                     <div className="user-input-voice-actions">
@@ -682,13 +749,63 @@ function UserInputForm({
             )}
           </fieldset>
           <div className="user-input-actions">
-            <button className="primary" disabled={busy || speechBusy || !currentAnswer}>
-              {isLastQuestion ? t("Отправить ответы") : t("Далее")}
-            </button>
+            {currentAnswer && (
+              <button
+                className="user-input-clear"
+                disabled={busy || speechBusy}
+                type="button"
+                onClick={clearAnswer}
+              >
+                {t("Очистить ответ")}
+              </button>
+            )}
+            <span className="user-input-navigation">
+              {questionIndex > 0 && (
+                <button
+                  disabled={busy || speechBusy}
+                  type="button"
+                  onClick={() => navigateTo(questionIndex - 1)}
+                >
+                  {t("Назад")}
+                </button>
+              )}
+              <button className="primary" disabled={busy || speechBusy}>
+                {isLastQuestion ? t("Отправить ответы") : t("Далее")}
+              </button>
+            </span>
           </div>
+          {providerDraft?.error && (
+            <div className="user-input-draft-error" role="status">
+              {t("Не удалось сохранить черновик. Повторим при следующем изменении.")}
+            </div>
+          )}
         </>
       )}
     </form>
+  );
+}
+
+function initialUserInputDraft(
+  request: Extract<AttentionRequest, { kind: "userInput" }>,
+  draft: { answers: Record<string, string[]>; currentQuestionId: string | null } | null | undefined,
+): { answers: Record<string, string[]>; currentQuestionId: string | null } {
+  const source = draft ?? request.draft;
+  const requestedId = source?.currentQuestionId;
+  return {
+    answers: Object.fromEntries(
+      Object.entries(source?.answers ?? {}).map(([id, values]) => [id, [...values]]),
+    ),
+    currentQuestionId: request.questions.some((question) => question.id === requestedId)
+      ? (requestedId ?? null)
+      : (request.questions[0]?.id ?? null),
+  };
+}
+
+function answeredUserInputValues(answers: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(answers)
+      .filter(([, values]) => Boolean(values[0]?.trim()))
+      .map(([id, values]) => [id, [values[0]!]]),
   );
 }
 

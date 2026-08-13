@@ -19,6 +19,7 @@ import {
   type QueueMessageRequest,
   type ThreadDetail,
   type ThreadSummary,
+  type UpdateUserInputDraftRequest,
 } from "@codexnest/protocol";
 
 import { ApiClient, isRetryableApiError } from "./api";
@@ -75,6 +76,15 @@ type VoiceRecordingUpload = Omit<
   "connectionKey" | "createdAt" | "attempts" | "lastError"
 >;
 
+type UserInputDraftPersistence = {
+  draft: UpdateUserInputDraftRequest;
+  version: number;
+  savedVersion: number;
+  inFlight: boolean;
+  pending: boolean;
+  timer: number | undefined;
+};
+
 interface ConnectionContextValue {
   api: ApiClient;
   state: ClientState;
@@ -90,6 +100,13 @@ interface ConnectionContextValue {
     body: QueueMessageRequest & { clientMessageId: string },
   ): Promise<"delivered" | "pending">;
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
+  updateUserInputDraft(
+    attentionId: string,
+    draft: UpdateUserInputDraftRequest,
+    timing: "immediate" | "debounced",
+  ): void;
+  flushUserInputDraft(attentionId: string): void;
+  clearUserInputDraft(attentionId: string): void;
   reconnect(): number;
 }
 
@@ -123,6 +140,7 @@ export function ConnectionProvider({
   const foregroundRefresh = useRef<Promise<void> | null>(null);
   const outboxDrain = useRef<Promise<void> | null>(null);
   const outboxRetryTimer = useRef<number | undefined>(undefined);
+  const userInputDraftPersistence = useRef(new Map<string, UserInputDraftPersistence>());
   const browserNotifications = useMemo(
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
     [],
@@ -131,6 +149,37 @@ export function ConnectionProvider({
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    const active = new Map(
+      (state.snapshot?.attention ?? [])
+        .filter((request) => request.kind === "userInput")
+        .map((request) => [request.id, request] as const),
+    );
+    for (const [attentionId, draft] of Object.entries(state.userInputDrafts)) {
+      const entry = userInputDraftPersistence.current.get(attentionId);
+      if (entry && (entry.inFlight || entry.version > entry.savedVersion)) continue;
+      userInputDraftPersistence.current.set(attentionId, {
+        draft: {
+          answers: cloneUserInputAnswers(draft.answers),
+          currentQuestionId: draft.currentQuestionId,
+        },
+        version: draft.localVersion,
+        savedVersion: draft.savedVersion,
+        inFlight: false,
+        pending: false,
+        timer: entry?.timer,
+      });
+    }
+    for (const [attentionId, entry] of userInputDraftPersistence.current) {
+      if (state.userInputDrafts[attentionId]) continue;
+      if (!state.snapshot) continue;
+      const request = active.get(attentionId);
+      if (request && request.draft === undefined) continue;
+      if (entry.timer !== undefined) window.clearTimeout(entry.timer);
+      userInputDraftPersistence.current.delete(attentionId);
+    }
+  }, [state.snapshot?.attention, state.userInputDrafts]);
 
   useEffect(() => {
     languageRef.current = language;
@@ -587,6 +636,126 @@ export function ConnectionProvider({
     [settings, uploadVoiceRecording],
   );
 
+  const persistUserInputDraft = useCallback(
+    function persist(attentionId: string): void {
+      const entry = userInputDraftPersistence.current.get(attentionId);
+      if (!entry) return;
+      if (entry.timer !== undefined) {
+        window.clearTimeout(entry.timer);
+        entry.timer = undefined;
+      }
+      if (entry.inFlight) {
+        entry.pending = true;
+        return;
+      }
+      if (entry.version <= entry.savedVersion) return;
+      const version = entry.version;
+      const draft = normalizeUserInputDraft(entry.draft);
+      entry.inFlight = true;
+      entry.pending = false;
+      dispatch({ type: "userInputDraft.saving", attentionId, version });
+      void api
+        .updateUserInputDraft(attentionId, draft)
+        .then((saved) => {
+          if (userInputDraftPersistence.current.get(attentionId) !== entry) return;
+          entry.savedVersion = Math.max(entry.savedVersion, version);
+          dispatch({ type: "userInputDraft.saved", attentionId, version, draft: saved });
+        })
+        .catch((caught: unknown) => {
+          if (userInputDraftPersistence.current.get(attentionId) !== entry) return;
+          dispatch({
+            type: "userInputDraft.failed",
+            attentionId,
+            error: caught instanceof Error ? caught.message : "Draft save failed",
+          });
+        })
+        .finally(() => {
+          if (userInputDraftPersistence.current.get(attentionId) !== entry) return;
+          entry.inFlight = false;
+          if (!entry.pending) return;
+          entry.pending = false;
+          persist(attentionId);
+        });
+    },
+    [api],
+  );
+
+  const updateUserInputDraft = useCallback(
+    (
+      attentionId: string,
+      input: UpdateUserInputDraftRequest,
+      timing: "immediate" | "debounced",
+    ): void => {
+      const draft = {
+        answers: cloneUserInputAnswers(input.answers),
+        currentQuestionId: input.currentQuestionId,
+      };
+      let entry = userInputDraftPersistence.current.get(attentionId);
+      if (!entry) {
+        const current = stateRef.current.userInputDrafts[attentionId];
+        entry = {
+          draft: current
+            ? {
+                answers: cloneUserInputAnswers(current.answers),
+                currentQuestionId: current.currentQuestionId,
+              }
+            : { answers: {}, currentQuestionId: null },
+          version: current?.localVersion ?? 0,
+          savedVersion: current?.savedVersion ?? 0,
+          inFlight: current?.saving ?? false,
+          pending: false,
+          timer: undefined,
+        };
+        userInputDraftPersistence.current.set(attentionId, entry);
+      }
+      if (sameUserInputDraft(entry.draft, draft)) {
+        if (timing === "immediate") persistUserInputDraft(attentionId);
+        return;
+      }
+      entry.draft = draft;
+      entry.version += 1;
+      dispatch({
+        type: "userInputDraft.edit",
+        attentionId,
+        draft,
+        version: entry.version,
+      });
+      if (entry.timer !== undefined) window.clearTimeout(entry.timer);
+      entry.timer = undefined;
+      if (timing === "immediate") {
+        persistUserInputDraft(attentionId);
+      } else {
+        entry.timer = window.setTimeout(() => persistUserInputDraft(attentionId), 500);
+      }
+    },
+    [persistUserInputDraft],
+  );
+
+  const flushUserInputDraft = useCallback(
+    (attentionId: string): void => persistUserInputDraft(attentionId),
+    [persistUserInputDraft],
+  );
+
+  const clearUserInputDraft = useCallback((attentionId: string): void => {
+    const entry = userInputDraftPersistence.current.get(attentionId);
+    if (entry?.timer !== undefined) window.clearTimeout(entry.timer);
+    userInputDraftPersistence.current.delete(attentionId);
+    dispatch({ type: "userInputDraft.clear", attentionId });
+  }, []);
+
+  useEffect(() => {
+    const flushAll = () => {
+      for (const attentionId of userInputDraftPersistence.current.keys()) {
+        persistUserInputDraft(attentionId);
+      }
+    };
+    window.addEventListener("pagehide", flushAll);
+    return () => {
+      window.removeEventListener("pagehide", flushAll);
+      flushAll();
+    };
+  }, [persistUserInputDraft]);
+
   useEffect(() => {
     const wake = () => {
       void drainReliableOutbox();
@@ -780,6 +949,9 @@ export function ConnectionProvider({
       loadTurnItems,
       sendReliable,
       queueVoiceRecording,
+      updateUserInputDraft,
+      flushUserInputDraft,
+      clearUserInputDraft,
       reconnect,
     }),
     [
@@ -793,6 +965,9 @@ export function ConnectionProvider({
       loadTurnItems,
       sendReliable,
       queueVoiceRecording,
+      updateUserInputDraft,
+      flushUserInputDraft,
+      clearUserInputDraft,
       reconnect,
     ],
   );
@@ -836,4 +1011,32 @@ function threadDetailNeedsRecovery(detail: ThreadDetail, summary: ThreadSummary)
     (item) => item.type === "plan" && item.status === "completed",
   );
   return !hasFinalAnswer && !hasPlan;
+}
+
+function normalizeUserInputDraft(input: UpdateUserInputDraftRequest): UpdateUserInputDraftRequest {
+  return {
+    answers: Object.fromEntries(
+      Object.entries(input.answers)
+        .filter(([, answers]) => Boolean(answers[0]?.trim()))
+        .map(([questionId, answers]) => [questionId, [answers[0]!]]),
+    ),
+    currentQuestionId: input.currentQuestionId,
+  };
+}
+
+function cloneUserInputAnswers(answers: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, [...values]]));
+}
+
+function sameUserInputDraft(
+  left: UpdateUserInputDraftRequest,
+  right: UpdateUserInputDraftRequest,
+): boolean {
+  if (left.currentQuestionId !== right.currentQuestionId) return false;
+  const leftEntries = Object.entries(left.answers);
+  const rightEntries = Object.entries(right.answers);
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(([id, answers]) => answers[0] === right.answers[id]?.[0])
+  );
 }

@@ -2,6 +2,8 @@ import type {
   ApiError,
   AppUpdateStatus,
   AttentionResponse,
+  UpdateUserInputDraftRequest,
+  UserInputDraft,
   CodexRateLimitsResponse,
   CodexManagementStatus,
   CreateDirectoryRequest,
@@ -427,6 +429,17 @@ export class ApiClient {
     return this.request(`/api/v1/attention/${encodeURIComponent(attentionId)}/respond`, {
       method: "POST",
       body,
+    });
+  }
+
+  updateUserInputDraft(
+    attentionId: string,
+    body: UpdateUserInputDraftRequest,
+  ): Promise<UserInputDraft> {
+    return this.request(`/api/v1/attention/${encodeURIComponent(attentionId)}/draft`, {
+      method: "PUT",
+      body,
+      keepalive: true,
     });
   }
 

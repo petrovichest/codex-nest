@@ -70,11 +70,32 @@ describe("AttentionManager", () => {
       } as ServerRequest,
       transport,
     );
-    expect(request).toMatchObject({ kind: "userInput", autoResolutionMs: 60_000 });
+    expect(request).toMatchObject({ kind: "userInput", autoResolutionMs: 60_000, draft: null });
     manager.resolve(request.id, { kind: "userInput", answers: { password: ["hidden"] } });
     expect(transport.respond).toHaveBeenCalledWith(7, {
       answers: { password: { answers: ["hidden"] } },
     });
+  });
+
+  it("returns the request expired by an external RPC resolution", () => {
+    const manager = new AttentionManager();
+    const request = manager.receive(
+      {
+        method: "item/tool/requestUserInput",
+        id: 8,
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "item",
+          autoResolutionMs: null,
+          questions: [],
+        },
+      } as ServerRequest,
+      fakeTransport(),
+    );
+
+    expect(manager.expireByRpcId(8)).toBe(request);
+    expect(manager.expireByRpcId(8)).toBeNull();
   });
 
   it("applies a proposed network amendment only after its explicit choice", () => {

@@ -27,6 +27,8 @@ import type {
   TurnProgress,
   TurnView,
   UiLanguage,
+  UpdateUserInputDraftRequest,
+  UserInputDraft,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 
@@ -145,12 +147,15 @@ export class AppProjection extends EventEmitter {
         cached.thread.status = { type: "active", activeFlags: [] };
       }
       if (!request.threadId) {
-        this.publish({ type: "attention.upserted", attention: request });
+        this.publish({ type: "attention.upserted", attention: this.enrichAttention(request) });
         return;
       }
       const state = this.store.view();
       if (this.isThreadVisible(request.threadId, state)) {
-        this.publish({ type: "attention.upserted", attention: request });
+        this.publish({
+          type: "attention.upserted",
+          attention: this.enrichAttention(request, state),
+        });
       }
       if (!this.touchThreadActivity(request.threadId, request.createdAt, state)) {
         this.publishThread(request.threadId, state);
@@ -189,7 +194,8 @@ export class AppProjection extends EventEmitter {
       threads,
       attention: this.attention
         .list()
-        .filter((request) => !request.threadId || visibleThreadIds.has(request.threadId)),
+        .filter((request) => !request.threadId || visibleThreadIds.has(request.threadId))
+        .map((request) => this.enrichAttention(request, state)),
       models: this.models,
       defaultReasoningEffort: state.defaultReasoningEffort,
       taskDefaults: state.taskDefaults ?? {},
@@ -800,6 +806,7 @@ export class AppProjection extends EventEmitter {
     ) {
       return;
     }
+    await this.clearUserInputDraft(request);
     const item: TimelineArtifact = {
       type: "userInputResponse",
       id: `${request.itemId ?? request.id}-response`,
@@ -813,6 +820,47 @@ export class AppProjection extends EventEmitter {
       afterItemId: request.itemId,
     };
     await this.upsertTimelineArtifact(request.threadId, request.turnId, item);
+  }
+
+  async updateUserInputDraft(
+    request: Extract<AttentionRequest, { kind: "userInput" }>,
+    body: UpdateUserInputDraftRequest,
+  ): Promise<UserInputDraft> {
+    const identity = userInputDraftIdentity(request);
+    if (!identity) throw new Error("User input request has no stable identity");
+    let saved!: UserInputDraft;
+    await this.store.update((state) => {
+      const meta = state.threadMeta[identity.threadId] ?? {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      const previous = meta.userInputDrafts?.[identity.key];
+      saved = {
+        answers: structuredClone(body.answers),
+        currentQuestionId: body.currentQuestionId,
+        revision: (previous?.revision ?? 0) + 1,
+        updatedAt: Date.now(),
+      };
+      meta.userInputDrafts ??= {};
+      meta.userInputDrafts[identity.key] = {
+        ...saved,
+        turnId: identity.turnId,
+        itemId: identity.itemId,
+        fingerprint: identity.fingerprint,
+      };
+      state.threadMeta[identity.threadId] = meta;
+    });
+    const active = this.attention.get(request.id);
+    if (active?.kind === "userInput" && userInputDraftIdentity(active)?.key === identity.key) {
+      const state = this.store.view();
+      if (this.isThreadVisible(identity.threadId, state)) {
+        this.publish({
+          type: "attention.upserted",
+          attention: this.enrichAttention(active, state),
+        });
+      }
+    }
+    return saved;
   }
 
   async recordOrchestrationNotice(
@@ -1712,6 +1760,10 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "turn/completed": {
+        await this.clearUserInputDraftsForTurn(
+          notification.params.threadId,
+          notification.params.turn.id,
+        );
         const cached = this.threads.get(notification.params.threadId);
         const outcome = normalizeOutcome(notification.params.turn.status);
         if (cached) {
@@ -1942,7 +1994,10 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "serverRequest/resolved":
-        this.attention.expireByRpcId(notification.params.requestId);
+        {
+          const resolved = this.attention.expireByRpcId(notification.params.requestId);
+          if (resolved?.kind === "userInput") await this.clearUserInputDraft(resolved);
+        }
         break;
       default:
         break;
@@ -2190,6 +2245,59 @@ export class AppProjection extends EventEmitter {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  private enrichAttention(
+    request: AttentionRequest,
+    state: CodexNestStateView = this.store.view(),
+  ): AttentionRequest {
+    if (request.kind !== "userInput") return request;
+    const identity = userInputDraftIdentity(request);
+    const persisted = identity
+      ? state.threadMeta[identity.threadId]?.userInputDrafts?.[identity.key]
+      : undefined;
+    const draft =
+      persisted &&
+      persisted.turnId === identity?.turnId &&
+      persisted.itemId === identity.itemId &&
+      persisted.fingerprint === identity.fingerprint
+        ? {
+            answers: Object.fromEntries(
+              Object.entries(persisted.answers).map(([id, answers]) => [id, [...answers]]),
+            ),
+            currentQuestionId: persisted.currentQuestionId,
+            revision: persisted.revision,
+            updatedAt: persisted.updatedAt,
+          }
+        : null;
+    return { ...request, draft };
+  }
+
+  private async clearUserInputDraft(
+    request: Extract<AttentionRequest, { kind: "userInput" }>,
+  ): Promise<void> {
+    const identity = userInputDraftIdentity(request);
+    if (!identity) return;
+    if (!this.store.view().threadMeta[identity.threadId]?.userInputDrafts?.[identity.key]) return;
+    await this.store.update((state) => {
+      const drafts = state.threadMeta[identity.threadId]?.userInputDrafts;
+      if (!drafts) return;
+      delete drafts[identity.key];
+      if (!Object.keys(drafts).length) delete state.threadMeta[identity.threadId]!.userInputDrafts;
+    });
+  }
+
+  private async clearUserInputDraftsForTurn(threadId: string, turnId: string): Promise<void> {
+    const existing = this.store.view().threadMeta[threadId]?.userInputDrafts;
+    if (!existing || !Object.values(existing).some((draft) => draft.turnId === turnId)) return;
+    await this.store.update((state) => {
+      const drafts = state.threadMeta[threadId]?.userInputDrafts;
+      if (!drafts) return;
+      for (const [key, draft] of Object.entries(drafts)) {
+        if (draft.turnId === turnId) delete drafts[key];
+      }
+      if (!Object.keys(drafts).length) delete state.threadMeta[threadId]!.userInputDrafts;
+    });
+  }
+
   private publishThread(
     threadId: string,
     state: CodexNestStateView = this.store.view(),
@@ -2226,6 +2334,40 @@ export class AppProjection extends EventEmitter {
     this.sequence += 1;
     this.emit("event", this.sequence, event);
   }
+}
+
+function userInputDraftIdentity(request: Extract<AttentionRequest, { kind: "userInput" }>): {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  fingerprint: string;
+  key: string;
+} | null {
+  if (!request.threadId || !request.turnId || !request.itemId) return null;
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify(
+        request.questions.map((question) => [
+          question.id,
+          question.header,
+          question.question,
+          question.isOther,
+          question.isSecret,
+          question.options?.map((option) => [option.label, option.description]) ?? null,
+        ]),
+      ),
+    )
+    .digest("hex");
+  const key = createHash("sha256")
+    .update(JSON.stringify([request.turnId, request.itemId, fingerprint]))
+    .digest("hex");
+  return {
+    threadId: request.threadId,
+    turnId: request.turnId,
+    itemId: request.itemId,
+    fingerprint,
+    key,
+  };
 }
 
 function applyReadMarkers(

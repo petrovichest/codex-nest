@@ -70,6 +70,208 @@ describe("clientReducer", () => {
     expect(state.snapshot?.threads).toEqual([]);
   });
 
+  it("hydrates and applies newer complete user-input drafts including the current question", () => {
+    const request = userInputAttention({
+      answers: { second: ["С сервера"] },
+      currentQuestionId: "second",
+      revision: 2,
+      updatedAt: 20,
+    });
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, attention: [request] },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: { second: ["С сервера"] },
+      currentQuestionId: "second",
+      serverRevision: 2,
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "attention.upserted",
+        attention: {
+          ...request,
+          draft: {
+            answers: { first: ["Новый ответ"] },
+            currentQuestionId: "first",
+            revision: 3,
+            updatedAt: 30,
+          },
+        },
+      },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: { first: ["Новый ответ"] },
+      currentQuestionId: "first",
+      serverRevision: 3,
+    });
+  });
+
+  it("clears a clean revisioned user-input draft when an authoritative snapshot or event has null", () => {
+    const request = userInputAttention({
+      answers: { first: ["Сохранённый"] },
+      currentQuestionId: "first",
+      revision: 2,
+      updatedAt: 20,
+    });
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, attention: [request] },
+    });
+    expect(state.userInputDrafts.questions?.serverRevision).toBe(2);
+
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: { ...snapshot, sequence: 5, attention: [{ ...request, draft: null }] },
+    });
+    expect(state.userInputDrafts.questions).toBeUndefined();
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: { type: "attention.upserted", attention: request },
+    });
+    expect(state.userInputDrafts.questions?.serverRevision).toBe(2);
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: {
+        type: "attention.upserted",
+        attention: { ...request, draft: null },
+      },
+    });
+    expect(state.userInputDrafts.questions).toBeUndefined();
+  });
+
+  it("retains a dirty local user-input draft against an authoritative null draft", () => {
+    const request = userInputAttention({
+      answers: { first: ["Сохранённый"] },
+      currentQuestionId: "first",
+      revision: 2,
+      updatedAt: 20,
+    });
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, attention: [request] },
+    });
+    state = clientReducer(state, {
+      type: "userInputDraft.edit",
+      attentionId: "questions",
+      version: 1,
+      draft: { answers: { second: ["Локальный"] }, currentQuestionId: "second" },
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "attention.upserted",
+        attention: { ...request, draft: null },
+      },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: { second: ["Локальный"] },
+      currentQuestionId: "second",
+      localVersion: 1,
+      savedVersion: 0,
+    });
+
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: { ...snapshot, sequence: 6, attention: [{ ...request, draft: null }] },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: { second: ["Локальный"] },
+      currentQuestionId: "second",
+      localVersion: 1,
+      savedVersion: 0,
+    });
+  });
+
+  it("protects dirty user-input drafts from remote echoes, then accepts remote state when clean", () => {
+    const request = userInputAttention({
+      answers: { first: ["Старый"] },
+      currentQuestionId: "first",
+      revision: 1,
+      updatedAt: 10,
+    });
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, attention: [request] },
+    });
+    state = clientReducer(state, {
+      type: "userInputDraft.edit",
+      attentionId: "questions",
+      version: 1,
+      draft: { answers: { second: ["Локальный"] }, currentQuestionId: "second" },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "attention.upserted",
+        attention: {
+          ...request,
+          draft: {
+            answers: { first: ["Удалённый"] },
+            currentQuestionId: "first",
+            revision: 2,
+            updatedAt: 20,
+          },
+        },
+      },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: { second: ["Локальный"] },
+      currentQuestionId: "second",
+      serverRevision: 2,
+      localVersion: 1,
+      savedVersion: 0,
+    });
+
+    state = clientReducer(state, {
+      type: "userInputDraft.saved",
+      attentionId: "questions",
+      version: 1,
+      draft: {
+        answers: { second: ["Локальный"] },
+        currentQuestionId: "second",
+        revision: 3,
+        updatedAt: 30,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "attention.upserted",
+        attention: {
+          ...request,
+          draft: {
+            answers: {},
+            currentQuestionId: "first",
+            revision: 4,
+            updatedAt: 40,
+          },
+        },
+      },
+    });
+    expect(state.userInputDrafts.questions).toMatchObject({
+      answers: {},
+      currentQuestionId: "first",
+      serverRevision: 4,
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: { type: "attention.removed", attentionId: "questions" },
+    });
+    expect(state.userInputDrafts.questions).toBeUndefined();
+  });
+
   it("appends compact activity deltas without replacing the whole item", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
@@ -1456,6 +1658,42 @@ describe("clientReducer", () => {
     ]);
   });
 });
+
+function userInputAttention(draft: {
+  answers: Record<string, string[]>;
+  currentQuestionId: string | null;
+  revision: number;
+  updatedAt: number;
+}) {
+  return {
+    id: "questions",
+    threadId: "one",
+    turnId: "turn",
+    itemId: "item",
+    createdAt: 1,
+    kind: "userInput" as const,
+    autoResolutionMs: null,
+    draft,
+    questions: [
+      {
+        id: "first",
+        header: "Первый",
+        question: "Первый?",
+        isOther: true,
+        isSecret: false,
+        options: null,
+      },
+      {
+        id: "second",
+        header: "Второй",
+        question: "Второй?",
+        isOther: true,
+        isSecret: false,
+        options: null,
+      },
+    ],
+  };
+}
 
 function turn(id: string) {
   return {

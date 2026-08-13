@@ -533,9 +533,18 @@ const ENGLISH: Record<string, string> = {
   "Выдать на turn": "Grant for turn",
   "Codex просит уточнение": "Codex needs clarification",
   "Вопрос {{current}} из {{total}}": "Question {{current}} of {{total}}",
+  "Навигация по вопросам": "Question navigation",
+  "Вопрос {{current}} из {{total}}: {{header}}{{answered}}":
+    "Question {{current}} of {{total}}: {{header}}{{answered}}",
+  ", есть ответ": ", answered",
+  ", без ответа": ", unanswered",
   "Свой ответ": "Your answer",
+  "Очистить ответ": "Clear answer",
   "Отправить ответы": "Submit answers",
+  Назад: "Back",
   Далее: "Next",
+  "Не удалось сохранить черновик. Повторим при следующем изменении.":
+    "Could not save the draft. We’ll retry on the next change.",
   "Автовыбор через {{seconds}} сек.": "Automatic selection in {{seconds}} sec.",
   "Время автовыбора истекло": "Automatic selection time expired",
   "Действие во внешнем сервисе": "Action in an external service",

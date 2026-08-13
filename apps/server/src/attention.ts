@@ -27,6 +27,10 @@ export class AttentionManager extends EventEmitter {
     return [...this.pending.values()].map(({ request }) => request);
   }
 
+  get(id: string): AttentionRequest | undefined {
+    return this.pending.get(id)?.request;
+  }
+
   receive(serverRequest: ServerRequest, transport: JsonlTransport): AttentionRequest {
     const id = `attention-${this.nextId++}`;
     const request = normalizeAttention(id, serverRequest);
@@ -61,11 +65,12 @@ export class AttentionManager extends EventEmitter {
     return pending.request;
   }
 
-  expireByRpcId(rpcId: number | string): void {
+  expireByRpcId(rpcId: number | string): AttentionRequest | null {
     const found = [...this.pending.entries()].find(([, item]) => item.rpcId === rpcId);
-    if (!found) return;
+    if (!found) return null;
     this.pending.delete(found[0]);
     this.emit("removed", found[0]);
+    return found[1].request;
   }
 
   expireAll(): void {
@@ -143,6 +148,7 @@ function normalizeAttention(id: string, request: ServerRequest): AttentionReques
         itemId: request.params.itemId,
         createdAt,
         autoResolutionMs: request.params.autoResolutionMs,
+        draft: null,
         questions: request.params.questions.map((question) => ({
           id: question.id,
           header: question.header,

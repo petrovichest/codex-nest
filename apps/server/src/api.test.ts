@@ -34,7 +34,7 @@ import type { AppManager } from "./app-management";
 import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
-import type { ServerNotification } from "./codex/generated/index";
+import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
 import { RpcError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
@@ -2844,6 +2844,123 @@ describe("thread settings", () => {
     expect(deleted.statusCode).toBe(404);
     expect(bridge.request).not.toHaveBeenCalledWith("thread/delete", { threadId: "thread" });
     expect(store.snapshot().threadMeta.thread).toBeDefined();
+    await app.close();
+  });
+
+  it("saves validated active user-input drafts and rejects stale or incompatible requests", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-user-input-draft-api-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      { bridge: bridge as unknown as CodexBridge, store, projection, attention },
+    );
+    const headers = { authorization: "Bearer correct" };
+    const userInput = attention.receive(
+      {
+        method: "item/tool/requestUserInput",
+        id: 501,
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "item",
+          autoResolutionMs: null,
+          questions: [
+            {
+              id: "choice",
+              header: "Choice",
+              question: "Which one?",
+              isOther: true,
+              isSecret: false,
+              options: null,
+            },
+          ],
+        },
+      } as ServerRequest,
+      { respond: vi.fn(), respondError: vi.fn() } as unknown as JsonlTransport,
+    );
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: `/api/v1/attention/${userInput.id}/draft`,
+      headers,
+      payload: { answers: { choice: ["First"] }, currentQuestionId: "choice" },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({
+      answers: { choice: ["First"] },
+      currentQuestionId: "choice",
+      revision: 1,
+      updatedAt: expect.any(Number),
+    });
+
+    for (const payload of [
+      { answers: { unknown: ["value"] }, currentQuestionId: null },
+      { answers: { choice: [] }, currentQuestionId: null },
+      { answers: { choice: ["   "] }, currentQuestionId: null },
+      { answers: { choice: ["one", "two"] }, currentQuestionId: null },
+      { answers: {}, currentQuestionId: "unknown" },
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "PUT",
+            url: `/api/v1/attention/${userInput.id}/draft`,
+            headers,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+
+    attention.expireAll();
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/api/v1/attention/${userInput.id}/draft`,
+          headers,
+          payload: { answers: {}, currentQuestionId: null },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const approval = attention.receive(
+      {
+        method: "item/commandExecution/requestApproval",
+        id: 502,
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "command",
+          startedAtMs: 1,
+          environmentId: null,
+          command: "pwd",
+          cwd: "/work",
+        },
+      } as ServerRequest,
+      { respond: vi.fn(), respondError: vi.fn() } as unknown as JsonlTransport,
+    );
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/api/v1/attention/${approval.id}/draft`,
+          headers,
+          payload: { answers: {}, currentQuestionId: null },
+        })
+      ).statusCode,
+    ).toBe(409);
     await app.close();
   });
 

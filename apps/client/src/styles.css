@@ -4102,6 +4102,40 @@
   font-weight: 600;
 }
 
+.user-input-steps {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 2px 1px var(--space-1);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.user-input-steps button {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-color: var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.user-input-steps button.answered {
+  border-color: color-mix(in srgb, var(--warning-text) 55%, var(--line));
+  color: var(--warning-text);
+  background: color-mix(in srgb, var(--warning) 55%, var(--surface));
+}
+
+.user-input-steps button.current {
+  border-color: var(--warning-text);
+  color: var(--surface);
+  background: var(--warning-text);
+}
+
 .user-input-freeform {
   display: flex;
   align-items: center;
@@ -4133,7 +4167,28 @@
 
 .user-input-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.user-input-navigation {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.user-input-clear {
+  border-color: transparent;
+  color: var(--muted);
+  background: transparent;
+}
+
+.user-input-draft-error {
+  margin-top: var(--space-2);
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .button-row {

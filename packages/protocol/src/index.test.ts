@@ -5,7 +5,9 @@ import type {
   CanonicalBrowserNetworkExchange,
   ThreadArtifactsResponse,
   ThreadSummary,
+  UpdateUserInputDraftRequest,
   UpdateThreadRequest,
+  UserInputDraft,
 } from "./index.js";
 import {
   BROWSER_AUTOMATION_OPERATIONS,
@@ -90,6 +92,20 @@ describe("active feed eligibility", () => {
 });
 
 describe("protocol guards", () => {
+  it("publishes the user-input draft snapshot types", () => {
+    const update: UpdateUserInputDraftRequest = {
+      answers: { choice: ["Yes"] },
+      currentQuestionId: "choice",
+    };
+    const saved: UserInputDraft = { ...update, revision: 2, updatedAt: 123 };
+    expect(saved).toEqual({
+      answers: { choice: ["Yes"] },
+      currentQuestionId: "choice",
+      revision: 2,
+      updatedAt: 123,
+    });
+  });
+
   it("carries browser opt-in on thread updates", () => {
     const update: UpdateThreadRequest = { browserEnabled: true };
     expect(update).toEqual({ browserEnabled: true });

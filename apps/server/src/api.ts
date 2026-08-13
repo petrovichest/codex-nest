@@ -58,6 +58,8 @@ import type {
   UpdateThreadRequest,
   UpdateTranscriptionSettingsRequest,
   UpdateUiLanguageRequest,
+  UpdateUserInputDraftRequest,
+  UserInputQuestion,
   VoiceTranscriptionMode,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
@@ -2795,6 +2797,31 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       await projection.recordAttentionResponse(resolved, body);
       return reply.code(204).send();
+    },
+  );
+
+  app.put<{ Params: { attentionId: string }; Body: UpdateUserInputDraftRequest }>(
+    "/api/v1/attention/:attentionId/draft",
+    async (request, reply) => {
+      const active = attention.get(request.params.attentionId);
+      if (
+        !active ||
+        active.kind !== "userInput" ||
+        !active.threadId ||
+        !active.turnId ||
+        !active.itemId
+      ) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "Attention request has already been resolved or is not a user-input request",
+        );
+      }
+      return projection.updateUserInputDraft(
+        active,
+        validateUserInputDraft(request.body, active.questions),
+      );
     },
   );
 
@@ -6170,6 +6197,40 @@ function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
     };
   });
   return { input: body.input, images, goalMode: body.goalMode, annotations };
+}
+
+function validateUserInputDraft(
+  value: unknown,
+  questions: readonly UserInputQuestion[],
+): UpdateUserInputDraftRequest {
+  const body = requireRecord<UpdateUserInputDraftRequest>(value);
+  if (
+    Object.keys(body).some((key) => !["answers", "currentQuestionId"].includes(key)) ||
+    !isRecord(body.answers)
+  ) {
+    throw new ProjectValidationError("Invalid user-input draft");
+  }
+  const knownQuestionIds = new Set(questions.map((question) => question.id));
+  const entries: Array<[string, string[]]> = [];
+  for (const [questionId, value] of Object.entries(body.answers)) {
+    if (
+      !knownQuestionIds.has(questionId) ||
+      !Array.isArray(value) ||
+      value.length !== 1 ||
+      typeof value[0] !== "string" ||
+      !value[0].trim()
+    ) {
+      throw new ProjectValidationError("Invalid user-input draft answer");
+    }
+    entries.push([questionId, [value[0]]]);
+  }
+  if (
+    body.currentQuestionId !== null &&
+    (typeof body.currentQuestionId !== "string" || !knownQuestionIds.has(body.currentQuestionId))
+  ) {
+    throw new ProjectValidationError("Unknown current user-input question");
+  }
+  return { answers: Object.fromEntries(entries), currentQuestionId: body.currentQuestionId };
 }
 
 function isInlineImage(value: unknown): value is string {

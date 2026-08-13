@@ -624,6 +624,8 @@ export type AttentionRequest =
       kind: "userInput";
       questions: UserInputQuestion[];
       autoResolutionMs: number | null;
+      /** Present on server snapshots/events; optional for backward-compatible fixtures/clients. */
+      draft?: UserInputDraft | null;
     })
   | (AttentionBase & {
       kind: "elicitation";
@@ -657,6 +659,15 @@ export type UserInputQuestion = {
   isSecret: boolean;
   options: Array<{ label: string; description: string }> | null;
 };
+
+export type UserInputDraft = {
+  answers: Record<string, string[]>;
+  currentQuestionId: string | null;
+  revision: number;
+  updatedAt: number;
+};
+
+export type UpdateUserInputDraftRequest = Pick<UserInputDraft, "answers" | "currentQuestionId">;
 
 export type ElicitationPrimitive =
   | {
