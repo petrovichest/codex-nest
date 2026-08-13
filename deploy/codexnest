@@ -495,56 +495,6 @@ codexnest_doctor() {
   return "$failed"
 }
 
-codexnest_firefox() {
-  local configured_bin firefox_bin firefox_major firefox_profile firefox_resolved firefox_version attempt
-  configured_bin="$(codexnest_config_value CODEXNEST_FIREFOX_BIN || true)"
-  firefox_bin="${CODEXNEST_FIREFOX_BIN:-$configured_bin}"
-  if [[ -z "$firefox_bin" ]]; then
-    firefox_bin="$(command -v firefox 2>/dev/null || true)"
-  fi
-  [[ -n "$firefox_bin" && -x "$firefox_bin" ]] || \
-    codexnest_die "Firefox is not installed; set CODEXNEST_FIREFOX_BIN after installing Firefox 146 or newer"
-
-  firefox_version="$("$firefox_bin" --version 2>/dev/null || true)"
-  firefox_major="$(sed -n 's/.*Firefox \([0-9][0-9]*\).*/\1/p' <<<"$firefox_version" | head -n 1)"
-  [[ -n "$firefox_major" ]] || codexnest_die "Could not determine the Firefox version from: $firefox_version"
-  ((firefox_major >= 146)) || codexnest_die "Firefox 146 or newer is required; found Firefox $firefox_major"
-
-  firefox_resolved="$(readlink -f "$firefox_bin" 2>/dev/null || printf '%s' "$firefox_bin")"
-  if [[ "$firefox_bin" == /snap/* || "$firefox_resolved" == /snap/* ]] || \
-     { [[ "$firefox_bin" == /usr/bin/firefox && -x /snap/bin/firefox ]] && \
-       grep -q '/snap/bin/firefox' "$firefox_bin" 2>/dev/null; }; then
-    firefox_profile="$HOME/snap/firefox/common/.mozilla/firefox/codexnest"
-  else
-    firefox_profile="${XDG_DATA_HOME:-$HOME/.local/share}/codexnest/firefox-profile"
-  fi
-  mkdir -p "$firefox_profile"
-  chmod 700 "$firefox_profile"
-
-  if curl --noproxy '*' --silent --output /dev/null --max-time 1 \
-    http://127.0.0.1:9222/session; then
-    printf '%s\n' 'CodexNest Firefox is already listening on 127.0.0.1:9222.'
-    return
-  fi
-
-  nohup "$firefox_bin" \
-    --no-remote \
-    --profile "$firefox_profile" \
-    --remote-debugging-port=9222 \
-    about:blank \
-    >/dev/null 2>&1 &
-
-  for ((attempt = 1; attempt <= 50; attempt += 1)); do
-    if curl --noproxy '*' --silent --output /dev/null --max-time 1 \
-      http://127.0.0.1:9222/session; then
-      printf '%s\n' 'CodexNest Firefox is ready. Install the signed Firefox XPI in this profile, then open its popup.'
-      return
-    fi
-    sleep 0.1
-  done
-  codexnest_die "Firefox started but its WebDriver BiDi endpoint did not become ready"
-}
-
 case "${1:-help}" in
   status) systemctl --user status codexnest.service --no-pager ;;
   logs) journalctl --user -u codexnest.service -n 100 --no-pager "${@:2}" ;;
@@ -555,8 +505,7 @@ case "${1:-help}" in
   update-worker) codexnest_update_worker ;;
   rollback) codexnest_rollback ;;
   restart) codexnest_restart ;;
-  firefox) codexnest_firefox ;;
   *)
-    printf '%s\n' 'Usage: codexnest status|logs|doctor|repair|check-update|update|rollback|restart|firefox'
+    printf '%s\n' 'Usage: codexnest status|logs|doctor|repair|check-update|update|rollback|restart'
     ;;
 esac

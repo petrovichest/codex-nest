@@ -17,7 +17,7 @@ CodexNest gives one owner an app-like workspace for Codex:
 - dictate prompts through configurable speech-to-text;
 - receive browser and Android notifications when work finishes, fails, or needs
   attention; and
-- attach Chrome or Firefox tabs to a session so Codex can inspect and operate the browser.
+- attach Chrome tabs to a session so Codex can inspect and operate the browser.
 
 The React interface runs in a browser and is bundled into the Capacitor Android
 app. On iOS, the HTTPS site can also be added to the Home Screen as a web app.
@@ -63,7 +63,7 @@ The repository is an npm workspace:
 
 - `apps/server` — authenticated API/WebSocket server and Codex bridge;
 - `apps/client` — React/Vite UI and Capacitor Android project;
-- `apps/extension` — separately packaged Chrome and Firefox browser-control extensions;
+- `apps/extension` — the separately packaged Chrome browser-control extension;
 - `packages/protocol` — the public client/server DTO contract; and
 - `deploy` — installer, service, proxy, STT, update, and recovery artifacts.
 
@@ -86,18 +86,15 @@ detached worktrees until the root integrates it. Team parent and child sessions
 disable native agent tools to preserve this boundary. Native subagents elsewhere
 in the Codex projection are separate and are not the implementation of Team.
 
-## Browser extensions
+## Browser extension
 
-Chrome and Firefox are delivered as two separate extensions. They expose the
-same browser-control tools and complete network-exchange storage to CodexNest;
-install only the artifact for the browser in which it will run.
+The Chrome extension exposes browser-control tools and complete network-exchange
+storage to CodexNest.
 
 The toolbar icon opens a compact popup. Choose **Open side panel** there to keep
-the same controls open in Chrome Side Panel or Firefox Sidebar while working
+the same controls open in Chrome Side Panel while working
 with web pages. The panel follows the active tab and stays open until you close
 it with the browser's native control; the extension never opens it automatically.
-
-### Chrome
 
 Download `codexnest-browser-<version>.zip` from the same GitHub release as the
 CodexNest server. Unpack it, open `chrome://extensions`, enable Developer mode,
@@ -114,19 +111,6 @@ session control over all ordinary Chrome tabs, including navigation, clicks,
 typing, JavaScript, screenshots, console/network metadata, and uploads. Install
 it only in a trusted Chrome profile. The owner token is stored in
 `chrome.storage.local`; plain HTTP exposes it on an untrusted network.
-
-### Firefox
-
-Firefox 146 or newer is required. Download the signed
-`codexnest-browser-firefox-<version>.xpi` from the same release. Run
-`codexnest firefox` to start the dedicated CodexNest Firefox profile with its
-WebDriver BiDi endpoint restricted to loopback, install the XPI in that profile,
-and use the popup or sidebar in the same way as the Chrome extension.
-
-The Firefox extension and the local BiDi adapter intentionally provide the
-attached Codex session with the same navigation, click, input, JavaScript,
-screenshot, console, network, and upload capabilities. Use this dedicated
-profile only for trusted work.
 
 ### Network capture
 
@@ -206,17 +190,11 @@ The real app-server smoke test is opt-in:
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
 ```
 
-Build both load-unpacked directories plus deterministic Chrome ZIP and unsigned
-Firefox XPI development archives with:
+Build the load-unpacked directory and deterministic Chrome ZIP with:
 
 ```bash
 npm run package:build -w @codexnest/extension
 ```
-
-Release CI validates the Firefox manifest and signs the Firefox XPI through AMO
-with the repository's `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` secrets. Only
-that signed release XPI is intended for persistent installation in standard
-Firefox builds.
 
 The persistent-Chromium extension E2E test is:
 

@@ -814,12 +814,10 @@ export const BROWSER_MAX_NETWORK_BODY_BYTES = 100 * 1024 * 1024;
 export const BROWSER_MAX_NETWORK_BODY_READ_BYTES = 512 * 1024;
 /** Base64 characters, leaving room for the JSON envelope under the 64 KiB socket limit. */
 export const BROWSER_NETWORK_CAPTURE_CHUNK_BYTES = 48 * 1024;
-export const BROWSER_AUTOMATION_RESULT_CHUNK_BYTES = 48 * 1024;
-export const BROWSER_MAX_AUTOMATION_RESULT_CHUNKS = 4_096;
 
 export type BrowserExtensionProtocolVersion = (typeof BROWSER_EXTENSION_PROTOCOL_VERSIONS)[number];
 
-export type BrowserName = "chrome" | "firefox";
+export type BrowserName = "chrome";
 
 export const BROWSER_TOOL_NAMES = [
   "tabs_context",
@@ -1023,46 +1021,6 @@ export type BrowserNetworkCaptureFrame =
   | BrowserNetworkCaptureCommitFrame
   | BrowserNetworkCaptureAbortFrame;
 
-export const BROWSER_AUTOMATION_OPERATIONS = [
-  "attach",
-  "detach",
-  "evaluate",
-  "input",
-  "screenshot",
-  "console",
-] as const;
-
-export type BrowserAutomationOperation = (typeof BROWSER_AUTOMATION_OPERATIONS)[number];
-
-export type BrowserAutomationRequestFrame = {
-  type: "automation.request";
-  requestId: string;
-  threadId: string;
-  tabId: number;
-  operation: BrowserAutomationOperation;
-  arguments: Record<string, unknown>;
-};
-
-export type BrowserAutomationResultFrame = {
-  type: "automation.result";
-  requestId: string;
-  result: unknown;
-};
-
-export type BrowserAutomationResultChunkFrame = {
-  type: "automation.result.chunk";
-  requestId: string;
-  chunkIndex: number;
-  chunkCount: number;
-  data: string;
-};
-
-export type BrowserAutomationErrorFrame = {
-  type: "automation.error";
-  requestId: string;
-  error: { code: string; message: string; data?: unknown };
-};
-
 type BrowserExtensionHelloBase = {
   type: "client.hello";
   protocol: typeof BROWSER_EXTENSION_PROTOCOL;
@@ -1077,15 +1035,10 @@ type BrowserExtensionHelloBase = {
   bindings: BrowserExtensionBindingSummary[];
 };
 
-export type BrowserExtensionClientHelloFrame =
-  | (BrowserExtensionHelloBase & {
-      version: typeof BROWSER_EXTENSION_PROTOCOL_VERSION_V1;
-      browser: { name: "chrome"; version: string };
-    })
-  | (BrowserExtensionHelloBase & {
-      version: typeof BROWSER_EXTENSION_PROTOCOL_VERSION_V2;
-      browser: { name: BrowserName; version: string };
-    });
+export type BrowserExtensionClientHelloFrame = BrowserExtensionHelloBase & {
+  version: BrowserExtensionProtocolVersion;
+  browser: { name: BrowserName; version: string };
+};
 
 export type BrowserExtensionClientFrame =
   | BrowserExtensionClientHelloFrame
@@ -1117,7 +1070,6 @@ export type BrowserExtensionClientFrame =
       error: { code: string; message: string; data?: unknown };
     }
   | BrowserNetworkCaptureFrame
-  | BrowserAutomationRequestFrame
   | { type: "file.request"; transferId: string }
   | { type: "client.ping" | "client.pong"; at: number };
 
@@ -1156,9 +1108,6 @@ export type BrowserExtensionServerFrame =
       chunkCount: number;
       data: string;
     }
-  | BrowserAutomationResultFrame
-  | BrowserAutomationResultChunkFrame
-  | BrowserAutomationErrorFrame
   | { type: "file.error"; transferId: string; error: string }
   | {
       type: "catalog.updated";
@@ -1272,13 +1221,6 @@ export function isBrowserToolName(value: unknown): value is BrowserToolName {
   return typeof value === "string" && (BROWSER_TOOL_NAMES as readonly string[]).includes(value);
 }
 
-export function isBrowserAutomationOperation(value: unknown): value is BrowserAutomationOperation {
-  return (
-    typeof value === "string" &&
-    (BROWSER_AUTOMATION_OPERATIONS as readonly string[]).includes(value)
-  );
-}
-
 export function isBrowserExtensionClientFrame(
   value: unknown,
 ): value is BrowserExtensionClientFrame {
@@ -1293,8 +1235,6 @@ export function isBrowserExtensionClientFrame(
       nonEmptyString(value.extensionVersion) &&
       isRecord(value.browser) &&
       isBrowserName(value.browser.name) &&
-      (value.version === BROWSER_EXTENSION_PROTOCOL_VERSION_V2 ||
-        value.browser.name === "chrome") &&
       typeof value.browser.version === "string" &&
       isRecord(value.capabilities) &&
       Array.isArray(value.capabilities.tools) &&
@@ -1371,15 +1311,6 @@ export function isBrowserExtensionClientFrame(
       (value.reason === undefined || typeof value.reason === "string")
     );
   }
-  if (value.type === "automation.request") {
-    return (
-      isProtocolIdentifier(value.requestId) &&
-      nonEmptyString(value.threadId) &&
-      isNonNegativeSafeInteger(value.tabId) &&
-      isBrowserAutomationOperation(value.operation) &&
-      isRecord(value.arguments)
-    );
-  }
   if (value.type === "file.request") {
     return nonEmptyString(value.transferId);
   }
@@ -1435,30 +1366,6 @@ export function isBrowserExtensionServerFrame(
       typeof value.data === "string"
     );
   }
-  if (value.type === "automation.result") {
-    return isProtocolIdentifier(value.requestId);
-  }
-  if (value.type === "automation.result.chunk") {
-    return (
-      isProtocolIdentifier(value.requestId) &&
-      Number.isSafeInteger(value.chunkIndex) &&
-      Number(value.chunkIndex) >= 0 &&
-      Number.isSafeInteger(value.chunkCount) &&
-      Number(value.chunkCount) >= 1 &&
-      Number(value.chunkIndex) < Number(value.chunkCount) &&
-      Number(value.chunkCount) <= BROWSER_MAX_AUTOMATION_RESULT_CHUNKS &&
-      typeof value.data === "string" &&
-      value.data.length <= BROWSER_AUTOMATION_RESULT_CHUNK_BYTES
-    );
-  }
-  if (value.type === "automation.error") {
-    return (
-      isProtocolIdentifier(value.requestId) &&
-      isRecord(value.error) &&
-      nonEmptyString(value.error.code) &&
-      nonEmptyString(value.error.message)
-    );
-  }
   if (value.type === "file.error") {
     return nonEmptyString(value.transferId) && nonEmptyString(value.error);
   }
@@ -1505,7 +1412,7 @@ function isBrowserExtensionProtocolVersion(
 }
 
 function isBrowserName(value: unknown): value is BrowserName {
-  return value === "chrome" || value === "firefox";
+  return value === "chrome";
 }
 
 function isBrowserNetworkCapturePart(value: unknown): value is BrowserNetworkCapturePart {

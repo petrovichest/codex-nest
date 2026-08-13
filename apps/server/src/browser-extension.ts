@@ -8,19 +8,16 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 
 import {
-  BROWSER_AUTOMATION_RESULT_CHUNK_BYTES,
   BROWSER_EXTENSION_ORIGIN,
   BROWSER_EXTENSION_PROTOCOL,
   BROWSER_EXTENSION_PROTOCOL_VERSION_V1,
   BROWSER_EXTENSION_PROTOCOL_VERSION_V2,
   BROWSER_EXTENSION_WEBSOCKET_PATH,
-  BROWSER_MAX_AUTOMATION_RESULT_CHUNKS,
   BROWSER_MAX_TOOL_RESULT_BYTES,
   BROWSER_MAX_PROJECT_FILE_BYTES,
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
   isBrowserExtensionClientFrame,
-  type BrowserAutomationRequestFrame,
   type BrowserExtensionBindingSummary,
   type BrowserExtensionClientFrame,
   type BrowserExtensionProtocolVersion,
@@ -40,8 +37,7 @@ import {
 
 import { verifyToken } from "./auth";
 import { BrowserCaptureStore, MAX_NETWORK_BODY_READ_BYTES } from "./browser-capture-store";
-import { FirefoxBidiClient } from "./firefox-bidi";
-import { isAllowedRequestOrigin, isFirefoxExtensionOrigin } from "./origin";
+import { isAllowedRequestOrigin } from "./origin";
 import type { AppProjection } from "./projection";
 import type { BrowserBindingState, StateStore } from "./state/store";
 
@@ -56,8 +52,6 @@ const LEGACY_EXTENSION_TOOL_NAMES = BROWSER_TOOL_NAMES.filter(
     !("read_network_request" === (name as string) || "read_network_body" === (name as string)),
 );
 const SERVER_BROWSER_TOOL_NAMES = BROWSER_TOOL_NAMES;
-
-type PendingAutomationRequest = { socket: WebSocket; timer: NodeJS.Timeout };
 
 export interface BrowserExtensionLifecycle {
   enable(threadId: string): Promise<void>;
@@ -77,7 +71,6 @@ export interface BrowserExtensionOptions {
   toolResponseMs?: number;
   internalSecret?: string;
   captureStore?: BrowserCaptureStore;
-  firefoxBidi?: FirefoxBidiClient;
 }
 
 interface ExtensionConnection {
@@ -133,10 +126,8 @@ export class BrowserExtensionServer {
   private readonly toolResponseMs: number;
   private readonly secret: string;
   private readonly captures: BrowserCaptureStore;
-  private readonly firefox: FirefoxBidiClient;
   private readonly connections = new Map<string, ExtensionConnection>();
   private readonly pendingTools = new Map<string, PendingToolCall>();
-  private readonly pendingAutomation = new Map<string, PendingAutomationRequest>();
   private readonly pendingFileTransfers = new Map<string, PendingFileTransfer>();
   private readonly pendingBindingThreads = new Map<string, string>();
   private readonly connectionEvents = new EventEmitter();
@@ -155,7 +146,6 @@ export class BrowserExtensionServer {
     this.toolResponseMs = options.toolResponseMs ?? DEFAULT_TOOL_RESPONSE_MS;
     this.secret = options.internalSecret ?? randomBytes(32).toString("base64url");
     this.captures = options.captureStore ?? new BrowserCaptureStore(options.store.path);
-    this.firefox = options.firefoxBidi ?? new FirefoxBidiClient({ captures: this.captures });
   }
 
   get captureRoot(): string {
@@ -217,10 +207,7 @@ export class BrowserExtensionServer {
         pending.reject(new BrowserExtensionError("disconnected", "Browser tool outcome unknown"));
       }
       this.pendingTools.clear();
-      for (const pending of this.pendingAutomation.values()) clearTimeout(pending.timer);
-      this.pendingAutomation.clear();
       this.pendingFileTransfers.clear();
-      await this.firefox.close();
       this.connectionEvents.removeAllListeners();
     });
   }
@@ -293,7 +280,6 @@ export class BrowserExtensionServer {
     const connection = this.connections.get(instanceId);
     connection?.bindingThreadIds.delete(threadId);
     connection?.bindingTabIds.delete(bindingId);
-    if (connection?.browser === "firefox") this.firefox.detachBinding(bindingId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     this.projection.publishThreadState(threadId);
     this.connectionEvents.emit("changed");
@@ -355,7 +341,6 @@ export class BrowserExtensionServer {
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     connection?.bindingThreadIds.delete(threadId);
     connection?.bindingTabIds.delete(binding.bindingId);
-    if (connection?.browser === "firefox") this.firefox.detachBinding(binding.bindingId);
     this.send(connection?.socket, { type: "binding.detach", threadId });
   }
 
@@ -365,17 +350,13 @@ export class BrowserExtensionServer {
     const connection = this.connections.get(binding.instanceId);
     connection?.bindingThreadIds.delete(threadId);
     connection?.bindingTabIds.delete(binding.bindingId);
-    if (connection?.browser === "firefox") this.firefox.detachBinding(binding.bindingId);
     if (connection?.activeThreadId === threadId) connection.activeThreadId = null;
     this.send(connection?.socket, { type: "binding.detach", threadId });
     this.connectionEvents.emit("changed");
   }
 
   private acceptSocket(socket: WebSocket, request: FastifyRequest): void {
-    if (
-      !isAllowedRequestOrigin(request, this.allowedOrigins) &&
-      !isFirefoxExtensionOrigin(request.headers.origin)
-    ) {
+    if (!isAllowedRequestOrigin(request, this.allowedOrigins)) {
       socket.close(1008, "Origin not allowed");
       return;
     }
@@ -536,15 +517,6 @@ export class BrowserExtensionServer {
           return;
         }
         void this.acceptNetworkCaptureAbort(connection, frame);
-      } else if (frame.type === "automation.request") {
-        if (
-          connection.protocolVersion !== BROWSER_EXTENSION_PROTOCOL_VERSION_V2 ||
-          connection.browser !== "firefox"
-        ) {
-          socket.close(1008, "Firefox protocol v2 automation required");
-          return;
-        }
-        this.acceptAutomationRequest(connection, frame);
       } else {
         socket.close(1008, "Unexpected frame");
       }
@@ -568,16 +540,6 @@ export class BrowserExtensionServer {
       }
       for (const [transferId, transfer] of this.pendingFileTransfers) {
         if (transfer.socket === socket) this.pendingFileTransfers.delete(transferId);
-      }
-      for (const [requestId, pending] of this.pendingAutomation) {
-        if (pending.socket !== socket) continue;
-        clearTimeout(pending.timer);
-        this.pendingAutomation.delete(requestId);
-      }
-      if (connection.browser === "firefox") {
-        for (const bindingId of connection.bindingTabIds.keys()) {
-          this.firefox.detachBinding(bindingId);
-        }
       }
       void this.captures.abortOwner(socket).catch(() => undefined);
       this.publishInstanceBindings(connection.instanceId);
@@ -652,101 +614,6 @@ export class BrowserExtensionServer {
     } catch (error) {
       this.sendProtocolError(connection.socket, "network_capture_rejected", error);
     }
-  }
-
-  private acceptAutomationRequest(
-    connection: ExtensionConnection,
-    frame: BrowserAutomationRequestFrame,
-  ): void {
-    let binding: BrowserBindingState;
-    try {
-      binding = this.assertConnectionOwnsThreadTab(connection, frame.threadId, frame.tabId);
-    } catch (error) {
-      this.sendAutomationError(connection.socket, frame.requestId, "forbidden", error);
-      return;
-    }
-    if (this.pendingAutomation.has(frame.requestId)) {
-      this.sendAutomationError(
-        connection.socket,
-        frame.requestId,
-        "duplicate_request",
-        new Error("Automation request ID is already active"),
-      );
-      return;
-    }
-    const timer = setTimeout(() => {
-      const pending = this.pendingAutomation.get(frame.requestId);
-      if (!pending || pending.socket !== connection.socket) return;
-      this.pendingAutomation.delete(frame.requestId);
-      this.sendAutomationError(
-        connection.socket,
-        frame.requestId,
-        "timeout",
-        new Error("Firefox automation request timed out"),
-      );
-    }, this.toolResponseMs);
-    timer.unref();
-    this.pendingAutomation.set(frame.requestId, { socket: connection.socket, timer });
-    void this.firefox
-      .execute({
-        bindingId: binding.bindingId,
-        threadId: frame.threadId,
-        tabId: frame.tabId,
-        operation: frame.operation,
-        arguments: frame.arguments,
-      })
-      .then((result) => this.finishAutomationRequest(connection.socket, frame.requestId, result))
-      .catch((error) => {
-        const pending = this.pendingAutomation.get(frame.requestId);
-        if (!pending || pending.socket !== connection.socket) return;
-        this.pendingAutomation.delete(frame.requestId);
-        clearTimeout(pending.timer);
-        this.sendAutomationError(connection.socket, frame.requestId, "automation_failed", error);
-      });
-  }
-
-  private finishAutomationRequest(socket: WebSocket, requestId: string, result: unknown): void {
-    const pending = this.pendingAutomation.get(requestId);
-    if (!pending || pending.socket !== socket) return;
-    this.pendingAutomation.delete(requestId);
-    clearTimeout(pending.timer);
-    const serialized = JSON.stringify(result ?? null);
-    if (Buffer.byteLength(serialized) <= BROWSER_AUTOMATION_RESULT_CHUNK_BYTES) {
-      this.send(socket, { type: "automation.result", requestId, result });
-      return;
-    }
-    const chunks = splitUtf8(serialized, BROWSER_AUTOMATION_RESULT_CHUNK_BYTES);
-    if (chunks.length > BROWSER_MAX_AUTOMATION_RESULT_CHUNKS) {
-      this.sendAutomationError(
-        socket,
-        requestId,
-        "result_too_large",
-        new Error("Firefox automation result is too large"),
-      );
-      return;
-    }
-    for (const [chunkIndex, data] of chunks.entries()) {
-      this.send(socket, {
-        type: "automation.result.chunk",
-        requestId,
-        chunkIndex,
-        chunkCount: chunks.length,
-        data,
-      });
-    }
-  }
-
-  private sendAutomationError(
-    socket: WebSocket,
-    requestId: string,
-    code: string,
-    error: unknown,
-  ): void {
-    this.send(socket, {
-      type: "automation.error",
-      requestId,
-      error: { code, message: safePublicMessage(error) },
-    });
   }
 
   private sendProtocolError(socket: WebSocket, code: string, error: unknown): void {
@@ -1588,24 +1455,6 @@ function isValidBase64(value: string): boolean {
     value.length % 4 === 0 &&
     /^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/u.test(value)
   );
-}
-
-function splitUtf8(value: string, maxBytes: number): string[] {
-  const chunks: string[] = [];
-  let current = "";
-  let bytes = 0;
-  for (const character of value) {
-    const characterBytes = Buffer.byteLength(character);
-    if (bytes + characterBytes > maxBytes && current) {
-      chunks.push(current);
-      current = "";
-      bytes = 0;
-    }
-    current += character;
-    bytes += characterBytes;
-  }
-  if (current || chunks.length === 0) chunks.push(current);
-  return chunks;
 }
 
 function requireBoundedInteger(

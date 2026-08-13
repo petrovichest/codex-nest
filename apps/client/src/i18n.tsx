@@ -302,8 +302,8 @@ const ENGLISH: Record<string, string> = {
   "CodexNest не восстановил соединение после перезапуска.":
     "CodexNest did not reconnect after the restart.",
   "Обновление CodexNest": "CodexNest update",
-  "Сервер, APK и расширения для Chrome и Firefox обновляются из одной проверенной CI-сборки с автоматическим откатом.":
-    "The server, APK, and extensions for Chrome and Firefox update from the same verified CI build with automatic rollback.",
+  "Сервер, APK и расширение для Chrome обновляются из одной проверенной CI-сборки с автоматическим откатом.":
+    "The server, APK, and Chrome extension update from the same verified CI build with automatic rollback.",
   "Получаем версию CodexNest…": "Loading CodexNest version…",
   "Технические детали": "Technical details",
   "Повторить загрузку технических деталей": "Retry loading technical details",
@@ -323,11 +323,8 @@ const ENGLISH: Record<string, string> = {
     "Updates are available only for installations made with install.sh.",
   "Скачать свежий APK": "Download latest APK",
   "Скачать расширение для Chrome": "Download Chrome extension",
-  "Скачать расширение для Firefox": "Download Firefox extension",
   "Не удалось открыть загрузку расширения для Chrome":
     "Failed to open the Chrome extension download",
-  "Не удалось открыть загрузку расширения для Firefox":
-    "Failed to open the Firefox extension download",
   "Проверить обновления": "Check for updates",
   "Обновляем…": "Updating…",
   "Обновить CodexNest": "Update CodexNest",

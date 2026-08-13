@@ -55,7 +55,7 @@ describe("ApplicationSettingsCard", () => {
     expect(getAppInfo).not.toHaveBeenCalled();
     expect(
       screen.getByText(
-        "Сервер, APK и расширения для Chrome и Firefox обновляются из одной проверенной CI-сборки с автоматическим откатом.",
+        "Сервер, APK и расширение для Chrome обновляются из одной проверенной CI-сборки с автоматическим откатом.",
       ),
     ).toBeInTheDocument();
   });
@@ -168,28 +168,6 @@ describe("ApplicationSettingsCard", () => {
     expect(api.updateApp).not.toHaveBeenCalled();
   });
 
-  it("opens the rolling Firefox extension download without another API request", async () => {
-    const api = {
-      settings: { baseUrl: "https://codex.home.arpa" },
-      readAppSettings: vi.fn(async () => updateStatus({ supported: false })),
-      checkAppUpdate: vi.fn(),
-      updateApp: vi.fn(),
-    };
-    connection.mockReturnValue({ api, state: { network: "connected" } });
-
-    render(<ApplicationSettingsCard />);
-    fireEvent.click(await screen.findByRole("button", { name: "Скачать расширение для Firefox" }));
-
-    await waitFor(() =>
-      expect(openDownloadUrl).toHaveBeenCalledWith(
-        "https://codex.home.arpa",
-        "https://github.com/petrovichest/codex-nest/releases/download/android-latest/codexnest-browser-firefox-latest.xpi",
-      ),
-    );
-    expect(api.checkAppUpdate).not.toHaveBeenCalled();
-    expect(api.updateApp).not.toHaveBeenCalled();
-  });
-
   it("allows the update while daemon turns are active", async () => {
     const current = updateStatus({
       latestVersion: "0.1.4-abcdef0",
@@ -289,24 +267,6 @@ describe("ApplicationSettingsCard", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Не удалось открыть загрузку расширения для Chrome",
-    );
-  });
-
-  it("shows an error when the Firefox extension download cannot be opened", async () => {
-    openDownloadUrl.mockRejectedValueOnce(new Error("browser failed"));
-    const api = {
-      settings: { baseUrl: "https://codex.home.arpa" },
-      readAppSettings: vi.fn(async () => updateStatus()),
-      checkAppUpdate: vi.fn(),
-      updateApp: vi.fn(),
-    };
-    connection.mockReturnValue({ api, state: { network: "connected" } });
-
-    render(<ApplicationSettingsCard />);
-    fireEvent.click(await screen.findByRole("button", { name: "Скачать расширение для Firefox" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Не удалось открыть загрузку расширения для Firefox",
     );
   });
 

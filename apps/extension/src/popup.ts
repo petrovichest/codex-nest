@@ -9,7 +9,7 @@ import type {
   ThreadSummary,
   UiLanguage,
 } from "./protocol";
-import { browserDisplayName, browserTarget, webext } from "./webext";
+import { browserDisplayName, webext } from "./webext";
 
 interface PopupSnapshot {
   configured: boolean;
@@ -191,20 +191,12 @@ function header(text: (typeof copy)[UiLanguage]): HTMLElement {
 
 function openPersistentPanel(): void {
   if (browserWindowId === null) return;
-  let opening: Promise<void>;
   try {
-    if (browserTarget === "chrome") {
-      if (!webext.sidePanel) throw new Error("Chrome Side Panel is unavailable");
-      opening = webext.sidePanel.open({ windowId: browserWindowId });
-    } else {
-      if (!webext.sidebarAction) throw new Error("Firefox Sidebar is unavailable");
-      opening = webext.sidebarAction.open();
-    }
+    if (!webext.sidePanel) throw new Error("Chrome Side Panel is unavailable");
+    void webext.sidePanel.open({ windowId: browserWindowId }).catch(showLocalError);
   } catch (error) {
     showLocalError(error);
-    return;
   }
-  void opening.catch(showLocalError);
 }
 
 function setupView(state: PopupSnapshot, text: (typeof copy)[UiLanguage]): HTMLElement {

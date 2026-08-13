@@ -41,10 +41,10 @@ afterEach(() => {
 
 describe("popup and panel surfaces", () => {
   it("opens the Chrome side panel for the popup's current window", async () => {
-    const { getCurrent, sendMessage, sidePanelOpen, sidebarActionOpen } = await loadPopup(
-      snapshot(),
-      { surface: "popup", windowId: 23 },
-    );
+    const { getCurrent, sendMessage, sidePanelOpen } = await loadPopup(snapshot(), {
+      surface: "popup",
+      windowId: 23,
+    });
 
     const openPanel = requireOpenPanelButton("Open side panel");
     expect(openPanel.textContent).toBe("Open side panel");
@@ -54,21 +54,6 @@ describe("popup and panel surfaces", () => {
     openPanel.click();
 
     expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: 23 });
-    expect(sidebarActionOpen).not.toHaveBeenCalled();
-  });
-
-  it("opens the Firefox sidebar directly from the localized popup action", async () => {
-    vi.stubGlobal("navigator", { language: "ru", userAgent: "Firefox/146.0" });
-    const { sidePanelOpen, sidebarActionOpen } = await loadPopup(snapshot({ locale: "ru" }), {
-      surface: "popup",
-    });
-
-    const openPanel = requireOpenPanelButton("Открыть сбоку");
-    expect(openPanel.textContent).toBe("Открыть сбоку");
-    openPanel.click();
-
-    expect(sidebarActionOpen).toHaveBeenCalledOnce();
-    expect(sidePanelOpen).not.toHaveBeenCalled();
   });
 
   it("omits the persistent-panel action from the panel surface", async () => {
@@ -80,13 +65,6 @@ describe("popup and panel surfaces", () => {
 });
 
 describe("popup session catalog", () => {
-  it("uses Firefox-specific setup wording in the Firefox target", async () => {
-    vi.stubGlobal("navigator", { language: "en", userAgent: "Firefox/146.0" });
-    await loadPopup(snapshot({ configured: false }));
-
-    expect(document.querySelector("h1")?.textContent).toBe("Connect this Firefox");
-  });
-
   it("starts on the placeholder and groups only enabled sessions under non-empty projects", async () => {
     await loadPopup(
       snapshot({
@@ -252,7 +230,6 @@ async function loadPopup(
   sendMessage: ReturnType<typeof vi.fn>;
   getCurrent: ReturnType<typeof vi.fn>;
   sidePanelOpen: ReturnType<typeof vi.fn>;
-  sidebarActionOpen: ReturnType<typeof vi.fn>;
 }> {
   document.body.dataset.surface = options.surface ?? "popup";
   document.body.innerHTML = '<main id="app" aria-live="polite"></main>';
@@ -261,7 +238,6 @@ async function loadPopup(
   const sendMessage = vi.fn(async () => ({ ok: true, result: current }));
   const getCurrent = vi.fn(async () => ({ id: options.windowId ?? 1 }));
   const sidePanelOpen = vi.fn(async () => undefined);
-  const sidebarActionOpen = vi.fn(async () => undefined);
   vi.stubGlobal("chrome", {
     runtime: {
       onMessage: {
@@ -273,7 +249,6 @@ async function loadPopup(
     },
     windows: { getCurrent },
     sidePanel: { open: sidePanelOpen },
-    sidebarAction: { open: sidebarActionOpen },
   });
 
   await import("./popup");
@@ -286,7 +261,6 @@ async function loadPopup(
     sendMessage,
     getCurrent,
     sidePanelOpen,
-    sidebarActionOpen,
   };
 }
 

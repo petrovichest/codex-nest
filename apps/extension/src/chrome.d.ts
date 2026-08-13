@@ -44,7 +44,6 @@ interface ChromeApi {
   runtime: {
     getManifest(): {
       version: string;
-      browser_specific_settings?: { gecko?: { id?: string; strict_min_version?: string } };
     };
     getURL(path: string): string;
     onInstalled: ChromeEvent<[]>;
@@ -110,9 +109,6 @@ interface ChromeApi {
   };
   sidePanel?: {
     open(options: { windowId: number }): Promise<void>;
-  };
-  sidebarAction?: {
-    open(): Promise<void>;
   };
   alarms: {
     create(name: string, information: Record<string, unknown>): Promise<void>;

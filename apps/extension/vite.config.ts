@@ -1,15 +1,10 @@
 export default ({ mode }: { mode: string }) => {
-  if (mode !== "chrome" && mode !== "firefox") {
-    throw new Error("Build with --mode chrome or --mode firefox");
-  }
+  if (mode !== "chrome") throw new Error("Build with --mode chrome");
   return {
-    publicDir: `public/${mode}`,
-    define: {
-      __CODEXNEST_BROWSER_TARGET__: JSON.stringify(mode),
-    },
+    publicDir: "public/chrome",
     build: {
       emptyOutDir: true,
-      outDir: `dist/${mode}`,
+      outDir: "dist/chrome",
       rollupOptions: {
         input: {
           popup: "popup.html",
@@ -24,7 +19,7 @@ export default ({ mode }: { mode: string }) => {
         },
       },
       sourcemap: true,
-      target: mode === "chrome" ? "chrome116" : "firefox146",
+      target: "chrome116",
     },
   };
 };

@@ -1,5 +1,4 @@
 import { DebuggerController } from "./cdp";
-import { FirefoxController } from "./firefox";
 import { streamNetworkCapture, streamNetworkCaptureDrop } from "./network-stream";
 import {
   BROWSER_PROTOCOL,
@@ -23,7 +22,7 @@ import {
 } from "./protocol";
 import { ExtensionStore, type ExtensionSettings, type PersistedState } from "./storage";
 import { BrowserToolDispatcher, BrowserToolError } from "./tools";
-import { browserDisplayName, browserTarget, webext } from "./webext";
+import { browserDisplayName, webext } from "./webext";
 
 const RECONNECT_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -75,18 +74,14 @@ let intentionalClose = false;
 let reconcileTimer: number | undefined;
 const pendingSessions = new Map<string, PendingSessionRequest>();
 const readyBindingThreadIds = new Set<string>();
-const firefoxController =
-  browserTarget === "firefox" ? new FirefoxController((frame) => sendPendingFrame(frame)) : null;
-const debuggerController =
-  firefoxController ??
-  new DebuggerController(
-    (tabId) => invalidateRefs(tabId),
-    (capture) => streamNetworkCapture(capture, sendPendingFrame),
-    (tabId) =>
-      Object.values(persisted?.bindings ?? {}).find((binding) => binding.tabIds.includes(tabId))
-        ?.threadId ?? null,
-    (capture) => streamNetworkCaptureDrop(capture, sendPendingFrame),
-  );
+const debuggerController = new DebuggerController(
+  (tabId) => invalidateRefs(tabId),
+  (capture) => streamNetworkCapture(capture, sendPendingFrame),
+  (tabId) =>
+    Object.values(persisted?.bindings ?? {}).find((binding) => binding.tabIds.includes(tabId))
+      ?.threadId ?? null,
+  (capture) => streamNetworkCaptureDrop(capture, sendPendingFrame),
+);
 const dispatcher = new BrowserToolDispatcher(
   debuggerController,
   async () => (await store.load()).bindings,
@@ -116,7 +111,6 @@ webext.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .then(() => handlePopupRequest(message))
     .then((result) => ({ ok: true, result }))
     .catch((error) => ({ ok: false, error: errorMessage(error) }));
-  if (browserTarget === "firefox") return operation;
   void operation.then(sendResponse);
   return true;
 });
@@ -220,7 +214,7 @@ async function sendHello(settings: ExtensionSettings): Promise<void> {
     token: settings.token,
     instanceId: persisted.instanceId,
     extensionVersion: webext.runtime.getManifest().version,
-    browser: { name: browserTarget, version: browserVersion() },
+    browser: { name: "chrome", version: browserVersion() },
     capabilities: {
       tools: BROWSER_TOOLS,
       maxProjectFileBytes: MAX_PROJECT_FILE_BYTES,
@@ -250,7 +244,6 @@ function acceptMessage(generation: number, data: unknown): void {
   }
   if (frame.type === "server.hello") {
     helloAccepted = true;
-    firefoxController?.setConnected();
     reconnectAttempt = 0;
     projects = frame.projects;
     threads = frame.threads;
@@ -276,7 +269,6 @@ function acceptMessage(generation: number, data: unknown): void {
 }
 
 function routeServerFrame(frame: ServerFrame): void {
-  if (firefoxController?.acceptFrame(frame)) return;
   if (frame.type === "server.ping") {
     trySend({ type: "client.pong", at: frame.at });
     return;
@@ -681,7 +673,6 @@ function closeSocket(intentional: boolean): void {
     pendingSessions.delete(requestId);
   }
   dispatcher.transfers.clear();
-  firefoxController?.clear();
 }
 
 function sendPendingFrame(frame: ClientFrame): void {
@@ -755,8 +746,7 @@ async function decorateGroup(groupId: number, title: string): Promise<void> {
 }
 
 function browserVersion(): string {
-  const product = browserTarget === "firefox" ? "Firefox" : "Chrome";
-  return new RegExp(`${product}/(\\d+(?:\\.\\d+)*)`).exec(navigator.userAgent)?.[1] ?? "unknown";
+  return /Chrome\/(\d+(?:\.\d+)*)/.exec(navigator.userAgent)?.[1] ?? "unknown";
 }
 
 function errorMessage(error: unknown): string {

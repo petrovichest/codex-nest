@@ -6,16 +6,12 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { LogController, type FastifyInstance } from "fastify";
 
-import {
-  BROWSER_EXTENSION_ORIGIN,
-  BROWSER_EXTENSION_WEBSOCKET_PATH,
-  BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES,
-} from "@codexnest/protocol";
+import { BROWSER_EXTENSION_ORIGIN, BROWSER_MAX_WEBSOCKET_MESSAGE_BYTES } from "@codexnest/protocol";
 
 import { registerApi, type ApiServices } from "./api";
 import { BrowserExtensionServer } from "./browser-extension";
 import type { AppConfig } from "./config";
-import { isAllowedRequestOrigin, isFirefoxExtensionOrigin } from "./origin";
+import { isAllowedRequestOrigin } from "./origin";
 import { registerEventsWebSocket } from "./websocket";
 
 export async function buildApp(config: AppConfig, services: ApiServices): Promise<FastifyInstance> {
@@ -57,7 +53,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
 
   await app.register(cors, {
     origin(origin, callback) {
-      callback(null, !origin || allowedOrigins.has(origin) || isFirefoxExtensionOrigin(origin));
+      callback(null, !origin || allowedOrigins.has(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["authorization", "content-type", "x-codexnest-audio-duration-ms"],
@@ -71,10 +67,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
   });
 
   app.addHook("onRequest", async (request, reply) => {
-    const firefoxBrowserSocket =
-      isFirefoxExtensionOrigin(request.headers.origin) &&
-      new URL(request.url, "http://localhost").pathname === BROWSER_EXTENSION_WEBSOCKET_PATH;
-    if (!isAllowedRequestOrigin(request, allowedOrigins) && !firefoxBrowserSocket) {
+    if (!isAllowedRequestOrigin(request, allowedOrigins)) {
       return reply
         .code(403)
         .send({ error: { code: "unauthorized", message: "Origin not allowed" } });

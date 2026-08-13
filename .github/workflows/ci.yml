@@ -90,18 +90,13 @@ jobs:
       - run: npm run test:e2e -w @codexnest/extension
         env:
           NODE_ENV: test
-      - name: Validate the Firefox extension manifest
-        run: npm run lint:firefox -w @codexnest/extension
       - name: Package the exact extension builds exercised by Playwright
         run: npm run package -w @codexnest/extension
       - run: unzip -t apps/extension/artifacts/codexnest-browser-*.zip
-      - run: unzip -t apps/extension/artifacts/codexnest-browser-firefox-*.xpi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: codexnest-browser-${{ github.sha }}
-          path: |
-            apps/extension/artifacts/codexnest-browser-*.zip
-            apps/extension/artifacts/codexnest-browser-firefox-*.xpi
+          path: apps/extension/artifacts/codexnest-browser-*.zip
           if-no-files-found: error
 
   rolling-release:
@@ -148,52 +143,14 @@ jobs:
         run: |
           shopt -s nullglob
           extension_archives=(release/unsigned-extensions/codexnest-browser-[0-9]*.zip)
-          firefox_archives=(release/unsigned-extensions/codexnest-browser-firefox-*.xpi)
           test "${#extension_archives[@]}" -eq 1
-          test "${#firefox_archives[@]}" -eq 1
           cp "${extension_archives[0]}" release/
           cp "${extension_archives[0]}" release/codexnest-browser-latest.zip
           unzip -t release/codexnest-browser-latest.zip
-          mkdir -p "$RUNNER_TEMP/firefox-extension-source"
-          unzip -q "${firefox_archives[0]}" -d "$RUNNER_TEMP/firefox-extension-source"
       - if: steps.head.outputs.current == 'true'
         run: npm ci
       - if: steps.head.outputs.current == 'true'
         run: npm run build
-      - name: Validate Firefox signing secrets
-        if: steps.head.outputs.current == 'true'
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-        run: |
-          test -n "$WEB_EXT_API_KEY"
-          test -n "$WEB_EXT_API_SECRET"
-      - name: Sign rolling Firefox extension through AMO
-        if: steps.head.outputs.current == 'true'
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-        run: |
-          package_version="$(node -p "require('./package.json').version")"
-          signing_version="$package_version.$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))"
-          node -e '
-            const fs = require("node:fs");
-            const path = process.argv[1];
-            const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
-            manifest.version = process.argv[2];
-            fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
-          ' "$RUNNER_TEMP/firefox-extension-source/manifest.json" "$signing_version"
-          mkdir -p release/firefox-signed
-          npm exec --yes --package=web-ext@10.6.0 -- web-ext sign \
-            --source-dir "$RUNNER_TEMP/firefox-extension-source" \
-            --artifacts-dir "$GITHUB_WORKSPACE/release/firefox-signed" \
-            --channel unlisted
-          shopt -s nullglob
-          signed_xpis=(release/firefox-signed/*.xpi)
-          test "${#signed_xpis[@]}" -eq 1
-          cp "${signed_xpis[0]}" "release/codexnest-browser-firefox-$package_version.xpi"
-          cp "${signed_xpis[0]}" release/codexnest-browser-firefox-latest.xpi
-          unzip -t release/codexnest-browser-firefox-latest.xpi
       - if: steps.head.outputs.current == 'true'
         run: npm run android:sync -w @codexnest/client
       - name: Validate Android signing secrets
@@ -268,14 +225,16 @@ jobs:
           ROLLING_VERSION: ${{ steps.apk.outputs.version }}
         run: |
           notes="$(printf \
-            'Automatically updated after successful CI for `%s`.\n\nCommit: `%s`\n\nLinux install:\n\n```bash\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | bash\n```\n\nThe APK, Chrome and Firefox extensions, and installer are built from the same tested commit.' \
+            'Automatically updated after successful CI for `%s`.\n\nCommit: `%s`\n\nLinux install:\n\n```bash\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | bash\n```\n\nThe APK, Chrome extension, and installer are built from the same tested commit.' \
             "$ROLLING_VERSION" "$GITHUB_SHA" "$GITHUB_REPOSITORY")"
           if gh release view android-latest >/dev/null 2>&1; then
+            while IFS= read -r obsolete_asset; do
+              [[ -z "$obsolete_asset" ]] || gh release delete-asset android-latest "$obsolete_asset" --yes
+            done < <(gh release view android-latest --json assets --jq '.assets[].name | select(endswith(".xpi"))')
             gh release upload android-latest \
               release/CodexNest-latest.apk \
               release/CodexNest-latest.json \
               release/codexnest-browser-*.zip \
-              release/codexnest-browser-firefox-*.xpi \
               release/install.sh \
               --clobber
             gh api \
@@ -294,7 +253,6 @@ jobs:
               release/CodexNest-latest.apk \
               release/CodexNest-latest.json \
               release/codexnest-browser-*.zip \
-              release/codexnest-browser-firefox-*.xpi \
               release/install.sh \
               --latest \
               --target "$GITHUB_SHA" \
@@ -327,45 +285,13 @@ jobs:
           git merge-base --is-ancestor "${GITHUB_SHA}^{commit}" FETCH_HEAD
       - name: Validate release version
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-      - run: npm ci
-      - name: Validate Firefox signing secrets
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-        run: |
-          test -n "$WEB_EXT_API_KEY"
-          test -n "$WEB_EXT_API_SECRET"
-      - name: Prepare signed browser extension assets
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+      - name: Prepare browser extension asset
         run: |
           shopt -s nullglob
           chrome_archives=(release/unsigned-extensions/codexnest-browser-[0-9]*.zip)
-          firefox_archives=(release/unsigned-extensions/codexnest-browser-firefox-*.xpi)
           test "${#chrome_archives[@]}" -eq 1
-          test "${#firefox_archives[@]}" -eq 1
           cp "${chrome_archives[0]}" release/
           unzip -t "${chrome_archives[0]}"
-          mkdir -p "$RUNNER_TEMP/firefox-extension-source" release/firefox-signed
-          unzip -q "${firefox_archives[0]}" -d "$RUNNER_TEMP/firefox-extension-source"
-          package_version="$(node -p "require('./package.json').version")"
-          signing_version="$package_version.$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))"
-          node -e '
-            const fs = require("node:fs");
-            const path = process.argv[1];
-            const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
-            manifest.version = process.argv[2];
-            fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
-          ' "$RUNNER_TEMP/firefox-extension-source/manifest.json" "$signing_version"
-          npm exec --yes --package=web-ext@10.6.0 -- web-ext sign \
-            --source-dir "$RUNNER_TEMP/firefox-extension-source" \
-            --artifacts-dir "$GITHUB_WORKSPACE/release/firefox-signed" \
-            --channel unlisted
-          signed_xpis=(release/firefox-signed/*.xpi)
-          test "${#signed_xpis[@]}" -eq 1
-          cp "${signed_xpis[0]}" "release/codexnest-browser-firefox-$package_version.xpi"
-          unzip -t "release/codexnest-browser-firefox-$package_version.xpi"
       - name: Prepare installer asset
         run: |
           mkdir -p release
@@ -379,5 +305,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "$GITHUB_REF_NAME" release/install.sh release/codexnest-browser-*.zip
-          release/codexnest-browser-firefox-*.xpi
           --generate-notes --latest=false --verify-tag

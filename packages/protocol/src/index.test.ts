@@ -10,7 +10,6 @@ import type {
   UserInputDraft,
 } from "./index.js";
 import {
-  BROWSER_AUTOMATION_OPERATIONS,
   BROWSER_EXTENSION_PROTOCOL,
   BROWSER_EXTENSION_PROTOCOL_VERSION,
   BROWSER_EXTENSION_PROTOCOL_VERSION_V1,
@@ -185,19 +184,6 @@ describe("protocol guards", () => {
         capabilities: { tools: BROWSER_TOOL_NAMES, maxProjectFileBytes: 100, screenshots: [] },
         bindings: [],
       }),
-    ).toBe(true);
-    expect(
-      isBrowserExtensionClientFrame({
-        type: "client.hello",
-        protocol: BROWSER_EXTENSION_PROTOCOL,
-        version: BROWSER_EXTENSION_PROTOCOL_VERSION_V1,
-        token: "owner-token",
-        instanceId: "extension-instance-firefox",
-        extensionVersion: "0.2.0",
-        browser: { name: "firefox", version: "130" },
-        capabilities: { tools: BROWSER_TOOL_NAMES, maxProjectFileBytes: 100, screenshots: [] },
-        bindings: [],
-      }),
     ).toBe(false);
     expect(
       isBrowserExtensionClientFrame({
@@ -302,7 +288,7 @@ describe("protocol guards", () => {
         threadId: "thread-1",
         tabId: 9,
         exchangeId: "exchange-1",
-        provider: "firefox",
+        provider: "chrome",
         parts: {
           metadata: { byteLength: 12_000, sha256 },
           requestBody: { byteLength: 0, sha256 },
@@ -384,54 +370,6 @@ describe("protocol guards", () => {
     },
   ])("rejects malformed capture chunks: $name", ({ frame }) => {
     expect(isBrowserExtensionClientFrame(frame)).toBe(false);
-  });
-
-  it("guards Firefox automation requests and chunked server outcomes", () => {
-    for (const operation of BROWSER_AUTOMATION_OPERATIONS) {
-      expect(
-        isBrowserExtensionClientFrame({
-          type: "automation.request",
-          requestId: `automation-${operation}`,
-          threadId: "thread-1",
-          tabId: 3,
-          operation,
-          arguments: {},
-        }),
-      ).toBe(true);
-    }
-    expect(
-      isBrowserExtensionClientFrame({
-        type: "automation.request",
-        requestId: "automation-unknown",
-        threadId: "thread-1",
-        tabId: 3,
-        operation: "delete-profile",
-        arguments: {},
-      }),
-    ).toBe(false);
-    expect(
-      isBrowserExtensionServerFrame({
-        type: "automation.result",
-        requestId: "automation-1",
-        result: { value: 42 },
-      }),
-    ).toBe(true);
-    expect(
-      isBrowserExtensionServerFrame({
-        type: "automation.result.chunk",
-        requestId: "automation-1",
-        chunkIndex: 0,
-        chunkCount: 2,
-        data: "partial",
-      }),
-    ).toBe(true);
-    expect(
-      isBrowserExtensionServerFrame({
-        type: "automation.error",
-        requestId: "automation-1",
-        error: { code: "failed", message: "Evaluation failed" },
-      }),
-    ).toBe(true);
   });
 
   it("types a canonical exchange with separate redirect hops and untouched raw events", () => {

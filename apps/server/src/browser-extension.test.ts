@@ -24,7 +24,6 @@ import {
 
 import { hashToken } from "./auth";
 import { BrowserExtensionError, BrowserExtensionServer } from "./browser-extension";
-import type { FirefoxBidiClient } from "./firefox-bidi";
 import type { AppProjection } from "./projection";
 import { StateStore } from "./state/store";
 
@@ -44,6 +43,12 @@ describe("browser extension transport", () => {
       headers: { origin: "http://rejected" },
     });
     expect(await closeCode(rejectedOrigin)).toBe(1008);
+
+    const rejectedLegacyBrowserOrigin = await harness.app.injectWS(
+      BROWSER_EXTENSION_WEBSOCKET_PATH,
+      { headers: { origin: "moz-extension://123e4567-e89b-12d3-a456-426614174000" } },
+    );
+    expect(await closeCode(rejectedLegacyBrowserOrigin)).toBe(1008);
 
     const rejectedToken = await harness.app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
       headers: { origin: "http://allowed" },
@@ -74,20 +79,6 @@ describe("browser extension transport", () => {
     acceptedExtensionOrigin.send(JSON.stringify(helloFrame("extension-instance-1")));
     expect((await acceptedFrames.next()).type).toBe("server.hello");
     acceptedExtensionOrigin.close();
-
-    const firefoxOrigin = await harness.app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
-      headers: { origin: "moz-extension://123e4567-e89b-12d3-a456-426614174000" },
-    });
-    const firefoxFrames = frameReader(firefoxOrigin);
-    firefoxOrigin.send(
-      JSON.stringify({
-        ...helloFrame("firefox-instance-1"),
-        version: 2,
-        browser: { name: "firefox", version: "141" },
-      }),
-    );
-    expect((await firefoxFrames.next()).type).toBe("server.hello");
-    firefoxOrigin.close();
 
     await harness.close();
   });
@@ -264,57 +255,6 @@ describe("browser extension transport", () => {
 
     replacement.socket.close();
     other.socket.close();
-    await harness.close();
-  });
-
-  it("accepts the initial Firefox automation request after the binding update", async () => {
-    const firefoxBidi = {
-      execute: vi.fn(async () => ({ context: "context-1" })),
-      detachBinding: vi.fn(),
-      close: vi.fn(async () => undefined),
-    } as unknown as FirefoxBidiClient;
-    const harness = await createHarness({ firefoxBidi });
-    harness.projection.summaries.set("thread", summary("thread"));
-    await harness.browser.enableThread("thread");
-
-    const extension = await connect(harness.app, "extension-instance-1", [], 2, "firefox");
-    await extension.nextType("server.hello");
-    extension.socket.send(
-      JSON.stringify({
-        type: "session.request",
-        requestId: "attach-firefox",
-        target: { kind: "existing", threadId: "thread" },
-        tab: tabSummary(),
-      }),
-    );
-    await extension.nextType("session.result");
-
-    const binding = bindingSummary("thread");
-    extension.socket.send(JSON.stringify({ type: "binding.updated", binding }));
-    extension.socket.send(
-      JSON.stringify({
-        type: "automation.request",
-        requestId: "automation-firefox",
-        threadId: "thread",
-        tabId: 1,
-        operation: "attach",
-        arguments: { marker: "marker-1" },
-      }),
-    );
-
-    expect(await extension.nextType("automation.result")).toMatchObject({
-      requestId: "automation-firefox",
-      result: { context: "context-1" },
-    });
-    expect(firefoxBidi.execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        threadId: "thread",
-        tabId: 1,
-        operation: "attach",
-      }),
-    );
-
-    extension.socket.close();
     await harness.close();
   });
 
@@ -810,9 +750,7 @@ describe("browser extension transport", () => {
   });
 });
 
-async function createHarness(
-  options: { disconnectWaitMs?: number; firefoxBidi?: FirefoxBidiClient } = {},
-) {
+async function createHarness(options: { disconnectWaitMs?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-extension-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -833,7 +771,6 @@ async function createHarness(
     heartbeatMs: 10_000,
     disconnectWaitMs: options.disconnectWaitMs,
     internalSecret: "internal-secret",
-    firefoxBidi: options.firefoxBidi,
   });
   browser.setLifecycle({
     enable: async (threadId) => {
@@ -967,7 +904,6 @@ async function connect(
   instanceId: string,
   bindings: BrowserExtensionBindingSummary[] = [],
   version = BROWSER_EXTENSION_PROTOCOL_VERSION,
-  browser: "chrome" | "firefox" = "chrome",
 ) {
   const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
     headers: { origin: "http://allowed" },
@@ -977,7 +913,7 @@ async function connect(
     JSON.stringify({
       ...helloFrame(instanceId, bindings),
       version,
-      browser: { name: browser, version: "128" },
+      browser: { name: "chrome", version: "128" },
     }),
   );
   return { socket, ...frames };

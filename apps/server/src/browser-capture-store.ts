@@ -38,7 +38,7 @@ export interface BrowserCaptureStreamStart {
   threadId: string;
   tabId: number;
   exchangeId: string;
-  provider: "chrome" | "firefox";
+  provider: "chrome";
   parts: {
     metadata: BrowserCapturePartDeclaration;
     requestBody?: BrowserCapturePartDeclaration;
@@ -915,8 +915,7 @@ function validateStreamStart(input: BrowserCaptureStreamStart, maxPartBytes: num
   if (!Number.isSafeInteger(input.tabId) || input.tabId < 0) throw new Error("Invalid tabId");
   if (!nonEmptyString(input.exchangeId) || input.exchangeId.length > 1_024)
     throw new Error("Invalid exchangeId");
-  if (input.provider !== "chrome" && input.provider !== "firefox")
-    throw new Error("Invalid provider");
+  if (input.provider !== "chrome") throw new Error("Invalid provider");
   for (const part of [input.parts.metadata, input.parts.requestBody, input.parts.responseBody]) {
     if (!part) continue;
     if (

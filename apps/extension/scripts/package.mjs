@@ -3,26 +3,16 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { deflateRawSync } from "node:zlib";
 
 const packageRoot = resolve(import.meta.dirname, "..");
-const requestedTarget = process.argv[2];
-if (requestedTarget && requestedTarget !== "chrome" && requestedTarget !== "firefox") {
-  throw new Error("Package target must be chrome or firefox");
-}
+process.stdout.write(`${await packageChrome()}\n`);
 
-for (const target of requestedTarget ? [requestedTarget] : ["chrome", "firefox"]) {
-  process.stdout.write(`${await packageTarget(target)}\n`);
-}
-
-async function packageTarget(target) {
-  const distRoot = join(packageRoot, "dist", target);
+async function packageChrome() {
+  const distRoot = join(packageRoot, "dist", "chrome");
   const manifest = JSON.parse(await readFile(join(distRoot, "manifest.json"), "utf8"));
-  const artifactName =
-    target === "firefox"
-      ? `codexnest-browser-firefox-${manifest.version}.xpi`
-      : `codexnest-browser-${manifest.version}.zip`;
+  const artifactName = `codexnest-browser-${manifest.version}.zip`;
   const output = join(packageRoot, "artifacts", artifactName);
   const files = (await walk(distRoot)).sort((left, right) => left.localeCompare(right));
   if (!files.some((file) => relative(distRoot, file) === "manifest.json")) {
-    throw new Error(`dist/${target}/manifest.json is required at the archive root`);
+    throw new Error("dist/chrome/manifest.json is required at the archive root");
   }
 
   const localParts = [];

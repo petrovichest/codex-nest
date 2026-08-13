@@ -19,37 +19,6 @@ describe("browser packaging", () => {
     expect(manifest.key).toMatch(/^MIGf/);
   });
 
-  it("uses a fixed Gecko id, module background scripts, and no debugger permission", async () => {
-    const manifest = await readJson("public/firefox/manifest.json");
-    expect(manifest).toMatchObject({
-      manifest_version: 3,
-      browser_specific_settings: {
-        gecko: {
-          id: "codexnest-browser@petrovichest",
-          strict_min_version: "146.0",
-          data_collection_permissions: {
-            required: expect.arrayContaining([
-              "authenticationInfo",
-              "browsingActivity",
-              "websiteContent",
-              "websiteActivity",
-            ]),
-          },
-        },
-      },
-      action: { default_popup: "popup.html" },
-      sidebar_action: {
-        default_panel: "panel.html",
-        open_at_install: false,
-      },
-      background: { scripts: ["background.js"], type: "module" },
-    });
-    expect(manifest.permissions).not.toContain("debugger");
-    expect(manifest.permissions).not.toContain("windows");
-    expect(manifest).not.toHaveProperty("key");
-    expect(manifest).not.toHaveProperty("minimum_chrome_version");
-  });
-
   it("ships popup and panel surfaces from the shared popup entrypoint", async () => {
     const [popup, panel] = await Promise.all([
       readFile(resolve(extensionRoot, "popup.html"), "utf8"),
@@ -62,10 +31,9 @@ describe("browser packaging", () => {
     expect(panel).toContain('<script type="module" src="/src/popup.ts"></script>');
   });
 
-  it("declares separate Chrome ZIP and Firefox XPI package names", async () => {
+  it("declares the Chrome ZIP package name", async () => {
     const script = await readFile(resolve(extensionRoot, "scripts/package.mjs"), "utf8");
     expect(script).toContain("codexnest-browser-${manifest.version}.zip");
-    expect(script).toContain("codexnest-browser-firefox-${manifest.version}.xpi");
   });
 });
 

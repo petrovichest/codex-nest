@@ -10,16 +10,13 @@
   "scripts": {
     "dev": "vite build --mode chrome --watch",
     "version:check": "node scripts/check-version.mjs",
-    "build": "npm run build -w @codexnest/protocol && npm run version:check && tsc -b && npm run build:chrome && npm run build:firefox",
+    "build": "npm run build -w @codexnest/protocol && npm run version:check && tsc -b && npm run build:chrome",
     "build:chrome": "vite build --mode chrome",
-    "build:firefox": "vite build --mode firefox",
-    "lint:firefox": "npx --yes web-ext@10.6.0 lint --source-dir dist/firefox --warnings-as-errors",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test --config=playwright.config.ts",
     "package": "node scripts/package.mjs",
-    "package:chrome": "node scripts/package.mjs chrome",
-    "package:firefox": "node scripts/package.mjs firefox",
+    "package:chrome": "node scripts/package.mjs",
     "package:build": "npm run build && npm run package"
   },
   "devDependencies": {
