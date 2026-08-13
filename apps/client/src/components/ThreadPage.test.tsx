@@ -19,13 +19,7 @@ import type {
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
 import { ApiClientError } from "../api";
 import type { OptimisticMessage } from "../state";
-import {
-  Activity,
-  ThreadPage,
-  TurnTiming,
-  formatMessageTime,
-  initialSessionSettings,
-} from "./ThreadPage";
+import { Activity, ThreadPage, formatMessageTime, initialSessionSettings } from "./ThreadPage";
 
 const connection = vi.hoisted(() => vi.fn());
 const openDownloadUrl = vi.hoisted(() => vi.fn());
@@ -182,6 +176,11 @@ describe("Activity", () => {
         }}
       />,
     );
+    const reasoningDetails = screen.getByText("Рассуждение").closest("details")!;
+    expect(reasoningDetails).toHaveClass("activity-card");
+    expect(screen.queryByText("Проверяю")).toBeNull();
+    fireEvent.click(reasoningDetails.querySelector("summary")!);
+    fireEvent(reasoningDetails, new Event("toggle"));
     expect(screen.getByText("Проверяю")).toBeInTheDocument();
     expect(screen.queryByText("Ход работы")).not.toBeInTheDocument();
   });
@@ -506,6 +505,8 @@ describe("Activity", () => {
     );
     const commandDetails = screen.getByText("npm test").closest("details")!;
     expect(commandDetails).toHaveClass("activity-card");
+    expect(within(commandDetails).getByText("готово")).toHaveClass("sr-only");
+    expect(commandDetails.querySelector(".activity-status svg")).not.toBeNull();
     fireEvent.click(within(commandDetails).getByText("npm test"));
     fireEvent(commandDetails, new Event("toggle"));
     expect(screen.getByText("5 tests passed")).toBeInTheDocument();
@@ -526,6 +527,23 @@ describe("Activity", () => {
     fileDetails.open = true;
     fireEvent(fileDetails, new Event("toggle"));
     expect(screen.getByText("+new line")).toBeInTheDocument();
+  });
+
+  it("keeps important compact activity states visible", () => {
+    const item = {
+      type: "command" as const,
+      id: "command",
+      kind: "command" as const,
+      command: "npm test",
+      cwd: "/work",
+      output: "",
+      exitCode: null,
+    };
+    const view = render(<Activity item={{ ...item, status: "inProgress" }} />);
+    expect(screen.getByText("выполняется")).toBeVisible();
+
+    view.rerender(<Activity item={{ ...item, status: "failed" }} />);
+    expect(screen.getByText("ошибка")).toBeVisible();
   });
 
   it("shows failed activity only after its group is expanded", () => {
@@ -556,9 +574,11 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const groupSummary = screen.getByText("Технические детали").closest("summary")!;
+    const groupSummary = screen.getByText("Действия").closest("summary")!;
     const group = groupSummary.closest("details")!;
 
+    expect(group).not.toHaveAttribute("open");
+    expect(screen.getByText("Готово за 0с").closest("summary")).toBe(groupSummary);
     expect(groupSummary).not.toHaveTextContent("Ошибка");
     expect(within(group).queryByText("ошибка")).toBeNull();
 
@@ -597,8 +617,94 @@ describe("Activity", () => {
     renderThread();
 
     expect(context.loadTurnItems).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText("Технические детали"));
+    const summaryRow = screen.getByText("Действия").closest("summary")!;
+    expect(screen.getByText("Готово за 0с").closest("summary")).toBe(summaryRow);
+    fireEvent.click(summaryRow);
     await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledWith("thread", "turn"));
+    fireEvent.click(summaryRow);
+    fireEvent.click(summaryRow);
+    expect(context.loadTurnItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps lazy-load retry inline", async () => {
+    const context = mockThreadConnection(threadApi(), summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "failed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          itemsLoaded: false,
+          items: [],
+        },
+      ],
+    });
+    context.loadTurnItems
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(undefined);
+    renderThread();
+
+    fireEvent.click(screen.getByText("Действия").closest("summary")!);
+    fireEvent.click(await screen.findByText("Повторить загрузку технических деталей"));
+    await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps an opened activity journal open through streamed items", () => {
+    const context = mockThreadConnection(threadApi(), summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "command",
+              id: "command",
+              status: "completed",
+              kind: "command",
+              command: "npm test",
+              cwd: "/work",
+              output: "passed",
+              exitCode: 0,
+            },
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+    const disclosure = screen.getByText("Действия").closest("details")!;
+    disclosure.open = true;
+    fireEvent(disclosure, new Event("toggle"));
+    expect(screen.getByText("npm test")).toBeInTheDocument();
+
+    const currentTurn = context.state.details.thread.turns[0]!;
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [
+        {
+          ...currentTurn,
+          items: [
+            ...currentTurn.items,
+            {
+              type: "tool",
+              id: "streamed-tool",
+              status: "inProgress",
+              title: "Проверка окружения",
+              detail: "Детали проверки",
+            },
+          ],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByText("Проверка окружения")).toBeInTheDocument();
   });
 
   it("copies message text and formats timestamps for today and older days", async () => {
@@ -960,34 +1066,86 @@ describe("Activity", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-07-21T12:00:05Z"));
+      const runningSummary = {
+        ...summary,
+        state: "running" as const,
+        currentTurnId: "running",
+      };
       const running = {
         id: "running",
         status: "inProgress" as const,
         startedAt: Date.now() - 5_000,
         completedAt: null,
         durationMs: null,
-        progress: progress(),
+        progress: { ...progress(), explanation: "  Проверяю изменения  " },
         items: [],
       };
-      const view = render(<TurnTiming turn={running} />);
-      expect(screen.getByText("Codex работает 5с")).toBeInTheDocument();
+      const context = mockThreadConnection(threadApi(), runningSummary, { turns: [running] });
+      const view = renderThread();
+      expect(screen.getByRole("status")).toHaveTextContent("Проверяю изменения");
+      expect(screen.getByText("5с")).toHaveAttribute("aria-live", "off");
       act(() => vi.advanceTimersByTime(2_000));
-      expect(screen.getByText("Codex работает 7с")).toBeInTheDocument();
+      expect(screen.getByText("7с")).toBeInTheDocument();
 
-      view.rerender(
-        <TurnTiming
-          turn={{
+      const completedSummary = { ...summary, state: "completed" as const };
+      context.state.snapshot.threads = [completedSummary];
+      context.state.details.thread = {
+        ...context.state.details.thread,
+        summary: completedSummary,
+        turns: [
+          {
             ...running,
             status: "completed",
             completedAt: running.startedAt + 8_000,
             durationMs: 8_000,
-          }}
-        />,
-      );
-      expect(screen.getByText("Работал 8с")).toBeInTheDocument();
+          },
+        ],
+      };
+      view.rerender(threadRoute());
+      expect(screen.getByText("Готово за 8с")).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("uses outcome-specific labels with and without durations", () => {
+    mockThreadConnection(threadApi(), summary, {
+      turns: [
+        {
+          id: "completed",
+          status: "completed",
+          startedAt: 1_000,
+          completedAt: 4_000,
+          durationMs: 3_000,
+          progress: progress(),
+          items: [],
+        },
+        {
+          id: "failed",
+          status: "failed",
+          startedAt: 1_000,
+          completedAt: 5_000,
+          durationMs: 4_000,
+          progress: progress(),
+          items: [],
+        },
+        {
+          id: "interrupted",
+          status: "interrupted",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          progress: { ...progress(), startedAt: null },
+          items: [],
+        },
+      ],
+    });
+    renderThread();
+
+    expect(screen.getByText("Готово за 3с")).toBeInTheDocument();
+    expect(screen.getByText("Ошибка через 4с")).toBeInTheDocument();
+    expect(screen.getByText("Прервано")).toBeInTheDocument();
+    expect(screen.queryByText("Действия")).toBeNull();
   });
 
   it("downloads task file links once and leaves other links unchanged", async () => {
@@ -2201,7 +2359,10 @@ describe("Activity", () => {
     ]) {
       expect(screen.queryByText(hidden)).toBeNull();
     }
-    expect(view.container.querySelectorAll(".turn")).toHaveLength(1);
+    expect(view.container.querySelectorAll(".turn")).toHaveLength(2);
+    expect(view.container.querySelectorAll(".turn-activity-static")).toHaveLength(2);
+    expect(screen.getAllByText("Готово за 0с")).toHaveLength(2);
+    expect(screen.queryByText("Действия")).toBeNull();
     expect(view.container.querySelector(".turn-timing")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).toBeNull();
     expect(screen.queryByLabelText("Действия с задачей")).toBeNull();
@@ -2278,6 +2439,7 @@ describe("Activity", () => {
 
     expect(screen.queryByText("Скрытый активный инструмент")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("Codex работает");
+    expect(screen.queryByText("Действия")).toBeNull();
     expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Разрешить один раз" })).toBeInTheDocument();
   });
@@ -3542,7 +3704,7 @@ describe("Activity", () => {
 
     const checklist = screen.getByText("Проверить результат").closest("article");
     const answer = screen.getByText("Итоговый ответ").closest("article");
-    const timing = view.container.querySelector(".turn-timing");
+    const timing = view.container.querySelector(".turn-activity-row");
     expect(checklist).toHaveClass("plan-checklist");
     expect(checklist).toHaveTextContent("Работа завершена");
     expect(answer).toHaveClass("agentMessage");
@@ -3594,6 +3756,8 @@ describe("Activity", () => {
 
     expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
     expect(view.container.querySelector(".turn > div:empty")).toBeNull();
+    expect(screen.queryByText("Действия")).toBeNull();
+    expect(view.container.querySelector(".turn-activity-static")).not.toBeNull();
   });
 
   it("renders attention requests after the active turn inside the timeline", () => {
@@ -4025,7 +4189,7 @@ describe("Activity", () => {
     const context = mockThreadConnection(api, running);
     const view = renderThread();
 
-    expect(screen.getByText("Codex работает…")).toBeInTheDocument();
+    expect(screen.getByText("Codex работает")).toBeInTheDocument();
     await waitFor(() => expect(context.refreshDetail).toHaveBeenCalled());
 
     context.state.snapshot.threads = [{ ...running, state: "completed", currentTurnId: null }];

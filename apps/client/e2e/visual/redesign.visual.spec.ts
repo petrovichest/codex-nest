@@ -70,8 +70,8 @@ test.describe("CodexNest redesign visual contract", () => {
         inactiveThreadWeight: inactiveThread ? getComputedStyle(inactiveThread).fontWeight : null,
       };
     });
-    expect(typography.fontFamilies).toEqual([
-      'Onest, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    expect(typography.fontFamilies.map((family) => family.replaceAll('"', ""))).toEqual([
+      "Onest, ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
     ]);
     expect(typography.activeThreadWeight).toBe(typography.inactiveThreadWeight);
     const checklistMarker = await page
@@ -91,6 +91,28 @@ test.describe("CodexNest redesign visual contract", () => {
     expect(Math.abs(checklistMarker.centerOffset)).toBeLessThanOrEqual(2);
     await expect(page).toHaveScreenshot("02-desktop-dark-session.png", { fullPage: true });
     if (browserName === "chromium") await expectA11yClean(page, "desktop session");
+  });
+
+  test.describe("compact activity disclosure", () => {
+    test.skip(
+      ({ browserName }) => browserName !== "chromium",
+      "The focused pixel contract is Chromium-only.",
+    );
+
+    test("11 desktop dark closed and expanded states", async ({ page }) => {
+      await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT);
+      const disclosure = page.locator(".turn-activity-disclosure");
+
+      await expect(disclosure).toBeVisible();
+      await expect(disclosure).toHaveScreenshot("11-desktop-dark-activity-closed.png");
+
+      await disclosure.locator("summary").click();
+      await expect(disclosure.getByText("Рассуждение")).toBeVisible();
+      await expect(disclosure.getByText("npm test -- --runInBand")).toBeVisible();
+      await expect(disclosure).toHaveScreenshot("12-desktop-dark-activity-open.png");
+
+      await expectA11yClean(page, "expanded activity disclosure", ".turn-activity-disclosure");
+    });
   });
 
   test("9 desktop light message queue", async ({ browserName, page }) => {

@@ -77,6 +77,7 @@ import {
   ArrowDownIcon,
   BrowserIcon,
   CheckIcon,
+  ChevronDownIcon,
   CopyIcon,
   FileIcon,
   GitBranchIcon,
@@ -87,6 +88,7 @@ import {
   PinIcon,
   RefreshIcon,
   SendIcon,
+  StopIcon,
   TeamIcon,
   TerminalIcon,
   ToolIcon,
@@ -3012,15 +3014,6 @@ export function ThreadPage({
                       (!message.turnId && workspaceSummary.currentTurnId === turn.id),
                   );
                   const active = workspaceSummary.currentTurnId === turn.id;
-                  if (
-                    isSubagent &&
-                    entries.length === 0 &&
-                    technicalItems.length === 0 &&
-                    turnOptimisticMessages.length === 0 &&
-                    !active
-                  ) {
-                    return null;
-                  }
                   return (
                     <div className="turn" key={turn.id}>
                       {turnOptimisticMessages.map((message) => (
@@ -3095,35 +3088,24 @@ export function ThreadPage({
                           </div>
                         ),
                       )}
-                      {!isSubagent && (
-                        <LazyTechnicalDetails
-                          items={technicalItems}
-                          loaded={turn.itemsLoaded !== false}
-                          onLoad={() => loadTurnItems(threadId, turn.id)}
-                          cwd={workspaceSummary.cwd}
-                          onDownload={downloadFile}
-                          onOpenArtifact={openLinkedArtifact}
-                        />
-                      )}
-                      {isSubagent ? (
-                        active && (
-                          <ActiveTurnStatus
-                            progress={{
-                              ...turn.progress,
-                              startedAt: turn.startedAt ?? turn.progress.startedAt,
-                            }}
-                          />
-                        )
-                      ) : (
-                        <MemoizedTurnTiming turn={turn} active={active} />
-                      )}
+                      <TurnActivityDisclosure
+                        turn={turn}
+                        active={active}
+                        items={technicalItems}
+                        loaded={turn.itemsLoaded !== false}
+                        interactive={!isSubagent}
+                        onLoad={() => loadTurnItems(threadId, turn.id)}
+                        cwd={workspaceSummary.cwd}
+                        onDownload={downloadFile}
+                        onOpenArtifact={openLinkedArtifact}
+                      />
                     </div>
                   );
                 })}
                 {workspaceSummary.currentTurnId &&
                   !detail?.turns.some((turn) => turn.id === workspaceSummary.currentTurnId) && (
                     <div className="turn active-turn-placeholder">
-                      <ActiveTurnStatus progress={activeProgress} />
+                      <TurnActivityStatus progress={activeProgress} active />
                     </div>
                   )}
                 {detachedOptimisticMessages(
@@ -3938,18 +3920,15 @@ export function Activity({
   }
   if (item.type === "reasoning") {
     return (
-      <article className="message reasoning">
-        <div className="message-body">
-          <MarkdownContent
-            text={item.text}
-            cwd={cwd}
-            onDownload={onDownload}
-            onOpenArtifact={onOpenArtifact}
-            onLoadImage={onLoadImage}
-          />
-        </div>
-        <MessageFooter text={item.text} timestamp={item.timestamp} />
-      </article>
+      <ActivityDetails icon={<MoreIcon />} title={t("Рассуждение")} status={item.status}>
+        <MarkdownContent
+          text={item.text}
+          cwd={cwd}
+          onDownload={onDownload}
+          onOpenArtifact={onOpenArtifact}
+          onLoadImage={onLoadImage}
+        />
+      </ActivityDetails>
     );
   }
   if (item.type === "plan") {
@@ -4642,16 +4621,22 @@ function ActivityGroup({
 
 const MemoizedActivityGroup = memo(ActivityGroup);
 
-function LazyTechnicalDetails({
+function TurnActivityDisclosure({
+  turn,
+  active,
   items,
   loaded,
+  interactive,
   onLoad,
   cwd,
   onDownload,
   onOpenArtifact,
 }: {
+  turn: TurnView;
+  active: boolean;
   items: ActivityItem[];
   loaded: boolean;
+  interactive: boolean;
   onLoad(): Promise<void>;
   cwd: string;
   onDownload(path: string): Promise<void>;
@@ -4661,42 +4646,54 @@ function LazyTechnicalDetails({
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const loadAttempted = useRef(false);
+  const visibleItems = items.filter(hasVisibleActivity);
 
   const load = useCallback(() => {
-    if (loading || loaded) return;
+    if (loading || loaded || loadAttempted.current) return;
+    loadAttempted.current = true;
     setLoading(true);
     setError(false);
     void onLoad()
-      .catch(() => setError(true))
+      .catch(() => {
+        loadAttempted.current = false;
+        setError(true);
+      })
       .finally(() => setLoading(false));
   }, [loaded, loading, onLoad]);
 
-  if (loaded && items.length === 0) return null;
+  if (!active && turn.status === "inProgress") return null;
+  const canOpen = interactive && (!loaded || visibleItems.length > 0);
+  if (!canOpen) {
+    return <TurnActivityStatus turn={turn} active={active} />;
+  }
   return (
     <details
-      className="activity-group technical-details"
+      className="turn-activity-disclosure"
+      open={open}
       onToggle={(event) => {
         const nextOpen = event.currentTarget.open;
         setOpen(nextOpen);
         if (nextOpen) load();
       }}
     >
-      <summary>
-        <span className="activity-group-icon">
-          <ToolIcon />
+      <summary aria-busy={loading || undefined}>
+        <TurnActivityStatus turn={turn} active={active} nested />
+        <span className="turn-activity-action">
+          {loading && <span className="spinner small" aria-hidden="true" />}
+          <span>{t("Действия")}</span>
+          <ChevronDownIcon aria-hidden="true" />
         </span>
-        <span>{t("Технические детали")}</span>
-        {loading && <span className="spinner small" />}
       </summary>
       {open && (
-        <div className="activity-group-content">
+        <div className="turn-activity-journal">
           {error && (
             <button type="button" className="history-retry" onClick={load}>
               {t("Повторить загрузку технических деталей")}
             </button>
           )}
           {loaded &&
-            items.map((item) => (
+            visibleItems.map((item) => (
               <MemoizedActivity
                 item={item}
                 cwd={cwd}
@@ -4961,43 +4958,83 @@ function MessageFooter({
   );
 }
 
-export function TurnTiming({
+function TurnActivityStatus({
   turn,
-  active = turn.status === "inProgress",
+  progress = turn?.progress,
+  active = turn?.status === "inProgress",
+  nested = false,
 }: {
-  turn: TurnView;
+  turn?: TurnView;
+  progress?: TurnProgress;
   active?: boolean;
+  nested?: boolean;
 }) {
   const { language, t } = useI18n();
-  const startedAt = turn.startedAt ?? turn.progress.startedAt;
-  if (active) return <ActiveTurnStatus progress={{ ...turn.progress, startedAt }} />;
-  if (turn.status === "inProgress" || startedAt === null) return null;
-  const duration =
-    turn.durationMs ??
-    (turn.completedAt === null ? null : Math.max(0, turn.completedAt - startedAt));
-  return duration === null ? null : (
-    <div className="turn-timing">
-      {t("Работал {{duration}}", { duration: formatDuration(duration, language) })}
-    </div>
+  const isActive = active;
+  const startedAt = turn?.startedAt ?? progress?.startedAt ?? null;
+  const elapsed = useElapsed(startedAt ?? 0, isActive && startedAt !== null, language);
+  const duration = turn
+    ? (turn.durationMs ??
+      (startedAt === null || turn.completedAt === null
+        ? null
+        : Math.max(0, turn.completedAt - startedAt)))
+    : null;
+  const label = isActive
+    ? progress?.explanation?.trim() || t("Codex работает")
+    : turn
+      ? turnOutcomeLabel(turn.status, duration, language, t)
+      : t("Codex работает");
+  const content = (
+    <>
+      <span
+        className={`turn-activity-state turn-activity-state-${isActive ? "active" : (turn?.status ?? "active")}`}
+        aria-hidden="true"
+      >
+        {isActive ? (
+          <span className="spinner small" />
+        ) : turn?.status === "completed" ? (
+          <CheckIcon />
+        ) : turn?.status === "failed" ? (
+          <XIcon />
+        ) : (
+          <StopIcon />
+        )}
+      </span>
+      <span className="turn-activity-copy">
+        <span className="turn-activity-phase" role={isActive ? "status" : undefined}>
+          {label}
+        </span>
+        {isActive && startedAt !== null && (
+          <span className="turn-activity-duration" aria-live="off">
+            {elapsed}
+          </span>
+        )}
+      </span>
+    </>
   );
+  if (nested) return <span className="turn-activity-row">{content}</span>;
+  return <div className="turn-activity-row turn-activity-static">{content}</div>;
 }
 
-const MemoizedTurnTiming = memo(TurnTiming);
-
-function ActiveTurnStatus({ progress }: { progress?: TurnProgress }) {
-  const { language, t } = useI18n();
-  const startedAt = progress?.startedAt ?? null;
-  const elapsed = useElapsed(startedAt ?? 0, startedAt !== null, language);
-  const label = progress?.explanation?.trim() || t("Codex работает");
-  return (
-    <div className="turn-timing active" role="status">
-      <span className="spinner small" />
-      <span>
-        {label}
-        {startedAt !== null ? ` ${elapsed}` : "…"}
-      </span>
-    </div>
-  );
+function turnOutcomeLabel(
+  status: TurnView["status"],
+  duration: number | null,
+  language: UiLanguage,
+  t: Translate,
+): string {
+  if (status === "completed") {
+    return duration === null
+      ? t("Готово")
+      : t("Готово за {{duration}}", { duration: formatDuration(duration, language) });
+  }
+  if (status === "failed") {
+    return duration === null
+      ? t("Ошибка")
+      : t("Ошибка через {{duration}}", { duration: formatDuration(duration, language) });
+  }
+  return duration === null
+    ? t("Прервано")
+    : t("Прервано через {{duration}}", { duration: formatDuration(duration, language) });
 }
 
 export function formatMessageTime(timestamp: number, language: UiLanguage = "ru"): string {
@@ -5240,11 +5277,21 @@ function ActivityDetails({
   return (
     <details className="activity-card" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
-        <span className="activity-icon">{icon}</span>
+        <span className="activity-icon" aria-hidden="true">
+          {icon}
+        </span>
         <span className={`activity-title${technicalTitle ? " technical" : ""}`}>{title}</span>
         <span className={`activity-status activity-status-${status}`}>
-          {statusLabel(status, t)}
+          {status === "completed" ? (
+            <>
+              <CheckIcon aria-hidden="true" />
+              <span className="sr-only">{statusLabel(status, t)}</span>
+            </>
+          ) : (
+            statusLabel(status, t)
+          )}
         </span>
+        <ChevronDownIcon className="activity-chevron" aria-hidden="true" />
       </summary>
       {open && <div className="activity-content">{children}</div>}
     </details>
