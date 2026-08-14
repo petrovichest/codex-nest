@@ -979,7 +979,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             : {}),
         }),
       );
-      resultTurnId = result.turnId;
+      if (result.turnId !== turnId) {
+        app.log.warn(
+          { threadId, expectedTurnId: turnId, returnedTurnId: result.turnId },
+          "turn/steer returned an unexpected turn ID",
+        );
+      }
+      resultTurnId = turnId;
     } catch (error) {
       if (teamClaim && teamMarkerId) {
         let recoveredTurnId: string | null;

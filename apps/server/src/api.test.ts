@@ -2656,14 +2656,18 @@ describe("thread settings", () => {
       expect.objectContaining({ id: "client-queued", text: "Исправленный текст" }),
     ]);
 
+    const steerWarning = vi.spyOn(app.log, "warn");
     const sentNow = await app.inject({
       method: "POST",
       url: `/api/v1/threads/thread/queue/${queued.json().id}/send`,
       headers,
     });
     expect(sentNow.statusCode).toBe(200);
+    expect(sentNow.json()).toEqual({ turnId: "turn" });
     expect(queued.json().id).toBe("client-queued");
     expect(store.snapshot().messageQueues?.thread).toBeUndefined();
+    expect(store.snapshot().messageReceipts?.["client-queued"]?.turnId).toBe("turn");
+    expect(projection.summary("thread")?.currentTurnId).toBe("turn");
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],
     ).toMatchObject({
@@ -2672,9 +2676,39 @@ describe("thread settings", () => {
     });
     expect(activityEvents.at(-1)).toMatchObject({
       threadId: "thread",
-      turnId: "steered",
+      turnId: "turn",
       item: { type: "userMessage", id: "client-queued", text: "Исправленный текст" },
     });
+    expect(steerWarning).toHaveBeenCalledTimes(1);
+    expect(steerWarning).toHaveBeenCalledWith(
+      { threadId: "thread", expectedTurnId: "turn", returnedTurnId: "steered" },
+      "turn/steer returned an unexpected turn ID",
+    );
+    steerWarning.mockRestore();
+
+    const queuedAfterSteer = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "Продолжить после steering", clientMessageId: "client-after-steer" },
+    });
+    expect(queuedAfterSteer.statusCode).toBe(202);
+    const startsBeforeSteeredCompletion = bridge.request.mock.calls.filter(
+      ([method]) => method === "turn/start",
+    ).length;
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "thread", turn: testTurn("turn", "completed") },
+    } satisfies ServerNotification);
+    await vi.waitFor(() =>
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        startsBeforeSteeredCompletion + 1,
+      ),
+    );
+    await vi.waitFor(() => expect(store.snapshot().messageQueues?.thread).toBeUndefined());
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1],
+    ).toMatchObject({ clientUserMessageId: "client-after-steer" });
 
     const invalid = await app.inject({
       method: "PATCH",
