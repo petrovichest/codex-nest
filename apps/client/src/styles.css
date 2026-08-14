@@ -2398,6 +2398,10 @@
   border-radius: var(--radius-sm);
 }
 
+.turn-activity-disclosure > summary:hover .turn-activity-row {
+  color: var(--muted-strong);
+}
+
 .turn-activity-row {
   min-width: 0;
   display: flex;
@@ -2460,26 +2464,6 @@
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-}
-
-.turn-activity-action {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted-strong);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.turn-activity-action > svg {
-  width: 14px;
-  height: 14px;
-  transition: transform 140ms ease;
-}
-
-.turn-activity-disclosure[open] .turn-activity-action > svg {
-  transform: rotate(180deg);
 }
 
 .turn-activity-journal {
@@ -5443,7 +5427,6 @@
     animation: none;
   }
 
-  .turn-activity-action > svg,
   .activity-chevron {
     transition: none;
   }

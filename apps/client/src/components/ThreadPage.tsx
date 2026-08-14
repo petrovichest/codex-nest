@@ -4678,13 +4678,8 @@ function TurnActivityDisclosure({
         if (nextOpen) load();
       }}
     >
-      <summary aria-busy={loading || undefined}>
-        <TurnActivityStatus turn={turn} active={active} nested />
-        <span className="turn-activity-action">
-          {loading && <span className="spinner small" aria-hidden="true" />}
-          <span>{t("Действия")}</span>
-          <ChevronDownIcon aria-hidden="true" />
-        </span>
+      <summary aria-busy={loading || undefined} aria-label={t("Технические детали")}>
+        <TurnActivityStatus turn={turn} active={active} loading={loading} nested />
       </summary>
       {open && (
         <div className="turn-activity-journal">
@@ -4963,15 +4958,18 @@ function TurnActivityStatus({
   turn,
   progress = turn?.progress,
   active = turn?.status === "inProgress",
+  loading = false,
   nested = false,
 }: {
   turn?: TurnView;
   progress?: TurnProgress;
   active?: boolean;
+  loading?: boolean;
   nested?: boolean;
 }) {
   const { language, t } = useI18n();
   const isActive = active;
+  const showSpinner = isActive || loading;
   const startedAt = turn?.startedAt ?? progress?.startedAt ?? null;
   const elapsed = useElapsed(startedAt ?? 0, isActive && startedAt !== null, language);
   const duration = turn
@@ -4988,10 +4986,10 @@ function TurnActivityStatus({
   const content = (
     <>
       <span
-        className={`turn-activity-state turn-activity-state-${isActive ? "active" : (turn?.status ?? "active")}`}
+        className={`turn-activity-state turn-activity-state-${showSpinner ? "active" : (turn?.status ?? "active")}`}
         aria-hidden="true"
       >
-        {isActive ? (
+        {showSpinner ? (
           <span className="spinner small" />
         ) : turn?.status === "completed" ? (
           <CheckIcon />

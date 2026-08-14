@@ -574,7 +574,7 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const groupSummary = screen.getByText("Действия").closest("summary")!;
+    const groupSummary = screen.getByLabelText("Технические детали");
     const group = groupSummary.closest("details")!;
 
     expect(group).not.toHaveAttribute("open");
@@ -617,7 +617,7 @@ describe("Activity", () => {
     renderThread();
 
     expect(context.loadTurnItems).not.toHaveBeenCalled();
-    const summaryRow = screen.getByText("Действия").closest("summary")!;
+    const summaryRow = screen.getByLabelText("Технические детали");
     expect(screen.getByText("Готово за 0с").closest("summary")).toBe(summaryRow);
     fireEvent.click(summaryRow);
     await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledWith("thread", "turn"));
@@ -646,7 +646,7 @@ describe("Activity", () => {
       .mockResolvedValueOnce(undefined);
     renderThread();
 
-    fireEvent.click(screen.getByText("Действия").closest("summary")!);
+    fireEvent.click(screen.getByLabelText("Технические детали"));
     fireEvent.click(await screen.findByText("Повторить загрузку технических деталей"));
     await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledTimes(2));
   });
@@ -677,7 +677,7 @@ describe("Activity", () => {
       ],
     });
     const view = renderThread();
-    const disclosure = screen.getByText("Действия").closest("details")!;
+    const disclosure = screen.getByLabelText("Технические детали").closest("details")!;
     disclosure.open = true;
     fireEvent(disclosure, new Event("toggle"));
     expect(screen.getByText("npm test")).toBeInTheDocument();
@@ -1145,7 +1145,7 @@ describe("Activity", () => {
     expect(screen.getByText("Готово за 3с")).toBeInTheDocument();
     expect(screen.getByText("Ошибка через 4с")).toBeInTheDocument();
     expect(screen.getByText("Прервано")).toBeInTheDocument();
-    expect(screen.queryByText("Действия")).toBeNull();
+    expect(screen.queryByLabelText("Технические детали")).toBeNull();
   });
 
   it("downloads task file links once and leaves other links unchanged", async () => {
@@ -2362,7 +2362,7 @@ describe("Activity", () => {
     expect(view.container.querySelectorAll(".turn")).toHaveLength(2);
     expect(view.container.querySelectorAll(".turn-activity-static")).toHaveLength(2);
     expect(screen.getAllByText("Готово за 0с")).toHaveLength(2);
-    expect(screen.queryByText("Действия")).toBeNull();
+    expect(screen.queryByLabelText("Технические детали")).toBeNull();
     expect(view.container.querySelector(".turn-timing")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).toBeNull();
     expect(screen.queryByLabelText("Действия с задачей")).toBeNull();
@@ -2439,7 +2439,7 @@ describe("Activity", () => {
 
     expect(screen.queryByText("Скрытый активный инструмент")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("Codex работает");
-    expect(screen.queryByText("Действия")).toBeNull();
+    expect(screen.queryByLabelText("Технические детали")).toBeNull();
     expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Разрешить один раз" })).toBeInTheDocument();
   });
@@ -3756,7 +3756,7 @@ describe("Activity", () => {
 
     expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
     expect(view.container.querySelector(".turn > div:empty")).toBeNull();
-    expect(screen.queryByText("Действия")).toBeNull();
+    expect(screen.queryByLabelText("Технические детали")).toBeNull();
     expect(view.container.querySelector(".turn-activity-static")).not.toBeNull();
   });
 

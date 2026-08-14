@@ -307,7 +307,6 @@ const ENGLISH: Record<string, string> = {
   "Получаем версию CodexNest…": "Loading CodexNest version…",
   "Технические детали": "Technical details",
   "Повторить загрузку технических деталей": "Retry loading technical details",
-  Действия: "Actions",
   Рассуждение: "Reasoning",
   "Готово за {{duration}}": "Completed in {{duration}}",
   "Ошибка через {{duration}}": "Failed after {{duration}}",
