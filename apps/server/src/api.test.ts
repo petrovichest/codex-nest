@@ -2104,6 +2104,20 @@ describe("thread settings", () => {
     const threadStartsBeforeEmptyThread = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/start",
     ).length;
+    projection.upsertThread({
+      ...testThread("stale-empty"),
+      cwd: "/work",
+      preview: "",
+      updatedAt: 3,
+      recencyAt: 3,
+    });
+    await projection.markUnmaterialized("stale-empty");
+    await store.update((state) => {
+      const meta = state.threadMeta["stale-empty"]!;
+      meta.managedTeamToolsAvailable = true;
+      meta.sessionArtifactsVersion = 1;
+    });
+    bridge.missingRolloutThreadIds.add("stale-empty");
     const [emptyCreated, emptyReopened] = await Promise.all(
       Array.from({ length: 2 }, () =>
         app.inject({
@@ -2118,6 +2132,12 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
       threadStartsBeforeEmptyThread + 1,
     );
+    expect(projection.summary("stale-empty")).toBeUndefined();
+    expect(store.snapshot().threadMeta["stale-empty"]).toBeUndefined();
+    expect(bridge.request).toHaveBeenCalledWith("thread/metadata/update", {
+      threadId: "created",
+      gitInfo: { sha: null },
+    });
     expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "plan" });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
@@ -5482,6 +5502,10 @@ class SettingsBridge extends EventEmitter {
     }
     if (method === "thread/unsubscribe") return {};
     if (method === "thread/metadata/update") {
+      const threadId = String(params.threadId);
+      if (this.missingRolloutThreadIds.delete(threadId)) {
+        throw new RpcError(-32_600, `no rollout found for thread id ${threadId}`);
+      }
       return { thread: testThread(String(params.threadId)) };
     }
     if (method === "thread/name/set") return {};

@@ -1229,6 +1229,7 @@ export function ThreadPage({
       thread = await applyPendingSettings(thread, generation);
       assertPreparationGeneration(generation);
       preparationRef.current = { ...preparationRef.current, thread };
+      if (preparationClaimedForSubmitRef.current) return;
       activateCreatedThread(thread, saved, generation);
       return;
     }

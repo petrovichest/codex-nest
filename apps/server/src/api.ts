@@ -688,7 +688,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (meta?.managedTeamToolsAvailable !== true || meta.sessionArtifactsVersion !== 1) {
         continue;
       }
-      if (candidate.knownUnmaterialized) return candidate.thread;
+      if (candidate.knownUnmaterialized) {
+        try {
+          // Empty threads are not durable in Codex until their rollout receives metadata.
+          // Validate old candidates before reusing them and materialize candidates that are
+          // still loaded but predate eager materialization below.
+          await bridge.request("thread/metadata/update", {
+            threadId: candidate.thread.id,
+            gitInfo: { sha: null },
+          });
+          return candidate.thread;
+        } catch (error) {
+          if (!isMissingRolloutError(error)) throw error;
+          await projection.removeOrphanedThread(candidate.thread.id);
+          continue;
+        }
+      }
       const detail = await projection.readThread(candidate.thread.id);
       if (detail.turns.length === 0 && detail.queuedMessages.length === 0) {
         await projection.markUnmaterialized(candidate.thread.id);
@@ -721,6 +736,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.upsertThread(started.thread);
       await projection.markUnmaterialized(started.thread.id);
       await markRootToolsAvailable(store, started.thread.id);
+      // Persist the empty rollout before returning it to the client. Otherwise an app-server
+      // restart between thread/start and the first turn leaves CodexNest holding a thread id
+      // that Codex can no longer resume. Keep the local candidate first so a transient failure
+      // can retry this metadata write instead of creating a second thread.
+      await bridge.request("thread/metadata/update", {
+        threadId: started.thread.id,
+        gitInfo: { sha: null },
+      });
       return projection.setSettings(started.thread.id, settings);
     })().finally(() => {
       if (projectThreadCreations.get(projectId) === request) {

@@ -2583,6 +2583,74 @@ describe("App routing and navigation", () => {
     });
   });
 
+  it("keeps the first send claimed while background preparation applies settings", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const draftTransfer = deferred<ThreadDraft | null>();
+    const settingsUpdate = deferred<ThreadSummary>();
+    const appSnapshot = snapshot([baseThread]);
+    appSnapshot.models = [
+      {
+        id: "gpt",
+        displayName: "GPT",
+        description: "",
+        isDefault: true,
+        reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
+        serviceTiers: [],
+        supportsPersonality: false,
+      },
+    ];
+    const api = mockConnection(appSnapshot);
+    api.createProjectThread.mockReturnValue(creation.promise);
+    api.updateThreadDraft.mockReturnValueOnce(draftTransfer.promise);
+    api.updateThreadSettings.mockReturnValueOnce(settingsUpdate.promise);
+
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Сообщение для Codex",
+    });
+    fireEvent.change(textarea, { target: { value: "Не потеряй первое сообщение" } });
+    creation.resolve({
+      thread: {
+        ...baseThread,
+        id: "created",
+        title: "Новая задача",
+        settings: { collaborationMode: "plan" },
+      },
+    });
+
+    await waitFor(() => expect(api.updateThreadDraft).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+    draftTransfer.resolve({
+      input: "Не потеряй первое сообщение",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    });
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("created", {
+        collaborationMode: "default",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    settingsUpdate.resolve({
+      ...baseThread,
+      id: "created",
+      title: "Новая задача",
+      settings: { collaborationMode: "default" },
+    });
+
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({ input: "Не потеряй первое сообщение" }),
+      ),
+    );
+    expect(api.sendReliable).toHaveBeenCalledOnce();
+  });
+
   it("uses the activated thread when sending before the handoff rerenders", async () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const api = mockConnection(snapshot([baseThread]));
