@@ -247,7 +247,10 @@ describe("Composer", () => {
 
   it("uses queue for form and plain Enter submissions and immediate for modifier Enter", () => {
     const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
-    const view = render(<Harness initialInput="Сообщение" onSubmit={onSubmit} />);
+    const onSendQueuedNow = vi.fn();
+    const view = render(
+      <Harness initialInput="Сообщение" onSubmit={onSubmit} onSendQueuedNow={onSendQueuedNow} />,
+    );
     const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
     const form = view.container.querySelector("form")!;
 
@@ -257,6 +260,22 @@ describe("Composer", () => {
     expect(fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true })).toBe(false);
 
     expect(onSubmit.mock.calls).toEqual([["queue"], ["queue"], ["immediate"], ["immediate"]]);
+    expect(onSendQueuedNow).not.toHaveBeenCalled();
+  });
+
+  it("sends a queued message with modifier Enter when the composer is empty", () => {
+    const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
+    const onSendQueuedNow = vi.fn();
+    render(<Harness onSubmit={onSubmit} onSendQueuedNow={onSendQueuedNow} />);
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true, repeat: true });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSendQueuedNow).toHaveBeenCalledTimes(2);
   });
 
   it("keeps Shift+Enter native and ignores composing and repeated submit shortcuts", () => {
@@ -965,6 +984,7 @@ function Harness({
   onInput,
   onSettingsChange,
   onSubmit = () => undefined,
+  onSendQueuedNow,
   projects: projectOptions,
   sessionIdentity,
   transcriptionConfig: speechConfig,
@@ -988,6 +1008,7 @@ function Harness({
   onInput?(value: string): void;
   onSettingsChange?(patch: UpdateThreadSettingsRequest): void;
   onSubmit?(intent: ComposerSubmitIntent): void;
+  onSendQueuedNow?(): void;
   projects?: Project[];
   sessionIdentity?: string;
   transcriptionConfig?: TranscriptionConfigResponse;
@@ -1013,6 +1034,7 @@ function Harness({
       images={images}
       onImagesChange={setImages}
       onSubmit={onSubmit}
+      onSendQueuedNow={onSendQueuedNow}
       busy={busy}
       cwd={cwd}
       projects={projectOptions}

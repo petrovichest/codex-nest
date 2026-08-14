@@ -74,6 +74,7 @@ export function Composer({
   attachmentScope = 0,
   onPendingAttachmentsChange,
   onSubmit,
+  onSendQueuedNow,
   busy,
   running = false,
   settings,
@@ -120,6 +121,7 @@ export function Composer({
   attachmentScope?: number;
   onPendingAttachmentsChange?(pending: boolean, attachmentScope?: number): void;
   onSubmit(intent: ComposerSubmitIntent): void;
+  onSendQueuedNow?(): void;
   busy: boolean;
   running?: boolean;
   settings: SessionSettings;
@@ -259,6 +261,7 @@ export function Composer({
     !busy &&
     !speechBusy &&
     (!creating || Boolean(projectId));
+  const canSendQueuedNow = !hasContent && !busy && !speechBusy && Boolean(onSendQueuedNow);
   const planToggleEligible =
     !running &&
     !busy &&
@@ -527,8 +530,14 @@ export function Composer({
       return;
     }
     event.preventDefault();
-    if (event.repeat || !canSubmit) return;
-    onSubmit(event.metaKey || event.ctrlKey ? "immediate" : "queue");
+    if (event.repeat) return;
+    const immediate = event.metaKey || event.ctrlKey;
+    if (immediate && canSendQueuedNow) {
+      onSendQueuedNow?.();
+      return;
+    }
+    if (!canSubmit) return;
+    onSubmit(immediate ? "immediate" : "queue");
   }
 
   async function addImages(files: readonly File[]) {

@@ -3318,6 +3318,73 @@ describe("Activity", () => {
     expect(api.sendQueuedNow).not.toHaveBeenCalledWith("thread", "older-message");
   });
 
+  it("sends queued messages oldest first with modifier Enter when the composer is empty", async () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const first = {
+      id: "first-message",
+      threadId: "thread",
+      text: "Первое",
+      createdAt: 1,
+      status: "queued" as const,
+    };
+    const second = {
+      id: "second-message",
+      threadId: "thread",
+      text: "Второе",
+      createdAt: 2,
+      status: "queued" as const,
+    };
+    const context = mockThreadConnection(api, running, { queuedMessages: [first, second] });
+    const view = renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Направить текущую задачу" });
+
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", first.id));
+    expect(api.enqueue).not.toHaveBeenCalled();
+
+    context.state.details.thread.queuedMessages = [second];
+    view.rerender(threadRoute());
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledTimes(2));
+    expect(api.sendQueuedNow.mock.calls).toEqual([
+      ["thread", first.id],
+      ["thread", second.id],
+    ]);
+  });
+
+  it("does not skip a dispatching message at the head of the queue", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    mockThreadConnection(api, running, {
+      queuedMessages: [
+        {
+          id: "first-message",
+          threadId: "thread",
+          text: "Первое",
+          createdAt: 1,
+          status: "dispatching",
+        },
+        {
+          id: "second-message",
+          threadId: "thread",
+          text: "Второе",
+          createdAt: 2,
+          status: "queued",
+        },
+      ],
+    });
+    renderThread();
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Направить текущую задачу" }), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    expect(api.sendQueuedNow).not.toHaveBeenCalled();
+  });
+
   it("keeps an accepted immediate message queued when send-now fails", async () => {
     const api = threadApi();
     api.sendQueuedNow.mockRejectedValueOnce(new Error("offline"));

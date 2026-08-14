@@ -691,6 +691,13 @@ export function ThreadPage({
   const optimisticQueuedMessages = optimisticMessages.filter(
     (message) => message.destination === "queue",
   );
+  const queuedMessages = preparationRef.current.active
+    ? []
+    : mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages);
+  const queuedShortcutMessage =
+    queueAction === null && queuedMessages[0]?.confirmed && queuedMessages[0].status === "queued"
+      ? queuedMessages[0]
+      : null;
   const activeMessageFingerprints = new Set<string>();
   const addActiveMessage = (identity: SubmittedMessageIdentity) => {
     activeMessageFingerprints.add(submittedMessageFingerprint(identity));
@@ -3315,6 +3322,9 @@ export function ThreadPage({
             attachmentScope={attachmentScope}
             onPendingAttachmentsChange={setPendingAttachments}
             onSubmit={submit}
+            onSendQueuedNow={
+              queuedShortcutMessage ? () => void sendQueuedNow(queuedShortcutMessage.id) : undefined
+            }
             busy={busy}
             running={
               Boolean(workspaceSummary.currentTurnId) ||
@@ -3427,11 +3437,7 @@ export function ThreadPage({
               </button>
             )}
             <QueuedMessages
-              messages={
-                preparationRef.current.active
-                  ? []
-                  : mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages)
-              }
+              messages={queuedMessages}
               action={queueAction}
               onSendNow={sendQueuedNow}
               onUpdate={updateQueued}
