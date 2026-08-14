@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { App as CapacitorApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
 import { Capacitor } from "@capacitor/core";
 import type { AppUpdateStatus } from "@codexnest/protocol";
 
@@ -16,6 +17,7 @@ const LATEST_ANDROID_APK_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/CodexNest-latest.apk";
 const LATEST_CHROME_EXTENSION_URL =
   "https://github.com/petrovichest/codex-nest/releases/download/android-latest/codexnest-browser-latest.zip";
+const REPOSITORY_URL = "https://github.com/petrovichest/codex-nest";
 
 export function ApplicationSettingsCard({
   initialStatus,
@@ -159,6 +161,15 @@ export function ApplicationSettingsCard({
     }
   }
 
+  async function openRepository() {
+    setError(null);
+    try {
+      await Browser.open({ url: REPOSITORY_URL });
+    } catch {
+      setError(t("Не удалось открыть GitHub"));
+    }
+  }
+
   const activeTurnCount =
     state.snapshot?.threads.filter((thread) => thread.currentTurnId !== null).length ?? 0;
   const activeTurnsBlockUpdate = activeTurnCount > 0 && status?.canUpdateWithActiveTurns !== true;
@@ -231,6 +242,19 @@ export function ApplicationSettingsCard({
           )}
 
           <div className="settings-actions codex-actions">
+            <a
+              className="settings-action-link"
+              href={REPOSITORY_URL}
+              rel="noopener noreferrer"
+              target="_blank"
+              onClick={(event) => {
+                if (!nativePlatform) return;
+                event.preventDefault();
+                void openRepository();
+              }}
+            >
+              {t("Открыть GitHub")}
+            </a>
             <button type="button" onClick={() => void downloadApk()}>
               {t("Скачать свежий APK")}
             </button>

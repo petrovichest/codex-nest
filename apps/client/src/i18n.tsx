@@ -325,6 +325,8 @@ const ENGLISH: Record<string, string> = {
   Результат: "Result",
   "Обновления доступны только для установки через install.sh.":
     "Updates are available only for installations made with install.sh.",
+  "Открыть GitHub": "Open GitHub",
+  "Не удалось открыть GitHub": "Failed to open GitHub",
   "Скачать свежий APK": "Download latest APK",
   "Скачать расширение для Chrome": "Download Chrome extension",
   "Не удалось открыть загрузку расширения для Chrome":

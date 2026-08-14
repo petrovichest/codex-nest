@@ -9,11 +9,13 @@ const connection = vi.hoisted(() => vi.fn());
 const openDownloadUrl = vi.hoisted(() => vi.fn());
 const isNativePlatform = vi.hoisted(() => vi.fn());
 const getAppInfo = vi.hoisted(() => vi.fn());
+const openBrowser = vi.hoisted(() => vi.fn());
 
 vi.mock("../connection", () => ({ useConnection: connection }));
 vi.mock("../downloads", () => ({ openDownloadUrl }));
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform } }));
 vi.mock("@capacitor/app", () => ({ App: { getInfo: getAppInfo } }));
+vi.mock("@capacitor/browser", () => ({ Browser: { open: openBrowser } }));
 
 beforeEach(() => {
   connection.mockReset();
@@ -22,6 +24,8 @@ beforeEach(() => {
   isNativePlatform.mockReset();
   isNativePlatform.mockReturnValue(false);
   getAppInfo.mockReset();
+  openBrowser.mockReset();
+  openBrowser.mockResolvedValue(undefined);
   vi.restoreAllMocks();
 });
 
@@ -79,6 +83,73 @@ describe("ApplicationSettingsCard", () => {
 
     expect(await screen.findByText("0.1.4-abcdef0 (1000078)")).toBeInTheDocument();
     expect(getAppInfo).toHaveBeenCalledOnce();
+  });
+
+  it("links to the repository in a separate web tab without another API request", async () => {
+    const api = {
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+
+    const link = await screen.findByRole("link", { name: "Открыть GitHub" });
+    expect(link).toHaveAttribute("href", "https://github.com/petrovichest/codex-nest");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(api.readAppSettings).toHaveBeenCalledOnce();
+    expect(api.checkAppUpdate).not.toHaveBeenCalled();
+    expect(api.updateApp).not.toHaveBeenCalled();
+    expect(openBrowser).not.toHaveBeenCalled();
+  });
+
+  it("opens the repository in the system browser on native platforms", async () => {
+    isNativePlatform.mockReturnValue(true);
+    getAppInfo.mockResolvedValue({
+      name: "CodexNest",
+      id: "com.codexnest.app",
+      version: "0.1.9",
+      build: "1000090",
+    });
+    const api = {
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("link", { name: "Открыть GitHub" }));
+
+    await waitFor(() =>
+      expect(openBrowser).toHaveBeenCalledWith({
+        url: "https://github.com/petrovichest/codex-nest",
+      }),
+    );
+  });
+
+  it("shows an error when the system browser cannot open GitHub", async () => {
+    isNativePlatform.mockReturnValue(true);
+    getAppInfo.mockResolvedValue({
+      name: "CodexNest",
+      id: "com.codexnest.app",
+      version: "0.1.9",
+      build: "1000090",
+    });
+    openBrowser.mockRejectedValueOnce(new Error("browser failed"));
+    const api = {
+      readAppSettings: vi.fn(async () => updateStatus()),
+      checkAppUpdate: vi.fn(),
+      updateApp: vi.fn(),
+    };
+    connection.mockReturnValue({ api, state: { network: "connected" } });
+
+    render(<ApplicationSettingsCard />);
+    fireEvent.click(await screen.findByRole("link", { name: "Открыть GitHub" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось открыть GitHub");
   });
 
   it("handles an unavailable Android APK version", async () => {
