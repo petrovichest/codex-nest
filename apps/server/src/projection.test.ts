@@ -639,6 +639,7 @@ describe("AppProjection", () => {
     const child = {
       ...thread("child", "/work", 2),
       ephemeral: true,
+      forkedFromId: "source",
       parentThreadId: "one",
       agentNickname: "tester",
       agentRole: "worker",
@@ -681,6 +682,7 @@ describe("AppProjection", () => {
         },
       }),
     );
+    expect(projection.summary("child")?.relation).not.toHaveProperty("forkedFromId");
     expect(bridge.request).toHaveBeenCalledWith("thread/name/set", {
       threadId: "child",
       name: "Проверить мобильную вёрстку субагента",
@@ -1163,6 +1165,11 @@ describe("AppProjection", () => {
         testTurn("live", "inProgress"),
       ]),
     );
+    projection.upsertThread({
+      ...thread("fork", "/work", 9),
+      sessionId: "fork-tree",
+      forkedFromId: "persistent",
+    });
     projection.upsertThread(thread("archived", "/work", 7));
     await projection.setArchived("archived", true);
     await store.flushed();
@@ -1190,6 +1197,11 @@ describe("AppProjection", () => {
       title: "persistent",
     });
     expect(reloaded.summary("archived")?.archived).toBe(true);
+    expect(reloaded.summary("fork")?.relation).toEqual({
+      kind: "session",
+      sessionId: "fork-tree",
+      forkedFromId: "persistent",
+    });
 
     await reloaded.sync();
 
@@ -1198,6 +1210,11 @@ describe("AppProjection", () => {
       currentTurnId: "live",
     });
     expect(reloaded.summary("archived")?.archived).toBe(true);
+    expect(reloaded.summary("fork")?.relation).toEqual({
+      kind: "session",
+      sessionId: "fork-tree",
+      forkedFromId: "persistent",
+    });
   });
 
   it("keeps a user session when app-server closes its in-memory thread", async () => {

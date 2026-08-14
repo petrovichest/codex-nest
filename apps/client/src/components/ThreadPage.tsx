@@ -63,6 +63,7 @@ import {
 } from "../offline-store";
 import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
+import { threadStatusClasses } from "../thread-status";
 import { AttentionPanel } from "./AttentionPanel";
 import { ArtifactViewer, type ArtifactLoadResult } from "./ArtifactViewer";
 import {
@@ -339,6 +340,43 @@ const TAIL_FOLLOW_THRESHOLD_PX = 120;
 const SCROLL_GESTURE_THRESHOLD_PX = 6;
 const DRAFT_SAVE_DELAY_MS = 500;
 
+function forkChildPriority(thread: ThreadSummary): number {
+  if (thread.archived) return 4;
+  if (thread.state === "needsAttention") return 0;
+  if (thread.state === "running") return 1;
+  if (thread.state === "queued") return 2;
+  return 3;
+}
+
+function sortForkChildren(threads: ThreadSummary[]): ThreadSummary[] {
+  return [...threads].sort((left, right) => {
+    const priority = forkChildPriority(left) - forkChildPriority(right);
+    if (priority !== 0) return priority;
+    return right.updatedAt - left.updatedAt || left.id.localeCompare(right.id);
+  });
+}
+
+function forkChildStateLabel(state: ThreadState, t: Translate): string {
+  switch (state) {
+    case "needsAttention":
+      return t("Требуется внимание");
+    case "running":
+      return t("Выполняется");
+    case "queued":
+      return t("В очереди");
+    case "completed":
+      return t("Завершена");
+    case "failed":
+      return t("Ошибка");
+    case "interrupted":
+      return t("Прервана");
+    case "unavailable":
+      return t("Недоступна");
+    case "idle":
+      return t("Готова");
+  }
+}
+
 function readVoiceInputMode(): VoiceInputMode {
   return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
 }
@@ -483,6 +521,22 @@ export function ThreadPage({
   const parentSummary = parentThreadId
     ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
     : undefined;
+  const forkedFromId =
+    summary?.relation.kind === "session" ? (summary.relation.forkedFromId ?? null) : null;
+  const forkParentSummary = forkedFromId
+    ? state.snapshot?.threads.find((thread) => thread.id === forkedFromId)
+    : undefined;
+  const forkChildren = useMemo(
+    () =>
+      sortForkChildren(
+        (state.snapshot?.threads ?? []).filter(
+          (thread) =>
+            thread.relation.kind === "session" && thread.relation.forkedFromId === threadId,
+        ),
+      ),
+    [state.snapshot?.threads, threadId],
+  );
+  const forkChildrenMenuRef = useRef<HTMLDetailsElement>(null);
   const project =
     newSessionProject ??
     state.snapshot?.projects.find((candidate) => candidate.id === summary?.projectId) ??
@@ -2867,7 +2921,40 @@ export function ThreadPage({
               : (localizeKnownServerText(language, workspaceSummary.title) ??
                 workspaceSummary.title)
           }
-          subtitle={project?.displayName ?? workspaceSummary.cwd}
+          subtitle={
+            <span className="workspace-subtitle-row">
+              <span className="workspace-context">
+                {project?.displayName ?? workspaceSummary.cwd}
+              </span>
+              {forkedFromId && (
+                <>
+                  <span aria-hidden="true" className="workspace-meta-separator">
+                    ·
+                  </span>
+                  {forkParentSummary ? (
+                    <Link
+                      className="fork-parent-link"
+                      to={`/threads/${encodeURIComponent(forkedFromId)}`}
+                    >
+                      <GitBranchIcon />
+                      <span>
+                        {t("Ответвление от {{title}}", {
+                          title:
+                            localizeKnownServerText(language, forkParentSummary.title) ??
+                            forkParentSummary.title,
+                        })}
+                      </span>
+                    </Link>
+                  ) : (
+                    <span className="fork-parent-unavailable">
+                      <GitBranchIcon />
+                      <span>{t("Ответвление · Родитель недоступен")}</span>
+                    </span>
+                  )}
+                </>
+              )}
+            </span>
+          }
           onOpenNavigation={onOpenNavigation}
           onToggleInspector={() => {
             setArtifactViewer(null);
@@ -2876,6 +2963,53 @@ export function ThreadPage({
           actions={
             showNewSessionChrome ? undefined : (
               <>
+                {forkChildren.length > 0 && (
+                  <details
+                    className="thread-action-menu fork-children-menu"
+                    data-dismiss-on-outside-click
+                    ref={forkChildrenMenuRef}
+                  >
+                    <summary
+                      aria-label={t("Показать ответвления: {{count}}", {
+                        count: forkChildren.length,
+                      })}
+                      className="icon-button fork-children-trigger"
+                    >
+                      <GitBranchIcon />
+                      <span aria-hidden="true">{forkChildren.length}</span>
+                    </summary>
+                    <div className="fork-children-popover">
+                      <strong>{t("Ответвления")}</strong>
+                      <div className="fork-children-list">
+                        {forkChildren.map((child) => {
+                          const childTitle =
+                            localizeKnownServerText(language, child.title) ?? child.title;
+                          const stateLabel = forkChildStateLabel(child.state, t);
+                          return (
+                            <Link
+                              className={`fork-child-link${child.archived ? " archived" : ""}`}
+                              key={child.id}
+                              onClick={() => forkChildrenMenuRef.current?.removeAttribute("open")}
+                              state={{ focusComposer: true }}
+                              to={`/threads/${encodeURIComponent(child.id)}`}
+                            >
+                              <span
+                                aria-label={t("Состояние: {{state}}", { state: stateLabel })}
+                                className={threadStatusClasses(child)}
+                                role="img"
+                                title={stateLabel}
+                              />
+                              <span className="fork-child-title">{childTitle}</span>
+                              {child.archived && (
+                                <span className="fork-child-archived">{t("Архив")}</span>
+                              )}
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </details>
+                )}
                 {!isSubagent && !workspaceSummary.archived && (
                   <button
                     aria-busy={browserUpdating || undefined}

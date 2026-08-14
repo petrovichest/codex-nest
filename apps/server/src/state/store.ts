@@ -195,6 +195,7 @@ export interface TeamToolOperationState {
 
 export interface SessionSnapshotState {
   sessionId: string;
+  forkedFromId?: string;
   name: string | null;
   preview: string;
   cwd: string;
@@ -1206,6 +1207,8 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshotState {
     isRecord(value) &&
     typeof value.sessionId === "string" &&
     value.sessionId.length > 0 &&
+    (value.forkedFromId === undefined ||
+      (typeof value.forkedFromId === "string" && value.forkedFromId.length > 0)) &&
     (value.name === null || typeof value.name === "string") &&
     typeof value.preview === "string" &&
     typeof value.cwd === "string" &&

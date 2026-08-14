@@ -1564,7 +1564,7 @@ describe("session forks", () => {
         model: "gpt-b",
         reasoningEffort: "low",
       },
-      relation: { kind: "session", sessionId: "fork" },
+      relation: { kind: "session", sessionId: "fork", forkedFromId: "thread" },
     });
     expect(response.json().thread.relation).not.toHaveProperty("parentThreadId");
     expect(harness.threadTitles.generate).toHaveBeenCalledWith("Готовая реализация с проверками", {
@@ -1616,6 +1616,7 @@ describe("session forks", () => {
       managedTeamToolsAvailable: true,
       sessionSnapshot: {
         sessionId: "fork",
+        forkedFromId: "thread",
         name: "Готовая реализация",
         preview: "Thread",
         cwd: "/work",

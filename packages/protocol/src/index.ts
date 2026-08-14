@@ -241,6 +241,7 @@ export type ThreadRelation =
   | {
       kind: "session";
       sessionId: string;
+      forkedFromId?: string;
     }
   | {
       kind: "subagent";

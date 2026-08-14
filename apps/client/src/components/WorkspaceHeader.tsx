@@ -12,7 +12,7 @@ export function WorkspaceHeader({
   actions,
 }: {
   title: string;
-  subtitle?: string;
+  subtitle?: ReactNode;
   leadingIcon?: ReactNode;
   onOpenNavigation(): void;
   onToggleInspector?(): void;

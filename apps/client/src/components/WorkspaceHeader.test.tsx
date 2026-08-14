@@ -30,4 +30,22 @@ describe("WorkspaceHeader", () => {
 
     expect(container.querySelector(".workspace-title-icon")).not.toBeInTheDocument();
   });
+
+  it("accepts linked metadata without changing the heading structure", () => {
+    render(
+      <I18nProvider>
+        <WorkspaceHeader
+          title="Fork"
+          subtitle={<a href="/threads/parent">Forked from Parent</a>}
+          onOpenNavigation={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole("heading", { level: 1, name: "Fork" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Forked from Parent" })).toHaveAttribute(
+      "href",
+      "/threads/parent",
+    );
+  });
 });

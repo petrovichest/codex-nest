@@ -2438,6 +2438,7 @@ function sessionSnapshot(cached: CachedThread): SessionSnapshotState | null {
   if (!isRecoverableUserSession(cached.thread)) return null;
   return {
     sessionId: cached.thread.sessionId,
+    ...(cached.thread.forkedFromId ? { forkedFromId: cached.thread.forkedFromId } : {}),
     name: cached.thread.name,
     preview: cached.thread.preview,
     cwd: cached.thread.cwd,
@@ -2454,6 +2455,7 @@ function sessionSnapshotsEqual(
 ): boolean {
   return (
     left?.sessionId === right.sessionId &&
+    left.forkedFromId === right.forkedFromId &&
     left.name === right.name &&
     left.preview === right.preview &&
     left.cwd === right.cwd &&
@@ -2475,7 +2477,7 @@ function cachedThreadFromSessionSnapshot(
       id,
       extra: null,
       sessionId: snapshot.sessionId,
-      forkedFromId: null,
+      forkedFromId: snapshot.forkedFromId ?? null,
       parentThreadId: null,
       preview: snapshot.preview,
       ephemeral: false,
@@ -2649,7 +2651,11 @@ function threadRelation(
     };
   }
   return thread.parentThreadId === null
-    ? { kind: "session", sessionId: thread.sessionId }
+    ? {
+        kind: "session",
+        sessionId: thread.sessionId,
+        ...(thread.forkedFromId ? { forkedFromId: thread.forkedFromId } : {}),
+      }
     : {
         kind: "subagent",
         sessionId: thread.sessionId,

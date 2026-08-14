@@ -134,6 +134,43 @@ const threads: ThreadSummary[] = [
   }),
 ];
 
+const forkThreads: ThreadSummary[] = [
+  thread("session-fork-active", "Проверка активной ветки", "needsAttention", {
+    relation: {
+      kind: "session",
+      sessionId: "session-fork-tree",
+      forkedFromId: mainThread.id,
+    },
+    updatedAt: FIXED_NOW - 20_000,
+  }),
+  thread("session-fork-queued", "Очередь альтернативы", "queued", {
+    relation: {
+      kind: "session",
+      sessionId: "session-fork-tree",
+      forkedFromId: mainThread.id,
+    },
+    updatedAt: FIXED_NOW - 40_000,
+  }),
+  thread("session-fork-archived", "Архивная гипотеза", "completed", {
+    archived: true,
+    relation: {
+      kind: "session",
+      sessionId: "session-fork-tree",
+      forkedFromId: mainThread.id,
+    },
+    updatedAt: FIXED_NOW - 10_000,
+  }),
+  thread("session-fork-grandchild", "Уточнение активной ветки", "running", {
+    currentTurnId: "turn-fork-grandchild",
+    relation: {
+      kind: "session",
+      sessionId: "session-fork-tree",
+      forkedFromId: "session-fork-active",
+    },
+    updatedAt: FIXED_NOW - 5_000,
+  }),
+];
+
 const mainDetail: ThreadDetail = {
   summary: mainThread,
   olderTurnsCursor: null,
@@ -353,6 +390,11 @@ export const snapshot: AppSnapshot = {
   voiceTranscriptions: [],
 };
 
+const forkSnapshot: AppSnapshot = {
+  ...snapshot,
+  threads: [...snapshot.threads, ...forkThreads],
+};
+
 const transcriptionConfig: TranscriptionConfigResponse = {
   providers: ["local", "openai"],
   provider: "local",
@@ -409,14 +451,21 @@ const codexStatus: CodexManagementStatus = {
 
 export type VisualFixtureOptions = {
   connected?: boolean;
+  forkLineage?: boolean;
   notificationPrompt?: boolean;
   theme: "light" | "dark";
 };
 
 export async function installVisualFixture(
   page: Page,
-  { connected = true, notificationPrompt = false, theme }: VisualFixtureOptions,
+  {
+    connected = true,
+    forkLineage = false,
+    notificationPrompt = false,
+    theme,
+  }: VisualFixtureOptions,
 ): Promise<void> {
+  const fixtureSnapshot = forkLineage ? forkSnapshot : snapshot;
   await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
   await page.addInitScript(
     ({
@@ -481,7 +530,7 @@ export async function installVisualFixture(
     },
   );
 
-  await page.route(`${SERVER_ORIGIN}/api/v1/**`, mockHttpRoute);
+  await page.route(`${SERVER_ORIGIN}/api/v1/**`, (route) => mockHttpRoute(route, fixtureSnapshot));
   await page.route(`${SERVER_ORIGIN}/downloads/**`, (route) =>
     route.fulfill({
       status: 200,
@@ -497,7 +546,7 @@ export async function installVisualFixture(
           type?: string;
         };
         if (frame.type === "authenticate") {
-          ws.send(JSON.stringify({ type: "snapshot", snapshot }));
+          ws.send(JSON.stringify({ type: "snapshot", snapshot: fixtureSnapshot }));
         } else if (frame.type === "ping") {
           ws.send(JSON.stringify({ type: "pong" }));
         }
@@ -515,15 +564,15 @@ export async function waitForVisualReady(page: Page): Promise<void> {
   });
 }
 
-function detailFor(id: string): ThreadDetail {
-  if (id === mainThread.id) return mainDetail;
-  if (id === attentionThread.id) return attentionDetail;
-  const summary = threads.find((candidate) => candidate.id === id);
+function detailFor(id: string, fixtureSnapshot: AppSnapshot): ThreadDetail {
+  const summary = fixtureSnapshot.threads.find((candidate) => candidate.id === id);
   if (!summary) throw new Error(`Unknown fixture thread: ${id}`);
+  if (id === mainThread.id) return { ...mainDetail, summary };
+  if (id === attentionThread.id) return { ...attentionDetail, summary };
   return { summary, turns: [], queuedMessages: [], olderTurnsCursor: null, draft: null };
 }
 
-async function mockHttpRoute(route: Route): Promise<void> {
+async function mockHttpRoute(route: Route, fixtureSnapshot: AppSnapshot): Promise<void> {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname;
@@ -554,10 +603,10 @@ async function mockHttpRoute(route: Route): Promise<void> {
   }
   if (path === "/api/v1/summary") {
     return json({
-      threadCount: snapshot.threads.length,
-      projectCount: snapshot.projects.length,
-      pendingAttentionCount: snapshot.attention.length,
-      syncedAt: snapshot.connection.syncedAt,
+      threadCount: fixtureSnapshot.threads.length,
+      projectCount: fixtureSnapshot.projects.length,
+      pendingAttentionCount: fixtureSnapshot.attention.length,
+      syncedAt: fixtureSnapshot.connection.syncedAt,
     });
   }
   if (path === "/api/v1/transcriptions/config") return json(transcriptionConfig);
@@ -588,7 +637,9 @@ async function mockHttpRoute(route: Route): Promise<void> {
   }
 
   const threadMatch = path.match(/^\/api\/v1\/threads\/([^/]+)$/u);
-  if (threadMatch && method === "GET") return json(detailFor(decodeURIComponent(threadMatch[1]!)));
+  if (threadMatch && method === "GET") {
+    return json(detailFor(decodeURIComponent(threadMatch[1]!), fixtureSnapshot));
+  }
   if (/^\/api\/v1\/threads\/[^/]+\/(read|viewed)$/u.test(path)) return empty();
   if (/^\/api\/v1\/threads\/[^/]+\/goal$/u.test(path) && method === "GET") return json(null);
   if (/^\/api\/v1\/threads\/[^/]+\/git-changes$/u.test(path)) {

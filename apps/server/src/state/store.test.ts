@@ -832,6 +832,42 @@ describe("StateStore", () => {
     }
   });
 
+  it("loads legacy and fork-aware session snapshots and rejects an empty fork parent", async () => {
+    const snapshot = {
+      sessionId: "fork-tree",
+      name: "Fork",
+      preview: "Preview",
+      cwd: "/work",
+      createdAt: 1,
+      updatedAt: 2,
+      archived: false,
+      currentTurnId: null,
+    };
+
+    const legacyState = validManagedTeamSerializedState();
+    legacyState.threadMeta.parent.sessionSnapshot = snapshot;
+    const legacy = await temporaryState();
+    await writeFile(legacy.path, JSON.stringify(legacyState), "utf8");
+    const legacyStore = new StateStore(legacy.path);
+    await legacyStore.load();
+    expect(legacyStore.snapshot().threadMeta.parent?.sessionSnapshot?.forkedFromId).toBeUndefined();
+
+    const forkState = structuredClone(legacyState);
+    forkState.threadMeta.parent.sessionSnapshot.forkedFromId = "source";
+    const fork = await temporaryState();
+    await writeFile(fork.path, JSON.stringify(forkState), "utf8");
+    const forkStore = new StateStore(fork.path);
+    await forkStore.load();
+    expect(forkStore.snapshot().threadMeta.parent?.sessionSnapshot?.forkedFromId).toBe("source");
+
+    forkState.threadMeta.parent.sessionSnapshot.forkedFromId = "";
+    const invalid = await temporaryState();
+    await writeFile(invalid.path, JSON.stringify(forkState), "utf8");
+    await expect(new StateStore(invalid.path).load()).rejects.toThrow(
+      "Corrupt thread metadata in CodexNest state",
+    );
+  });
+
   it("reloads unmaterialized sessions and complete server drafts", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

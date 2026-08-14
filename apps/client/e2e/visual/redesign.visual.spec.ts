@@ -115,6 +115,70 @@ test.describe("CodexNest redesign visual contract", () => {
     });
   });
 
+  test.describe("fork lineage", () => {
+    test.skip(
+      ({ browserName }) => browserName !== "chromium",
+      "The focused fork-navigation pixel contract is Chromium-only.",
+    );
+
+    test("13 desktop dark parent and fork popover", async ({ browserName, page }) => {
+      await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT, {
+        forkLineage: true,
+      });
+
+      const trigger = page.getByLabel("Показать ответвления: 3");
+      await trigger.click();
+      const popover = page.locator(".fork-children-popover");
+      await expect(popover).toBeVisible();
+      await expect(popover.locator(".fork-child-title")).toHaveText([
+        "Проверка активной ветки",
+        "Очередь альтернативы",
+        "Архивная гипотеза",
+      ]);
+      await expect(popover.getByText("Архив", { exact: true })).toBeVisible();
+      await expect(page).toHaveScreenshot("13-desktop-dark-forks.png", { fullPage: true });
+      if (browserName === "chromium") {
+        await expectA11yClean(page, "desktop fork navigation", ".workspace-header");
+      }
+    });
+
+    test("14 mobile light middle fork navigation", async ({ browserName, page }) => {
+      await openVisualPage(page, "/threads/session-fork-active", "light", PHONE_VIEWPORT, {
+        forkLineage: true,
+      });
+
+      await expect(
+        page.getByRole("link", { name: "Ответвление от Полировка мастерской" }),
+      ).toBeVisible();
+      const trigger = page.getByLabel("Показать ответвления: 1");
+      await assertCompactTouchTarget(trigger);
+      await trigger.click();
+      const popover = page.locator(".fork-children-popover");
+      await expect(popover.getByText("Уточнение активной ветки")).toBeVisible();
+      await expect(popover).toHaveCSS("position", "fixed");
+      const popoverBox = await popover.boundingBox();
+      expect(popoverBox, "mobile fork popover must have a rendered box").not.toBeNull();
+      expect(
+        popoverBox!.x,
+        "mobile fork popover stays inside the left edge",
+      ).toBeGreaterThanOrEqual(9);
+      expect(
+        popoverBox!.x + popoverBox!.width,
+        "mobile fork popover stays inside the right edge",
+      ).toBeLessThanOrEqual(PHONE_VIEWPORT.width - 9);
+      expect(
+        await page
+          .locator(".workspace-header")
+          .evaluate((element) => element.scrollWidth <= element.clientWidth),
+        "mobile fork header fits without horizontal scrolling",
+      ).toBe(true);
+      await expect(page).toHaveScreenshot("14-mobile-light-forks.png", { fullPage: true });
+      if (browserName === "chromium") {
+        await expectA11yClean(page, "mobile fork navigation", ".workspace-header");
+      }
+    });
+  });
+
   test("9 desktop light message queue", async ({ browserName, page }) => {
     await openVisualPage(page, "/threads/session-attention", "light", DESKTOP_VIEWPORT);
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
@@ -248,7 +312,7 @@ async function openVisualPage(
   path: string,
   theme: "light" | "dark",
   viewport: { width: number; height: number },
-  options: { connected?: boolean; notificationPrompt?: boolean } = {},
+  options: { connected?: boolean; forkLineage?: boolean; notificationPrompt?: boolean } = {},
 ): Promise<void> {
   await page.setViewportSize(viewport);
   await installVisualFixture(page, { theme, ...options });

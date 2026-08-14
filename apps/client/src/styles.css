@@ -1399,6 +1399,64 @@
   white-space: nowrap;
 }
 
+.workspace-subtitle-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.workspace-context,
+.fork-parent-link > span,
+.fork-parent-unavailable > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-context {
+  flex: 0 1 auto;
+}
+
+.workspace-meta-separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted) 65%, transparent);
+}
+
+.fork-parent-link,
+.fork-parent-unavailable {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fork-parent-link {
+  color: var(--muted-strong);
+}
+
+.fork-parent-link:hover {
+  color: var(--accent);
+}
+
+.fork-parent-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.fork-parent-unavailable {
+  color: var(--muted);
+}
+
+.fork-parent-link svg,
+.fork-parent-unavailable svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
 .workspace-actions {
   display: flex;
   align-items: center;
@@ -1481,6 +1539,94 @@
 
 .action-menu-popover button:hover {
   border-color: transparent;
+}
+
+.fork-children-trigger {
+  width: auto;
+  padding: 0 6px;
+  display: inline-flex;
+  gap: 3px;
+  color: var(--muted-strong);
+  font-size: 10px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.fork-children-trigger svg {
+  width: 16px;
+  height: 16px;
+}
+
+.fork-children-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 55;
+  width: min(300px, calc(100vw - 20px));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+
+.fork-children-popover > strong {
+  display: block;
+  padding: 6px 8px 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.fork-children-list {
+  max-height: min(320px, calc(100dvh - var(--header-height) - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 28%, transparent) transparent;
+}
+
+.fork-child-link {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.fork-child-link:hover,
+.fork-child-link:focus-visible {
+  color: var(--text-strong);
+  background: var(--sidebar-hover);
+}
+
+.fork-child-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.fork-child-link.archived {
+  color: var(--muted);
+}
+
+.fork-child-link .status {
+  width: 7px;
+  height: 7px;
+}
+
+.fork-child-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fork-child-archived {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .conversation-scroll {
@@ -4905,6 +5051,14 @@
 
   .workspace-header {
     padding: var(--app-safe-area-top) 10px 0;
+  }
+
+  .fork-children-popover {
+    position: fixed;
+    top: calc(var(--header-height) + 7px);
+    right: 10px;
+    left: 10px;
+    width: auto;
   }
 
   .workspace-title {

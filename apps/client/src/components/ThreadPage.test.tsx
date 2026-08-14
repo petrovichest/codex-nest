@@ -1958,6 +1958,92 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Создать ответвление отсюда" })).toBeNull();
   });
 
+  it("links a fork to its parent and shows a non-link fallback when the parent is unavailable", () => {
+    const fork = {
+      ...summary,
+      relation: { kind: "session" as const, sessionId: "fork-tree", forkedFromId: "parent" },
+    };
+    const parent = { ...summary, id: "parent", title: "Родительская задача" };
+    const context = mockThreadConnection(threadApi(), fork);
+    context.state.snapshot.threads = [fork, parent];
+    const view = renderThread();
+
+    expect(screen.getByText("Проект")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Ответвление от Родительская задача" }),
+    ).toHaveAttribute("href", "/threads/parent");
+
+    context.state.snapshot.threads = [fork];
+    view.rerender(threadRoute());
+
+    expect(screen.queryByRole("link", { name: /Ответвление от/ })).toBeNull();
+    expect(screen.getByText("Ответвление · Родитель недоступен")).toBeInTheDocument();
+  });
+
+  it("lists only direct forks by work priority, keeps archived forks last, and supports a middle node", () => {
+    const middle = {
+      ...summary,
+      relation: {
+        kind: "session" as const,
+        sessionId: "fork-tree",
+        forkedFromId: "grandparent",
+      },
+    };
+    const grandparent = { ...summary, id: "grandparent", title: "Исходная задача" };
+    const child = (
+      id: string,
+      title: string,
+      state: ThreadSummary["state"],
+      updatedAt: number,
+      archived = false,
+    ): ThreadSummary => ({
+      ...summary,
+      id,
+      title,
+      state,
+      updatedAt,
+      archived,
+      relation: { kind: "session", sessionId: "fork-tree", forkedFromId: "thread" },
+    });
+    const children = [
+      child("completed", "Недавно завершена", "completed", 100),
+      child("queued", "В очереди", "queued", 8),
+      child("running", "Выполняется", "running", 9),
+      child("attention", "Нужно решение", "needsAttention", 10),
+      child("idle", "Старая открытая", "idle", 7),
+      child("archived", "Архивная", "completed", 1_000, true),
+    ];
+    const indirect = {
+      ...child("grandchild", "Внук", "running", 2_000),
+      relation: {
+        kind: "session" as const,
+        sessionId: "fork-tree",
+        forkedFromId: "running",
+      },
+    };
+    const context = mockThreadConnection(threadApi(), middle);
+    context.state.snapshot.threads = [middle, grandparent, ...children, indirect];
+    render(forkThreadRoute());
+
+    expect(screen.getByRole("link", { name: "Ответвление от Исходная задача" })).toBeVisible();
+    const trigger = screen.getByLabelText("Показать ответвления: 6");
+    fireEvent.click(trigger);
+    const popover = screen.getByText("Ответвления").parentElement!;
+    const links = within(popover).getAllByRole("link");
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Нужно решение",
+      "Выполняется",
+      "В очереди",
+      "Недавно завершена",
+      "Старая открытая",
+      "АрхивнаяАрхив",
+    ]);
+    expect(within(popover).queryByText("Внук")).toBeNull();
+
+    fireEvent.click(within(popover).getByRole("link", { name: /Нужно решение/ }));
+    expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/attention:true");
+  });
+
   it("offers a fork on a completed plan alongside both implementation choices", async () => {
     const api = threadApi();
     const planThread = {
