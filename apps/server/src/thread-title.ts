@@ -40,6 +40,7 @@ export class ThreadTitleGenerator {
         approvalPolicy: "never",
         sandbox: "read-only",
         baseInstructions: TITLE_INSTRUCTIONS,
+        serviceTier: null,
         ...(options.model ? { model: options.model } : {}),
       }),
     );
@@ -60,6 +61,7 @@ export class ThreadTitleGenerator {
             },
           ],
           outputSchema: TITLE_SCHEMA,
+          serviceTier: null,
           ...(options.model ? { model: options.model } : {}),
           ...(options.effort ? { effort: options.effort } : {}),
         }),

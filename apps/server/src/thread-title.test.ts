@@ -28,6 +28,7 @@ describe("ThreadTitleGenerator", () => {
         ephemeral: true,
         approvalPolicy: "never",
         sandbox: "read-only",
+        serviceTier: null,
         baseInstructions: expect.stringContaining("same language"),
       }),
     ]);
@@ -39,6 +40,7 @@ describe("ThreadTitleGenerator", () => {
         threadId: "title-thread",
         model: "gpt-test",
         effort: "low",
+        serviceTier: null,
         input: [
           {
             type: "text",

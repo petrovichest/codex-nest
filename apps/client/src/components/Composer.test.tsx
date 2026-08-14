@@ -411,6 +411,25 @@ describe("Composer", () => {
     expect(toggle).toHaveFocus();
   });
 
+  it("does not send a legacy service tier when the model changes", () => {
+    const onSettingsChange = vi.fn();
+    render(
+      <Harness
+        initialSettings={{ collaborationMode: "default", serviceTier: "fast" }}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Модель и уровень рассуждений"));
+    const modelOptions = within(screen.getByRole("dialog", { name: "Настройки модели" })).getByRole(
+      "radiogroup",
+      { name: "Модель" },
+    );
+    fireEvent.click(within(modelOptions).getByRole("radio", { name: "GPT-5.6-Terra" }));
+
+    expect(onSettingsChange).toHaveBeenCalledWith({ model: "gpt-terra" });
+  });
+
   it("keeps pointer focus in the textarea for direct toolbar and attachment controls", () => {
     const view = render(
       <Harness
@@ -979,6 +998,7 @@ function Harness({
   input: controlledInput,
   inputSyncRevision,
   initialProjectId,
+  initialSettings = { collaborationMode: "default" },
   onDraftFlush,
   onGoalModeChange,
   onInput,
@@ -1003,6 +1023,7 @@ function Harness({
   input?: string;
   inputSyncRevision?: number;
   initialProjectId?: string;
+  initialSettings?: SessionSettings;
   onDraftFlush?(): void;
   onGoalModeChange?(value: boolean): void;
   onInput?(value: string): void;
@@ -1020,7 +1041,7 @@ function Harness({
   const [input, setInput] = useState(initialInput);
   const [images, setImages] = useState<ComposerImage[]>(initialImages);
   const [projectId, setProjectId] = useState(initialProjectId);
-  const [settings, setSettings] = useState<SessionSettings>({ collaborationMode: "default" });
+  const [settings, setSettings] = useState<SessionSettings>(initialSettings);
   const [voiceMode, setVoiceMode] = useState<"draft" | "send">("draft");
   return (
     <Composer

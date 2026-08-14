@@ -82,11 +82,11 @@ afterEach(() => {
 describe("initialSessionSettings", () => {
   const taskDefaults = { serviceTier: "fast", personality: "friendly" };
 
-  it("mirrors server defaults when model metadata is missing", () => {
+  it("ignores a legacy service-tier default when model metadata is missing", () => {
     expect(initialSessionSettings("high", [], taskDefaults)).toEqual({
       ...DEFAULT_SESSION_SETTINGS,
       reasoningEffort: "high",
-      ...taskDefaults,
+      personality: "friendly",
     });
   });
 

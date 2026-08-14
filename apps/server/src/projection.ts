@@ -229,10 +229,6 @@ export class AppProjection extends EventEmitter {
     const settings: SessionSettings = {
       ...DEFAULT_SESSION_SETTINGS,
       ...(explicitModel ? { model: explicitModel.id } : {}),
-      ...(defaults.serviceTier &&
-      (!model || model.serviceTiers.some((tier) => tier.id === defaults.serviceTier))
-        ? { serviceTier: defaults.serviceTier }
-        : {}),
       ...(defaults.personality && (!model || model.supportsPersonality)
         ? { personality: defaults.personality }
         : {}),
@@ -567,9 +563,10 @@ export class AppProjection extends EventEmitter {
 
   async setSettings(threadId: string, settings: SessionSettings): Promise<ThreadSummary> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
+    const normalized = sessionSettings(settings);
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-      meta.settings = settings;
+      meta.settings = normalized;
       state.threadMeta[threadId] = meta;
     });
     this.publishThread(threadId);
@@ -588,11 +585,13 @@ export class AppProjection extends EventEmitter {
   }
 
   async setTaskDefaults(taskDefaults: TaskDefaults): Promise<void> {
+    const normalized = { ...taskDefaults };
+    delete normalized.serviceTier;
     await this.store.update((state) => {
-      if (Object.keys(taskDefaults).length) state.taskDefaults = taskDefaults;
+      if (Object.keys(normalized).length) state.taskDefaults = normalized;
       else delete state.taskDefaults;
     });
-    this.publish({ type: "taskDefaults.changed", taskDefaults });
+    this.publish({ type: "taskDefaults.changed", taskDefaults: normalized });
   }
 
   async setUiLanguage(language: UiLanguage): Promise<void> {
@@ -1367,7 +1366,11 @@ export class AppProjection extends EventEmitter {
       const resumed = parseThreadResume(
         await this.bridge.request<unknown>(
           "thread/resume",
-          { threadId: thread.id, ...this.threadResumeConfigProvider(thread.id) },
+          {
+            threadId: thread.id,
+            ...this.threadResumeConfigProvider(thread.id),
+            serviceTier: null,
+          },
           30_000,
         ),
       );
@@ -2672,7 +2675,6 @@ function sessionSettings(settings?: SessionSettings): SessionSettings {
     ...(settings?.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: settings.reasoningEffort }),
-    ...(settings?.serviceTier === undefined ? {} : { serviceTier: settings.serviceTier }),
     ...(settings?.personality === undefined ? {} : { personality: settings.personality }),
   };
 }

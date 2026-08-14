@@ -198,12 +198,6 @@ export function SettingsPicker({
       patch.reasoningEffort =
         nextModel?.reasoningEfforts.find((option) => option.isDefault)?.value ?? null;
     }
-    if (
-      value.serviceTier &&
-      !nextModel?.serviceTiers.some((option) => option.id === value.serviceTier)
-    ) {
-      patch.serviceTier = null;
-    }
     if (value.personality && !nextModel?.supportsPersonality) patch.personality = null;
     onChange(patch);
   }

@@ -74,7 +74,6 @@ function thread(
       collaborationMode: "plan",
       model: "gpt-5.6-codex",
       reasoningEffort: "high",
-      serviceTier: "priority",
       personality: "pragmatic",
     },
     relation: { kind: "session", sessionId: id },
@@ -88,7 +87,6 @@ export const mainThread = thread("session-main", "Полировка масте�
     collaborationMode: "team",
     model: "gpt-5.6-codex",
     reasoningEffort: "high",
-    serviceTier: "priority",
     personality: "pragmatic",
   },
 });
@@ -378,15 +376,12 @@ export const snapshot: AppSnapshot = {
         { value: "medium", description: "Сбалансировано", isDefault: false },
         { value: "high", description: "Глубокая проверка", isDefault: true },
       ],
-      serviceTiers: [
-        { id: "auto", displayName: "Auto" },
-        { id: "priority", displayName: "Priority" },
-      ],
+      serviceTiers: [],
       supportsPersonality: true,
     },
   ],
   defaultReasoningEffort: "high",
-  taskDefaults: { serviceTier: "priority", personality: "pragmatic" },
+  taskDefaults: { personality: "pragmatic" },
   voiceTranscriptions: [],
 };
 

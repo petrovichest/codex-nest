@@ -82,6 +82,7 @@ const SETTINGS_SECTIONS = [
 ] as const;
 
 type SettingsSection = (typeof SETTINGS_SECTIONS)[number]["id"];
+type EditableTaskDefaults = Omit<TaskDefaults, "serviceTier">;
 const EMPTY_MODELS: ModelOption[] = [];
 
 function isSettingsSection(value: string | null): value is SettingsSection {
@@ -133,9 +134,10 @@ export function SettingsPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const initialTaskDefaults = state?.snapshot?.taskDefaults ?? {};
-  const [taskDefaults, setTaskDefaults] = useState<TaskDefaults>(initialTaskDefaults);
-  const [savedTaskDefaults, setSavedTaskDefaults] = useState<TaskDefaults>(initialTaskDefaults);
+  const initialTaskDefaults = editableTaskDefaults(state?.snapshot?.taskDefaults ?? {});
+  const [taskDefaults, setTaskDefaults] = useState<EditableTaskDefaults>(initialTaskDefaults);
+  const [savedTaskDefaults, setSavedTaskDefaults] =
+    useState<EditableTaskDefaults>(initialTaskDefaults);
   const [taskDefaultsSaving, setTaskDefaultsSaving] = useState(false);
   const [taskDefaultsError, setTaskDefaultsError] = useState<string | null>(null);
   const [notificationPermission, setNotificationPermission] =
@@ -196,7 +198,7 @@ export function SettingsPage({
   }, [load]);
 
   useEffect(() => {
-    const current = state?.snapshot?.taskDefaults ?? {};
+    const current = editableTaskDefaults(state?.snapshot?.taskDefaults ?? {});
     setTaskDefaults(current);
     setSavedTaskDefaults(current);
   }, [state?.snapshot?.taskDefaults]);
@@ -236,8 +238,9 @@ export function SettingsPage({
       const updated = await api.updateTaskDefaults(
         taskDefaultsPatch(savedTaskDefaults, taskDefaults),
       );
-      setTaskDefaults(updated);
-      setSavedTaskDefaults(updated);
+      const editable = editableTaskDefaults(updated);
+      setTaskDefaults(editable);
+      setSavedTaskDefaults(editable);
     } catch (caught) {
       setTaskDefaultsError(
         caught instanceof Error
@@ -567,38 +570,6 @@ export function SettingsPage({
                 </select>
               </SettingsRow>
               <SettingsRow
-                description={t("Приоритет обработки для новых задач.")}
-                label="Service tier"
-                labelFor="settings-service-tier"
-              >
-                <select
-                  disabled={!selectedTaskModel || taskDefaultsSaving}
-                  id="settings-service-tier"
-                  value={taskDefaults.serviceTier ?? ""}
-                  onChange={(event) =>
-                    setTaskDefaults((current) => ({
-                      ...current,
-                      serviceTier: event.target.value || undefined,
-                    }))
-                  }
-                >
-                  <option value="">{t("По умолчанию")}</option>
-                  {taskDefaults.serviceTier &&
-                    !selectedTaskModel?.serviceTiers.some(
-                      (tier) => tier.id === taskDefaults.serviceTier,
-                    ) && (
-                      <option value={taskDefaults.serviceTier}>
-                        {taskDefaults.serviceTier} — {t("Недоступна")}
-                      </option>
-                    )}
-                  {selectedTaskModel?.serviceTiers.map((tier) => (
-                    <option value={tier.id} key={tier.id}>
-                      {tier.displayName}
-                    </option>
-                  ))}
-                </select>
-              </SettingsRow>
-              <SettingsRow
                 description={t("Стиль ответов для новых задач.")}
                 label="Personality"
                 labelFor="settings-personality"
@@ -770,29 +741,32 @@ export function SettingsPage({
   );
 }
 
-function taskDefaultsForModel(value: TaskDefaults, models: ModelOption[]): TaskDefaults {
+function editableTaskDefaults(value: TaskDefaults): EditableTaskDefaults {
+  const next = { ...value };
+  delete next.serviceTier;
+  return next;
+}
+
+function taskDefaultsForModel(
+  value: EditableTaskDefaults,
+  models: ModelOption[],
+): EditableTaskDefaults {
   const defaultModel = models.find((model) => model.isDefault) ?? models[0];
   const selectedModel = value.model ? models.find((model) => model.id === value.model) : undefined;
   const effectiveModel = selectedModel ?? defaultModel;
   if (!effectiveModel) return value;
   const next = { ...value };
-  if (
-    next.serviceTier &&
-    !effectiveModel.serviceTiers.some((tier) => tier.id === next.serviceTier)
-  ) {
-    delete next.serviceTier;
-  }
   if (next.personality && !effectiveModel.supportsPersonality) delete next.personality;
   return next;
 }
 
-function taskDefaultsPatch(saved: TaskDefaults, current: TaskDefaults): UpdateTaskDefaultsRequest {
+function taskDefaultsPatch(
+  saved: EditableTaskDefaults,
+  current: EditableTaskDefaults,
+): UpdateTaskDefaultsRequest {
   return {
     ...(saved.model !== current.model ? { model: current.model ?? null } : {}),
     ...(saved.titleModel !== current.titleModel ? { titleModel: current.titleModel ?? null } : {}),
-    ...(saved.serviceTier !== current.serviceTier
-      ? { serviceTier: current.serviceTier ?? null }
-      : {}),
     ...(saved.personality !== current.personality
       ? { personality: current.personality ?? null }
       : {}),

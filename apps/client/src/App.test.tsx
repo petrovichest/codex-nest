@@ -2405,12 +2405,12 @@ describe("App routing and navigation", () => {
         description: "",
         isDefault: true,
         reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
-        serviceTiers: [{ id: "fast", displayName: "Fast" }],
+        serviceTiers: [],
         supportsPersonality: true,
       },
     ];
     appSnapshot.defaultReasoningEffort = "high";
-    appSnapshot.taskDefaults = { serviceTier: "fast", personality: "friendly" };
+    appSnapshot.taskDefaults = { personality: "friendly" };
     const api = mockConnection(appSnapshot);
     api.createProjectThread.mockReturnValue(creation.promise);
 
@@ -2431,7 +2431,6 @@ describe("App routing and navigation", () => {
         settings: {
           collaborationMode: "plan",
           reasoningEffort: "high",
-          serviceTier: "fast",
           personality: "friendly",
         },
       },
@@ -2453,7 +2452,7 @@ describe("App routing and navigation", () => {
     expect(api.updateThreadSettings).toHaveBeenCalledOnce();
   });
 
-  it("does not null-clear task defaults after a collaboration-only edit with stale metadata", async () => {
+  it("ignores a legacy service-tier default after a collaboration-only edit", async () => {
     const creation = deferred<{ thread: ThreadSummary }>();
     const appSnapshot = snapshot([baseThread]);
     appSnapshot.models = [
@@ -2509,12 +2508,12 @@ describe("App routing and navigation", () => {
         description: "",
         isDefault: true,
         reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
-        serviceTiers: [{ id: "fast", displayName: "Fast" }],
+        serviceTiers: [],
         supportsPersonality: true,
       },
     ];
     appSnapshot.defaultReasoningEffort = "high";
-    appSnapshot.taskDefaults = { serviceTier: "fast", personality: "friendly" };
+    appSnapshot.taskDefaults = { personality: "friendly" };
     const api = mockConnection(appSnapshot);
     api.createProjectThread.mockReturnValue(creation.promise);
 
@@ -2532,7 +2531,6 @@ describe("App routing and navigation", () => {
         settings: {
           collaborationMode: "plan",
           reasoningEffort: "high",
-          serviceTier: "fast",
           personality: "friendly",
         },
       },

@@ -256,7 +256,6 @@ interface ManagedTaskOptions {
   access: ManagedTeamTaskAccessState;
   model: string;
   reasoningEffort: string | null;
-  serviceTier: string | null;
 }
 
 interface ManagedChildRuntime {
@@ -299,7 +298,6 @@ const TEAM_TASK_OPTIONS_SCHEMA = {
   dependsOn: { type: "array", items: { type: "string" }, maxItems: 50 },
   access: TEAM_ACCESS_SCHEMA,
   reasoningEffort: { type: "string" },
-  serviceTier: { type: "string" },
 } as const;
 
 const ROOT_DYNAMIC_TOOLS = [
@@ -335,7 +333,6 @@ const ROOT_DYNAMIC_TOOLS = [
           prompt: { type: "string", description: "Self-contained follow-up instructions." },
           access: TEAM_ACCESS_SCHEMA,
           reasoningEffort: { type: "string" },
-          serviceTier: { type: "string" },
         },
         required: ["taskId", "prompt"],
         additionalProperties: false,
@@ -2460,6 +2457,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId: source.id,
           lastTurnId: turn.id,
           excludeTurns: true,
+          serviceTier: null,
         }),
       ).thread;
       await bridge.request("thread/goal/clear", { threadId: forked.id });
@@ -3236,7 +3234,7 @@ async function handleManagedTeamToolCall(
       access: options.access,
       resolvedModel: options.model,
       resolvedReasoningEffort: options.reasoningEffort,
-      resolvedServiceTier: options.serviceTier,
+      resolvedServiceTier: null,
       ...(reusesWorkspace && task.workspace
         ? { workspace: cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(task.workspace) }
         : {}),
@@ -3563,7 +3561,7 @@ async function createManagedTeamTask(
         await bridge.request<unknown>("thread/start", {
           cwd: parent.cwd,
           model: options.model,
-          ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
+          serviceTier: null,
           ...(parent.settings.personality ? { personality: parent.settings.personality } : {}),
           config: teamRuntimeConfig(),
           developerInstructions: TEAM_CHILD_INSTRUCTIONS,
@@ -3589,7 +3587,7 @@ async function createManagedTeamTask(
     access: options.access,
     resolvedModel: options.model,
     resolvedReasoningEffort: options.reasoningEffort,
-    resolvedServiceTier: options.serviceTier,
+    resolvedServiceTier: null,
     createdAt: now,
     lastActivityAt: now,
   };
@@ -3843,10 +3841,7 @@ async function startQueuedTeamTasks(
           queued.resolvedReasoningEffort,
           parent.settings.reasoningEffort,
         ]),
-        resolvedServiceTier: compatibleManagedChildTier(model, [
-          queued.resolvedServiceTier,
-          parent.settings.serviceTier,
-        ]),
+        resolvedServiceTier: null,
       };
       await store.update((state) => {
         const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
@@ -3872,7 +3867,7 @@ async function startQueuedTeamTasks(
             : {}),
           approvalPolicy: "never" as const,
           excludeTurns: true,
-          ...managedChildResumeSettings(parent.settings, projection.availableModels, launchTask),
+          ...managedChildResumeSettings(parent.settings, projection.availableModels),
           config: teamRuntimeConfig(),
           developerInstructions: TEAM_CHILD_INSTRUCTIONS,
         },
@@ -5047,7 +5042,6 @@ function publicManagedTask(
     access: task.access ?? null,
     model: task.resolvedModel ?? null,
     reasoningEffort: task.resolvedReasoningEffort ?? null,
-    serviceTier: task.resolvedServiceTier ?? null,
     tokensUsed: task.tokensUsed ?? 0,
     timeUsedSeconds:
       task.status === "running" && task.startedAt
@@ -5383,19 +5377,11 @@ function managedTaskOptions(
       inherited?.resolvedReasoningEffort,
       settings.reasoningEffort,
     ]);
-  const requestedTier = optionalToolString(args, "serviceTier");
-  if (requestedTier && !model.serviceTiers.some((tier) => tier.id === requestedTier)) {
-    throw new ProjectValidationError("The requested service tier is unavailable");
-  }
-  const serviceTier =
-    requestedTier ??
-    compatibleManagedChildTier(model, [inherited?.resolvedServiceTier, settings.serviceTier]);
   return {
     dependsOn: optionalToolStringArray(args, "dependsOn", 50) ?? [],
     access: managedTaskAccess(args, inherited?.access),
     model: model.id,
     reasoningEffort,
-    serviceTier,
   };
 }
 
@@ -5420,18 +5406,6 @@ function compatibleManagedChildEffort(
     ) ??
     model.reasoningEfforts.find((option) => option.isDefault)?.value ??
     null
-  );
-}
-
-function compatibleManagedChildTier(
-  model: ModelOption,
-  candidates: Array<string | null | undefined>,
-): string | null {
-  return (
-    candidates.find(
-      (candidate): candidate is string =>
-        Boolean(candidate) && model.serviceTiers.some((tier) => tier.id === candidate),
-    ) ?? null
   );
 }
 
@@ -5609,13 +5583,9 @@ function managedChildTurnSettings(
     task?.resolvedReasoningEffort,
     settings.reasoningEffort,
   ]);
-  const serviceTier = compatibleManagedChildTier(model, [
-    task?.resolvedServiceTier,
-    settings.serviceTier,
-  ]);
   return compact({
     model: model.id,
-    serviceTier,
+    serviceTier: null,
     effort,
     personality: settings.personality,
     ...(task && runtime
@@ -5640,15 +5610,11 @@ function managedChildTurnSettings(
 function managedChildResumeSettings(
   settings: SessionSettings,
   models: ModelOption[],
-  task: ManagedTeamTaskView,
 ): Record<string, unknown> {
   const model = managedChildModel(models);
   return compact({
     model: model.id,
-    serviceTier: compatibleManagedChildTier(model, [
-      task.resolvedServiceTier,
-      settings.serviceTier,
-    ]),
+    serviceTier: null,
     personality: settings.personality,
   });
 }
@@ -5809,10 +5775,10 @@ function requireAppManager(manager: AppManager | undefined): AppManager {
 }
 
 function threadSettings(settings?: SessionSettings): Record<string, unknown> {
-  if (!settings) return {};
+  if (!settings) return { serviceTier: null };
   return compact({
     model: settings.model,
-    serviceTier: settings.serviceTier,
+    serviceTier: null,
     personality: settings.personality,
   });
 }
@@ -5908,7 +5874,7 @@ function turnSettings(
     null;
   return compact({
     model: settings.model,
-    serviceTier: settings.serviceTier,
+    serviceTier: null,
     effort: settings.reasoningEffort,
     personality: settings.personality,
     collaborationMode: {
@@ -6356,6 +6322,7 @@ function mergeSettings(
   models: ModelOption[],
 ): SessionSettings {
   const next = applySettingsPatch(current, patch);
+  delete next.serviceTier;
   const model = effectiveModel(next, models);
   if (!model) throw new ProjectValidationError("Unknown model");
 
@@ -6369,12 +6336,6 @@ function mergeSettings(
     const fallback = model.reasoningEfforts.find((option) => option.isDefault)?.value;
     if (fallback) next.reasoningEffort = fallback;
     else delete next.reasoningEffort;
-  }
-  if (next.serviceTier && !model.serviceTiers.some(({ id }) => id === next.serviceTier)) {
-    if (patch.serviceTier !== undefined) {
-      throw new ProjectValidationError("Service tier is not supported by the selected model");
-    }
-    delete next.serviceTier;
   }
   if (next.personality && !model.supportsPersonality) {
     if (patch.personality !== undefined) {
@@ -6396,6 +6357,7 @@ function applySettingsPatch(
       UpdateThreadSettingsRequest[keyof UpdateThreadSettingsRequest],
     ]
   >) {
+    if (key === "serviceTier") continue;
     if (value === null) delete next[key as keyof SessionSettings];
     else if (value !== undefined) Object.assign(next, { [key]: value });
   }
@@ -6437,6 +6399,7 @@ function mergeTaskDefaults(
   models: ModelOption[],
 ): TaskDefaults {
   const next = { ...current };
+  delete next.serviceTier;
   if (patch.model !== undefined) {
     const model = validateTaskDefaultModel(patch.model, models);
     if (model) next.model = model;
@@ -6447,22 +6410,14 @@ function mergeTaskDefaults(
     if (model) next.titleModel = model;
     else delete next.titleModel;
   }
-  for (const key of ["serviceTier", "personality"] as const) {
-    const value = patch[key];
-    if (value === null) delete next[key];
-    else if (value !== undefined) next[key] = value;
-  }
+  const personality = patch.personality;
+  if (personality === null) delete next.personality;
+  else if (personality !== undefined) next.personality = personality;
 
   const model =
     (next.model ? models.find((candidate) => candidate.id === next.model) : undefined) ??
     models.find((candidate) => candidate.isDefault) ??
     models[0];
-  if (next.serviceTier && !model?.serviceTiers.some(({ id }) => id === next.serviceTier)) {
-    if (patch.serviceTier !== undefined && patch.serviceTier !== null) {
-      throw new ProjectValidationError("Service tier is not supported by the selected model");
-    }
-    if (patch.model !== undefined && model) delete next.serviceTier;
-  }
   if (next.personality && !model?.supportsPersonality) {
     if (patch.personality !== undefined && patch.personality !== null) {
       throw new ProjectValidationError("Personality is not supported by the selected model");

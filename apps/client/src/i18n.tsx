@@ -176,7 +176,6 @@ const ENGLISH: Record<string, string> = {
     "These values apply to new sessions and tasks on every connected device.",
   "Модель, которая будет выбрана для новых сессий.": "Model selected for new sessions.",
   "Модель для автоматических названий сессий.": "Model used for automatic session titles.",
-  "Приоритет обработки для новых задач.": "Processing priority for new tasks.",
   "Стиль ответов для новых задач.": "Response style for new tasks.",
   "По умолчанию": "Default",
   Дружелюбная: "Friendly",

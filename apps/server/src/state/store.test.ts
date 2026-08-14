@@ -160,6 +160,7 @@ describe("StateStore", () => {
           collaborationMode: "plan",
           model: "gpt",
           reasoningEffort: "high",
+          serviceTier: "priority",
           approvalPolicy: "on-request",
           approvalsReviewer: "auto_review",
         },
@@ -180,7 +181,7 @@ describe("StateStore", () => {
     });
   });
 
-  it("persists session and title model task defaults", async () => {
+  it("strips legacy service tiers from persisted settings and task defaults", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);
     await store.load();
@@ -199,7 +200,6 @@ describe("StateStore", () => {
     expect(reloaded.snapshot().taskDefaults).toEqual({
       model: "gpt-a",
       titleModel: "gpt-b",
-      serviceTier: "fast",
       personality: "friendly",
     });
   });

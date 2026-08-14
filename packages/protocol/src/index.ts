@@ -546,6 +546,7 @@ export type SessionSettings = {
   collaborationMode: CollaborationMode;
   model?: string;
   reasoningEffort?: string;
+  /** @deprecated CodexNest always uses the standard service tier. */
   serviceTier?: string;
   personality?: string;
 };
@@ -553,6 +554,7 @@ export type SessionSettings = {
 export type TaskDefaults = {
   model?: string;
   titleModel?: string;
+  /** @deprecated CodexNest ignores this value and always uses the standard service tier. */
   serviceTier?: string;
   personality?: string;
 };
@@ -560,6 +562,7 @@ export type TaskDefaults = {
 export type UpdateTaskDefaultsRequest = {
   model?: string | null;
   titleModel?: string | null;
+  /** @deprecated Accepted for compatibility and ignored. */
   serviceTier?: string | null;
   personality?: string | null;
 };
@@ -1175,6 +1178,7 @@ export type UpdateThreadSettingsRequest = {
   collaborationMode?: CollaborationMode;
   model?: string | null;
   reasoningEffort?: string | null;
+  /** @deprecated Accepted for compatibility and ignored. */
   serviceTier?: string | null;
   personality?: string | null;
 };

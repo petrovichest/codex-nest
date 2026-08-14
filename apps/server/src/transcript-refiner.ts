@@ -42,7 +42,7 @@ export class TranscriptRefiner {
         sandbox: "read-only",
         baseInstructions: REFINEMENT_INSTRUCTIONS,
         model: options.model,
-        serviceTier: "priority",
+        serviceTier: null,
       }),
     );
     const threadId = started.thread.id;
@@ -67,7 +67,7 @@ export class TranscriptRefiner {
           ],
           outputSchema: REFINEMENT_SCHEMA,
           model: options.model,
-          serviceTier: "priority",
+          serviceTier: null,
           effort: "low",
         }),
       );

@@ -47,7 +47,7 @@ const model: ModelOption = {
   description: "",
   isDefault: true,
   reasoningEfforts: [{ value: "high", description: null, isDefault: true }],
-  serviceTiers: [{ id: "fast", displayName: "Fast" }],
+  serviceTiers: [],
   supportsPersonality: true,
 };
 
@@ -311,7 +311,7 @@ describe("NewSession", () => {
     expect(createProjectThread).toHaveBeenCalledOnce();
   });
 
-  it("restores an abandoned early submission with its images and settings without sending it", async () => {
+  it("restores an abandoned early submission without carrying a legacy service tier", async () => {
     let stored: {
       projectId: string;
       value: ThreadDraft;
@@ -402,7 +402,6 @@ describe("NewSession", () => {
       ]);
       expect(stored?.settings).toEqual({
         collaborationMode: "default",
-        serviceTier: "fast",
         personality: "friendly",
       });
     });

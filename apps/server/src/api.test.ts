@@ -1590,6 +1590,7 @@ describe("session forks", () => {
       threadId: "thread",
       lastTurnId: "selected-turn",
       excludeTurns: true,
+      serviceTier: null,
     });
     expect(harness.threadTitles.generate.mock.invocationCallOrder[0]).toBeLessThan(
       harness.bridge.request.mock.invocationCallOrder[
@@ -1675,6 +1676,7 @@ describe("session forks", () => {
       threadId: "thread",
       lastTurnId: "plan-turn",
       excludeTurns: true,
+      serviceTier: null,
     });
     await harness.app.close();
   });
@@ -1802,16 +1804,13 @@ describe("task defaults", () => {
     ).toEqual({
       model: "gpt-a",
       titleModel: "gpt-b",
-      serviceTier: "fast",
       personality: "friendly",
     });
     expect((await save({ titleModel: null })).json()).toEqual({
       model: "gpt-a",
-      serviceTier: "fast",
       personality: "friendly",
     });
     expect((await save({ model: null })).json()).toEqual({
-      serviceTier: "fast",
       personality: "friendly",
     });
 
@@ -1826,7 +1825,6 @@ describe("task defaults", () => {
     expect((await save({ personality: "friendly" })).json()).toEqual({
       model: "retired-session-model",
       titleModel: "retired-title-model",
-      serviceTier: "legacy-tier",
       personality: "friendly",
     });
     expect(harness.projection.newSessionSettings).toEqual({
@@ -1835,7 +1833,6 @@ describe("task defaults", () => {
     });
     expect((await save({ titleModel: null })).json()).toEqual({
       model: "retired-session-model",
-      serviceTier: "legacy-tier",
       personality: "friendly",
     });
     await harness.app.close();
@@ -2324,7 +2321,6 @@ describe("thread settings", () => {
     expect(resetPreference.json().settings).toEqual({
       collaborationMode: "default",
       model: "gpt-a",
-      serviceTier: "fast",
       personality: "friendly",
     });
     expect(store.snapshot().defaultReasoningEffort).toBeUndefined();
@@ -2520,6 +2516,7 @@ describe("thread settings", () => {
       const properties = managedTools?.find((candidate) => candidate.name === toolName)?.inputSchema
         .properties;
       expect(properties).toHaveProperty("reasoningEffort");
+      expect(properties).not.toHaveProperty("serviceTier");
       expect(properties).not.toHaveProperty("model");
       expect(properties).not.toHaveProperty("tokenBudget");
       expect(properties).not.toHaveProperty("timeoutMinutes");
@@ -2784,7 +2781,6 @@ describe("thread settings", () => {
     expect(store.snapshot().taskDefaults).toEqual({
       model: "gpt-a",
       titleModel: "gpt-b",
-      serviceTier: "fast",
       personality: "friendly",
     });
     expect(projection.summary("thread")?.settings).not.toMatchObject({ serviceTier: "fast" });
@@ -2795,7 +2791,6 @@ describe("thread settings", () => {
     });
     expect(withDefaults.json().thread.settings).toMatchObject({
       model: "gpt-a",
-      serviceTier: "fast",
       personality: "friendly",
     });
 
@@ -4661,20 +4656,20 @@ describe("Team orchestration", () => {
       sandboxPolicy: { type: "readOnly", networkAccess: false },
       model: "gpt-5.6-sol",
       effort: "high",
-      serviceTier: "fast",
+      serviceTier: null,
     });
     const childThreadStart = bridge.request.mock.calls.find(
       ([method, params]) =>
         method === "thread/start" &&
         String((params as Record<string, unknown>).threadSource).startsWith("codexnest-managed:"),
     )?.[1];
-    expect(childThreadStart).toMatchObject({ model: "gpt-5.6-sol", serviceTier: "fast" });
+    expect(childThreadStart).toMatchObject({ model: "gpt-5.6-sol", serviceTier: null });
     const childResume = bridge.request.mock.calls.find(
       ([method, params]) =>
         method === "thread/resume" &&
         (params as Record<string, unknown>).threadId === spawned.threadId,
     )?.[1];
-    expect(childResume).toMatchObject({ model: "gpt-5.6-sol", serviceTier: "fast" });
+    expect(childResume).toMatchObject({ model: "gpt-5.6-sol", serviceTier: null });
 
     const submitted = await callTeamTool(bridge, String(spawned.threadId), "submit_result", {
       outcome: "success",

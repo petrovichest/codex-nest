@@ -147,7 +147,8 @@ type AcceptedDraftClearGuard = {
   pendingRevision: number;
 };
 
-type PendingSettingsField = keyof UpdateThreadSettingsRequest;
+type PendingSettingsField = Exclude<keyof UpdateThreadSettingsRequest, "serviceTier">;
+type ClientSessionSettings = Omit<SessionSettings, "serviceTier">;
 
 type QueueAction = {
   messageId: string;
@@ -215,7 +216,7 @@ export function initialSessionSettings(
   defaultReasoningEffort: string | undefined,
   models: ModelOption[],
   taskDefaults?: TaskDefaults,
-): SessionSettings {
+): ClientSessionSettings {
   const explicitModel = taskDefaults?.model
     ? models.find((candidate) => candidate.id === taskDefaults.model)
     : undefined;
@@ -223,10 +224,6 @@ export function initialSessionSettings(
   const settings = {
     ...DEFAULT_SESSION_SETTINGS,
     ...(explicitModel ? { model: explicitModel.id } : {}),
-    ...(taskDefaults?.serviceTier &&
-    (!model || model.serviceTiers.some((tier) => tier.id === taskDefaults.serviceTier))
-      ? { serviceTier: taskDefaults.serviceTier }
-      : {}),
     ...(taskDefaults?.personality && (!model || model.supportsPersonality)
       ? { personality: taskDefaults.personality }
       : {}),
@@ -240,15 +237,29 @@ export function initialSessionSettings(
   return settings;
 }
 
+function clientSessionSettings(value: SessionSettings): ClientSessionSettings {
+  const next = { ...value };
+  delete next.serviceTier;
+  return next;
+}
+
+function clientSessionSettingsPatch(
+  value: UpdateThreadSettingsRequest,
+): UpdateThreadSettingsRequest {
+  const next = { ...value };
+  delete next.serviceTier;
+  return next;
+}
+
 function applySessionSettingsPatch(
-  current: SessionSettings,
+  current: ClientSessionSettings,
   patch: UpdateThreadSettingsRequest,
-): SessionSettings {
+): ClientSessionSettings {
   const next = { ...current };
   if (patch.collaborationMode !== undefined) {
     next.collaborationMode = patch.collaborationMode;
   }
-  for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
+  for (const key of ["model", "reasoningEffort", "personality"] as const) {
     const value = patch[key];
     if (value === undefined) continue;
     if (value === null) delete next[key];
@@ -259,14 +270,14 @@ function applySessionSettingsPatch(
 
 function settingsPatchBetween(
   current: SessionSettings,
-  target: SessionSettings,
+  target: ClientSessionSettings,
   touched: ReadonlySet<PendingSettingsField>,
 ): UpdateThreadSettingsRequest {
   const patch: UpdateThreadSettingsRequest = {};
   if (touched.has("collaborationMode") && current.collaborationMode !== target.collaborationMode) {
     patch.collaborationMode = target.collaborationMode;
   }
-  for (const key of ["model", "reasoningEffort", "serviceTier", "personality"] as const) {
+  for (const key of ["model", "reasoningEffort", "personality"] as const) {
     if (!touched.has(key) || current[key] === target[key]) continue;
     patch[key] = target[key] ?? null;
   }
@@ -462,7 +473,7 @@ export function ThreadPage({
   const [preparationWorking, setPreparationWorking] = useState(false);
   const [preparationRetry, setPreparationRetry] = useState(0);
   const [storageWarning, setStorageWarning] = useState(false);
-  const [pendingSettings, setPendingSettings] = useState<SessionSettings>(() =>
+  const [pendingSettings, setPendingSettings] = useState<ClientSessionSettings>(() =>
     initialSessionSettings(
       state.snapshot?.defaultReasoningEffort,
       state.snapshot?.models ?? [],
@@ -1553,14 +1564,13 @@ export function ThreadPage({
           : current.value;
       const settings =
         stored?.settings && pendingSettingsTouchedRef.current.size === 0
-          ? structuredClone(stored.settings)
+          ? clientSessionSettings(stored.settings)
           : current.settings;
       if (stored?.settings && pendingSettingsTouchedRef.current.size === 0) {
         for (const key of [
           "collaborationMode",
           "model",
           "reasoningEffort",
-          "serviceTier",
           "personality",
         ] as const) {
           if (pendingSettingsRef.current[key] !== settings[key]) {
@@ -2754,15 +2764,11 @@ export function ThreadPage({
   const toggleArchive = () => void api.archive(threadId, !summary!.archived);
 
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
+    patch = clientSessionSettingsPatch(patch);
+    if (Object.keys(patch).length === 0) return;
     if (preparationRef.current.active) {
       const next = applySessionSettingsPatch(pendingSettingsRef.current, patch);
-      for (const key of [
-        "collaborationMode",
-        "model",
-        "reasoningEffort",
-        "serviceTier",
-        "personality",
-      ] as const) {
+      for (const key of ["collaborationMode", "model", "reasoningEffort", "personality"] as const) {
         if (patch[key] !== undefined) pendingSettingsTouchedRef.current.add(key);
       }
       pendingSettingsRef.current = next;

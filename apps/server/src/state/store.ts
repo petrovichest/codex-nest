@@ -1047,6 +1047,7 @@ function validateState(value: unknown): CodexNestState {
   ) {
     throw new Error("Corrupt default reasoning effort in CodexNest state");
   }
+  if (isRecord(value.taskDefaults)) delete value.taskDefaults.serviceTier;
   if (value.taskDefaults !== undefined && !isTaskDefaults(value.taskDefaults)) {
     throw new Error("Corrupt task defaults in CodexNest state");
   }
@@ -1060,6 +1061,7 @@ function validateState(value: unknown): CodexNestState {
     if (!isProject(project)) throw new Error("Corrupt project in CodexNest state");
   }
   for (const meta of Object.values(value.threadMeta)) {
+    if (isRecord(meta) && isRecord(meta.settings)) delete meta.settings.serviceTier;
     if (isRecord(meta) && isLegacyTeamOrchestrationState(meta.teamOrchestration)) {
       delete meta.teamOrchestration;
     }
