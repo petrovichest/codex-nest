@@ -3802,6 +3802,7 @@ function mockConnection(
     api,
     appActive: true,
     foregroundEpoch: 0,
+    streamRecoveryEpoch: 0,
     state: {
       snapshot: appSnapshot,
       details: Object.fromEntries(

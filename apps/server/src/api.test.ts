@@ -4208,6 +4208,12 @@ describe("Team orchestration", () => {
     const childTurnId =
       store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
         ?.childTurnId;
+    const childUpdates: Array<Record<string, unknown>> = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "thread.upserted" && event.thread.id === spawned.threadId) {
+        childUpdates.push(event.thread);
+      }
+    });
     bridge.emit("notification", {
       method: "turn/completed",
       params: {
@@ -4238,6 +4244,7 @@ describe("Team orchestration", () => {
       });
       expect(tracked?.delivery).toBeUndefined();
     });
+    expect(childUpdates.at(-1)).toMatchObject({ state: "completed", currentTurnId: null });
 
     const queued = await app.inject({
       method: "POST",

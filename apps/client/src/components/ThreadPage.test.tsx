@@ -4144,16 +4144,17 @@ describe("Activity", () => {
     expect(scroll.scrollTop).toBe(470);
   });
 
-  it("does not reload the open chat for a reconnect snapshot epoch", async () => {
+  it("reloads the open chat after a reconnect snapshot without duplicating the initial read", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary);
     const view = renderThread();
     await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(1));
 
-    context.state.snapshotEpoch += 1;
+    context.streamRecoveryEpoch += 1;
     view.rerender(threadRoute());
 
-    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
+    expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
   });
 
   it("reloads the open chat as soon as the native app returns to the foreground", async () => {
@@ -5007,6 +5008,7 @@ function mockThreadConnection(
     api,
     appActive: true,
     foregroundEpoch: 0,
+    streamRecoveryEpoch: 0,
     state: {
       snapshot: {
         projects: [

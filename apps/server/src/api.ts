@@ -3525,6 +3525,7 @@ async function handleManagedTeamToolCall(
     const reason = optionalToolString(args, "reason");
     await finalizeManagedTask(
       store,
+      projection,
       task.childThreadId,
       `cancelled:${Date.now()}`,
       "interrupted",
@@ -3804,6 +3805,7 @@ async function startQueuedTeamTasks(
     if (dependencyFailure) {
       await finalizeManagedTask(
         store,
+        projection,
         dependencyFailure.task.childThreadId,
         `dependency-failed:${Date.now()}`,
         "failed",
@@ -3926,6 +3928,7 @@ async function startQueuedTeamTasks(
       } else {
         await finalizeManagedTask(
           store,
+          projection,
           queued.childThreadId,
           `start-error:${Date.now()}`,
           "failed",
@@ -4033,6 +4036,7 @@ async function handleManagedTeamNotification(
     if (
       await finalizeManagedTask(
         store,
+        projection,
         childThreadId,
         turn.id,
         turnOutcome(turn),
@@ -4052,6 +4056,7 @@ async function handleManagedTeamNotification(
     if (
       await finalizeManagedTask(
         store,
+        projection,
         childThreadId,
         `system-error:${Date.now()}`,
         "failed",
@@ -4069,6 +4074,7 @@ async function handleManagedTeamNotification(
     if (
       await finalizeManagedTask(
         store,
+        projection,
         childThreadId,
         `${notification.method}:${Date.now()}`,
         outcome,
@@ -4090,6 +4096,7 @@ async function handleManagedTeamNotification(
 
 async function finalizeManagedTask(
   store: StateStore,
+  projection: AppProjection,
   childThreadId: string,
   terminalTurnId: string,
   outcome: ThreadOutcome,
@@ -4167,6 +4174,7 @@ async function finalizeManagedTask(
     }
     recorded = true;
   });
+  if (recorded) projection.publishThreadState(childThreadId);
   return recorded;
 }
 
@@ -4654,6 +4662,7 @@ async function reconcileTeamOrchestration(
           if (
             await finalizeManagedTask(
               store,
+              projection,
               task.childThreadId,
               recoveredTurn.id,
               turnOutcome(recoveredTurn),
@@ -4690,6 +4699,7 @@ async function reconcileTeamOrchestration(
             if (
               await finalizeManagedTask(
                 store,
+                projection,
                 task.childThreadId,
                 `reconcile-missing:${Date.now()}`,
                 "interrupted",
@@ -4709,6 +4719,7 @@ async function reconcileTeamOrchestration(
           isMissingRolloutError(error) &&
           (await finalizeManagedTask(
             store,
+            projection,
             task.childThreadId,
             `reconcile-deleted:${Date.now()}`,
             "failed",

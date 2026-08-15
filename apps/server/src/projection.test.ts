@@ -379,6 +379,81 @@ describe("AppProjection", () => {
     expect(projection.summary("one")).toMatchObject({ state: "running", currentTurnId: "live" });
   });
 
+  it("does not roll a pre-existing live turn back from an equal-time full sync", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const updatedAt = Math.floor(Date.now() / 1_000);
+    const bridge = new EventEmitter() as EventEmitter & {
+      state: "ready";
+      request: ReturnType<typeof vi.fn>;
+    };
+    bridge.state = "ready";
+    bridge.request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/list") {
+        return params.archived
+          ? { data: [], nextCursor: null, backwardsCursor: null }
+          : {
+              data: [thread("one", "/work", updatedAt, { type: "idle" })],
+              nextCursor: null,
+              backwardsCursor: null,
+            };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return {
+          data: [testTurn("last", "completed")],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", updatedAt));
+    await projection.setCurrentTurn("one", "live");
+
+    await projection.sync();
+
+    expect(projection.summary("one")).toMatchObject({ state: "running", currentTurnId: "live" });
+  });
+
+  it("does not roll a pre-existing live turn back from an equal-time thread refresh", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const updatedAt = Math.floor(Date.now() / 1_000);
+    const bridge = new EventEmitter() as EventEmitter & {
+      state: "ready";
+      request: ReturnType<typeof vi.fn>;
+    };
+    bridge.state = "ready";
+    bridge.request = vi.fn(async (method: string) => {
+      if (method === "thread/read") {
+        return { thread: thread("one", "/work", updatedAt, { type: "idle" }) };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", updatedAt));
+    await projection.setCurrentTurn("one", "live");
+
+    await projection.refreshThread("one");
+
+    expect(projection.summary("one")).toMatchObject({ state: "running", currentTurnId: "live" });
+  });
+
   it("does not resurrect a thread deleted while a full sync is listing it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

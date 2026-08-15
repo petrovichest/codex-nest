@@ -677,7 +677,9 @@ export class AppProjection extends EventEmitter {
       throw error;
     }
     if (this.historyRevision(threadId) !== baselineRevision) return this.summary(threadId);
-    const archived = this.threads.get(threadId)?.archived ?? false;
+    const current = this.threads.get(threadId);
+    if (wouldRollbackLiveTurn(current, response.thread)) return this.summary(threadId);
+    const archived = current?.archived ?? false;
     return this.upsertThread(response.thread, archived);
   }
 
@@ -1034,6 +1036,7 @@ export class AppProjection extends EventEmitter {
       incoming.add(thread.id);
       if (changedDuringSync(thread.id)) continue;
       const liveCached = this.threads.get(thread.id);
+      if (wouldRollbackLiveTurn(liveCached, thread)) continue;
       const liveGoalStatus = liveCached?.goalStatus;
       const latestThread =
         liveCached && liveCached.thread.updatedAt > thread.updatedAt
@@ -3147,6 +3150,11 @@ function activeTurnId(thread: Thread): string | null {
     if (turn?.status === "inProgress") return turn.id;
   }
   return null;
+}
+
+function wouldRollbackLiveTurn(current: CachedThread | undefined, incoming: Thread): boolean {
+  if (!current?.currentTurnId || incoming.updatedAt > current.thread.updatedAt) return false;
+  return !incoming.turns.some((turn) => turn.id === current.currentTurnId);
 }
 
 function activityKey(threadId: string, turnId: string, itemId: string): string {

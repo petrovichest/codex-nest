@@ -516,8 +516,11 @@ function applyDetail(
 ): ClientState {
   const threadId = detail.summary.id;
   const current = state.details[threadId];
+  const snapshotSummary = state.snapshot?.threads.find((thread) => thread.id === threadId);
   const liveSummary = preserveLive
-    ? state.snapshot?.threads.find((thread) => thread.id === threadId)
+    ? snapshotSummary && (!current || snapshotSummary.updatedAt > current.summary.updatedAt)
+      ? snapshotSummary
+      : (current?.summary ?? snapshotSummary)
     : undefined;
   const expanded = state.expandedHistory[threadId] ?? false;
   const subagent = detail.summary.relation.kind === "subagent";

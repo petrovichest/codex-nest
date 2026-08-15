@@ -447,6 +447,7 @@ export function ThreadPage({
     state,
     appActive,
     foregroundEpoch,
+    streamRecoveryEpoch,
     dispatch,
     refreshDetail,
     forceRefreshDetail,
@@ -1849,7 +1850,7 @@ export function ThreadPage({
         }
       });
     }
-  }, [foregroundEpoch, threadId, refreshDetail]);
+  }, [foregroundEpoch, refreshDetail, streamRecoveryEpoch, threadId]);
 
   useEffect(() => {
     if (!threadId || !summary?.unseen || !appActive || state.network !== "connected") return;

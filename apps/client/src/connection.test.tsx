@@ -334,13 +334,14 @@ describe("ConnectionProvider", () => {
     let refresh: (() => Promise<ThreadDetail>) | undefined;
 
     function Probe() {
-      const { forceRefreshDetail, state } = useConnection();
+      const { forceRefreshDetail, state, streamRecoveryEpoch } = useConnection();
       refresh = () => forceRefreshDetail("thread");
       const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
       return (
         <>
           <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>
           <span>{latest && "text" in latest ? latest.text : ""}</span>
+          <span>{`recovery:${streamRecoveryEpoch}`}</span>
         </>
       );
     }
@@ -357,6 +358,7 @@ describe("ConnectionProvider", () => {
 
     expect(screen.getByText("Актуальная сессия")).toBeInTheDocument();
     expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
+    expect(screen.getByText("recovery:0")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("https://codexnest.example/api/v1/threads/thread/refresh"),
       expect.objectContaining({ method: "POST" }),
@@ -480,6 +482,210 @@ describe("ConnectionProvider", () => {
     });
 
     expect(screen.getByText("Начало live-обновления")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("does not treat an unrelated subagent event as live progress in the refreshed thread", async () => {
+    const running = {
+      ...summary,
+      state: "running" as const,
+      currentTurnId: "turn",
+      updatedAt: 3,
+    };
+    const child: ThreadSummary = {
+      ...summary,
+      id: "child",
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: "thread",
+        nickname: null,
+        role: null,
+      },
+    };
+    const detail = (explanation: string): ThreadDetail => ({
+      summary: running,
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 3,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 3,
+            explanation,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [],
+          itemsLoaded: false,
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    });
+    let resolveRefresh!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, forceRefreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: detail("Старый шаг"), page: "latest" });
+      }, [dispatch]);
+      refresh = () => forceRefreshDetail("thread");
+      return <span>{state.details.thread?.turns[0]?.progress.explanation ?? "none"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [running, child]) });
+    });
+    expect(await screen.findByText("Старый шаг")).toBeInTheDocument();
+
+    let pendingRefresh!: Promise<ThreadDetail>;
+    act(() => {
+      pendingRefresh = refresh!();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    act(() => {
+      socket.receive({
+        type: "event",
+        sequence: 2,
+        event: { type: "thread.upserted", thread: { ...child, updatedAt: 4 } },
+      });
+    });
+
+    await act(async () => {
+      resolveRefresh(
+        new Response(
+          JSON.stringify({
+            snapshot: snapshot(2, [running, { ...child, updatedAt: 4 }]),
+            detail: detail("Актуальный шаг"),
+          }),
+          { status: 200 },
+        ),
+      );
+      await pendingRefresh;
+    });
+
+    expect(screen.getByText("Актуальный шаг")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("preserves a pre-existing live turn when selection revalidation returns an equal-time reset", async () => {
+    const running = {
+      ...summary,
+      state: "running" as const,
+      currentTurnId: "live-turn",
+      updatedAt: 3,
+    };
+    const liveDetail: ThreadDetail = {
+      summary: running,
+      turns: [
+        {
+          id: "live-turn",
+          status: "inProgress",
+          startedAt: 3,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 3,
+            explanation: "Актуальная работа",
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "live-answer",
+              status: "inProgress",
+              text: "Актуальный потоковый ответ",
+              images: [],
+              timestamp: 3,
+              phase: "commentary",
+            },
+          ],
+          itemsLoaded: false,
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      syncPoint: {
+        cursor: "stale-cursor",
+        anchorTurnId: "old-turn",
+        anchorRevision: "old-revision",
+      },
+    };
+    const staleReset = {
+      summary: { ...summary, state: "idle" as const, updatedAt: 3 },
+      turns: [],
+      queuedMessages: [],
+      draft: null,
+      continuationCursor: null,
+      syncPoint: null,
+      resetLatest: true,
+      olderTurnsCursor: null,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(staleReset), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, refreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: liveDetail, page: "latest" });
+      }, [dispatch]);
+      refresh = () => refreshDetail("thread", { force: true });
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : "none"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [running]) });
+    });
+    expect(await screen.findByText("Актуальный потоковый ответ")).toBeInTheDocument();
+
+    await act(async () => {
+      await refresh?.();
+    });
+
+    expect(screen.getByText("Актуальный потоковый ответ")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledOnce();
     view.unmount();
   });
 
@@ -1228,6 +1434,36 @@ describe("ConnectionProvider", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     expect(screen.getByText("active:true")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("requests detail recovery only after a subsequent stream snapshot", () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    function Probe() {
+      const { streamRecoveryEpoch } = useConnection();
+      return <span>{`recovery:${streamRecoveryEpoch}`}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    expect(screen.getByText("recovery:0")).toBeInTheDocument();
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1) });
+    });
+    expect(screen.getByText("recovery:0")).toBeInTheDocument();
+
+    act(() => {
+      socket.receive({ type: "snapshot", snapshot: snapshot(2) });
+    });
+    expect(screen.getByText("recovery:1")).toBeInTheDocument();
     view.unmount();
   });
 
