@@ -1,0 +1,143 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  analyzeForkRollout,
+  FORK_MATERIALIZATION_MARKER_KEY,
+  hasForkMaterializationMarker,
+} from "./fork-rollout";
+
+const directories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+});
+
+describe("fork rollout analysis", () => {
+  it("streams through the selected turn and returns the safe compaction plus visible tail", async () => {
+    const path = await rollout([
+      record("turn_context", { turn_id: "earlier" }),
+      record("compacted", {
+        message: "",
+        replacement_history: [message("summary", "compressed context")],
+      }),
+      record("response_item", message("tail-user", "later question")),
+      record("turn_context", { turn_id: "selected" }),
+      record("response_item", message("tail-answer", "selected answer", "assistant")),
+      record("event_msg", { type: "task_complete", turn_id: "selected" }),
+      record("response_item", message("after", "must not be included")),
+    ]);
+
+    const analysis = await analyzeForkRollout(path, "selected", "tail-answer");
+
+    expect(analysis.estimate.sourceBytes).toBeGreaterThan(analysis.estimate.exact.estimatedBytes!);
+    expect(analysis.estimate.compressed).toMatchObject({
+      available: true,
+      unavailableReason: null,
+    });
+    expect(analysis.compressedItems?.map((item) => item.id)).toEqual([
+      "summary",
+      "tail-user",
+      "tail-answer",
+    ]);
+    expect(analysis.forkPointValidation).toBe("valid");
+  });
+
+  it("keeps exact available when strict JSONL gates reject compressed mode", async () => {
+    const path = await rollout([
+      record("compacted", {
+        message: "",
+        replacement_history: [message("summary", "context")],
+      }),
+      "{broken-json",
+      record("turn_context", { turn_id: "selected" }),
+      record("event_msg", { type: "task_complete", turn_id: "selected" }),
+    ]);
+
+    const analysis = await analyzeForkRollout(path, "selected");
+
+    expect(analysis.compressedItems).toBeNull();
+    expect(analysis.estimate.compressed).toMatchObject({
+      available: false,
+      estimatedBytes: null,
+      estimatedSeconds: null,
+    });
+    expect(analysis.estimate.exact.available).toBe(true);
+    expect(analysis.estimate.exact.estimatedBytes).toBeTypeOf("number");
+  });
+
+  it("marks compressed unavailable when no safe compaction precedes the fork point", async () => {
+    const path = await rollout([
+      record("turn_context", { turn_id: "selected" }),
+      record("response_item", message("answer", "answer", "assistant")),
+      record("event_msg", { type: "task_complete", turn_id: "selected" }),
+    ]);
+
+    const analysis = await analyzeForkRollout(path, "selected");
+
+    expect(analysis.estimate.compressed.available).toBe(false);
+    expect(analysis.estimate.compressed.unavailableReason).toContain("No safe compaction");
+    expect(analysis.estimate.exact.available).toBe(true);
+  });
+
+  it("keeps exact available when the streamed agent-message schema cannot validate compression", async () => {
+    const path = await rollout([
+      record("compacted", {
+        message: "",
+        replacement_history: [message("summary", "context")],
+      }),
+      record("turn_context", { turn_id: "selected" }),
+      record("response_item", {
+        type: "reasoning",
+        id: "unsupported-agent-shape",
+        summary: [],
+        content: null,
+      }),
+      record("event_msg", { type: "task_complete", turn_id: "selected" }),
+    ]);
+
+    const analysis = await analyzeForkRollout(path, "selected", "selected-answer");
+
+    expect(analysis.forkPointValidation).toBe("unknown");
+    expect(analysis.estimate.compressed.available).toBe(false);
+    expect(analysis.estimate.exact.available).toBe(true);
+  });
+
+  it("detects a deterministic compressed materialization marker while streaming", async () => {
+    const path = await rollout([
+      record("response_item", {
+        ...message("summary", "context"),
+        internal_chat_message_metadata_passthrough: {
+          [FORK_MATERIALIZATION_MARKER_KEY]: "operation",
+        },
+      }),
+    ]);
+
+    await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);
+    await expect(hasForkMaterializationMarker(path, "different")).resolves.toBe(false);
+  });
+});
+
+async function rollout(lines: string[]): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-fork-rollout-test-"));
+  directories.push(directory);
+  const path = join(directory, "rollout.jsonl");
+  await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+  return path;
+}
+
+function record(type: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp: "2026-01-01T00:00:00.000Z", type, payload });
+}
+
+function message(id: string, text: string, role = "user"): Record<string, unknown> {
+  return {
+    type: "message",
+    id,
+    role,
+    content: [{ type: role === "assistant" ? "output_text" : "input_text", text }],
+  };
+}

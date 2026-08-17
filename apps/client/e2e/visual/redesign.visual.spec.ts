@@ -179,6 +179,62 @@ test.describe("CodexNest redesign visual contract", () => {
     });
   });
 
+  test.describe("reliable fork dialog", () => {
+    test.skip(
+      ({ browserName }) => browserName !== "chromium",
+      "The fork dialog and mobile sheet pixel contract is Chromium-only.",
+    );
+
+    test("15 desktop light estimated choices", async ({ page }) => {
+      await openVisualPage(page, "/threads/session-main", "light", DESKTOP_VIEWPORT, {
+        forkEstimate: "ready",
+      });
+      await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
+      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
+      await expect(dialog.getByRole("radio", { name: /Сжатая/ })).toBeChecked();
+      expect(
+        await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),
+        "desktop fork dialog has no horizontal overflow",
+      ).toBe(true);
+      await expect(page).toHaveScreenshot("15-desktop-light-fork-dialog.png", { fullPage: true });
+      await expectA11yClean(page, "desktop light fork dialog", ".fork-dialog");
+    });
+
+    test("16 desktop dark estimate failure", async ({ page }) => {
+      await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT, {
+        forkEstimate: "failure",
+      });
+      await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
+      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
+      await expect(dialog.getByRole("radio", { name: /^Точная/u })).toBeChecked();
+      await expect(dialog.getByRole("radio", { name: /^Сжатая/u })).toBeDisabled();
+      await expect(page).toHaveScreenshot("16-desktop-dark-fork-dialog-failure.png", {
+        fullPage: true,
+      });
+      await expectA11yClean(page, "desktop dark failed fork estimate", ".fork-dialog");
+    });
+
+    test("17 mobile light loading sheet", async ({ page }) => {
+      await openVisualPage(page, "/threads/session-main", "light", PHONE_VIEWPORT, {
+        forkEstimate: "loading",
+      });
+      await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
+      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
+      await expect(dialog.getByText("Считаем…").first()).toBeVisible();
+      await expect(dialog).toHaveCSS("border-bottom-left-radius", "0px");
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        ),
+        "mobile fork sheet has no horizontal overflow",
+      ).toBe(true);
+      await expect(page).toHaveScreenshot("17-mobile-light-fork-sheet-loading.png", {
+        fullPage: true,
+      });
+      await expectA11yClean(page, "mobile loading fork sheet", ".fork-dialog");
+    });
+  });
+
   test("9 desktop light message queue", async ({ browserName, page }) => {
     await openVisualPage(page, "/threads/session-attention", "light", DESKTOP_VIEWPORT);
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
@@ -312,7 +368,12 @@ async function openVisualPage(
   path: string,
   theme: "light" | "dark",
   viewport: { width: number; height: number },
-  options: { connected?: boolean; forkLineage?: boolean; notificationPrompt?: boolean } = {},
+  options: {
+    connected?: boolean;
+    forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
+    forkLineage?: boolean;
+    notificationPrompt?: boolean;
+  } = {},
 ): Promise<void> {
   await page.setViewportSize(viewport);
   await installVisualFixture(page, { theme, ...options });

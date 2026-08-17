@@ -49,6 +49,7 @@ import {
   TrashIcon,
 } from "./components/Icons";
 import { NewSession } from "./components/NewSession";
+import { PendingForkPage } from "./components/PendingForkPage";
 import { ProjectDialog } from "./components/ProjectDialog";
 import {
   SettingsPage,
@@ -60,6 +61,7 @@ import { useConnection } from "./connection";
 import { localizeKnownServerText, useI18n, type Translate } from "./i18n";
 import { stopPushNotifications, usePushNotifications } from "./push";
 import { groupedThreads } from "./state";
+import { forkOperationsFromSnapshot, type ForkOperationSummary } from "./forks";
 import { clearConnectionSettings } from "./storage";
 import { hasAlwaysVisibleThreadStatus, threadStatusClasses } from "./thread-status";
 import { useDrawerNavigation } from "./useDrawerNavigation";
@@ -150,8 +152,14 @@ export function App({
   const { language, setLanguage, t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
+  const pendingForkMatch = location.pathname.match(/^\/fork-operations\/([^/]+)\/?$/u);
+  const pendingForkOperationId = pendingForkMatch?.[1]
+    ? decodeURIComponent(pendingForkMatch[1])
+    : null;
   const sessionWorkspace =
-    location.pathname === "/new" || /^\/threads\/[^/]+\/?$/.test(location.pathname);
+    location.pathname === "/new" ||
+    /^\/threads\/[^/]+\/?$/.test(location.pathname) ||
+    pendingForkOperationId !== null;
   const newSessionWorkspaceId = (location.state as { newSessionWorkspaceId?: unknown } | null)
     ?.newSessionWorkspaceId;
   const sessionWorkspaceKey =
@@ -159,7 +167,9 @@ export function App({
       ? `new:${newSessionWorkspaceId}`
       : location.pathname === "/new"
         ? `new:direct:${location.search}`
-        : `thread:${location.pathname}`;
+        : pendingForkOperationId
+          ? `fork:${pendingForkOperationId}`
+          : `thread:${location.pathname}`;
   const [drawer, setDrawer] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(storedTheme);
@@ -193,7 +203,8 @@ export function App({
   } = useDrawerNavigation({
     open: drawer,
     routeKey: location.pathname,
-    threadActive: /^\/threads\/[^/]+\/?$/.test(location.pathname),
+    threadActive:
+      /^\/threads\/[^/]+\/?$/.test(location.pathname) || pendingForkOperationId !== null,
     side: sidebarSide,
     setOpen: setDrawer,
   });
@@ -392,6 +403,12 @@ export function App({
             <div className="spinner" />
             <p>{t("Получаем состояние Codex…")}</p>
           </div>
+        ) : pendingForkOperationId ? (
+          <PendingForkPage
+            key={sessionWorkspaceKey}
+            operationId={pendingForkOperationId}
+            onOpenNavigation={() => setDrawer(true)}
+          />
         ) : sessionWorkspace ? (
           <NewSession
             key={sessionWorkspaceKey}
@@ -717,6 +734,11 @@ function Sidebar({
   const snapshot = state.snapshot;
   const snapshotReady = snapshot !== null;
   const allThreads = snapshot?.threads ?? [];
+  const pendingForkSourceIds = new Set(
+    forkOperationsFromSnapshot(snapshot)
+      .filter((operation) => operation.status !== "ready")
+      .map((operation) => operation.sourceThreadId),
+  );
   const childrenByParent = childThreadsByParent(allThreads);
   const roots = sortThreadBranchesByActivity(topLevelThreads(allThreads), childrenByParent);
   const activeRoots = roots.filter((thread) => !thread.archived);
@@ -724,7 +746,9 @@ function Sidebar({
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
   const activeFeedRoots = sortActiveFeedThreads(
-    activeRoots.filter(isActiveFeedEligible),
+    activeRoots.filter(
+      (thread) => isActiveFeedEligible(thread) || pendingForkSourceIds.has(thread.id),
+    ),
     childrenByParent,
     null,
     activeFeedRunningOrderRef.current.byParent,
@@ -1398,9 +1422,13 @@ function Sidebar({
             {orderedGroups.map((group) => {
               const key = group.project?.id ?? "ungrouped";
               const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
-              const alwaysVisibleThreads = group.threads.filter(hasAlwaysVisibleThreadStatus);
+              const alwaysVisibleThreads = group.threads.filter(
+                (thread) =>
+                  hasAlwaysVisibleThreadStatus(thread) || pendingForkSourceIds.has(thread.id),
+              );
               const collapsibleThreads = group.threads.filter(
-                (thread) => !hasAlwaysVisibleThreadStatus(thread),
+                (thread) =>
+                  !hasAlwaysVisibleThreadStatus(thread) && !pendingForkSourceIds.has(thread.id),
               );
               const initialCollapsibleLimit = Math.max(
                 0,
@@ -1421,7 +1449,9 @@ function Sidebar({
               );
               const visible = group.threads.filter(
                 (thread) =>
-                  hasAlwaysVisibleThreadStatus(thread) || visibleCollapsibleIds.has(thread.id),
+                  hasAlwaysVisibleThreadStatus(thread) ||
+                  pendingForkSourceIds.has(thread.id) ||
+                  visibleCollapsibleIds.has(thread.id),
               );
               const projectThreads = group.project
                 ? (snapshot?.threads.filter((thread) => thread.projectId === group.project!.id) ??
@@ -1663,6 +1693,10 @@ function ThreadBranch({
   onToggleHistory(threadId: string, total: number): void;
 }) {
   const { t } = useI18n();
+  const { state } = useConnection();
+  const forkOperations = forkOperationsFromSnapshot(state.snapshot).filter(
+    (operation) => operation.sourceThreadId === thread.id && operation.status !== "ready",
+  );
   const children = sortThreadBranchesByActivity(
     childrenByParent.get(thread.id) ?? [],
     childrenByParent,
@@ -1681,8 +1715,16 @@ function ThreadBranch({
         <span className="thread-branch-spacer" />
         <ThreadLink thread={thread} onNavigate={onNavigate} />
       </div>
-      {children.length > 0 && (
+      {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
+          {forkOperations.map((operation) => (
+            <ForkOperationRow
+              operation={operation}
+              source={thread}
+              key={operation.id}
+              onNavigate={onNavigate}
+            />
+          ))}
           {visibleChildren.map((child) => (
             <ThreadBranch
               branchHistoryExpansions={branchHistoryExpansions}
@@ -1725,6 +1767,12 @@ function ActiveThreadBranch({
   projectLabel?: string;
   runningOrderByParent: Map<string | null, string[]>;
 }) {
+  const { state } = useConnection();
+  const forkOperations = forkOperationsFromSnapshot(state.snapshot).filter(
+    (operation) =>
+      operation.sourceThreadId === thread.id &&
+      (operation.status === "preparing" || operation.status === "reconciling"),
+  );
   const children = sortActiveFeedThreads(
     (childrenByParent.get(thread.id) ?? []).filter(isActiveChildFeedEligible),
     childrenByParent,
@@ -1738,8 +1786,16 @@ function ActiveThreadBranch({
         <span className="thread-branch-spacer" />
         <ThreadLink thread={thread} onNavigate={onNavigate} secondaryLabel={projectLabel} />
       </div>
-      {children.length > 0 && (
+      {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
+          {forkOperations.map((operation) => (
+            <ForkOperationRow
+              operation={operation}
+              source={thread}
+              key={operation.id}
+              onNavigate={onNavigate}
+            />
+          ))}
           {children.map((child) => (
             <ActiveThreadBranch
               thread={child}
@@ -1750,6 +1806,90 @@ function ActiveThreadBranch({
             />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ForkOperationRow({
+  operation,
+  source,
+  onNavigate,
+}: {
+  operation: ForkOperationSummary;
+  source: ThreadSummary;
+  onNavigate(): void;
+}) {
+  const { api, dispatch } = useConnection();
+  const { language, t } = useI18n();
+  const [working, setWorking] = useState<"retry" | "remove" | null>(null);
+  const title =
+    operation.title.trim() ||
+    t("Ответвление от {{title}}", {
+      title: localizeKnownServerText(language, source.title) ?? source.title,
+    });
+  const status =
+    operation.status === "preparing"
+      ? t("Готовим ветку")
+      : operation.status === "reconciling"
+        ? t("Сверяем контекст")
+        : t("Создание остановлено");
+
+  async function retry() {
+    if (working) return;
+    setWorking("retry");
+    try {
+      const result = await api.retryForkOperation(operation);
+      dispatch({ type: "forkOperation", operation: result.operation });
+    } catch {
+      // The terminal row remains available for another retry.
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function remove() {
+    if (working) return;
+    setWorking("remove");
+    try {
+      await api.removeForkOperation(operation.id);
+      dispatch({ type: "forkOperation.remove", operationId: operation.id });
+    } catch {
+      // Keep the failed operation visible when the server rejects removal.
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  return (
+    <div className={`fork-operation-row ${operation.status}`}>
+      <NavLink
+        className={({ isActive }) => `thread-link fork-operation-link ${isActive ? "active" : ""}`}
+        to={`/fork-operations/${encodeURIComponent(operation.id)}`}
+        state={{ forkOperation: operation, focusComposer: true }}
+        onClick={onNavigate}
+      >
+        {operation.status === "failed" ? (
+          <span className="fork-operation-failed" aria-hidden="true">
+            !
+          </span>
+        ) : (
+          <span className="spinner small" aria-hidden="true" />
+        )}
+        <span className="thread-link-copy">
+          <span className="thread-link-title">{title}</span>
+          <span className="thread-link-project">{status}</span>
+        </span>
+      </NavLink>
+      {operation.status === "failed" && (
+        <span className="fork-operation-actions">
+          <button type="button" disabled={working !== null} onClick={() => void retry()}>
+            {t("Повторить")}
+          </button>
+          <button type="button" disabled={working !== null} onClick={() => void remove()}>
+            {t("Удалить")}
+          </button>
+        </span>
       )}
     </div>
   );

@@ -1310,4 +1310,48 @@ describe("StateStore", () => {
     ]);
     database.close();
   });
+
+  it("persists fork operations in an optional map namespace without a schema change", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    expect(store.snapshot().forkOperations).toBeUndefined();
+
+    await store.update((state) => {
+      state.forkOperations = {
+        operation: {
+          id: "operation",
+          sourceThreadId: "source",
+          lastTurnId: "turn",
+          agentMessageId: "answer",
+          mode: "compressed",
+          status: "reconciling",
+          title: "Ответвление: Source",
+          createdAt: 1,
+          updatedAt: 1,
+          targetThreadId: null,
+          estimate: null,
+          error: null,
+          sourceCwd: "/work",
+          sourceSettings: { collaborationMode: "default" },
+          rolloutPath: null,
+          agentText: "",
+          nativeAttempt: { startedAt: 2, sequence: 1 },
+          compressedMaterialization: { phase: "injecting", startedAt: 3 },
+          queuedMessages: [],
+        },
+      };
+    });
+
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.snapshot().schemaVersion).toBe(1);
+    expect(reloaded.snapshot().forkOperations?.operation).toMatchObject({
+      mode: "compressed",
+      status: "reconciling",
+      sourceThreadId: "source",
+      nativeAttempt: { startedAt: 2, sequence: 1 },
+      compressedMaterialization: { phase: "injecting", startedAt: 3 },
+    });
+  });
 });

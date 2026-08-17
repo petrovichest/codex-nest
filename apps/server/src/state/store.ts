@@ -7,6 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import type {
   ActivityItem,
+  ForkMode,
+  ForkModeEstimate,
+  ForkOperationStatus,
   Project,
   QueuedMessage,
   SessionSettings,
@@ -235,6 +238,33 @@ export interface ThreadMetaState {
   draft?: ThreadDraft;
   userInputDrafts?: Record<string, UserInputDraftState>;
   sessionSnapshot?: SessionSnapshotState;
+  logicalFork?: { sourceThreadId: string; operationId: string; mode: ForkMode };
+}
+
+export interface ForkOperationState {
+  id: string;
+  sourceThreadId: string;
+  lastTurnId: string;
+  agentMessageId: string;
+  mode: ForkMode;
+  status: ForkOperationStatus;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  targetThreadId: string | null;
+  estimate: ForkModeEstimate | null;
+  error: string | null;
+  sourceCwd: string;
+  sourceSettings: SessionSettings;
+  rolloutPath: string | null;
+  agentText: string;
+  nativeAttempt?: { startedAt: number; sequence: number };
+  compressedMaterialization?: {
+    phase: "injecting" | "injected";
+    startedAt: number;
+  };
+  draft?: ThreadDraft;
+  queuedMessages: QueuedMessage[];
 }
 
 export interface BrowserBindingState {
@@ -295,6 +325,7 @@ export interface CodexNestState {
   messageQueues?: Record<string, QueuedMessage[]>;
   messageReceipts?: Record<string, MessageReceiptState>;
   teamToolOperations?: Record<string, TeamToolOperationState>;
+  forkOperations?: Record<string, ForkOperationState>;
   voiceTranscriptions?: Record<string, VoiceTranscriptionState>;
   voiceReceipts?: Record<string, VoiceReceiptState>;
 }
@@ -753,6 +784,7 @@ const MAP_NAMESPACES = [
   "messageQueues",
   "messageReceipts",
   "teamToolOperations",
+  "forkOperations",
   "voiceTranscriptions",
   "voiceReceipts",
 ] as const;
@@ -862,7 +894,8 @@ function loadDatabaseState(database: DatabaseSync): CodexNestState {
     if (!MAP_NAMESPACE_SET.has(row.namespace)) {
       throw new Error(`Unknown CodexNest SQLite namespace ${row.namespace}`);
     }
-    (state[row.namespace] as Record<string, unknown>)[row.entry_key] = value;
+    const namespace = (state[row.namespace] ??= {}) as Record<string, unknown>;
+    namespace[row.entry_key] = value;
   }
   if ([...REQUIRED_ROOT_KEYS].some((key) => !foundRootKeys.has(key))) {
     throw new Error("Corrupt CodexNest SQLite state: required root entry is missing");
@@ -1035,6 +1068,9 @@ function validateState(value: unknown): CodexNestState {
   if (value.teamToolOperations !== undefined && !isRecord(value.teamToolOperations)) {
     throw new Error("Corrupt Team tool operations in CodexNest state");
   }
+  if (value.forkOperations !== undefined && !isRecord(value.forkOperations)) {
+    throw new Error("Corrupt fork operations in CodexNest state");
+  }
   if (value.voiceTranscriptions !== undefined && !isRecord(value.voiceTranscriptions)) {
     throw new Error("Corrupt voice transcriptions in CodexNest state");
   }
@@ -1109,7 +1145,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.unmaterialized !== undefined && typeof meta.unmaterialized !== "boolean") ||
       (meta.draft !== undefined && !isThreadDraft(meta.draft)) ||
       (meta.userInputDrafts !== undefined && !isUserInputDrafts(meta.userInputDrafts)) ||
-      (meta.sessionSnapshot !== undefined && !isSessionSnapshot(meta.sessionSnapshot))
+      (meta.sessionSnapshot !== undefined && !isSessionSnapshot(meta.sessionSnapshot)) ||
+      (meta.logicalFork !== undefined && !isLogicalFork(meta.logicalFork))
     ) {
       throw new Error("Corrupt thread metadata in CodexNest state");
     }
@@ -1139,6 +1176,9 @@ function validateState(value: unknown): CodexNestState {
     if (!isTeamToolOperation(operation)) {
       throw new Error("Corrupt Team tool operation");
     }
+  }
+  for (const [operationId, operation] of Object.entries(value.forkOperations ?? {})) {
+    if (!isForkOperation(operation, operationId)) throw new Error("Corrupt fork operation");
   }
   for (const [threadId, job] of Object.entries(value.voiceTranscriptions ?? {})) {
     if (!isVoiceTranscription(job, threadId)) {
@@ -1221,6 +1261,68 @@ function isSessionSnapshot(value: unknown): value is SessionSnapshotState {
     Number.isFinite(value.updatedAt) &&
     typeof value.archived === "boolean" &&
     (value.currentTurnId === null || typeof value.currentTurnId === "string")
+  );
+}
+
+function isLogicalFork(value: unknown): value is ThreadMetaState["logicalFork"] {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["sourceThreadId", "operationId", "mode"]) &&
+    isBoundedString(value.sourceThreadId, 500) &&
+    isBoundedString(value.operationId, 500) &&
+    (value.mode === "compressed" || value.mode === "exact")
+  );
+}
+
+function isForkModeEstimate(value: unknown): value is ForkModeEstimate {
+  return (
+    isRecord(value) &&
+    typeof value.available === "boolean" &&
+    (value.estimatedBytes === null || isNonNegativeFiniteNumber(value.estimatedBytes)) &&
+    (value.estimatedSeconds === null ||
+      (isRecord(value.estimatedSeconds) &&
+        isNonNegativeFiniteNumber(value.estimatedSeconds.minSeconds) &&
+        isNonNegativeFiniteNumber(value.estimatedSeconds.maxSeconds) &&
+        value.estimatedSeconds.minSeconds <= value.estimatedSeconds.maxSeconds)) &&
+    (value.unavailableReason === null || typeof value.unavailableReason === "string")
+  );
+}
+
+function isForkOperation(value: unknown, operationId: string): value is ForkOperationState {
+  return (
+    isRecord(value) &&
+    value.id === operationId &&
+    isBoundedString(value.sourceThreadId, 500) &&
+    isBoundedString(value.lastTurnId, 500) &&
+    isBoundedString(value.agentMessageId, 500) &&
+    (value.mode === "compressed" || value.mode === "exact") &&
+    ["preparing", "reconciling", "ready", "failed"].includes(String(value.status)) &&
+    typeof value.title === "string" &&
+    isNonNegativeFiniteNumber(value.createdAt) &&
+    isNonNegativeFiniteNumber(value.updatedAt) &&
+    (value.targetThreadId === null || isBoundedString(value.targetThreadId, 500)) &&
+    (value.estimate === null || isForkModeEstimate(value.estimate)) &&
+    (value.error === null || typeof value.error === "string") &&
+    typeof value.sourceCwd === "string" &&
+    isAbsolute(value.sourceCwd) &&
+    isSessionSettings(value.sourceSettings) &&
+    (value.rolloutPath === null ||
+      (typeof value.rolloutPath === "string" && isAbsolute(value.rolloutPath))) &&
+    typeof value.agentText === "string" &&
+    (value.nativeAttempt === undefined ||
+      (isRecord(value.nativeAttempt) &&
+        isNonNegativeFiniteNumber(value.nativeAttempt.startedAt) &&
+        typeof value.nativeAttempt.sequence === "number" &&
+        Number.isSafeInteger(value.nativeAttempt.sequence) &&
+        value.nativeAttempt.sequence > 0)) &&
+    (value.compressedMaterialization === undefined ||
+      (value.mode === "compressed" &&
+        isRecord(value.compressedMaterialization) &&
+        ["injecting", "injected"].includes(String(value.compressedMaterialization.phase)) &&
+        isNonNegativeFiniteNumber(value.compressedMaterialization.startedAt))) &&
+    (value.draft === undefined || isThreadDraft(value.draft)) &&
+    Array.isArray(value.queuedMessages) &&
+    value.queuedMessages.every((message) => isQueuedMessage(message, operationId))
   );
 }
 

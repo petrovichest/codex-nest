@@ -44,6 +44,7 @@ export type ComposerImage = {
 };
 
 export type ComposerRecording = {
+  id: string;
   audio: Blob;
   durationMs: number;
   selection: { start: number; end: number };
@@ -61,8 +62,28 @@ const KEYBOARD_VIEWPORT_DELTA = 120;
 
 type SpeechState = "idle" | "requesting" | "recording" | "uploading" | "transcribing";
 
+type RecordingCapture = {
+  id: string;
+  sessionIdentity: string | undefined;
+  recorder: MediaRecorder;
+  stream: MediaStream;
+  chunks: Blob[];
+  bytes: number;
+  startedAt: number;
+  selection: { start: number; end: number };
+  maxUploadBytes: number;
+  discarded: boolean;
+  preserveOnSessionChange: boolean;
+  submit?: (recording: ComposerRecording) => Promise<void>;
+  transcribe?: (audio: Blob, durationMs: number) => Promise<string>;
+};
+
 function viewportHeight(): number {
   return Math.min(window.innerHeight, window.visualViewport?.height ?? window.innerHeight);
+}
+
+function createVoiceRecordingId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 export function Composer({
@@ -98,6 +119,7 @@ export function Composer({
   transcriptionProvider = null,
   onTranscribe,
   onRecordingReady,
+  preserveRecordingOnSessionChange = false,
   voiceMode,
   onVoiceModeChange,
   voiceUploadPending = false,
@@ -145,6 +167,7 @@ export function Composer({
   transcriptionProvider?: TranscriptionProvider | null;
   onTranscribe?(audio: Blob, durationMs: number): Promise<string>;
   onRecordingReady?(recording: ComposerRecording): Promise<void>;
+  preserveRecordingOnSessionChange?: boolean;
   voiceMode?: VoiceInputMode;
   onVoiceModeChange?(mode: VoiceInputMode): void;
   voiceUploadPending?: boolean;
@@ -181,16 +204,22 @@ export function Composer({
   const viewportBaselineRef = useRef(viewportHeight());
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const audioBytesRef = useRef(0);
-  const discardRecordingRef = useRef(false);
-  const recordingStoppedRef = useRef(false);
+  const stoppedMediaStreamsRef = useRef(new WeakSet<MediaStream>());
+  const activeRecordingRef = useRef<RecordingCapture | null>(null);
   const aliveRef = useRef(true);
-  const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | undefined>(undefined);
   const recordingLimitRef = useRef<number | undefined>(undefined);
   const transcriptionStartedAtRef = useRef(0);
   const transcriptionTimerRef = useRef<number | undefined>(undefined);
+  const retryRecordingsRef = useRef(
+    new Map<
+      string | undefined,
+      {
+        recording: ComposerRecording;
+        submit(recording: ComposerRecording): Promise<void>;
+      }
+    >(),
+  );
   const insertionRef = useRef<{ start: number; end: number } | null>(null);
   const [skillCaret, setSkillCaret] = useState<number | null>(null);
   const [skillDismissedToken, setSkillDismissedToken] = useState<string | null>(null);
@@ -211,6 +240,7 @@ export function Composer({
     onInput,
     onPendingAttachmentsChange,
     onRecordingReady,
+    preserveRecordingOnSessionChange,
     onTranscribe,
     sessionIdentity,
     t,
@@ -226,15 +256,25 @@ export function Composer({
     onInput,
     onPendingAttachmentsChange,
     onRecordingReady,
+    preserveRecordingOnSessionChange,
     onTranscribe,
     sessionIdentity,
     t,
     transcriptionConfig,
   };
+  useLayoutEffect(() => {
+    const activeRecording = activeRecordingRef.current;
+    if (!activeRecording || activeRecording.sessionIdentity !== sessionIdentity) return;
+    activeRecording.submit = onRecordingReady;
+    activeRecording.transcribe = onTranscribe;
+    activeRecording.preserveOnSessionChange = preserveRecordingOnSessionChange;
+  }, [onRecordingReady, onTranscribe, preserveRecordingOnSessionChange, sessionIdentity]);
   const [viewer, setViewer] = useState<{ index: number; opener: HTMLElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
+  const [hasRetryRecording, setHasRetryRecording] = useState(false);
+  const [retryRecordingCount, setRetryRecordingCount] = useState(0);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribingSeconds, setTranscribingSeconds] = useState(0);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -356,6 +396,13 @@ export function Composer({
   }, [images.length, viewer]);
 
   useEffect(() => {
+    if (!retryRecordingCount && speechState === "idle") return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [retryRecordingCount, speechState]);
+
+  useEffect(() => {
     if (activeSkillIndex >= matchingSkills.length) setActiveSkillIndex(0);
   }, [activeSkillIndex, matchingSkills.length]);
 
@@ -441,31 +488,32 @@ export function Composer({
       clearRecordingTimers();
       clearTranscriptionTimer();
       const recorder = mediaRecorderRef.current;
+      const recording = activeRecordingRef.current;
       if (recorder && recorder.state !== "inactive") {
-        discardRecordingRef.current = true;
+        if (recording && !recording.preserveOnSessionChange) recording.discarded = true;
         recorder.stop();
-      } else if (!recordingStoppedRef.current) {
-        discardRecordingRef.current = true;
       }
-      stopMediaStream();
+      stopMediaStream(recording?.stream);
+      mediaRecorderRef.current = null;
+      activeRecordingRef.current = null;
     };
   }, []);
 
   useEffect(() => {
     if (sessionIdentityRef.current === sessionIdentity) return;
     sessionIdentityRef.current = sessionIdentity;
+    setHasRetryRecording(retryRecordingsRef.current.has(sessionIdentity));
     clearRecordingTimers();
     clearTranscriptionTimer();
     const recorder = mediaRecorderRef.current;
+    const recording = activeRecordingRef.current;
     if (recorder && recorder.state !== "inactive") {
-      discardRecordingRef.current = true;
-      recordingStoppedRef.current = true;
+      if (recording && !recording.preserveOnSessionChange) recording.discarded = true;
       recorder.stop();
     }
-    stopMediaStream();
+    stopMediaStream(recording?.stream);
     mediaRecorderRef.current = null;
-    audioChunksRef.current = [];
-    audioBytesRef.current = 0;
+    activeRecordingRef.current = null;
     insertionRef.current = null;
     setSkillCaret(null);
     setSkillDismissedToken(null);
@@ -665,8 +713,6 @@ export function Composer({
     const recordingIdentity = latestPropsRef.current.sessionIdentity;
     setSpeechError(null);
     setSpeechState("requesting");
-    discardRecordingRef.current = false;
-    recordingStoppedRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== recordingIdentity) {
@@ -674,44 +720,59 @@ export function Composer({
         return;
       }
       const recorder = new MediaRecorder(stream, { mimeType });
+      const latest = latestPropsRef.current;
+      const latestInput = draftInputRef.current;
+      const recording: RecordingCapture = {
+        id: createVoiceRecordingId(),
+        sessionIdentity: recordingIdentity,
+        recorder,
+        stream,
+        chunks: [],
+        bytes: 0,
+        startedAt: Date.now(),
+        selection: insertionRef.current ?? {
+          start: latestInput.length,
+          end: latestInput.length,
+        },
+        maxUploadBytes: latest.transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024,
+        discarded: false,
+        preserveOnSessionChange: latest.preserveRecordingOnSessionChange,
+        ...(latest.onRecordingReady ? { submit: latest.onRecordingReady } : {}),
+        ...(latest.onTranscribe ? { transcribe: latest.onTranscribe } : {}),
+      };
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-      audioBytesRef.current = 0;
+      activeRecordingRef.current = recording;
       recorder.addEventListener("dataavailable", (event) => {
         if (!event.data.size) return;
-        audioChunksRef.current.push(event.data);
-        audioBytesRef.current += event.data.size;
-        if (
-          audioBytesRef.current >=
-          (latestPropsRef.current.transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)
-        ) {
-          stopRecording();
-        }
+        recording.chunks.push(event.data);
+        recording.bytes += event.data.size;
+        if (recording.bytes >= recording.maxUploadBytes) stopRecording(recording);
       });
       recorder.addEventListener("error", () => {
-        discardRecordingRef.current = true;
-        clearRecordingTimers();
-        clearTranscriptionTimer();
-        stopMediaStream();
-        mediaRecorderRef.current = null;
+        recording.discarded = true;
+        if (activeRecordingRef.current === recording) {
+          clearRecordingTimers();
+          clearTranscriptionTimer();
+          mediaRecorderRef.current = null;
+          activeRecordingRef.current = null;
+        }
+        stopMediaStream(recording.stream);
         if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
           setSpeechState("idle");
           setSpeechError(latestPropsRef.current.t("Не удалось записать аудио"));
         }
       });
-      recorder.addEventListener("stop", () => void finishRecording(mimeType, recordingIdentity));
+      recorder.addEventListener("stop", () => void finishRecording(mimeType, recording));
       recorder.start(1_000);
-      recordingStartedAtRef.current = Date.now();
+      recording.startedAt = Date.now();
       setRecordingSeconds(0);
       setSpeechState("recording");
       recordingTimerRef.current = window.setInterval(() => {
-        setRecordingSeconds(
-          Math.max(0, Math.floor((Date.now() - recordingStartedAtRef.current) / 1_000)),
-        );
+        setRecordingSeconds(Math.max(0, Math.floor((Date.now() - recording.startedAt) / 1_000)));
       }, 250);
       recordingLimitRef.current = window.setTimeout(
-        stopRecording,
+        () => stopRecording(recording),
         (latestPropsRef.current.transcriptionConfig?.maxRecordingSeconds ?? 300) * 1_000,
       );
     } catch (caught) {
@@ -723,84 +784,118 @@ export function Composer({
     }
   }
 
-  function stopRecording() {
-    const recorder = mediaRecorderRef.current;
+  function stopRecording(recording = activeRecordingRef.current) {
+    const recorder = recording?.recorder;
     if (!recorder || recorder.state === "inactive") return;
-    clearRecordingTimers();
-    recordingStoppedRef.current = true;
-    if (aliveRef.current) {
+    if (activeRecordingRef.current === recording) clearRecordingTimers();
+    if (aliveRef.current && latestPropsRef.current.sessionIdentity === recording.sessionIdentity) {
       startTranscriptionTimer();
-      if (latestPropsRef.current.onRecordingReady) {
+      if (recording.submit) {
         setSpeechState("uploading");
       } else {
         setSpeechState("transcribing");
       }
     }
     recorder.stop();
-    stopMediaStream();
+    stopMediaStream(recording.stream);
   }
 
   function cancelRecording() {
-    const recorder = mediaRecorderRef.current;
+    const recording = activeRecordingRef.current;
+    const recorder = recording?.recorder;
     if (!recorder || recorder.state === "inactive") return;
-    discardRecordingRef.current = true;
-    recordingStoppedRef.current = true;
+    recording.discarded = true;
     clearRecordingTimers();
     recorder.stop();
-    stopMediaStream();
+    stopMediaStream(recording.stream);
   }
 
-  async function finishRecording(mimeType: string, recordingIdentity: string | undefined) {
-    clearRecordingTimers();
-    stopMediaStream();
-    mediaRecorderRef.current = null;
-    const chunks = audioChunksRef.current;
-    const bytes = audioBytesRef.current;
-    audioChunksRef.current = [];
-    audioBytesRef.current = 0;
-    if (latestPropsRef.current.sessionIdentity !== recordingIdentity) {
-      clearTranscriptionTimer();
-      return;
+  async function finishRecording(mimeType: string, capture: RecordingCapture) {
+    const ownedUi = activeRecordingRef.current === capture;
+    if (ownedUi) {
+      clearRecordingTimers();
+      mediaRecorderRef.current = null;
+      activeRecordingRef.current = null;
     }
-    if (discardRecordingRef.current) {
-      clearTranscriptionTimer();
-      if (aliveRef.current) {
+    stopMediaStream(capture.stream);
+    const recordingIdentity = capture.sessionIdentity;
+    if (capture.discarded) {
+      if (ownedUi) clearTranscriptionTimer();
+      if (
+        ownedUi &&
+        aliveRef.current &&
+        latestPropsRef.current.sessionIdentity === recordingIdentity
+      ) {
         setRecordingSeconds(0);
         setSpeechState("idle");
       }
       return;
     }
-    if (!chunks.length || !bytes) {
-      if (aliveRef.current) {
+    if (!capture.chunks.length || !capture.bytes) {
+      if (
+        ownedUi &&
+        aliveRef.current &&
+        latestPropsRef.current.sessionIdentity === recordingIdentity
+      ) {
         clearTranscriptionTimer();
         setSpeechState("idle");
         setSpeechError(latestPropsRef.current.t("Запись не содержит аудио"));
       }
       return;
     }
-    if (bytes > (latestPropsRef.current.transcriptionConfig?.maxUploadBytes ?? 24 * 1024 * 1024)) {
-      if (aliveRef.current) {
+    if (capture.bytes > capture.maxUploadBytes) {
+      if (
+        ownedUi &&
+        aliveRef.current &&
+        latestPropsRef.current.sessionIdentity === recordingIdentity
+      ) {
         clearTranscriptionTimer();
         setSpeechState("idle");
         setSpeechError(latestPropsRef.current.t("Запись слишком большая"));
       }
       return;
     }
-    const latestInput = draftInputRef.current;
     const recording = {
-      audio: new Blob(chunks, { type: mimeType }),
-      durationMs: Math.max(1, Date.now() - recordingStartedAtRef.current),
-      selection: insertionRef.current ?? { start: latestInput.length, end: latestInput.length },
+      id: capture.id,
+      audio: new Blob(capture.chunks, { type: mimeType }),
+      durationMs: Math.max(1, Date.now() - capture.startedAt),
+      selection: capture.selection,
     };
-    const onRecordingReadyLatest = latestPropsRef.current.onRecordingReady;
-    if (onRecordingReadyLatest) {
+    if (capture.submit) {
+      retryRecordingsRef.current.set(recordingIdentity, {
+        recording,
+        submit: capture.submit,
+      });
+      if (aliveRef.current) {
+        setRetryRecordingCount(retryRecordingsRef.current.size);
+        if (ownedUi && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+          setHasRetryRecording(true);
+        }
+      }
       try {
-        await onRecordingReadyLatest(recording);
-        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+        await capture.submit(recording);
+        if (retryRecordingsRef.current.get(recordingIdentity)?.recording.id === recording.id) {
+          retryRecordingsRef.current.delete(recordingIdentity);
+          if (aliveRef.current) {
+            setRetryRecordingCount(retryRecordingsRef.current.size);
+            if (ownedUi && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+              setHasRetryRecording(false);
+            }
+          }
+        }
+        if (
+          ownedUi &&
+          aliveRef.current &&
+          latestPropsRef.current.sessionIdentity === recordingIdentity
+        ) {
           setSpeechError(null);
         }
       } catch (caught) {
-        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+        if (
+          ownedUi &&
+          aliveRef.current &&
+          latestPropsRef.current.sessionIdentity === recordingIdentity
+        ) {
           const latest = latestPropsRef.current;
           setSpeechError(
             caught instanceof Error
@@ -809,20 +904,28 @@ export function Composer({
           );
         }
       } finally {
-        if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
+        if (
+          ownedUi &&
+          aliveRef.current &&
+          latestPropsRef.current.sessionIdentity === recordingIdentity
+        ) {
           clearTranscriptionTimer();
           setSpeechState("idle");
         }
       }
       return;
     }
-    const onTranscribeLatest = latestPropsRef.current.onTranscribe;
-    if (!aliveRef.current || !onTranscribeLatest) {
-      clearTranscriptionTimer();
+    if (
+      !ownedUi ||
+      !aliveRef.current ||
+      latestPropsRef.current.sessionIdentity !== recordingIdentity ||
+      !capture.transcribe
+    ) {
+      if (ownedUi) clearTranscriptionTimer();
       return;
     }
     try {
-      const transcript = await onTranscribeLatest(recording.audio, recording.durationMs);
+      const transcript = await capture.transcribe(recording.audio, recording.durationMs);
       if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== recordingIdentity) {
         return;
       }
@@ -842,6 +945,33 @@ export function Composer({
       if (aliveRef.current && latestPropsRef.current.sessionIdentity === recordingIdentity) {
         setSpeechState("idle");
       }
+    }
+  }
+
+  async function retryVoiceRecording(): Promise<void> {
+    const retryIdentity = latestPropsRef.current.sessionIdentity;
+    const retry = retryRecordingsRef.current.get(retryIdentity);
+    if (!retry || speechState !== "idle") return;
+    setSpeechError(null);
+    setSpeechState("uploading");
+    startTranscriptionTimer();
+    try {
+      await retry.submit(retry.recording);
+      if (retryRecordingsRef.current.get(retryIdentity)?.recording.id === retry.recording.id) {
+        retryRecordingsRef.current.delete(retryIdentity);
+        setRetryRecordingCount(retryRecordingsRef.current.size);
+        setHasRetryRecording(false);
+      }
+    } catch (caught) {
+      const latest = latestPropsRef.current;
+      setSpeechError(
+        caught instanceof Error
+          ? localizeKnownServerText(latest.language, caught.message)
+          : latest.t("Не удалось отправить запись на сервер"),
+      );
+    } finally {
+      clearTranscriptionTimer();
+      if (aliveRef.current) setSpeechState("idle");
     }
   }
 
@@ -936,9 +1066,12 @@ export function Composer({
     }
   }
 
-  function stopMediaStream() {
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
+  function stopMediaStream(stream = mediaStreamRef.current) {
+    if (stream && !stoppedMediaStreamsRef.current.has(stream)) {
+      stoppedMediaStreamsRef.current.add(stream);
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    if (mediaStreamRef.current === stream) mediaStreamRef.current = null;
   }
 
   return (
@@ -1175,7 +1308,9 @@ export function Composer({
                                   ? t("Распознаём запись")
                                   : speechUnavailable
                                     ? speechUnavailable
-                                    : t("Начать запись")
+                                    : hasRetryRecording
+                                      ? t("Повторить")
+                                      : t("Начать запись")
                   }
                   aria-pressed={speechState === "recording"}
                   className={`composer-action microphone${speechState === "recording" ? " recording" : ""}${speechTimerText ? " timing" : ""}`}
@@ -1191,12 +1326,19 @@ export function Composer({
                   title={speechUnavailable ?? undefined}
                   type="button"
                   onPointerDown={
-                    speechState === "idle" && !transcriptionStatus && !voiceInputLocked
+                    speechState === "idle" &&
+                    !hasRetryRecording &&
+                    !transcriptionStatus &&
+                    !voiceInputLocked
                       ? captureInsertionPoint
                       : undefined
                   }
                   onClick={() =>
-                    speechState === "recording" ? stopRecording() : void startRecording()
+                    speechState === "recording"
+                      ? stopRecording()
+                      : hasRetryRecording
+                        ? void retryVoiceRecording()
+                        : void startRecording()
                   }
                 >
                   {speechTimerText ? (

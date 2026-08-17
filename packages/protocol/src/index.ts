@@ -199,6 +199,7 @@ export type ApiErrorCode =
   | "transcription_unavailable"
   | "transcription_failed"
   | "not_found"
+  | "draft_conflict"
   | "conflict"
   | "app_server_unavailable"
   | "internal_error";
@@ -466,6 +467,41 @@ export type UpdateThreadDraftRequest = {
 
 export type ThreadDraft = UpdateThreadDraftRequest & {
   updatedAt: number;
+};
+
+export type ForkMode = "compressed" | "exact";
+
+export type ForkTimeEstimate = { minSeconds: number; maxSeconds: number };
+
+export type ForkModeEstimate = {
+  available: boolean;
+  estimatedBytes: number | null;
+  estimatedSeconds: ForkTimeEstimate | null;
+  unavailableReason: string | null;
+};
+
+export type ForkEstimateResponse = {
+  sourceBytes: number | null;
+  compressed: ForkModeEstimate;
+  exact: ForkModeEstimate;
+};
+
+export type ForkOperationStatus = "preparing" | "reconciling" | "ready" | "failed";
+
+export type ForkOperationSummary = {
+  id: string;
+  sourceThreadId: string;
+  lastTurnId: string;
+  agentMessageId: string;
+  mode: ForkMode;
+  status: ForkOperationStatus;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  targetThreadId: string | null;
+  queuedMessageCount: number;
+  estimate: ForkModeEstimate | null;
+  error: string | null;
 };
 
 export type ThreadSyncPoint = {
@@ -753,6 +789,7 @@ export type AppSnapshot = {
   defaultReasoningEffort?: string;
   taskDefaults?: TaskDefaults;
   voiceTranscriptions?: VoiceTranscriptionJob[];
+  forkOperations: ForkOperationSummary[];
 };
 
 export type ServerEvent =
@@ -762,6 +799,8 @@ export type ServerEvent =
   | { type: "project.removed"; projectId: string }
   | { type: "thread.upserted"; thread: ThreadSummary }
   | { type: "thread.removed"; threadId: string }
+  | { type: "forkOperation.upserted"; operation: ForkOperationSummary }
+  | { type: "forkOperation.removed"; operationId: string }
   | { type: "activity.upserted"; threadId: string; turnId: string; item: ActivityItem }
   | {
       type: "activity.delta";
@@ -1140,6 +1179,20 @@ export type ForkThreadRequest = {
 
 export type ForkThreadResponse = {
   thread: ThreadSummary;
+};
+
+export type CreateForkOperationRequest = ForkThreadRequest & {
+  operationId: string;
+  mode: ForkMode;
+};
+
+export type ForkOperationResponse = {
+  operation: ForkOperationSummary;
+};
+
+export type ForkOperationDetailResponse = ForkOperationResponse & {
+  queuedMessages: QueuedMessage[];
+  draft: ThreadDraft | null;
 };
 
 export type CreateProjectThreadResponse = {

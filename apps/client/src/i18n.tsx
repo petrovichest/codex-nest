@@ -32,6 +32,8 @@ const ENGLISH: Record<string, string> = {
   "{{error}}. Серверные задачи продолжат выполняться.":
     "{{error}}. Server tasks will continue running.",
   Повторить: "Retry",
+  "Повторить сохранённую запись": "Retry saved recording",
+  "Восстанавливаем сохранённую запись…": "Recovering saved recording…",
   "Получаем состояние Codex…": "Loading Codex state…",
   "Разрешить уведомления?": "Allow notifications?",
   "CodexNest сообщит, когда задача завершится или потребуется ваше решение.":
@@ -50,6 +52,49 @@ const ENGLISH: Record<string, string> = {
   "Не удалось удалить проект": "Failed to remove project",
   "Не удалось создать сессию": "Failed to create session",
   "Не удалось создать ответвление сессии": "Failed to fork session",
+  "Не удалось начать создание ответвления": "Failed to start creating the fork",
+  "Не удалось загрузить создаваемое ответвление": "Failed to load the pending fork",
+  "Не удалось загрузить исходную историю": "Failed to load the source history",
+  "Новое ответвление": "New fork",
+  "Как перенести контекст?": "How should context be transferred?",
+  "Выберите баланс между скоростью и буквальной точностью истории.":
+    "Choose the balance between speed and a literal copy of the history.",
+  "Исходный контекст · {{size}}": "Source context · {{size}}",
+  "Считаем…": "Calculating…",
+  "размер неизвестен": "size unknown",
+  "Способ переноса контекста": "Context transfer method",
+  Сжатая: "Compressed",
+  Точная: "Exact",
+  Рекомендуем: "Recommended",
+  "Переносит смысл и решения в компактном контексте без выдуманных сообщений.":
+    "Transfers meaning and decisions in compact context without invented messages.",
+  "Копирует доступную историю буквально. Для большой сессии это займёт больше времени и места.":
+    "Copies the available history literally. A large session will take more time and space.",
+  "Не удалось рассчитать сжатую ветку. Точная копия всё ещё доступна.":
+    "The compressed fork could not be estimated. An exact copy is still available.",
+  "Этот способ сейчас недоступен": "This method is currently unavailable",
+  Объём: "Size",
+  Время: "Time",
+  неизвестно: "unknown",
+  Б: "B",
+  КБ: "KB",
+  МБ: "MB",
+  ГБ: "GB",
+  "{{count}} с": "{{count}} sec",
+  "Создать ответвление": "Create fork",
+  "Готовим ответвление. Можно писать дальше — сообщения встанут в очередь.":
+    "Preparing the fork. You can keep writing—messages will be queued.",
+  "Сверяем перенесённый контекст и готовим ветку к работе.":
+    "Reconciling transferred context and preparing the fork for work.",
+  "Не удалось создать ответвление.": "The fork could not be created.",
+  "Ответвление готово. Открываем…": "The fork is ready. Opening…",
+  "Готовим ветку": "Preparing fork",
+  "Сверяем контекст": "Reconciling context",
+  "Ветка готова": "Fork ready",
+  "Создание остановлено": "Creation stopped",
+  "Исходная ветка": "Source branch",
+  "Контекст перенесён в сжатом виде из исходной ветки.":
+    "Context was transferred from the source branch in compressed form.",
   "Ответвление от {{title}}": "Forked from {{title}}",
   "Ответвление · Родитель недоступен": "Fork · Parent unavailable",
   "Показать ответвления: {{count}}": "Show forks: {{count}}",
@@ -647,6 +692,8 @@ const ENGLISH: Record<string, string> = {
   "Это сообщение уже отправлено": "This message has already been sent",
   "Не удалось остановить задачу": "Failed to stop the task",
   "Не удалось отправить запись на сервер": "Failed to upload the recording",
+  "Не удалось надежно сохранить запись на устройстве":
+    "Failed to save the recording safely on this device",
   "Не удалось очистить цель": "Failed to clear the goal",
   "Не удалось прочитать выбранное изображение": "Failed to read the selected image",
   "Не удалось распознать запись": "Failed to transcribe the recording",
@@ -806,7 +853,12 @@ export function localizeKnownServerText(
   value: string | null | undefined,
 ): string | null {
   if (!value) return null;
-  if (language === "ru") return value;
+  if (language === "ru") {
+    if (value === "The draft changed before voice upload") {
+      return "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.";
+    }
+    return value;
+  }
   const direct = ENGLISH[value];
   if (direct) return direct;
   const execAmendment = /^Разрешать похожую команду: (.*)$/s.exec(value);

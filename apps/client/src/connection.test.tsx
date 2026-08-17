@@ -5,14 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
 import { ConnectionProvider, useConnection } from "./connection";
+import type { PendingVoiceRecording } from "./offline-store";
 
 const capacitor = vi.hoisted(() => ({ native: false }));
 const addAppListener = vi.hoisted(() => vi.fn());
 const listPendingVoiceRecordings = vi.hoisted(() =>
-  vi.fn<() => Promise<Array<{ id: string }>>>(() => Promise.resolve([])),
+  vi.fn<() => Promise<PendingVoiceRecording[]>>(() => Promise.resolve([])),
 );
 const deletePendingVoiceRecording = vi.hoisted(() =>
   vi.fn<(id: string) => Promise<void>>(() => Promise.resolve()),
+);
+const loadPendingVoiceRecording = vi.hoisted(() => vi.fn(() => Promise.resolve(null)));
+const putPendingVoiceRecording = vi.hoisted(() =>
+  vi.fn<(recording: PendingVoiceRecording) => Promise<boolean>>(() => Promise.resolve(true)),
 );
 const observeNativeNotificationEvent = vi.hoisted(() => vi.fn());
 const observeNativeNotificationSnapshot = vi.hoisted(() => vi.fn());
@@ -31,6 +36,8 @@ vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listPendingVoiceRecordings,
   deletePendingVoiceRecording,
+  loadPendingVoiceRecording,
+  putPendingVoiceRecording,
 }));
 
 const summary: ThreadSummary = {
@@ -61,6 +68,10 @@ describe("ConnectionProvider", () => {
     listPendingVoiceRecordings.mockResolvedValue([]);
     deletePendingVoiceRecording.mockReset();
     deletePendingVoiceRecording.mockResolvedValue();
+    loadPendingVoiceRecording.mockReset();
+    loadPendingVoiceRecording.mockResolvedValue(null);
+    putPendingVoiceRecording.mockReset();
+    putPendingVoiceRecording.mockResolvedValue(true);
     observeNativeNotificationEvent.mockReset();
     observeNativeNotificationSnapshot.mockReset();
     setNativeNotificationAppActive.mockReset();
@@ -69,9 +80,27 @@ describe("ConnectionProvider", () => {
 
   afterEach(() => vi.useRealTimers());
 
-  it("discards persisted voice recordings without uploading them in the background", async () => {
-    listPendingVoiceRecordings.mockResolvedValueOnce([{ id: "stale-recording" }]);
-    const fetchMock = vi.fn();
+  it("uploads a persisted voice recording after reload and deletes it only after acceptance", async () => {
+    listPendingVoiceRecordings.mockResolvedValue([
+      {
+        id: "stale-recording",
+        connectionKey: "saved-connection",
+        threadId: "thread",
+        audio: new Blob(["audio"], { type: "audio/webm" }),
+        durationMs: 1_000,
+        mode: "draft",
+        selectionStart: 0,
+        selectionEnd: 0,
+        draftUpdatedAt: null,
+        draft: { input: "", images: [], goalMode: false, annotations: [] },
+        localDraftUpdatedAt: 1,
+        serverDraftUpdatedAt: null,
+        createdAt: 1,
+        attempts: 1,
+        lastError: "offline",
+      },
+    ]);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
 
@@ -84,14 +113,128 @@ describe("ConnectionProvider", () => {
     await waitFor(() =>
       expect(deletePendingVoiceRecording).toHaveBeenCalledWith("stale-recording"),
     );
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
     view.unmount();
   });
 
-  it("does not retry a failed voice upload after reconnecting", async () => {
+  it("keeps a recovered recording without endlessly retrying a stale draft conflict", async () => {
+    listPendingVoiceRecordings.mockResolvedValue([
+      {
+        id: "conflicted-recording",
+        connectionKey: "saved-connection",
+        threadId: "thread",
+        audio: new Blob(["audio"], { type: "audio/webm" }),
+        durationMs: 1_000,
+        mode: "draft",
+        selectionStart: 0,
+        selectionEnd: 0,
+        draftUpdatedAt: 10,
+        draft: { input: "Старый черновик", images: [], goalMode: false, annotations: [] },
+        localDraftUpdatedAt: 1,
+        serverDraftUpdatedAt: 11,
+        createdAt: 1,
+        attempts: 1,
+        lastError: "offline",
+      },
+    ]);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: "draft_conflict", message: "The draft changed before voice upload" },
+        }),
+        { status: 409 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let pendingThreadIds: readonly string[] = [];
+    let pendingErrors: Readonly<Record<string, string>> = {};
+    let retryRecording: ReturnType<typeof useConnection>["retryPendingVoiceRecording"] | undefined;
+
+    function Probe() {
+      const connection = useConnection();
+      pendingThreadIds = connection.pendingVoiceRecordingThreadIds;
+      pendingErrors = connection.pendingVoiceRecordingErrors;
+      retryRecording = connection.retryPendingVoiceRecording;
+      return null;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(putPendingVoiceRecording).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "conflicted-recording",
+        attempts: 2,
+        lastError: "The draft changed before voice upload",
+      }),
+    );
+    expect(deletePendingVoiceRecording).not.toHaveBeenCalledWith("conflicted-recording");
+    expect(pendingThreadIds).toEqual(["thread"]);
+    expect(pendingErrors).toEqual({
+      thread: "The draft changed before voice upload",
+    });
+
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { code: "draft_conflict", message: "The draft changed before voice upload" },
+          }),
+          { status: 409 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            input: "Текущий черновик",
+            images: [],
+            goalMode: false,
+            annotations: [],
+            updatedAt: 21,
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await act(async () => {
+      await retryRecording!({
+        threadId: "thread",
+        mode: "draft",
+        draft: { input: "Текущий черновик", images: [], goalMode: false, annotations: [] },
+        draftUpdatedAt: 20,
+      });
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1]?.[0]).toEqual(
+      new URL("https://codexnest.example/api/v1/threads/thread/draft?expectedUpdatedAt=20"),
+    );
+    expect(
+      putPendingVoiceRecording.mock.calls.some(
+        ([recording]) =>
+          recording.draft.input === "Текущий черновик" &&
+          !Object.prototype.hasOwnProperty.call(recording, "serverDraftUpdatedAt"),
+      ),
+    ).toBe(true);
+    await waitFor(() => expect(pendingThreadIds).toEqual([]));
+    expect(pendingErrors).toEqual({});
+    expect(deletePendingVoiceRecording).toHaveBeenCalledWith("conflicted-recording");
+    view.unmount();
+  });
+
+  it("persists a new voice recording before upload and retains it after a failed upload", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(
+      .mockResolvedValueOnce(new Response("null", { status: 200 }))
+      .mockResolvedValueOnce(
         new Response(
           JSON.stringify({ error: { code: "transcription_unavailable", message: "offline" } }),
           { status: 503 },
@@ -127,11 +270,19 @@ describe("ConnectionProvider", () => {
         }),
       ).rejects.toThrow("offline");
     });
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toEqual(
+      new URL("https://codexnest.example/api/v1/threads/thread/draft?expectedUpdatedAt=none"),
+    );
+    expect(putPendingVoiceRecording).toHaveBeenCalled();
+    expect(putPendingVoiceRecording.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchMock.mock.invocationCallOrder[0]!,
+    );
+    expect(deletePendingVoiceRecording).not.toHaveBeenCalledWith("recording");
 
     act(() => window.dispatchEvent(new Event("online")));
     await act(async () => Promise.resolve());
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     view.unmount();
   });
 
@@ -1835,6 +1986,7 @@ function snapshot(sequence: number, threads: ThreadSummary[] = [summary]): AppSn
     connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects: [],
     threads,
+    forkOperations: [],
     attention: [],
     models: [],
   };

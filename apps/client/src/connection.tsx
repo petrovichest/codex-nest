@@ -23,7 +23,7 @@ import {
   type UpdateUserInputDraftRequest,
 } from "@codexnest/protocol";
 
-import { ApiClient, isRetryableApiError } from "./api";
+import { ApiClient, ApiClientError, isRetryableApiError } from "./api";
 import { BrowserNotificationTracker } from "./browser-notifications";
 import { translate, useI18n } from "./i18n";
 import {
@@ -41,7 +41,9 @@ import {
   confirmLocalDraft,
   listOutboxMessages,
   listPendingVoiceRecordings,
+  loadPendingVoiceRecording,
   putOutboxMessage,
+  putPendingVoiceRecording,
   saveCachedMeta,
   saveCachedThread,
   saveLocalDraft,
@@ -77,6 +79,11 @@ type VoiceRecordingUpload = Omit<
   "connectionKey" | "createdAt" | "attempts" | "lastError"
 >;
 
+type VoiceRecordingRecovery = Pick<
+  PendingVoiceRecording,
+  "threadId" | "mode" | "draft" | "draftUpdatedAt"
+>;
+
 type UserInputDraftPersistence = {
   draft: UpdateUserInputDraftRequest;
   version: number;
@@ -102,6 +109,9 @@ interface ConnectionContextValue {
     body: QueueMessageRequest & { clientMessageId: string },
   ): Promise<"delivered" | "pending">;
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
+  pendingVoiceRecordingThreadIds: readonly string[];
+  pendingVoiceRecordingErrors: Readonly<Record<string, string>>;
+  retryPendingVoiceRecording(recording: VoiceRecordingRecovery): Promise<void>;
   updateUserInputDraft(
     attentionId: string,
     draft: UpdateUserInputDraftRequest,
@@ -126,6 +136,12 @@ export function ConnectionProvider({
   const [generation, setGeneration] = useState(0);
   const [foregroundEpoch, setForegroundEpoch] = useState(0);
   const [streamRecoveryEpoch, setStreamRecoveryEpoch] = useState(0);
+  const [pendingVoiceRecordingThreadIds, setPendingVoiceRecordingThreadIds] = useState<string[]>(
+    [],
+  );
+  const [pendingVoiceRecordingErrors, setPendingVoiceRecordingErrors] = useState<
+    Record<string, string>
+  >({});
   const [appActive, setAppActive] = useState(() => document.visibilityState === "visible");
   const generationRef = useRef(0);
   const streamSequence = useRef<number | null>(null);
@@ -145,6 +161,12 @@ export function ConnectionProvider({
   const foregroundRefresh = useRef<Promise<void> | null>(null);
   const outboxDrain = useRef<Promise<void> | null>(null);
   const outboxRetryTimer = useRef<number | undefined>(undefined);
+  const recoveredVoiceRecordingIds = useRef(new Set<string>());
+  const pendingVoiceRecordings = useRef(
+    new Map<string, Pick<PendingVoiceRecording, "threadId" | "lastError">>(),
+  );
+  const voiceRecoveryDrain = useRef<Promise<void> | null>(null);
+  const voiceRecoveryRetryTimer = useRef<number | undefined>(undefined);
   const userInputDraftPersistence = useRef(new Map<string, UserInputDraftPersistence>());
   const browserNotifications = useMemo(
     () => (Capacitor.isNativePlatform() ? null : new BrowserNotificationTracker()),
@@ -617,42 +639,195 @@ export function ConnectionProvider({
     [api, drainReliableOutbox, scheduleOutboxRetry, settings],
   );
 
-  const uploadVoiceRecording = useCallback(
-    async (recording: VoiceRecordingUpload): Promise<void> => {
-      const savedDraft = await api.updateThreadDraft(recording.threadId, recording.draft, {
-        retry: false,
+  const publishPendingVoiceRecordingThreads = useCallback(() => {
+    const threadIds = new Set<string>();
+    const errors: Record<string, string> = {};
+    for (const recording of pendingVoiceRecordings.current.values()) {
+      threadIds.add(recording.threadId);
+      if (recording.lastError && errors[recording.threadId] === undefined) {
+        errors[recording.threadId] = recording.lastError;
+      }
+    }
+    setPendingVoiceRecordingThreadIds([...threadIds]);
+    setPendingVoiceRecordingErrors(errors);
+  }, []);
+
+  const trackPendingVoiceRecording = useCallback(
+    (recording: Pick<PendingVoiceRecording, "id" | "threadId" | "lastError">) => {
+      pendingVoiceRecordings.current.set(recording.id, {
+        threadId: recording.threadId,
+        lastError: recording.lastError,
       });
-      await confirmLocalDraft(
-        settings,
-        recording.threadId,
-        savedDraft,
-        recording.localDraftUpdatedAt,
-      );
-      const accepted = await api.createVoiceTranscription(recording.threadId, recording.audio, {
-        recordingDurationMs: recording.durationMs,
-        mode: recording.mode,
-        selectionStart: recording.selectionStart,
-        selectionEnd: recording.selectionEnd,
-        draftUpdatedAt: savedDraft?.updatedAt ?? null,
-        clientUploadId: recording.id,
-      });
-      if (accepted) dispatch({ type: "voice.accepted", job: accepted });
+      publishPendingVoiceRecordingThreads();
     },
-    [api, settings],
+    [publishPendingVoiceRecordingThreads],
+  );
+
+  const untrackPendingVoiceRecording = useCallback(
+    (id: string) => {
+      if (!pendingVoiceRecordings.current.delete(id)) return;
+      publishPendingVoiceRecordingThreads();
+    },
+    [publishPendingVoiceRecordingThreads],
+  );
+
+  const uploadVoiceRecording = useCallback(
+    async (recording: PendingVoiceRecording): Promise<void> => {
+      let prepared = recording;
+      try {
+        if (!Object.prototype.hasOwnProperty.call(prepared, "serverDraftUpdatedAt")) {
+          const savedDraft = await api.updateThreadDraft(prepared.threadId, prepared.draft, {
+            retry: false,
+            expectedUpdatedAt: prepared.draftUpdatedAt,
+          });
+          prepared = { ...prepared, serverDraftUpdatedAt: savedDraft?.updatedAt ?? null };
+          if (!(await putPendingVoiceRecording(prepared))) {
+            throw new Error(
+              translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+            );
+          }
+          await confirmLocalDraft(
+            settings,
+            prepared.threadId,
+            savedDraft,
+            prepared.localDraftUpdatedAt,
+          );
+        }
+        const accepted = await api.createVoiceTranscription(prepared.threadId, prepared.audio, {
+          recordingDurationMs: prepared.durationMs,
+          mode: prepared.mode,
+          selectionStart: prepared.selectionStart,
+          selectionEnd: prepared.selectionEnd,
+          draftUpdatedAt: prepared.serverDraftUpdatedAt ?? null,
+          clientUploadId: prepared.id,
+        });
+        if (accepted) dispatch({ type: "voice.accepted", job: accepted });
+        await deletePendingVoiceRecording(prepared.id);
+        recoveredVoiceRecordingIds.current.delete(prepared.id);
+        untrackPendingVoiceRecording(prepared.id);
+      } catch (error) {
+        const current = (await loadPendingVoiceRecording(prepared.id)) ?? prepared;
+        const failed = {
+          ...current,
+          attempts: current.attempts + 1,
+          lastError: error instanceof Error ? error.message : "Delivery failed",
+        };
+        await putPendingVoiceRecording(failed);
+        trackPendingVoiceRecording(failed);
+        throw error;
+      }
+    },
+    [api, settings, trackPendingVoiceRecording, untrackPendingVoiceRecording],
   );
 
   const queueVoiceRecording = useCallback(
     async (input: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void> => {
-      const localDraftUpdatedAt = Date.now();
-      const recording: VoiceRecordingUpload = {
-        ...input,
-        localDraftUpdatedAt,
-      };
+      const existing = await loadPendingVoiceRecording(input.id);
+      const localDraftUpdatedAt = existing?.localDraftUpdatedAt ?? Date.now();
+      const recording: PendingVoiceRecording =
+        existing ??
+        ({
+          ...input,
+          connectionKey: connectionCacheKey(settings),
+          localDraftUpdatedAt,
+          createdAt: Date.now(),
+          attempts: 0,
+          lastError: null,
+        } satisfies PendingVoiceRecording);
+      if (!existing && !(await putPendingVoiceRecording(recording))) {
+        throw new Error(
+          translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+        );
+      }
+      trackPendingVoiceRecording(recording);
       await saveLocalDraft(settings, recording.threadId, recording.draft, localDraftUpdatedAt);
       await uploadVoiceRecording(recording);
     },
-    [settings, uploadVoiceRecording],
+    [settings, trackPendingVoiceRecording, uploadVoiceRecording],
   );
+
+  const retryPendingVoiceRecording = useCallback(
+    async (input: VoiceRecordingRecovery): Promise<void> => {
+      const recordings = await listPendingVoiceRecordings(settings);
+      const recording = recordings
+        .filter((candidate) => candidate.threadId === input.threadId)
+        .sort((left, right) => left.createdAt - right.createdAt)[0];
+      if (!recording) return;
+      try {
+        await uploadVoiceRecording(recording);
+        return;
+      } catch (error) {
+        if (!(error instanceof ApiClientError) || error.code !== "draft_conflict") throw error;
+      }
+      const current = (await loadPendingVoiceRecording(recording.id)) ?? recording;
+      const unprepared = { ...current };
+      delete unprepared.serverDraftUpdatedAt;
+      const maxSelection = input.draft.input.length;
+      const selectionStart = Math.min(current.selectionStart, maxSelection);
+      const rebased: PendingVoiceRecording = {
+        ...unprepared,
+        mode: input.mode,
+        draft: structuredClone(input.draft),
+        draftUpdatedAt: input.draftUpdatedAt,
+        selectionStart,
+        selectionEnd: Math.max(selectionStart, Math.min(current.selectionEnd, maxSelection)),
+        lastError: null,
+      };
+      if (!(await putPendingVoiceRecording(rebased))) {
+        throw new Error(
+          translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+        );
+      }
+      trackPendingVoiceRecording(rebased);
+      await uploadVoiceRecording(rebased);
+    },
+    [settings, trackPendingVoiceRecording, uploadVoiceRecording],
+  );
+
+  const scheduleVoiceRecoveryRetry = useCallback((attempt: number, drain: () => void) => {
+    if (voiceRecoveryRetryTimer.current !== undefined) return;
+    const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+    const base = delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)] ?? 30_000;
+    voiceRecoveryRetryTimer.current = window.setTimeout(
+      () => {
+        voiceRecoveryRetryTimer.current = undefined;
+        drain();
+      },
+      Math.round(base * (0.8 + Math.random() * 0.4)),
+    );
+  }, []);
+
+  const drainRecoveredVoiceRecordings = useCallback((): Promise<void> => {
+    if (voiceRecoveryDrain.current) return voiceRecoveryDrain.current;
+    const request = (async () => {
+      const recordings = await listPendingVoiceRecordings(settings);
+      let retryAttempt: number | null = null;
+      for (const recording of recordings) {
+        if (!recoveredVoiceRecordingIds.current.has(recording.id)) continue;
+        try {
+          await uploadVoiceRecording(recording);
+        } catch (error) {
+          if (
+            isRetryableApiError(error) ||
+            (error instanceof ApiClientError &&
+              error.status === 409 &&
+              error.code !== "draft_conflict")
+          ) {
+            retryAttempt = Math.max(retryAttempt ?? 0, recording.attempts + 1);
+          }
+        }
+      }
+      if (retryAttempt !== null) {
+        scheduleVoiceRecoveryRetry(retryAttempt, () => void drainRecoveredVoiceRecordings());
+      }
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        if (voiceRecoveryDrain.current === request) voiceRecoveryDrain.current = null;
+      });
+    voiceRecoveryDrain.current = request;
+    return request;
+  }, [scheduleVoiceRecoveryRetry, settings, uploadVoiceRecording]);
 
   const persistUserInputDraft = useCallback(
     function persist(attentionId: string): void {
@@ -777,25 +952,47 @@ export function ConnectionProvider({
   useEffect(() => {
     const wake = () => {
       void drainReliableOutbox();
+      void drainRecoveredVoiceRecordings();
     };
     window.addEventListener("online", wake);
-    wake();
+    void drainReliableOutbox();
     return () => {
       window.removeEventListener("online", wake);
       if (outboxRetryTimer.current !== undefined) {
         window.clearTimeout(outboxRetryTimer.current);
         outboxRetryTimer.current = undefined;
       }
+      if (voiceRecoveryRetryTimer.current !== undefined) {
+        window.clearTimeout(voiceRecoveryRetryTimer.current);
+        voiceRecoveryRetryTimer.current = undefined;
+      }
     };
-  }, [drainReliableOutbox]);
+  }, [drainRecoveredVoiceRecordings, drainReliableOutbox]);
 
   useEffect(() => {
+    let active = true;
     void listPendingVoiceRecordings(settings)
-      .then((recordings) =>
-        Promise.all(recordings.map((recording) => deletePendingVoiceRecording(recording.id))),
-      )
+      .then((recordings) => {
+        if (!active) return;
+        pendingVoiceRecordings.current.clear();
+        for (const recording of recordings) {
+          recoveredVoiceRecordingIds.current.add(recording.id);
+          pendingVoiceRecordings.current.set(recording.id, {
+            threadId: recording.threadId,
+            lastError: recording.lastError,
+          });
+        }
+        publishPendingVoiceRecordingThreads();
+        void drainRecoveredVoiceRecordings();
+      })
       .catch(() => undefined);
-  }, [settings]);
+    return () => {
+      active = false;
+      recoveredVoiceRecordingIds.current.clear();
+      pendingVoiceRecordings.current.clear();
+      publishPendingVoiceRecordingThreads();
+    };
+  }, [drainRecoveredVoiceRecordings, publishPendingVoiceRecordingThreads, settings]);
 
   useEffect(() => {
     let stopped = false;
@@ -979,6 +1176,9 @@ export function ConnectionProvider({
       loadTurnItems,
       sendReliable,
       queueVoiceRecording,
+      pendingVoiceRecordingThreadIds,
+      pendingVoiceRecordingErrors,
+      retryPendingVoiceRecording,
       updateUserInputDraft,
       flushUserInputDraft,
       clearUserInputDraft,
@@ -996,6 +1196,9 @@ export function ConnectionProvider({
       loadTurnItems,
       sendReliable,
       queueVoiceRecording,
+      pendingVoiceRecordingThreadIds,
+      pendingVoiceRecordingErrors,
+      retryPendingVoiceRecording,
       updateUserInputDraft,
       flushUserInputDraft,
       clearUserInputDraft,

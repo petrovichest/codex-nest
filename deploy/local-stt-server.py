@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from io import BytesIO
 import json
 import logging
 import os
-import tempfile
 import threading
 from email import policy
 from email.parser import BytesParser
@@ -45,19 +45,15 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
-            audio, suffix, language = self.read_transcription_request()
+            audio, _suffix, language = self.read_transcription_request()
         except RequestError as error:
             self.send_json(error.status, {"error": error.message})
             return
 
-        temporary_path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
-                temporary.write(audio)
-                temporary_path = temporary.name
             with self.server.transcription_lock:
                 segments, _info = self.server.model.transcribe(
-                    temporary_path,
+                    BytesIO(audio),
                     language=None if language == "auto" else language,
                     task="transcribe",
                     beam_size=5,
@@ -72,9 +68,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         except Exception:
             LOG.exception("Transcription failed")
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Transcription failed"})
-        finally:
-            if temporary_path:
-                Path(temporary_path).unlink(missing_ok=True)
 
     def read_transcription_request(self) -> tuple[bytes, str, str]:
         content_type = self.headers.get("Content-Type", "")

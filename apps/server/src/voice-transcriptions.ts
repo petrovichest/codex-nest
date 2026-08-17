@@ -42,6 +42,7 @@ type AcceptVoiceTranscription = {
 };
 
 export class VoiceTranscriptionConflictError extends Error {}
+export class VoiceTranscriptionDraftConflictError extends VoiceTranscriptionConflictError {}
 export class VoiceTranscriptionQueueFullError extends Error {}
 
 export class VoiceTranscriptionManager {
@@ -101,6 +102,18 @@ export class VoiceTranscriptionManager {
     return status === "queued" || status === "transcribing" || status === "applying";
   }
 
+  duplicate(threadId: string, clientUploadId: string): VoiceTranscriptionJob | null | undefined {
+    const existing = this.job(threadId);
+    if (existing?.id === clientUploadId) return publicJob(existing);
+    if (
+      this.options.store.view().voiceReceipts?.[clientUploadId] ||
+      this.options.store.view().messageReceipts?.[clientUploadId]
+    ) {
+      return null;
+    }
+    return undefined;
+  }
+
   accept(input: AcceptVoiceTranscription): Promise<VoiceTranscriptionJob | null> {
     let accepted!: VoiceTranscriptionJob | null;
     const task = this.acceptChain
@@ -143,15 +156,9 @@ export class VoiceTranscriptionManager {
     input: AcceptVoiceTranscription,
   ): Promise<VoiceTranscriptionJob | null> {
     const requestedId = input.clientUploadId;
-    if (
-      requestedId &&
-      (this.options.store.view().voiceReceipts?.[requestedId] ||
-        this.options.store.view().messageReceipts?.[requestedId])
-    ) {
-      return null;
-    }
+    const duplicate = requestedId ? this.duplicate(input.threadId, requestedId) : undefined;
+    if (duplicate !== undefined) return duplicate;
     const existing = this.job(input.threadId);
-    if (requestedId && existing?.id === requestedId) return publicJob(existing);
     if (existing && existing.status !== "failed") {
       throw new VoiceTranscriptionConflictError(
         "A voice transcription is already active in this thread",
@@ -207,17 +214,13 @@ export class VoiceTranscriptionManager {
         }
         const threadDraft = draft.threadMeta[input.threadId]?.draft;
         if ((threadDraft?.updatedAt ?? null) !== input.expectedDraftUpdatedAt) {
-          throw new VoiceTranscriptionConflictError(
-            "The draft changed before the recording reached the server",
-          );
+          throw new VoiceTranscriptionDraftConflictError("The draft changed before voice upload");
         }
         if (
           input.selectionStart > (threadDraft?.input.length ?? 0) ||
           input.selectionEnd > (threadDraft?.input.length ?? 0)
         ) {
-          throw new VoiceTranscriptionConflictError(
-            "The draft changed before the recording reached the server",
-          );
+          throw new VoiceTranscriptionDraftConflictError("The draft changed before voice upload");
         }
         draft.voiceTranscriptions[input.threadId] = state;
       });
@@ -373,7 +376,7 @@ export class VoiceTranscriptionManager {
       const draft = meta.draft ?? emptyDraft();
       meta.draft = {
         ...insertTranscript(draft, job.selectionStart, job.selectionEnd, transcript),
-        updatedAt: Date.now(),
+        updatedAt: Math.max(Date.now(), (meta.draft?.updatedAt ?? -1) + 1),
       };
       state.threadMeta[job.threadId] = meta;
       state.voiceReceipts ??= {};

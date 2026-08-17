@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
 import type {
@@ -8,6 +9,7 @@ import type {
   AttentionResponse,
   AppSnapshot,
   BrowserThreadStatus,
+  ForkOperationSummary,
   ModelOption,
   Project,
   QueuedMessage,
@@ -52,6 +54,7 @@ import type {
   CodexNestState,
   CodexNestStateView,
   DeepReadonly,
+  ForkOperationState,
   ManagedTeamTaskState,
   SessionSnapshotState,
   StateStore,
@@ -66,6 +69,8 @@ interface CachedThread {
   liveOutcome?: ThreadOutcome;
   goalStatus?: ThreadGoal["status"] | null;
 }
+
+export class ThreadDraftConflictError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
 const SESSION_RETENTION_BATCH_SIZE = 25;
@@ -203,6 +208,9 @@ export class AppProjection extends EventEmitter {
         .filter((job) => visibleThreadIds.has(job.threadId))
         .map(publicVoiceTranscription)
         .sort((left, right) => left.createdAt - right.createdAt),
+      forkOperations: Object.values(state.forkOperations ?? {})
+        .map(publicForkOperation)
+        .sort((left, right) => left.createdAt - right.createdAt),
     };
   }
 
@@ -246,6 +254,21 @@ export class AppProjection extends EventEmitter {
     if (this.removedThreads.has(id)) return undefined;
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
+  }
+
+  rolloutPath(id: string): string | null {
+    return this.threads.get(id)?.thread.path ?? null;
+  }
+
+  publishForkOperation(operationId: string): void {
+    const operation = this.store.view().forkOperations?.[operationId];
+    if (operation) {
+      this.publish({ type: "forkOperation.upserted", operation: publicForkOperation(operation) });
+    }
+  }
+
+  removeForkOperation(operationId: string): void {
+    this.publish({ type: "forkOperation.removed", operationId });
   }
 
   setBrowserStatusProvider(provider: (threadId: string) => BrowserThreadStatus): void {
@@ -476,7 +499,11 @@ export class AppProjection extends EventEmitter {
     return page;
   }
 
-  async setDraft(threadId: string, value: UpdateThreadDraftRequest): Promise<ThreadDraft | null> {
+  async setDraft(
+    threadId: string,
+    value: UpdateThreadDraftRequest,
+    options?: { expectedUpdatedAt: number | null },
+  ): Promise<ThreadDraft | null> {
     if (!this.threads.has(threadId)) throw new Error("Thread not found");
     const empty =
       value.input === "" &&
@@ -486,10 +513,21 @@ export class AppProjection extends EventEmitter {
     let draft: ThreadDraft | null = null;
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
+      const current = meta.draft;
+      if (options && (current?.updatedAt ?? null) !== options.expectedUpdatedAt) {
+        if (threadDraftMatches(current, value)) {
+          draft = current ? { ...structuredClone(value), updatedAt: current.updatedAt } : null;
+          return;
+        }
+        throw new ThreadDraftConflictError("The draft changed before voice upload");
+      }
       if (empty) {
         delete meta.draft;
       } else {
-        draft = { ...structuredClone(value), updatedAt: Date.now() };
+        draft = {
+          ...structuredClone(value),
+          updatedAt: Math.max(Date.now(), (current?.updatedAt ?? -1) + 1),
+        };
         meta.draft = draft;
       }
       state.threadMeta[threadId] = meta;
@@ -2656,11 +2694,12 @@ function threadRelation(
       role: null,
     };
   }
+  const forkedFromId = meta?.logicalFork?.sourceThreadId ?? thread.forkedFromId;
   return thread.parentThreadId === null
     ? {
         kind: "session",
         sessionId: thread.sessionId,
-        ...(thread.forkedFromId ? { forkedFromId: thread.forkedFromId } : {}),
+        ...(forkedFromId ? { forkedFromId } : {}),
       }
     : {
         kind: "subagent",
@@ -2669,6 +2708,26 @@ function threadRelation(
         nickname: thread.agentNickname,
         role: thread.agentRole,
       };
+}
+
+export function publicForkOperation(
+  operation: DeepReadonly<ForkOperationState>,
+): ForkOperationSummary {
+  return {
+    id: operation.id,
+    sourceThreadId: operation.sourceThreadId,
+    lastTurnId: operation.lastTurnId,
+    agentMessageId: operation.agentMessageId,
+    mode: operation.mode,
+    status: operation.status,
+    title: operation.title,
+    createdAt: operation.createdAt,
+    updatedAt: operation.updatedAt,
+    targetThreadId: operation.targetThreadId,
+    queuedMessageCount: operation.queuedMessages.length,
+    estimate: operation.estimate ? cloneView(operation.estimate) : null,
+    error: operation.error,
+  };
 }
 
 function sessionSettings(settings?: SessionSettings): SessionSettings {
@@ -3193,6 +3252,29 @@ function teamOrchestrationIsActive(
       task.status === "starting" ||
       task.status === "running" ||
       task.delivery?.status !== "delivered",
+  );
+}
+
+function threadDraftMatches(
+  current: ThreadDraft | undefined,
+  value: UpdateThreadDraftRequest,
+): boolean {
+  if (!current) {
+    return (
+      value.input === "" &&
+      value.images.length === 0 &&
+      !value.goalMode &&
+      value.annotations.length === 0
+    );
+  }
+  return isDeepStrictEqual(
+    {
+      input: current.input,
+      images: current.images,
+      goalMode: current.goalMode,
+      annotations: current.annotations,
+    },
+    value,
   );
 }
 

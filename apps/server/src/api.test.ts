@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
+  appendFile,
   chmod,
   lstat,
   mkdir,
@@ -15,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -36,14 +37,16 @@ import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
-import { RpcError, type JsonlTransport } from "./codex/transport";
+import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
 import { computeTeamWorkspaceDelta, createTeamWorkspace } from "./team-workspace";
+import type { ThreadTitleGenerator } from "./thread-title";
 import { TranscriptionError } from "./transcription";
+import { VoiceTranscriptionManager } from "./voice-transcriptions";
 
 const directories: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -1317,7 +1320,191 @@ describe("audio transcriptions", () => {
       },
     );
     const authorization = { authorization: "Bearer correct" };
-    const updatedAt = store.snapshot().threadMeta.voice!.draft!.updatedAt;
+    let updatedAt = store.snapshot().threadMeta.voice!.draft!.updatedAt;
+    await store.update((state) => {
+      state.threadMeta.voice!.draft = {
+        input: "Более новый черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: updatedAt + 1,
+      };
+      state.voiceTranscriptions!.voice = {
+        id: "failed-voice",
+        threadId: "voice",
+        mode: "draft",
+        status: "failed",
+        createdAt: 1,
+        startedAt: null,
+        audioDurationMs: 1_000,
+        estimatedTotalSeconds: null,
+        error: "failed",
+        contentType: "audio/webm",
+        audioBytes: 5,
+        selectionStart: 0,
+        selectionEnd: 0,
+      };
+    });
+
+    const staleDraft = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt}`,
+      headers: authorization,
+      payload: { input: "Начало конец", images: [], goalMode: false, annotations: [] },
+    });
+    expect(staleDraft.statusCode).toBe(409);
+    expect(staleDraft.json()).toMatchObject({ error: { code: "draft_conflict" } });
+    expect(store.snapshot().threadMeta.voice!.draft!.input).toBe("Более новый черновик");
+    expect(store.snapshot().voiceTranscriptions!.voice!.id).toBe("failed-voice");
+
+    const equivalentDraft = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt}`,
+      headers: authorization,
+      payload: {
+        input: "Более новый черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+    });
+    expect(equivalentDraft.statusCode).toBe(200);
+    expect(equivalentDraft.json().updatedAt).toBe(updatedAt + 1);
+    expect(store.snapshot().voiceTranscriptions!.voice).toBeUndefined();
+
+    const restoredDraft = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt + 1}`,
+      headers: authorization,
+      payload: { input: "Начало конец", images: [], goalMode: false, annotations: [] },
+    });
+    expect(restoredDraft.statusCode).toBe(200);
+    updatedAt = restoredDraft.json().updatedAt;
+
+    const sameMillisecond = vi.spyOn(Date, "now").mockReturnValue(updatedAt);
+    const competingDrafts = await Promise.all(
+      ["Версия A", "Версия B"].map((input) =>
+        app.inject({
+          method: "PUT",
+          url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt}`,
+          headers: authorization,
+          payload: { input, images: [], goalMode: false, annotations: [] },
+        }),
+      ),
+    );
+    sameMillisecond.mockRestore();
+    expect(competingDrafts.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const winningDraft = competingDrafts.find((response) => response.statusCode === 200)!;
+    expect(winningDraft.json().updatedAt).toBe(updatedAt + 1);
+
+    const finalDraft = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt + 1}`,
+      headers: authorization,
+      payload: { input: "Начало конец", images: [], goalMode: false, annotations: [] },
+    });
+    expect(finalDraft.statusCode).toBe(200);
+    updatedAt = finalDraft.json().updatedAt;
+
+    const preparedDraftUpdatedAt = updatedAt;
+    await store.update((state) => {
+      state.threadMeta.voice!.draft = {
+        input: "x",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: preparedDraftUpdatedAt + 1,
+      };
+    });
+    const lateDraftConflict = await app.inject({
+      method: "POST",
+      url:
+        "/api/v1/threads/voice/voice-transcriptions?" +
+        new URLSearchParams({
+          mode: "draft",
+          selectionStart: "7",
+          selectionEnd: "7",
+          draftUpdatedAt: String(preparedDraftUpdatedAt),
+          clientUploadId: "late-conflict",
+        }),
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio"),
+    });
+    expect(lateDraftConflict.statusCode).toBe(409);
+    expect(lateDraftConflict.json()).toMatchObject({ error: { code: "draft_conflict" } });
+    expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
+
+    const restoredAfterLateConflict = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${preparedDraftUpdatedAt + 1}`,
+      headers: authorization,
+      payload: { input: "Начало конец", images: [], goalMode: false, annotations: [] },
+    });
+    expect(restoredAfterLateConflict.statusCode).toBe(200);
+    updatedAt = restoredAfterLateConflict.json().updatedAt;
+
+    const writeStarted = Promise.withResolvers<void>();
+    const continueWrite = Promise.withResolvers<void>();
+    const managerPrototype = VoiceTranscriptionManager.prototype as unknown as {
+      writeAudio(temporary: string, target: string, audio: Buffer): Promise<void>;
+    };
+    const originalWriteAudio = managerPrototype.writeAudio;
+    const writeAudio = vi
+      .spyOn(managerPrototype, "writeAudio")
+      .mockImplementation(async function (temporary, target, audio) {
+        writeStarted.resolve();
+        await continueWrite.promise;
+        await originalWriteAudio.call(this, temporary, target, audio);
+      });
+    const atomicConflictRequest = app.inject({
+      method: "POST",
+      url:
+        "/api/v1/threads/voice/voice-transcriptions?" +
+        new URLSearchParams({
+          mode: "draft",
+          selectionStart: "7",
+          selectionEnd: "7",
+          draftUpdatedAt: String(updatedAt),
+          clientUploadId: "atomic-late-conflict",
+        }),
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio"),
+    });
+    await writeStarted.promise;
+    const concurrentDraft = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt}`,
+      headers: authorization,
+      payload: { input: "Конкурентный черновик", images: [], goalMode: false, annotations: [] },
+    });
+    expect(concurrentDraft.statusCode).toBe(200);
+    updatedAt = concurrentDraft.json().updatedAt;
+    continueWrite.resolve();
+    const atomicConflict = await atomicConflictRequest;
+    writeAudio.mockRestore();
+    expect(atomicConflict.statusCode).toBe(409);
+    expect(atomicConflict.json()).toMatchObject({ error: { code: "draft_conflict" } });
+    expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
+    await expect(
+      access(join(directory, "state.json.voice-transcriptions", "atomic-late-conflict.webm")),
+    ).rejects.toThrow();
+
+    const restoredAfterAtomicConflict = await app.inject({
+      method: "PUT",
+      url: `/api/v1/threads/voice/draft?expectedUpdatedAt=${updatedAt}`,
+      headers: authorization,
+      payload: { input: "Начало конец", images: [], goalMode: false, annotations: [] },
+    });
+    expect(restoredAfterAtomicConflict.statusCode).toBe(200);
+    updatedAt = restoredAfterAtomicConflict.json().updatedAt;
 
     const accepted = await app.inject({
       method: "POST",
@@ -1328,6 +1515,7 @@ describe("audio transcriptions", () => {
           selectionStart: "7",
           selectionEnd: "7",
           draftUpdatedAt: String(updatedAt),
+          clientUploadId: "completed-voice",
         }),
       headers: {
         ...authorization,
@@ -1363,11 +1551,35 @@ describe("audio transcriptions", () => {
     ).toBe(409);
 
     await vi.waitFor(() => expect(transcription.transcribe).toHaveBeenCalledOnce());
+    const backwardClock = vi.spyOn(Date, "now").mockReturnValue(updatedAt - 1);
     resolveTranscript?.("голос");
     await vi.waitFor(() => {
       expect(store.snapshot().voiceTranscriptions?.voice).toBeUndefined();
     });
+    backwardClock.mockRestore();
     expect(store.snapshot().threadMeta.voice?.draft?.input).toBe("Начало голос конец");
+    expect(store.snapshot().threadMeta.voice?.draft?.updatedAt).toBe(updatedAt + 1);
+
+    const repeated = await app.inject({
+      method: "POST",
+      url:
+        "/api/v1/threads/voice/voice-transcriptions?" +
+        new URLSearchParams({
+          mode: "draft",
+          selectionStart: "999",
+          selectionEnd: "999",
+          draftUpdatedAt: "none",
+          clientUploadId: "completed-voice",
+        }),
+      headers: {
+        ...authorization,
+        "content-type": "audio/webm",
+        "x-codexnest-audio-duration-ms": "2000",
+      },
+      payload: Buffer.from("audio-again"),
+    });
+    expect(repeated.statusCode).toBe(204);
+    expect(transcription.transcribe).toHaveBeenCalledOnce();
 
     const cancellationTarget = await app.inject({
       method: "POST",
@@ -1525,6 +1737,660 @@ describe("file downloads", () => {
 });
 
 describe("session forks", () => {
+  it("estimates without a rollout RPC and keeps exact available when compressed is unavailable", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.request.mockClear();
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-estimate",
+      headers: harness.headers,
+      payload: { lastTurnId: "selected-turn", agentMessageId: "selected-answer" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      sourceBytes: null,
+      compressed: { available: false, estimatedBytes: null, estimatedSeconds: null },
+      exact: { available: true, estimatedBytes: null },
+    });
+    expect(harness.bridge.request).not.toHaveBeenCalled();
+    await harness.app.close();
+  });
+
+  it("persists an idempotent 202 operation, reloads pending detail, and transfers composer state", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовый ответ")],
+      },
+    ]);
+    const payload = {
+      operationId: "operation",
+      lastTurnId: "selected-turn",
+      agentMessageId: "selected-answer",
+      mode: "exact",
+    };
+
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+    expect(created.statusCode).toBe(202);
+    expect(created.json().operation).toMatchObject({
+      id: "operation",
+      status: "preparing",
+      title: "Ответвление: Thread",
+      queuedMessageCount: 0,
+      targetThreadId: null,
+    });
+    expect(harness.bridge.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
+
+    const repeated = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+    expect(repeated.statusCode).toBe(202);
+    const conflict = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: { ...payload, mode: "compressed" },
+    });
+    expect(conflict.statusCode).toBe(409);
+
+    expect(
+      (
+        await harness.app.inject({
+          method: "PUT",
+          url: "/api/v1/fork-operations/operation/draft?expectedUpdatedAt=none",
+          headers: harness.headers,
+          payload: { input: "pending", images: [], goalMode: false, annotations: [] },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await harness.app.inject({
+          method: "POST",
+          url: "/api/v1/fork-operations/operation/queue",
+          headers: harness.headers,
+          payload: { input: "queued", clientMessageId: "queued-message" },
+        })
+      ).statusCode,
+    ).toBe(202);
+    expect(
+      (
+        await harness.app.inject({
+          method: "PUT",
+          url: "/api/v1/fork-operations/operation/draft?expectedUpdatedAt=none",
+          headers: harness.headers,
+          payload: { input: "pending", images: [], goalMode: false, annotations: [] },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const detail = await harness.app.inject({
+      url: "/api/v1/fork-operations/operation",
+      headers: harness.headers,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      operation: { id: "operation", status: "preparing", queuedMessageCount: 1 },
+      queuedMessages: [
+        { id: "queued-message", threadId: "operation", text: "queued", status: "queued" },
+      ],
+      draft: { input: "pending", images: [], goalMode: false, annotations: [] },
+    });
+
+    harness.bridge.state = "ready";
+    harness.bridge.emit("state", "ready");
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.operation).toMatchObject({
+        status: "ready",
+        error: null,
+      });
+    });
+    expect(harness.store.snapshot().forkOperations?.operation.targetThreadId).toBe("fork");
+    expect(harness.store.snapshot().threadMeta.fork?.logicalFork).toEqual({
+      sourceThreadId: "thread",
+      operationId: "operation",
+      mode: "exact",
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/fork",
+      expect.objectContaining({
+        threadId: "thread",
+        threadSource: "codexnest-fork:operation",
+        excludeTurns: true,
+      }),
+      600_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "turn/start",
+      expect.objectContaining({ threadId: "fork" }),
+    );
+    await harness.app.close();
+  });
+
+  it("creates a compressed fork only from a strict safe compaction and injected tail", async () => {
+    const harness = await createForkHarness();
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-compressed-fork-test-"));
+    directories.push(directory);
+    const rolloutPath = join(directory, "rollout.jsonl");
+    await writeFile(
+      rolloutPath,
+      [
+        JSON.stringify({
+          type: "compacted",
+          payload: {
+            message: "",
+            replacement_history: [{ type: "message", id: "summary", role: "user", content: [] }],
+          },
+        }),
+        JSON.stringify({ type: "turn_context", payload: { turn_id: "selected-turn" } }),
+        JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", id: "answer-item", role: "assistant", content: [] },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "selected-turn" },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    harness.projection.upsertThread({ ...testThread(), path: rolloutPath });
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовый ответ")],
+      },
+    ]);
+
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-operation",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    expect(created.statusCode).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["compressed-operation"].status).toBe(
+        "ready",
+      );
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/start",
+      expect.objectContaining({
+        cwd: "/work",
+        model: "gpt-b",
+        threadSource: "codexnest-fork:compressed-operation",
+      }),
+      600_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/inject_items",
+      {
+        threadId: "created",
+        items: [
+          {
+            type: "message",
+            id: "summary",
+            role: "user",
+            content: [],
+            internal_chat_message_metadata_passthrough: {
+              codexnest_fork_operation_id: "compressed-operation",
+            },
+          },
+          { type: "message", id: "answer-item", role: "assistant", content: [] },
+        ],
+      },
+      600_000,
+    );
+    expect(
+      harness.bridge.request.mock.calls.some(
+        ([method, params]) =>
+          method === "thread/fork" &&
+          (params as Record<string, unknown>).threadSource ===
+            "codexnest-fork:compressed-operation",
+      ),
+    ).toBe(false);
+    expect(harness.store.snapshot().threadMeta.created?.logicalFork).toEqual({
+      sourceThreadId: "thread",
+      operationId: "compressed-operation",
+      mode: "compressed",
+    });
+    await harness.app.close();
+  });
+
+  it("fails compressed creation before creating a partial thread when no safe compaction exists", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовый ответ")],
+      },
+    ]);
+    const starts = harness.bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/start",
+    ).length;
+
+    expect(
+      (
+        await harness.app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/fork-operations",
+          headers: harness.headers,
+          payload: {
+            operationId: "unavailable-compressed",
+            lastTurnId: "selected-turn",
+            agentMessageId: "selected-answer",
+            mode: "compressed",
+          },
+        })
+      ).statusCode,
+    ).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["unavailable-compressed"].status).toBe(
+        "failed",
+      );
+    });
+    expect(
+      harness.bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+    ).toHaveLength(starts);
+    await harness.app.close();
+  });
+
+  it("reconciles an exact fork by threadSource after the native call times out", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.timeoutForkAfterCreate = true;
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовый ответ")],
+      },
+    ]);
+
+    expect(
+      (
+        await harness.app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/fork-operations",
+          headers: harness.headers,
+          payload: {
+            operationId: "timeout-operation",
+            lastTurnId: "selected-turn",
+            agentMessageId: "selected-answer",
+            mode: "exact",
+          },
+        })
+      ).statusCode,
+    ).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["timeout-operation"].status).toBe("ready");
+    });
+    expect(
+      harness.bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "thread/fork" &&
+          (params as Record<string, unknown>).threadSource === "codexnest-fork:timeout-operation",
+      ),
+    ).toHaveLength(1);
+    expect(harness.store.snapshot().forkOperations?.["timeout-operation"].targetThreadId).toBe(
+      "fork",
+    );
+    await harness.app.close();
+  });
+
+  it("retries a persisted crash-before-native-RPC only after the uncertainty window", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const selectedTurn = completedForkTurn();
+    harness.bridge.threadTurns.set("thread", [selectedTurn]);
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "crash-before-rpc",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "exact",
+      },
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["crash-before-rpc"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.nativeAttempt = { startedAt: 1_000, sequence: 1 };
+    });
+    await harness.app.close();
+
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(1_000);
+    let restarted: Awaited<ReturnType<typeof restartForkApp>> | undefined;
+    try {
+      const bridge = new SettingsBridge();
+      bridge.threadTurns.set("thread", [selectedTurn]);
+      restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+      await flushImmediates();
+      expect(forkRequests(bridge, "crash-before-rpc")).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(629_999);
+      await flushImmediates();
+      expect(forkRequests(bridge, "crash-before-rpc")).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await flushImmediates(8);
+      expect(forkRequests(bridge, "crash-before-rpc")).toHaveLength(1);
+      expect(harness.store.snapshot().forkOperations?.["crash-before-rpc"].status).toBe("ready");
+    } finally {
+      await restarted?.app.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconciles a late exact target after restart without a duplicate native call", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const selectedTurn = completedForkTurn();
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "late-timeout-target",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "exact",
+      },
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["late-timeout-target"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.nativeAttempt = { startedAt: Date.now(), sequence: 1 };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [selectedTurn]);
+    bridge.managedThreads.push({
+      ...testThread("late-fork"),
+      threadSource: "codexnest-fork:late-timeout-target",
+      forkedFromId: "thread",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["late-timeout-target"].status).toBe("ready");
+    });
+    expect(forkRequests(bridge, "late-timeout-target")).toHaveLength(0);
+    expect(
+      harness.store.snapshot().forkOperations?.["late-timeout-target"].nativeAttempt,
+    ).toBeUndefined();
+    await restarted.app.close();
+  });
+
+  it("retries compressed injection after a persisted crash before the RPC", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const sourcePath = join(dirname(harness.store.path), "compressed-source-before.jsonl");
+    const targetPath = join(dirname(harness.store.path), "compressed-target-before.jsonl");
+    await Promise.all([writeSafeForkRollout(sourcePath), writeFile(targetPath, "", "utf8")]);
+    harness.projection.upsertThread({ ...testThread(), path: sourcePath });
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-before-inject",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["compressed-before-inject"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.targetThreadId = "compressed-target";
+      operation.compressedMaterialization = {
+        phase: "injecting",
+        startedAt: Date.now() - 630_001,
+      };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.managedThreads.push({
+      ...testThread("compressed-target"),
+      path: targetPath,
+      threadSource: "codexnest-fork:compressed-before-inject",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["compressed-before-inject"].status).toBe(
+        "ready",
+      );
+    });
+    expect(injectRequests(bridge)).toHaveLength(1);
+    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
+      1,
+    );
+    await restarted.app.close();
+  });
+
+  it("verifies completed compressed injection after restart instead of replaying it", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const sourcePath = join(dirname(harness.store.path), "compressed-source-after.jsonl");
+    const targetPath = join(dirname(harness.store.path), "compressed-target-after.jsonl");
+    await writeSafeForkRollout(sourcePath);
+    await writeFile(
+      targetPath,
+      `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "summary",
+          role: "user",
+          content: [],
+          internal_chat_message_metadata_passthrough: {
+            codexnest_fork_operation_id: "compressed-after-inject",
+          },
+        },
+      })}\n`,
+      "utf8",
+    );
+    harness.projection.upsertThread({ ...testThread(), path: sourcePath });
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-after-inject",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["compressed-after-inject"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.targetThreadId = "compressed-target";
+      operation.compressedMaterialization = { phase: "injecting", startedAt: Date.now() };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.managedThreads.push({
+      ...testThread("compressed-target"),
+      path: targetPath,
+      threadSource: "codexnest-fork:compressed-after-inject",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["compressed-after-inject"].status).toBe(
+        "ready",
+      );
+    });
+    expect(injectRequests(bridge)).toHaveLength(0);
+    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
+      1,
+    );
+    await restarted.app.close();
+  });
+
+  it("reconciles compressed inject response loss from the persisted marker", async () => {
+    const harness = await createForkHarness();
+    const sourcePath = join(dirname(harness.store.path), "compressed-source-loss.jsonl");
+    const targetPath = join(dirname(harness.store.path), "compressed-target-loss.jsonl");
+    await Promise.all([writeSafeForkRollout(sourcePath), writeFile(targetPath, "", "utf8")]);
+    harness.projection.upsertThread({ ...testThread(), path: sourcePath });
+    harness.bridge.threadTurns.set("thread", [completedForkTurn()]);
+    harness.bridge.nextForkTargetPath = targetPath;
+    harness.bridge.timeoutInjectAfterWrite = true;
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-response-loss",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["compressed-response-loss"].status).toBe(
+        "ready",
+      );
+    });
+    expect(injectRequests(harness.bridge)).toHaveLength(1);
+    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
+      1,
+    );
+    await harness.app.close();
+  });
+
+  it("recovers a persisted operation after restart without creating a duplicate", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const selectedTurn = {
+      ...testTurn("selected-turn", "completed"),
+      itemsView: "full" as const,
+      items: [agentMessage("selected-answer", "Готовый ответ")],
+    };
+    harness.bridge.threadTurns.set("thread", [selectedTurn]);
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "restart-operation",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "exact",
+      },
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [selectedTurn]);
+    bridge.managedThreads.push({
+      ...testThread("recovered-fork"),
+      threadSource: "codexnest-fork:restart-operation",
+      forkedFromId: "thread",
+    });
+    const attention = new AttentionManager();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      harness.store,
+      attention,
+    );
+    await projection.sync();
+    const restarted = await buildApp(
+      loadConfig({
+        statePath: harness.store.path,
+        clientDist: join(harness.store.path, "../missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store: harness.store,
+        projection,
+        attention,
+        threadTitles: harness.threadTitles,
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["restart-operation"].status).toBe("ready");
+    });
+    expect(harness.store.snapshot().forkOperations?.["restart-operation"].targetThreadId).toBe(
+      "recovered-fork",
+    );
+    expect(
+      bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "thread/fork" &&
+          (params as Record<string, unknown>).threadSource === "codexnest-fork:restart-operation",
+      ),
+    ).toHaveLength(0);
+    await restarted.close();
+  });
+
+  it("keeps the fork ready when asynchronous title generation fails", async () => {
+    const harness = await createForkHarness();
+    harness.threadTitles.generate.mockRejectedValue(new Error("title unavailable"));
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("selected-answer", "Готовый ответ")],
+      },
+    ]);
+
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "title-failure",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "exact",
+      },
+    });
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["title-failure"].status).toBe("ready");
+    });
+    expect(harness.store.snapshot().forkOperations?.["title-failure"].error).toBeNull();
+    await harness.app.close();
+  });
+
   it("forks through the selected completed reply with a generated title and fresh state", async () => {
     const harness = await createForkHarness();
     await harness.store.update((state) => {
@@ -1586,12 +2452,16 @@ describe("session forks", () => {
     expect(
       harness.bridge.request.mock.calls.some(([method]) => method === "thread/items/list"),
     ).toBe(false);
-    expect(harness.bridge.request).toHaveBeenCalledWith("thread/fork", {
-      threadId: "thread",
-      lastTurnId: "selected-turn",
-      excludeTurns: true,
-      serviceTier: null,
-    });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/fork",
+      {
+        threadId: "thread",
+        lastTurnId: "selected-turn",
+        excludeTurns: true,
+        serviceTier: null,
+      },
+      600_000,
+    );
     expect(harness.threadTitles.generate.mock.invocationCallOrder[0]).toBeLessThan(
       harness.bridge.request.mock.invocationCallOrder[
         harness.bridge.request.mock.calls.findIndex(([method]) => method === "thread/fork")
@@ -1672,12 +2542,16 @@ describe("session forks", () => {
       model: "gpt-b",
       effort: "low",
     });
-    expect(harness.bridge.request).toHaveBeenCalledWith("thread/fork", {
-      threadId: "thread",
-      lastTurnId: "plan-turn",
-      excludeTurns: true,
-      serviceTier: null,
-    });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/fork",
+      {
+        threadId: "thread",
+        lastTurnId: "plan-turn",
+        excludeTurns: true,
+        serviceTier: null,
+      },
+      600_000,
+    );
     await harness.app.close();
   });
 
@@ -5424,6 +6298,9 @@ class SettingsBridge extends EventEmitter {
   failBrowserResumeOnce = false;
   failNextGoalActivation = false;
   failInterrupts = 0;
+  timeoutForkAfterCreate = false;
+  timeoutInjectAfterWrite = false;
+  nextForkTargetPath: string | null = null;
   parentTurnStartEntered: (() => void) | null = null;
   parentTurnStartGate: Promise<void> | null = null;
   rejectFullTurnReads = false;
@@ -5505,7 +6382,14 @@ class SettingsBridge extends EventEmitter {
         this.managedThreads.push(thread);
         return { thread };
       }
-      return { thread: { ...testThread("created"), cwd: String(params.cwd ?? "/work") } };
+      const thread = {
+        ...testThread("created"),
+        cwd: String(params.cwd ?? "/work"),
+        path: this.nextForkTargetPath,
+        threadSource: typeof params.threadSource === "string" ? params.threadSource : null,
+      };
+      if (thread.threadSource) this.managedThreads.push(thread);
+      return { thread };
     }
     if (method === "thread/fork") {
       const thread = {
@@ -5516,8 +6400,13 @@ class SettingsBridge extends EventEmitter {
         updatedAt: 4,
         recencyAt: 4,
         status: { type: "idle" as const },
+        threadSource: typeof params.threadSource === "string" ? params.threadSource : null,
       };
       this.managedThreads.push(thread);
+      if (this.timeoutForkAfterCreate) {
+        this.timeoutForkAfterCreate = false;
+        throw new RpcTimeoutError("thread/fork", 600_000);
+      }
       return { thread };
     }
     if (method === "thread/resume") {
@@ -5546,6 +6435,23 @@ class SettingsBridge extends EventEmitter {
       return { thread: testThread(String(params.threadId)) };
     }
     if (method === "thread/name/set") return {};
+    if (method === "thread/inject_items") {
+      const thread = this.managedThreads.find((candidate) => candidate.id === params.threadId);
+      if (thread?.path && Array.isArray(params.items)) {
+        await appendFile(
+          thread.path,
+          `${params.items
+            .map((payload) => JSON.stringify({ type: "response_item", payload }))
+            .join("\n")}\n`,
+          "utf8",
+        );
+      }
+      if (this.timeoutInjectAfterWrite) {
+        this.timeoutInjectAfterWrite = false;
+        throw new RpcTimeoutError("thread/inject_items", 600_000);
+      }
+      return {};
+    }
     if (method === "thread/delete") return {};
     if (method === "thread/turns/list") {
       if (this.rejectFullTurnReads && params.itemsView === "full") {
@@ -5841,6 +6747,82 @@ async function createForkHarness() {
     store,
     threadTitles,
   };
+}
+
+async function restartForkApp(
+  store: StateStore,
+  bridge: SettingsBridge,
+  threadTitles: ThreadTitleGenerator,
+) {
+  const attention = new AttentionManager();
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+  await projection.sync();
+  const app = await buildApp(
+    loadConfig({
+      statePath: store.path,
+      clientDist: join(dirname(store.path), "missing"),
+      allowedOrigins: new Set(["http://localhost"]),
+    }),
+    {
+      bridge: bridge as unknown as CodexBridge,
+      store,
+      projection,
+      attention,
+      threadTitles,
+    },
+  );
+  return { app, projection };
+}
+
+function completedForkTurn(): Turn {
+  return {
+    ...testTurn("selected-turn", "completed"),
+    itemsView: "full",
+    items: [agentMessage("selected-answer", "Готовый ответ")],
+  };
+}
+
+async function writeSafeForkRollout(path: string): Promise<void> {
+  await writeFile(
+    path,
+    [
+      JSON.stringify({
+        type: "compacted",
+        payload: {
+          message: "",
+          replacement_history: [{ type: "message", id: "summary", role: "user", content: [] }],
+        },
+      }),
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "selected-turn" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", id: "answer-item", role: "assistant", content: [] },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "selected-turn" },
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+}
+
+async function flushImmediates(count = 4): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+function forkRequests(bridge: SettingsBridge, operationId: string) {
+  return bridge.request.mock.calls.filter(
+    ([method, params]) =>
+      method === "thread/fork" &&
+      (params as Record<string, unknown>).threadSource === `codexnest-fork:${operationId}`,
+  );
+}
+
+function injectRequests(bridge: SettingsBridge) {
+  return bridge.request.mock.calls.filter(([method]) => method === "thread/inject_items");
 }
 
 async function createTeamHarness(

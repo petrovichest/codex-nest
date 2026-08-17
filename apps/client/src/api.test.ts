@@ -69,8 +69,11 @@ describe("ApiClient", () => {
       updatedAt: 123,
     };
 
-    await api.updateThreadDraft("thread", restoredDraft);
+    await api.updateThreadDraft("thread", restoredDraft, { expectedUpdatedAt: 123 });
 
+    expect(fetchMock.mock.calls[0]?.[0]).toEqual(
+      new URL("https://codexnest.example/api/v1/threads/thread/draft?expectedUpdatedAt=123"),
+    );
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(String(request.body))).toEqual({
       input: "Текст",
@@ -135,27 +138,86 @@ describe("ApiClient", () => {
     );
   });
 
-  it("posts an inclusive fork point to the encoded thread endpoint", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ thread: { id: "fork" } }), {
-        headers: { "Content-Type": "application/json" },
-        status: 201,
-      }),
-    );
+  it("estimates and starts a reliable fork operation with the stable client id", async () => {
+    const estimate = {
+      sourceBytes: 100,
+      compressed: {
+        available: true,
+        estimatedBytes: 30,
+        estimatedSeconds: null,
+        unavailableReason: null,
+      },
+      exact: {
+        available: true,
+        estimatedBytes: 100,
+        estimatedSeconds: null,
+        unavailableReason: null,
+      },
+    };
+    const operation = { id: "operation" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(estimate), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ operation }), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
 
-    await api.forkThread("thread/id", {
+    await api.estimateFork("thread/id", { lastTurnId: "turn", agentMessageId: "answer" });
+    await api.createForkOperation("thread/id", {
+      operationId: "stable-id",
       lastTurnId: "turn",
       agentMessageId: "answer",
+      mode: "compressed",
     });
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/forks"),
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/fork-estimate"),
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ lastTurnId: "turn", agentMessageId: "answer" }),
       }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://codexnest.example/api/v1/threads/thread%2Fid/fork-operations"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          operationId: "stable-id",
+          lastTurnId: "turn",
+          agentMessageId: "answer",
+          mode: "compressed",
+        }),
+      }),
+    );
+  });
+
+  it("uses operation-scoped pending draft and queue endpoints", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "message" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+
+    await api.updateForkOperationDraft("fork/id", {
+      input: "Черновик",
+      images: [],
+      goalMode: false,
+      annotations: [],
+    });
+    await api.enqueueForkOperation("fork/id", { input: "Следом", clientMessageId: "message" });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://codexnest.example/api/v1/fork-operations/fork%2Fid/draft"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://codexnest.example/api/v1/fork-operations/fork%2Fid/queue"),
+      expect.objectContaining({ method: "POST" }),
     );
   });
 

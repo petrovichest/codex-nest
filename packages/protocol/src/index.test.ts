@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type {
   ActivityItem,
   CanonicalBrowserNetworkExchange,
+  ForkOperationDetailResponse,
   ThreadArtifactsResponse,
   ThreadSummary,
   UpdateUserInputDraftRequest,
@@ -91,6 +92,43 @@ describe("active feed eligibility", () => {
 });
 
 describe("protocol guards", () => {
+  it("types fork-operation reload details as one pending-state response", () => {
+    const detail: ForkOperationDetailResponse = {
+      operation: {
+        id: "operation",
+        sourceThreadId: "source",
+        lastTurnId: "turn",
+        agentMessageId: "answer",
+        mode: "compressed",
+        status: "preparing",
+        title: "Ответвление: Source",
+        createdAt: 1,
+        updatedAt: 1,
+        targetThreadId: null,
+        queuedMessageCount: 1,
+        estimate: null,
+        error: null,
+      },
+      queuedMessages: [
+        {
+          id: "queued",
+          threadId: "operation",
+          text: "Continue",
+          createdAt: 1,
+          status: "queued",
+        },
+      ],
+      draft: {
+        input: "Draft",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      },
+    };
+    expect(detail.operation.queuedMessageCount).toBe(detail.queuedMessages.length);
+  });
+
   it("publishes the user-input draft snapshot types", () => {
     const update: UpdateUserInputDraftRequest = {
       answers: { choice: ["Yes"] },

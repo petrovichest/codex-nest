@@ -13,6 +13,12 @@ import type {
   UserInputDraft,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
+import {
+  forkOperationsFromSnapshot,
+  type ForkOperationSummary,
+  upsertForkOperation,
+  withForkOperations,
+} from "./forks";
 
 export interface ClientState {
   snapshot: AppSnapshot | null;
@@ -67,6 +73,8 @@ export type ClientAction =
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
+  | { type: "forkOperation"; operation: ForkOperationSummary }
+  | { type: "forkOperation.remove"; operationId: string }
   | { type: "project.remove"; projectId: string; threadIds: string[] }
   | { type: "goal"; threadId: string; goal: ThreadGoal | null }
   | { type: "voice.accepted"; job: VoiceTranscriptionJob }
@@ -160,6 +168,26 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return applyThreadSummary(state, action.thread);
     case "thread.remove":
       return removeThreadState(state, action.threadId);
+    case "forkOperation":
+      if (!state.snapshot) return state;
+      return {
+        ...state,
+        snapshot: withForkOperations(
+          state.snapshot,
+          upsertForkOperation(forkOperationsFromSnapshot(state.snapshot), action.operation),
+        ),
+      };
+    case "forkOperation.remove":
+      if (!state.snapshot) return state;
+      return {
+        ...state,
+        snapshot: withForkOperations(
+          state.snapshot,
+          forkOperationsFromSnapshot(state.snapshot).filter(
+            (operation) => operation.id !== action.operationId,
+          ),
+        ),
+      };
     case "project.remove": {
       const snapshot = state.snapshot
         ? {
@@ -392,7 +420,26 @@ export function mergeThreadDetailChanges(
 }
 
 function applyEvent(state: ClientState, sequence: number, event: ServerEvent): ClientState {
-  const snapshot = { ...state.snapshot!, sequence };
+  let snapshot = { ...state.snapshot!, sequence };
+  const forkEvent = event as unknown as
+    | { type: "forkOperation.upserted"; operation: ForkOperationSummary }
+    | { type: "forkOperation.removed"; operationId: string };
+  if (forkEvent.type === "forkOperation.upserted") {
+    snapshot = withForkOperations(
+      snapshot,
+      upsertForkOperation(forkOperationsFromSnapshot(snapshot), forkEvent.operation),
+    );
+    return { ...state, snapshot };
+  }
+  if (forkEvent.type === "forkOperation.removed") {
+    snapshot = withForkOperations(
+      snapshot,
+      forkOperationsFromSnapshot(snapshot).filter(
+        (operation) => operation.id !== forkEvent.operationId,
+      ),
+    );
+    return { ...state, snapshot };
+  }
   switch (event.type) {
     case "connection.changed":
       snapshot.connection = event.connection;

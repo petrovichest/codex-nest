@@ -859,6 +859,111 @@ describe("Composer", () => {
     },
   );
 
+  it("finalizes an active background recording for its source session on session switch", async () => {
+    installMediaRecorder(
+      async () => ({ getTracks: () => [{ stop: vi.fn() }] }) as unknown as MediaStream,
+    );
+    const sourceReady = vi.fn<NonNullable<Parameters<typeof Composer>[0]["onRecordingReady"]>>(
+      async () => undefined,
+    );
+    const nextReady = vi.fn<NonNullable<Parameters<typeof Composer>[0]["onRecordingReady"]>>(
+      async () => undefined,
+    );
+    const view = render(
+      <Harness
+        sessionIdentity="source"
+        transcriptionConfig={transcriptionConfig}
+        onRecordingReady={sourceReady}
+        preserveRecordingOnSessionChange
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    await screen.findByRole("button", { name: "Остановить запись" });
+    view.rerender(
+      <Harness
+        sessionIdentity="next"
+        transcriptionConfig={transcriptionConfig}
+        onRecordingReady={nextReady}
+        preserveRecordingOnSessionChange
+      />,
+    );
+
+    await waitFor(() => expect(sourceReady).toHaveBeenCalledOnce());
+    expect(sourceReady.mock.calls[0]?.[0]).toMatchObject({
+      id: expect.any(String),
+      audio: expect.objectContaining({ type: "audio/webm;codecs=opus" }),
+    });
+    expect(nextReady).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
+  });
+
+  it("keeps delayed source chunks isolated from a new-session recording", async () => {
+    const recorders = installDeferredMediaRecorder();
+    const sourceReady = vi.fn<NonNullable<Parameters<typeof Composer>[0]["onRecordingReady"]>>(
+      async () => undefined,
+    );
+    const nextReady = vi.fn<NonNullable<Parameters<typeof Composer>[0]["onRecordingReady"]>>(
+      async () => undefined,
+    );
+    const view = render(
+      <Harness
+        sessionIdentity="source"
+        transcriptionConfig={transcriptionConfig}
+        onRecordingReady={sourceReady}
+        preserveRecordingOnSessionChange
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    await screen.findByRole("button", { name: "Остановить запись" });
+    view.rerender(
+      <Harness
+        sessionIdentity="next"
+        transcriptionConfig={transcriptionConfig}
+        onRecordingReady={nextReady}
+        preserveRecordingOnSessionChange
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+
+    await act(async () => recorders[0]!.flush("source-audio"));
+    await waitFor(() => expect(sourceReady).toHaveBeenCalledOnce());
+    expect(sourceReady.mock.calls[0]![0].audio.size).toBe(12);
+    expect(nextReady).not.toHaveBeenCalled();
+
+    await act(async () => recorders[1]!.flush("next-audio"));
+    await waitFor(() => expect(nextReady).toHaveBeenCalledOnce());
+    expect(nextReady.mock.calls[0]![0].audio.size).toBe(10);
+  });
+
+  it("retains a failed background recording and retries it with the same upload id", async () => {
+    installMediaRecorder(
+      async () => ({ getTracks: () => [{ stop: vi.fn() }] }) as unknown as MediaStream,
+    );
+    const onRecordingReady = vi
+      .fn<NonNullable<Parameters<typeof Composer>[0]["onRecordingReady"]>>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(undefined);
+    render(
+      <Harness transcriptionConfig={transcriptionConfig} onRecordingReady={onRecordingReady} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+
+    const retry = await screen.findByRole("button", { name: "Повторить" });
+    expect(screen.getByText("offline")).toBeInTheDocument();
+    const first = onRecordingReady.mock.calls[0]?.[0];
+    expect(first?.id).toBeTruthy();
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(onRecordingReady).toHaveBeenCalledTimes(2));
+    expect(onRecordingReady.mock.calls[1]?.[0]).toBe(first);
+    await screen.findByRole("button", { name: "Начать запись" });
+  });
+
   it("keeps the existing text when microphone permission is denied", async () => {
     installMediaRecorder(async () => {
       throw new DOMException("denied", "NotAllowedError");
@@ -1010,6 +1115,7 @@ function Harness({
   transcriptionConfig: speechConfig,
   onTranscribe,
   onRecordingReady,
+  preserveRecordingOnSessionChange = false,
   transcriptionStatus = null,
   voiceInputLocked = false,
 }: {
@@ -1035,6 +1141,7 @@ function Harness({
   transcriptionConfig?: TranscriptionConfigResponse;
   onTranscribe?(audio: Blob): Promise<string>;
   onRecordingReady?: Parameters<typeof Composer>[0]["onRecordingReady"];
+  preserveRecordingOnSessionChange?: boolean;
   transcriptionStatus?: ComposerTranscriptionStatus | null;
   voiceInputLocked?: boolean;
 }) {
@@ -1080,6 +1187,7 @@ function Harness({
       transcriptionProvider={speechConfig?.provider ?? null}
       onTranscribe={onTranscribe}
       onRecordingReady={onRecordingReady}
+      preserveRecordingOnSessionChange={preserveRecordingOnSessionChange}
       voiceMode={voiceMode}
       onVoiceModeChange={setVoiceMode}
       voiceInputLocked={voiceInputLocked}
@@ -1148,4 +1256,47 @@ function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
     configurable: true,
     value: { getUserMedia: vi.fn(getUserMedia) },
   });
+}
+
+function installDeferredMediaRecorder() {
+  class DeferredMediaRecorder extends EventTarget {
+    static isTypeSupported = vi.fn(() => true);
+    readonly mimeType: string;
+    state: RecordingState = "inactive";
+
+    constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+      super();
+      this.mimeType = options?.mimeType ?? "audio/webm";
+      instances.push(this);
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      this.state = "inactive";
+    }
+
+    async flush(value: string) {
+      const data = new Blob([value], { type: this.mimeType });
+      const dataEvent = new Event("dataavailable") as BlobEvent;
+      Object.defineProperty(dataEvent, "data", { value: data });
+      this.dispatchEvent(dataEvent);
+      this.dispatchEvent(new Event("stop"));
+      await Promise.resolve();
+    }
+  }
+
+  const instances: DeferredMediaRecorder[] = [];
+  vi.stubGlobal("MediaRecorder", DeferredMediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn(async () => {
+        return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+      }),
+    },
+  });
+  return instances;
 }

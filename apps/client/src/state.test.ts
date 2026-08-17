@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
 
 import { clientReducer, initialState, mergeThreadDetailChanges, sortThreads } from "./state";
+import { forkOperationsFromSnapshot, type ForkOperationSummary } from "./forks";
 
 const baseThread: ThreadSummary = {
   id: "one",
@@ -30,6 +31,7 @@ const snapshot: AppSnapshot = {
   connection: { state: "ready", message: null, syncedAt: null },
   projects: [],
   threads: [baseThread],
+  forkOperations: [],
   attention: [],
   models: [],
 };
@@ -470,6 +472,38 @@ describe("clientReducer", () => {
 
     expect(state.snapshot?.sequence).toBe(5);
     expect(state.skillsEpoch).toBe(epoch + 1);
+  });
+
+  it("upserts and removes fork operations from streamed events", () => {
+    const operation: ForkOperationSummary = {
+      id: "fork",
+      sourceThreadId: "one",
+      lastTurnId: "turn",
+      agentMessageId: "answer",
+      mode: "compressed",
+      status: "preparing",
+      title: "",
+      createdAt: 1,
+      updatedAt: 1,
+      targetThreadId: null,
+      queuedMessageCount: 0,
+      estimate: null,
+      error: null,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: { type: "forkOperation.upserted", operation } as never,
+    });
+    expect(forkOperationsFromSnapshot(state.snapshot)).toEqual([operation]);
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: { type: "forkOperation.removed", operationId: operation.id } as never,
+    });
+    expect(forkOperationsFromSnapshot(state.snapshot)).toEqual([]);
   });
 
   it("applies task defaults and native goal events without polling", () => {

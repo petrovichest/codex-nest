@@ -281,6 +281,7 @@ function notificationSnapshot(): AppSnapshot {
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],
     threads: [thread],
+    forkOperations: [],
     attention: [],
     models: [],
   };

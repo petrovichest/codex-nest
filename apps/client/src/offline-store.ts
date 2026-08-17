@@ -83,6 +83,7 @@ export type PendingVoiceRecording = {
   draftUpdatedAt: number | null;
   draft: UpdateThreadDraftRequest;
   localDraftUpdatedAt: number;
+  serverDraftUpdatedAt?: number | null;
   createdAt: number;
   attempts: number;
   lastError: string | null;
@@ -291,6 +292,14 @@ export async function listPendingVoiceRecordings(
   return (await readAll<PendingVoiceRecording>(RECORDING_STORE))
     .filter((recording) => recording.connectionKey === connectionCacheKey(settings))
     .sort((left, right) => left.createdAt - right.createdAt);
+}
+
+export async function loadPendingVoiceRecording(id: string): Promise<PendingVoiceRecording | null> {
+  return readValue<PendingVoiceRecording>(RECORDING_STORE, id);
+}
+
+export async function putPendingVoiceRecording(recording: PendingVoiceRecording): Promise<boolean> {
+  return writeValue(RECORDING_STORE, recording);
 }
 
 export async function deletePendingVoiceRecording(id: string): Promise<void> {

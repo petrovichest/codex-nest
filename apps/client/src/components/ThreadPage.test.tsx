@@ -18,6 +18,7 @@ import type {
 
 import { annotationStorageKey, type PendingAnnotation } from "../annotations";
 import { ApiClientError } from "../api";
+import type { ForkOperationSummary } from "../forks";
 import type { OptimisticMessage } from "../state";
 import { Activity, ThreadPage, formatMessageTime, initialSessionSettings } from "./ThreadPage";
 
@@ -2063,18 +2064,19 @@ describe("Activity", () => {
     fireEvent.click(fork);
 
     await waitFor(() =>
-      expect(api.forkThread).toHaveBeenCalledWith("thread", {
+      expect(api.estimateFork).toHaveBeenCalledWith("thread", {
         lastTurnId: "plan-turn",
         agentMessageId: "plan",
       }),
     );
+    expect(screen.getByRole("dialog", { name: "Как перенести контекст?" })).toBeVisible();
   });
 
-  it("disables all fork actions, dispatches the result, navigates, and focuses the composer", async () => {
-    let resolveFork: ((value: { thread: ThreadSummary }) => void) | undefined;
+  it("creates one reliable operation, dispatches it, and navigates to the pending route", async () => {
+    let resolveFork: ((value: { operation: ForkOperationSummary }) => void) | undefined;
     const api = threadApi();
-    api.forkThread.mockReturnValue(
-      new Promise<{ thread: ThreadSummary }>((resolve) => {
+    api.createForkOperation.mockReturnValue(
+      new Promise<{ operation: ForkOperationSummary }>((resolve) => {
         resolveFork = resolve;
       }),
     );
@@ -2088,55 +2090,61 @@ describe("Activity", () => {
         },
       ],
     });
-    const forked = {
-      ...summary,
-      id: "fork",
-      title: "Ответвление",
-      state: "completed" as const,
-      unread: true,
-      unseen: true,
+    const operation: ForkOperationSummary = {
+      id: "fork-operation",
+      sourceThreadId: "thread",
+      lastTurnId: "second-turn",
+      agentMessageId: "second-answer",
+      mode: "compressed",
+      status: "preparing",
+      title: "",
+      createdAt: 3,
       updatedAt: 3,
+      targetThreadId: null,
+      queuedMessageCount: 0,
+      estimate: null,
+      error: null,
     };
-    context.dispatch.mockImplementation((action) => {
-      if (action.type !== "thread") return;
-      context.state.snapshot.threads = [...context.state.snapshot.threads, action.thread];
-      (context.state.details as Record<string, ThreadDetail>).fork = {
-        summary: action.thread,
-        turns: [],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-        draft: null,
-      };
-    });
     render(forkThreadRoute());
 
     const buttons = screen.getAllByRole("button", { name: "Создать ответвление отсюда" });
     fireEvent.click(buttons[1]!);
-    expect(api.forkThread).toHaveBeenCalledWith("thread", {
+    await screen.findByRole("dialog", { name: "Как перенести контекст?" });
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Сжатая/ })).toBeChecked());
+    const create = screen.getByRole("button", { name: "Создать ответвление" });
+    fireEvent.click(create);
+    fireEvent.click(create);
+    expect(api.createForkOperation).toHaveBeenCalledOnce();
+    expect(api.createForkOperation).toHaveBeenCalledWith("thread", {
+      operationId: expect.any(String),
       lastTurnId: "second-turn",
       agentMessageId: "second-answer",
+      mode: "compressed",
     });
-    expect(buttons.every((button) => button.hasAttribute("disabled"))).toBe(true);
+    expect(create).toBeDisabled();
 
-    await act(async () => resolveFork?.({ thread: forked }));
+    await act(async () => resolveFork?.({ operation }));
 
-    expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: forked });
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "forkOperation", operation });
     await waitFor(() =>
-      expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/fork:true"),
+      expect(screen.getByTestId("fork-location")).toHaveTextContent(
+        "/fork-operations/fork-operation:true",
+      ),
     );
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveFocus();
   });
 
-  it("surfaces fork errors without navigating and restores the action", async () => {
+  it("surfaces operation creation errors without navigating and restores Create", async () => {
     const api = threadApi();
-    api.forkThread.mockRejectedValue(new Error("Не удалось создать fork"));
+    api.createForkOperation.mockRejectedValue(new Error("Не удалось создать fork"));
     mockThreadConnection(api, summary, { turns: [completedAgentTurn()] });
     render(forkThreadRoute());
 
     fireEvent.click(screen.getByRole("button", { name: "Создать ответвление отсюда" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Сжатая/ })).toBeChecked());
+    fireEvent.click(screen.getByRole("button", { name: "Создать ответвление" }));
 
     expect(await screen.findByText("Не удалось создать fork")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Создать ответвление отсюда" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Создать ответвление" })).toBeEnabled();
     expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/thread:false");
   });
 
@@ -4379,6 +4387,39 @@ describe("Activity", () => {
     delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
   });
 
+  it("offers an explicit retry for a recording retained after reload", async () => {
+    const api = threadApi();
+    const initialDraft: ThreadDraft = {
+      input: "Текущий черновик",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 20,
+    };
+    const context = mockThreadConnection(api, summary, { draft: initialDraft });
+    context.pendingVoiceRecordingThreadIds = ["thread"];
+    context.pendingVoiceRecordingErrors = {
+      thread: "The draft changed before voice upload",
+    };
+    render(voiceThreadRoute());
+
+    const retry = await screen.findByRole("button", { name: "Повторить сохранённую запись" });
+    expect(
+      screen.getByText(
+        "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(context.retryPendingVoiceRecording).toHaveBeenCalledOnce());
+    expect(context.retryPendingVoiceRecording).toHaveBeenCalledWith({
+      threadId: "thread",
+      mode: "draft",
+      draft: expect.objectContaining({ input: "Текущий черновик" }),
+      draftUpdatedAt: expect.any(Number),
+    });
+  });
+
   it("uploads voice for its source session and leaves other sessions usable", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
@@ -4436,14 +4477,17 @@ describe("Activity", () => {
     textarea.setSelectionRange(7, 7);
     fireEvent.select(textarea);
     fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+    await screen.findByRole("button", { name: "Остановить запись" });
+    fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
 
+    await screen.findByRole("heading", { name: "Другая задача" });
     await waitFor(() => expect(api.createVoiceTranscription).toHaveBeenCalledOnce());
-    const progress = screen.getByRole("status", { name: "Отправляем запись" });
-    expect(progress).toHaveClass("voice-transcription-message");
-    expect(progress).toHaveTextContent("Отправляем запись");
-    expect(progress).toHaveTextContent("0:00");
-    expect(document.querySelector(".composer .microphone")).not.toHaveClass("timing");
+    expect(context.queueVoiceRecording).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: "thread",
+        draft: expect.objectContaining({ input: "Начало конец" }),
+      }),
+    );
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
     expect(api.createVoiceTranscription).toHaveBeenCalledWith(
       "thread",
@@ -4455,9 +4499,6 @@ describe("Activity", () => {
         draftUpdatedAt: expect.any(Number),
       }),
     );
-    fireEvent.click(screen.getByRole("link", { name: "Открыть B" }));
-
-    await screen.findByRole("heading", { name: "Другая задача" });
     expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
       "readonly",
@@ -4794,6 +4835,7 @@ function forkThreadRoute() {
             </>
           }
         />
+        <Route path="/fork-operations/:operationId" element={<ForkLocation />} />
       </Routes>
     </MemoryRouter>
   );
@@ -4914,7 +4956,38 @@ function threadApi() {
       downloadUrl: "/downloads/ticket/file.bin",
       expiresAt: Date.now() + 60_000,
     }),
-    forkThread: vi.fn().mockResolvedValue({ thread: summary }),
+    estimateFork: vi.fn().mockResolvedValue({
+      sourceBytes: 1_000,
+      compressed: {
+        available: true,
+        estimatedBytes: 300,
+        estimatedSeconds: { minSeconds: 1, maxSeconds: 2 },
+        unavailableReason: null,
+      },
+      exact: {
+        available: true,
+        estimatedBytes: 1_000,
+        estimatedSeconds: { minSeconds: 2, maxSeconds: 4 },
+        unavailableReason: null,
+      },
+    }),
+    createForkOperation: vi.fn().mockResolvedValue({
+      operation: {
+        id: "operation",
+        sourceThreadId: "thread",
+        lastTurnId: "turn",
+        agentMessageId: "answer",
+        mode: "compressed",
+        status: "preparing",
+        title: "",
+        createdAt: 1,
+        updatedAt: 1,
+        targetThreadId: null,
+        queuedMessageCount: 0,
+        estimate: null,
+        error: null,
+      },
+    }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
     updateThreadDraft: vi
       .fn()
@@ -5065,6 +5138,9 @@ function mockThreadConnection(
         clientUploadId: recording.id,
       }),
     ),
+    pendingVoiceRecordingThreadIds: [] as string[],
+    pendingVoiceRecordingErrors: {} as Record<string, string>,
+    retryPendingVoiceRecording: vi.fn().mockResolvedValue(undefined),
     dispatch: vi.fn(),
   };
   connection.mockReturnValue(value);

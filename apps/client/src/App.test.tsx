@@ -12,6 +12,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { App } from "./App";
+import type { ForkOperationSummary } from "./forks";
 import { I18nProvider } from "./i18n";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -1065,6 +1066,43 @@ describe("App routing and navigation", () => {
     expect(connectedMarker).toHaveAttribute("title", "Браузер подключён");
     expect(enabledMarker).toHaveClass("thread-browser-status-disconnected");
     expect(enabledMarker).toHaveAttribute("title", "Браузер включён");
+  });
+
+  it("nests pending fork operations under their source and limits actions to failures", () => {
+    const preparing: ForkOperationSummary = {
+      id: "preparing-fork",
+      sourceThreadId: baseThread.id,
+      lastTurnId: "turn",
+      agentMessageId: "answer",
+      mode: "compressed",
+      status: "preparing",
+      title: "",
+      createdAt: 1,
+      updatedAt: 1,
+      targetThreadId: null,
+      queuedMessageCount: 0,
+      estimate: null,
+      error: null,
+    };
+    const failed: ForkOperationSummary = {
+      ...preparing,
+      id: "failed-fork",
+      status: "failed",
+      error: "Native fork failed",
+    };
+    const appSnapshot = snapshot([baseThread]);
+    appSnapshot.forkOperations = [preparing, failed];
+    mockConnection(appSnapshot);
+
+    const view = renderApp(`/threads/${baseThread.id}`);
+    const rows = view.container.querySelectorAll(".fork-operation-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent(`Ответвление от ${baseThread.title}`);
+    expect(rows[0]).toHaveTextContent("Готовим ветку");
+    expect(within(rows[0] as HTMLElement).queryByRole("button")).toBeNull();
+    expect(within(rows[1] as HTMLElement).getByRole("button", { name: "Повторить" })).toBeVisible();
+    expect(within(rows[1] as HTMLElement).getByRole("button", { name: "Удалить" })).toBeVisible();
+    expect(view.container.querySelector('[aria-label*="Отмен"]')).toBeNull();
   });
 
   it("restores and persists the theme from the settings page", async () => {
@@ -3714,6 +3752,7 @@ function snapshot(threads: ThreadSummary[], projects: Project[] = [defaultProjec
     connection: { state: "ready", message: null, syncedAt: "2026-08-03T00:00:00.000Z" },
     projects,
     threads,
+    forkOperations: [],
     attention: [],
     models: [],
   };

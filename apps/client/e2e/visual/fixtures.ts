@@ -342,6 +342,7 @@ export const snapshot: AppSnapshot = {
   },
   projects,
   threads,
+  forkOperations: [],
   attention: [
     {
       id: "attention-material",
@@ -446,6 +447,7 @@ const codexStatus: CodexManagementStatus = {
 
 export type VisualFixtureOptions = {
   connected?: boolean;
+  forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
   forkLineage?: boolean;
   notificationPrompt?: boolean;
   theme: "light" | "dark";
@@ -455,6 +457,7 @@ export async function installVisualFixture(
   page: Page,
   {
     connected = true,
+    forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
     theme,
@@ -525,7 +528,9 @@ export async function installVisualFixture(
     },
   );
 
-  await page.route(`${SERVER_ORIGIN}/api/v1/**`, (route) => mockHttpRoute(route, fixtureSnapshot));
+  await page.route(`${SERVER_ORIGIN}/api/v1/**`, (route) =>
+    mockHttpRoute(route, fixtureSnapshot, forkEstimate),
+  );
   await page.route(`${SERVER_ORIGIN}/downloads/**`, (route) =>
     route.fulfill({
       status: 200,
@@ -567,7 +572,11 @@ function detailFor(id: string, fixtureSnapshot: AppSnapshot): ThreadDetail {
   return { summary, turns: [], queuedMessages: [], olderTurnsCursor: null, draft: null };
 }
 
-async function mockHttpRoute(route: Route, fixtureSnapshot: AppSnapshot): Promise<void> {
+async function mockHttpRoute(
+  route: Route,
+  fixtureSnapshot: AppSnapshot,
+  forkEstimate: NonNullable<VisualFixtureOptions["forkEstimate"]>,
+): Promise<void> {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname;
@@ -628,6 +637,36 @@ async function mockHttpRoute(route: Route, fixtureSnapshot: AppSnapshot): Promis
         { name: "codex-nest", path: "/home/codex/workspaces/codex-nest" },
         { name: "mineral-atlas", path: "/home/codex/workspaces/mineral-atlas" },
       ],
+    });
+  }
+
+  if (/^\/api\/v1\/threads\/[^/]+\/fork-estimate$/u.test(path) && method === "POST") {
+    if (forkEstimate === "loading") return;
+    if (forkEstimate === "failure")
+      return json({ error: { code: "estimate_failed", message: "Estimate unavailable" } }, 500);
+    return json({
+      sourceBytes: 987_654_321_012,
+      compressed:
+        forkEstimate === "unavailable"
+          ? {
+              available: false,
+              estimatedBytes: null,
+              estimatedSeconds: null,
+              unavailableReason:
+                "Для этой очень длинной истории пока недостаточно надёжных данных для безопасного сжатия",
+            }
+          : {
+              available: true,
+              estimatedBytes: 47_891_234,
+              estimatedSeconds: { minSeconds: 18, maxSeconds: 42 },
+              unavailableReason: null,
+            },
+      exact: {
+        available: true,
+        estimatedBytes: 987_654_321_012,
+        estimatedSeconds: { minSeconds: 185, maxSeconds: 425 },
+        unavailableReason: null,
+      },
     });
   }
 

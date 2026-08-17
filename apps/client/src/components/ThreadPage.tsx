@@ -51,6 +51,7 @@ import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { ApiClientError } from "../api";
 import { openDownloadUrl } from "../downloads";
+import { forkOperationsFromSnapshot } from "../forks";
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import {
   confirmLocalDraft,
@@ -73,6 +74,7 @@ import {
   type ComposerSubmitIntent,
 } from "./Composer";
 import { Dialog } from "./Dialog";
+import { ForkDialog } from "./ForkDialog";
 import {
   ArchiveIcon,
   ArrowDownIcon,
@@ -109,6 +111,12 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 type ComposerDraftState = {
   threadId: string;
   value: UpdateThreadDraftRequest;
+};
+
+type VoiceRecordingContext = {
+  draft: UpdateThreadDraftRequest;
+  draftUpdatedAt: number | null;
+  mode: VoiceTranscriptionMode;
 };
 
 type LocalImageLoader = (path: string) => Promise<Blob>;
@@ -150,12 +158,12 @@ type AcceptedDraftClearGuard = {
 type PendingSettingsField = Exclude<keyof UpdateThreadSettingsRequest, "serviceTier">;
 type ClientSessionSettings = Omit<SessionSettings, "serviceTier">;
 
-type QueueAction = {
+export type QueueAction = {
   messageId: string;
   kind: "send" | "update" | "delete";
 };
 
-type QueuedMessageView = QueuedMessage & {
+export type QueuedMessageView = QueuedMessage & {
   confirmed: boolean;
 };
 
@@ -455,6 +463,9 @@ export function ThreadPage({
     loadTurnItems,
     sendReliable,
     queueVoiceRecording,
+    pendingVoiceRecordingThreadIds = [],
+    pendingVoiceRecordingErrors = {},
+    retryPendingVoiceRecording = async () => undefined,
   } = useConnection();
   const activeThreadIdRef = useRef(threadId);
   activeThreadIdRef.current = threadId;
@@ -548,6 +559,13 @@ export function ThreadPage({
       ),
     [state.snapshot?.threads, threadId],
   );
+  const pendingForkOperations = useMemo(
+    () =>
+      forkOperationsFromSnapshot(state.snapshot).filter(
+        (operation) => operation.sourceThreadId === threadId && operation.status !== "ready",
+      ),
+    [state.snapshot, threadId],
+  );
   const forkChildrenMenuRef = useRef<HTMLDetailsElement>(null);
   const project =
     newSessionProject ??
@@ -581,7 +599,11 @@ export function ThreadPage({
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
-  const [forking, setForking] = useState(false);
+  const [forkDialogTarget, setForkDialogTarget] = useState<{
+    lastTurnId: string;
+    agentMessageId: string;
+  } | null>(null);
+  const forkDialogOpenerRef = useRef<HTMLElement | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [browserUpdating, setBrowserUpdating] = useState(false);
@@ -597,10 +619,12 @@ export function ThreadPage({
   const [voiceUploads, setVoiceUploads] = useState<Record<string, VoiceUploadState>>({});
   const localVoiceJobIdsRef = useRef(new Set<string>());
   const [voiceCancellationPending, setVoiceCancellationPending] = useState(false);
+  const [voiceRecoveryPending, setVoiceRecoveryPending] = useState(false);
   const [transcriptionElapsedSeconds, setTranscriptionElapsedSeconds] = useState(0);
   const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const restoredComposerSelectionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
@@ -782,15 +806,37 @@ export function ThreadPage({
       ),
     [detail?.turns, isSubagent],
   );
-  const forkFromTurnRef = useRef(forkFromTurn);
-  forkFromTurnRef.current = forkFromTurn;
-  const forkFromTurnEvent = useCallback((lastTurnId: string, agentMessageId: string) => {
-    void forkFromTurnRef.current(lastTurnId, agentMessageId);
-  }, []);
+  const forkFromTurnEvent = useCallback(
+    (lastTurnId: string, agentMessageId: string, opener?: HTMLElement) => {
+      forkDialogOpenerRef.current = opener ?? null;
+      setForkDialogTarget({ lastTurnId, agentMessageId });
+    },
+    [],
+  );
+  useEffect(() => {
+    const selection = (
+      location.state as { restoreComposerSelection?: { start: number; end: number } | null } | null
+    )?.restoreComposerSelection;
+    if (!selection || restoredComposerSelectionRef.current === threadId) return;
+    const frame = window.requestAnimationFrame(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        ".thread-workspace .composer textarea",
+      );
+      if (!textarea) return;
+      const length = textarea.value.length;
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(
+        Math.min(selection.start, length),
+        Math.min(selection.end, length),
+      );
+      restoredComposerSelectionRef.current = threadId;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail?.draft?.updatedAt, location.state, threadId]);
   const completedTurnForkActions = useMemo(() => {
     const actions = new Map<
       string,
-      { responseId: string; action: { disabled: boolean; onFork(): void } }
+      { responseId: string; action: { disabled: boolean; onFork(opener?: HTMLElement): void } }
     >();
     if (isSubagent) return actions;
     for (const turn of detail?.turns ?? []) {
@@ -799,13 +845,13 @@ export function ThreadPage({
       actions.set(turn.id, {
         responseId,
         action: {
-          disabled: forking,
-          onFork: () => forkFromTurnEvent(turn.id, responseId),
+          disabled: false,
+          onFork: (opener) => forkFromTurnEvent(turn.id, responseId, opener),
         },
       });
     }
     return actions;
-  }, [detail?.turns, forking, forkFromTurnEvent, isSubagent]);
+  }, [detail?.turns, forkFromTurnEvent, isSubagent]);
   const completedLatestPlanId = useMemo(() => findLatestCompletedPlan(detail), [detail]);
   const latestAnnotatableId = useMemo(
     () => findLatestAnnotatable(detail, summary?.currentTurnId ?? null),
@@ -1454,23 +1500,25 @@ export function ThreadPage({
   async function beginTranscription(
     targetThreadId: string,
     recording: ComposerRecording,
+    context?: VoiceRecordingContext,
   ): Promise<void> {
     if (!transcriptionProvider || activeVoiceJob || voiceUploads[targetThreadId]) return;
-    const uploadMode = resolveVoiceTranscriptionMode(
-      voiceModeRef.current,
-      currentTurnIdRef.current,
-    );
+    const uploadMode =
+      context?.mode ??
+      resolveVoiceTranscriptionMode(voiceModeRef.current, currentTurnIdRef.current);
     setVoiceUploads((current) => ({
       ...current,
       [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
     }));
-    const uploadId = createClientMessageId();
+    const uploadId = recording.id;
     localVoiceJobIdsRef.current.add(uploadId);
     try {
-      const draft = structuredClone(currentComposerDraft());
-      const expectedDraftUpdatedAt = savedDraftUpdatedAtRef.current.has(targetThreadId)
-        ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
-        : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
+      const draft = context?.draft ?? structuredClone(currentComposerDraft());
+      const expectedDraftUpdatedAt = context
+        ? context.draftUpdatedAt
+        : savedDraftUpdatedAtRef.current.has(targetThreadId)
+          ? savedDraftUpdatedAtRef.current.get(targetThreadId)!
+          : (state.details[targetThreadId]?.draft?.updatedAt ?? null);
       await queueVoiceRecording({
         id: uploadId,
         threadId: targetThreadId,
@@ -2689,27 +2737,6 @@ export function ThreadPage({
     }
   }
 
-  async function forkFromTurn(lastTurnId: string, agentMessageId: string) {
-    if (forking) return;
-    setForking(true);
-    setError(null);
-    try {
-      const result = await api.forkThread(threadId, { lastTurnId, agentMessageId });
-      dispatch({ type: "thread", thread: result.thread });
-      navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
-        state: { focusComposer: true },
-      });
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? localizeKnownServerText(language, caught.message)
-          : t("Не удалось создать ответвление сессии"),
-      );
-    } finally {
-      setForking(false);
-    }
-  }
-
   async function forceRefreshSession() {
     if (refreshing) return;
     setRefreshing(true);
@@ -2924,6 +2951,34 @@ export function ThreadPage({
     : browserUpdating
       ? t("Изменяем доступ браузера…")
       : browserSwitchLabel;
+  const backgroundVoiceContext: VoiceRecordingContext | null = preparationRef.current.active
+    ? null
+    : {
+        draft: structuredClone(currentComposerDraft()),
+        draftUpdatedAt: savedDraftUpdatedAtRef.current.has(threadId)
+          ? savedDraftUpdatedAtRef.current.get(threadId)!
+          : (state.details[threadId]?.draft?.updatedAt ?? null),
+        mode: resolveVoiceTranscriptionMode(voiceModeRef.current, currentTurnIdRef.current),
+      };
+  const hasPendingVoiceRecording = pendingVoiceRecordingThreadIds.includes(threadId);
+  const pendingVoiceRecordingError = pendingVoiceRecordingErrors[threadId] ?? null;
+
+  async function retryRecoveredVoiceRecording(): Promise<void> {
+    if (!backgroundVoiceContext || voiceRecoveryPending) return;
+    setVoiceRecoveryPending(true);
+    setError(null);
+    try {
+      await retryPendingVoiceRecording({ threadId, ...backgroundVoiceContext });
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отправить запись на сервер"),
+      );
+    } finally {
+      setVoiceRecoveryPending(false);
+    }
+  }
 
   return (
     <div className="thread-workspace">
@@ -2977,7 +3032,7 @@ export function ThreadPage({
           actions={
             showNewSessionChrome ? undefined : (
               <>
-                {forkChildren.length > 0 && (
+                {forkChildren.length + pendingForkOperations.length > 0 && (
                   <details
                     className="thread-action-menu fork-children-menu"
                     data-dismiss-on-outside-click
@@ -2985,16 +3040,54 @@ export function ThreadPage({
                   >
                     <summary
                       aria-label={t("Показать ответвления: {{count}}", {
-                        count: forkChildren.length,
+                        count: forkChildren.length + pendingForkOperations.length,
                       })}
                       className="icon-button fork-children-trigger"
                     >
                       <GitBranchIcon />
-                      <span aria-hidden="true">{forkChildren.length}</span>
+                      <span aria-hidden="true">
+                        {forkChildren.length + pendingForkOperations.length}
+                      </span>
                     </summary>
                     <div className="fork-children-popover">
                       <strong>{t("Ответвления")}</strong>
                       <div className="fork-children-list">
+                        {pendingForkOperations.map((operation) => {
+                          const title =
+                            operation.title.trim() ||
+                            t("Ответвление от {{title}}", {
+                              title:
+                                localizeKnownServerText(language, workspaceSummary.title) ??
+                                workspaceSummary.title,
+                            });
+                          const status =
+                            operation.status === "preparing"
+                              ? t("Готовим ветку")
+                              : operation.status === "reconciling"
+                                ? t("Сверяем контекст")
+                                : t("Создание остановлено");
+                          return (
+                            <Link
+                              className={`fork-child-link fork-operation-child ${operation.status}`}
+                              key={operation.id}
+                              onClick={() => forkChildrenMenuRef.current?.removeAttribute("open")}
+                              state={{ forkOperation: operation, focusComposer: true }}
+                              to={`/fork-operations/${encodeURIComponent(operation.id)}`}
+                            >
+                              {operation.status === "failed" ? (
+                                <span className="fork-operation-failed" aria-hidden="true">
+                                  !
+                                </span>
+                              ) : (
+                                <span className="spinner small" aria-hidden="true" />
+                              )}
+                              <span className="fork-operation-child-copy">
+                                <span className="fork-child-title">{title}</span>
+                                <small>{status}</small>
+                              </span>
+                            </Link>
+                          );
+                        })}
                         {forkChildren.map((child) => {
                           const childTitle =
                             localizeKnownServerText(language, child.title) ?? child.title;
@@ -3117,6 +3210,17 @@ export function ThreadPage({
           }}
         >
           <section className="timeline" aria-live="polite">
+            {forkOperationsFromSnapshot(state.snapshot).some(
+              (operation) =>
+                operation.status === "ready" &&
+                operation.mode === "compressed" &&
+                operation.targetThreadId === threadId,
+            ) && (
+              <div className="compressed-origin-notice" role="note">
+                <GitBranchIcon />
+                <span>{t("Контекст перенесён в сжатом виде из исходной ветки.")}</span>
+              </div>
+            )}
             {showEmptySessionHero ? (
               <div className="new-session-empty">
                 <span className="new-session-glyph">
@@ -3389,17 +3493,32 @@ export function ThreadPage({
                 ? voiceMode === "send"
                   ? beginPreparedTranscription
                   : undefined
-                : (recording) => beginTranscription(activeThreadIdRef.current, recording)
+                : backgroundVoiceContext
+                  ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
+                  : undefined
             }
+            preserveRecordingOnSessionChange={backgroundVoiceContext !== null}
             transcriptionStatus={draftVoiceProgress}
             transcriptionError={
               voiceJob?.status === "failed"
                 ? (localizeKnownServerText(language, voiceJob.error) ?? voiceJob.error)
                 : null
             }
-            error={error}
+            error={error ?? pendingVoiceRecordingError}
             hasSupplementalContent={annotations.length > 0}
           >
+            {hasPendingVoiceRecording && backgroundVoiceContext && (
+              <button
+                className="new-session-retry"
+                type="button"
+                disabled={voiceRecoveryPending || busy || Boolean(activeVoiceJob || voiceUpload)}
+                onClick={() => void retryRecoveredVoiceRecording()}
+              >
+                {voiceRecoveryPending
+                  ? t("Восстанавливаем сохранённую запись…")
+                  : t("Повторить сохранённую запись")}
+              </button>
+            )}
             {storageWarning && preparationRef.current.active && (
               <p className="new-session-storage-warning" role="status">
                 {t(
@@ -3510,6 +3629,22 @@ export function ThreadPage({
           onRename={async (name) => {
             await api.updateThread(threadId, { name });
             setRenaming(false);
+          }}
+        />
+      )}
+      {forkDialogTarget && summary && (
+        <ForkDialog
+          sourceThreadId={threadId}
+          sourceTitle={localizeKnownServerText(language, summary.title) ?? summary.title}
+          lastTurnId={forkDialogTarget.lastTurnId}
+          agentMessageId={forkDialogTarget.agentMessageId}
+          openerRef={forkDialogOpenerRef}
+          onClose={() => setForkDialogTarget(null)}
+          onCreated={(operation) => {
+            dispatch({ type: "forkOperation", operation });
+            navigate(`/fork-operations/${encodeURIComponent(operation.id)}`, {
+              state: { forkOperation: operation, focusComposer: true },
+            });
           }}
         />
       )}
@@ -4012,7 +4147,7 @@ export function Activity({
   onDownload?(path: string): Promise<void>;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
-  forkAction?: { disabled: boolean; onFork(): void };
+  forkAction?: { disabled: boolean; onFork(opener?: HTMLElement): void };
   annotations?: PendingAnnotation[];
   annotationEnabled?: boolean;
   annotationBusy?: boolean;
@@ -4851,15 +4986,17 @@ function TurnActivityDisclosure({
   );
 }
 
-function QueuedMessages({
+export function QueuedMessages({
   messages,
   action,
+  canSendNow = true,
   onSendNow,
   onUpdate,
   onDelete,
 }: {
   messages: QueuedMessageView[];
   action: QueueAction | null;
+  canSendNow?: boolean;
   onSendNow(messageId: string): Promise<boolean>;
   onUpdate(messageId: string, value: string): Promise<boolean>;
   onDelete(messageId: string): Promise<boolean>;
@@ -4979,16 +5116,18 @@ function QueuedMessages({
                   >
                     <TrashIcon />
                   </button>
-                  <button
-                    type="button"
-                    className="icon-button queued-message-send"
-                    aria-label={t("Отправить сейчас")}
-                    title={t("Отправить сейчас")}
-                    disabled={actionsDisabled}
-                    onClick={() => void onSendNow(message.id)}
-                  >
-                    <SendIcon />
-                  </button>
+                  {canSendNow && (
+                    <button
+                      type="button"
+                      className="icon-button queued-message-send"
+                      aria-label={t("Отправить сейчас")}
+                      title={t("Отправить сейчас")}
+                      disabled={actionsDisabled}
+                      onClick={() => void onSendNow(message.id)}
+                    >
+                      <SendIcon />
+                    </button>
+                  )}
                 </div>
               </div>
             </article>
@@ -5046,7 +5185,7 @@ function MessageFooter({
 }: {
   text: string;
   timestamp: number | null;
-  forkAction?: { disabled: boolean; onFork(): void };
+  forkAction?: { disabled: boolean; onFork(opener?: HTMLElement): void };
 }) {
   const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -5092,7 +5231,7 @@ function MessageFooter({
           aria-label={t("Создать ответвление отсюда")}
           disabled={forkAction.disabled}
           title={t("Создать ответвление отсюда")}
-          onClick={forkAction.onFork}
+          onClick={(event) => forkAction.onFork(event.currentTarget)}
         >
           <GitBranchIcon />
         </button>

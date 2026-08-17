@@ -11,8 +11,6 @@ import type {
   CreateProjectThreadResponse,
   DirectoryListing,
   ForceRestartAccepted,
-  ForkThreadRequest,
-  ForkThreadResponse,
   GitChangesSummary,
   GlobalPermissionSettings,
   HealthResponse,
@@ -57,6 +55,13 @@ import type {
 
 import type { ConnectionSettings } from "./storage";
 import { readInitialLanguage, translate } from "./i18n";
+import {
+  normalizeForkOperationDetail,
+  type ForkEstimateResponse,
+  type ForkMode,
+  type ForkOperationDetail,
+  type ForkOperationSummary,
+} from "./forks";
 
 export class ApiClient {
   constructor(public readonly settings: ConnectionSettings) {}
@@ -288,9 +293,17 @@ export class ApiClient {
   updateThreadDraft(
     id: string,
     body: UpdateThreadDraftRequest,
-    options?: { keepalive?: boolean; retry?: boolean },
+    options?: {
+      keepalive?: boolean;
+      retry?: boolean;
+      expectedUpdatedAt?: number | null;
+    },
   ): Promise<ThreadDraft | null> {
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/draft`, {
+    const expected =
+      options && Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt")
+        ? `?expectedUpdatedAt=${options.expectedUpdatedAt === null ? "none" : String(options.expectedUpdatedAt)}`
+        : "";
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/draft${expected}`, {
       method: "PUT",
       body: {
         input: body.input,
@@ -321,11 +334,104 @@ export class ApiClient {
     });
   }
 
-  forkThread(id: string, body: ForkThreadRequest): Promise<ForkThreadResponse> {
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/forks`, {
+  estimateFork(
+    id: string,
+    body: { lastTurnId: string; agentMessageId: string },
+  ): Promise<ForkEstimateResponse> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/fork-estimate`, {
       method: "POST",
       body,
       timeoutMs: null,
+    });
+  }
+
+  createForkOperation(
+    id: string,
+    body: {
+      operationId: string;
+      lastTurnId: string;
+      agentMessageId: string;
+      mode: ForkMode;
+    },
+  ): Promise<{ operation: ForkOperationSummary }> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/fork-operations`, {
+      method: "POST",
+      body,
+      timeoutMs: null,
+    });
+  }
+
+  async readForkOperation(id: string): Promise<ForkOperationDetail> {
+    const response = await this.request<
+      | ForkOperationSummary
+      | ForkOperationDetail
+      | {
+          operation: ForkOperationSummary;
+          queuedMessages?: QueuedMessage[];
+          draft?: ThreadDraft | null;
+        }
+    >(`/api/v1/fork-operations/${encodeURIComponent(id)}`, { cache: "no-store", retry: true });
+    return normalizeForkOperationDetail(response);
+  }
+
+  updateForkOperationDraft(
+    id: string,
+    body: UpdateThreadDraftRequest,
+    options?: { keepalive?: boolean },
+  ): Promise<ThreadDraft | null> {
+    return this.request(`/api/v1/fork-operations/${encodeURIComponent(id)}/draft`, {
+      method: "PUT",
+      body: {
+        input: body.input,
+        images: body.images,
+        goalMode: body.goalMode,
+        annotations: body.annotations,
+      },
+      keepalive: options?.keepalive,
+      timeoutMs: 15_000,
+    });
+  }
+
+  enqueueForkOperation(id: string, body: QueueMessageRequest): Promise<QueuedMessage> {
+    return this.request(`/api/v1/fork-operations/${encodeURIComponent(id)}/queue`, {
+      method: "POST",
+      body,
+      timeoutMs: 15_000,
+    });
+  }
+
+  updateForkOperationQueued(
+    id: string,
+    messageId: string,
+    body: UpdateQueuedMessageRequest,
+  ): Promise<QueuedMessage> {
+    return this.request(
+      `/api/v1/fork-operations/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "PATCH", body },
+    );
+  }
+
+  deleteForkOperationQueued(id: string, messageId: string): Promise<void> {
+    return this.request(
+      `/api/v1/fork-operations/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  retryForkOperation(
+    operation: ForkOperationSummary,
+  ): Promise<{ operation: ForkOperationSummary }> {
+    return this.createForkOperation(operation.sourceThreadId, {
+      operationId: operation.id,
+      lastTurnId: operation.lastTurnId,
+      agentMessageId: operation.agentMessageId,
+      mode: operation.mode,
+    });
+  }
+
+  removeForkOperation(id: string): Promise<void> {
+    return this.request(`/api/v1/fork-operations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     });
   }
 

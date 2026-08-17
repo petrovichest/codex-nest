@@ -276,6 +276,7 @@ function snapshot(
     connection: { state: "ready", message: null, syncedAt: null },
     projects: [],
     threads,
+    forkOperations: [],
     attention,
     models: [],
   };

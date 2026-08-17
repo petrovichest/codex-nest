@@ -9,6 +9,10 @@ import type {
   ApiErrorCode,
   AppUpdateStatus,
   ForceRestartAccepted,
+  CreateForkOperationRequest,
+  ForkEstimateResponse,
+  ForkOperationDetailResponse,
+  ForkOperationResponse,
   ForkThreadRequest,
   ForkThreadResponse,
   AttentionResponse,
@@ -92,7 +96,7 @@ import {
   parseTurnSteer,
   ProtocolShapeError,
 } from "./codex/guards";
-import { RpcError, type JsonlTransport } from "./codex/transport";
+import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
 import { readGitChanges } from "./git-changes";
@@ -109,7 +113,12 @@ import {
   ProjectNotFoundError,
   ProjectValidationError,
 } from "./projects";
-import type { AppProjection } from "./projection";
+import {
+  analyzeForkRollout,
+  FORK_MATERIALIZATION_MARKER_KEY,
+  hasForkMaterializationMarker,
+} from "./fork-rollout";
+import { ThreadDraftConflictError, publicForkOperation, type AppProjection } from "./projection";
 import {
   RESTART_RECOVERY_PROTOCOL_VERSION,
   RestartPreparationTimeoutError,
@@ -128,6 +137,7 @@ import type {
   CodexNestState,
   CodexNestStateView,
   DeepReadonly,
+  ForkOperationState,
   ManagedTeamTaskAccessState,
   ManagedTeamTaskResultArtifact,
   ManagedTeamTaskResultCheck,
@@ -159,6 +169,7 @@ import {
 } from "./transcription";
 import {
   VoiceTranscriptionConflictError,
+  VoiceTranscriptionDraftConflictError,
   VoiceTranscriptionManager,
   VoiceTranscriptionQueueFullError,
 } from "./voice-transcriptions";
@@ -166,6 +177,8 @@ import {
 const CHAT_BODY_LIMIT = Number.MAX_SAFE_INTEGER;
 const DOWNLOAD_TICKET_TTL_MS = 60_000;
 const MAX_DOWNLOAD_TICKETS = 128;
+const FORK_RPC_TIMEOUT_MS = 10 * 60_000;
+const FORK_ATTEMPT_SETTLE_MS = FORK_RPC_TIMEOUT_MS + 30_000;
 const TEAM_MAX_ACTIVE_TASKS = 10;
 const TEAM_TASK_HISTORY_LIMIT = 50;
 const TEAM_NOTICE_CHANGED_PATH_LIMIT = 20;
@@ -1064,6 +1077,400 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       onMissingThreadCleanup: (threadId) => projection.removeOrphanedThread(threadId),
     },
   );
+  const forkOperationLocks = new Map<string, Promise<unknown>>();
+  const forkOperationRuns = new Set<Promise<unknown>>();
+  const forkOperationTimers = new Map<string, NodeJS.Timeout>();
+  let forkOperationsClosed = false;
+  const publishForkOperation = (operationId: string): void =>
+    projection.publishForkOperation(operationId);
+  const removeReadyForkOperationsForThread = async (threadId: string): Promise<void> => {
+    const operationIds = Object.values(store.view().forkOperations ?? {})
+      .filter((operation) => operation.status === "ready" && operation.targetThreadId === threadId)
+      .map((operation) => operation.id);
+    if (!operationIds.length) return;
+    await store.update((state) => {
+      for (const operationId of operationIds) delete state.forkOperations?.[operationId];
+    });
+    for (const operationId of operationIds) projection.removeForkOperation(operationId);
+  };
+  const updateForkOperation = async (
+    operationId: string,
+    update: (operation: ForkOperationState) => void,
+  ): Promise<void> => {
+    await store.update((state) => {
+      const operation = state.forkOperations?.[operationId];
+      if (!operation) return;
+      update(operation);
+      operation.updatedAt = Date.now();
+    });
+    publishForkOperation(operationId);
+  };
+  const scheduleForkTitle = (operationId: string, target: Thread, agentText: string): void => {
+    const operation = store.view().forkOperations?.[operationId];
+    if (!operation) return;
+    const temporaryTitle = operation.title;
+    const pending = bridge
+      .request("thread/name/set", { threadId: target.id, name: temporaryTitle }, 30_000)
+      .catch(() => undefined)
+      .then(async () => {
+        if (!threadTitles || !agentText.trim()) return;
+        const model = effectiveTitleModel(
+          operation.sourceSettings,
+          store.view().taskDefaults,
+          projection.availableModels,
+        );
+        const title = await threadTitles.generate(agentText, {
+          cwd: operation.sourceCwd,
+          model: model?.id,
+          effort: model?.reasoningEfforts[0]?.value,
+        });
+        await bridge.request("thread/name/set", { threadId: target.id, name: title }, 30_000);
+        await updateForkOperation(operationId, (current) => {
+          if (current.status === "ready") current.title = title;
+        });
+        projection.upsertThread({ ...target, name: title });
+      })
+      .catch((error: unknown) => {
+        app.log.warn(
+          { err: safeError(error), operationId, threadId: target.id },
+          "Failed to generate fork title",
+        );
+      });
+    void (lifecycle?.track(pending, "fork title generation") ?? pending);
+  };
+  const finishForkOperation = async (
+    operationId: string,
+    target: Thread,
+    agentText: string,
+  ): Promise<void> => {
+    const observed = store.view().forkOperations?.[operationId];
+    if (!observed || observed.status === "ready") return;
+    const reconciliationTimer = forkOperationTimers.get(operationId);
+    if (reconciliationTimer) clearTimeout(reconciliationTimer);
+    forkOperationTimers.delete(operationId);
+    projection.upsertThread({ ...target, name: observed.title });
+    const sourceMeta = store.view().threadMeta[observed.sourceThreadId];
+    const sourceSettings = cloneView<SessionSettings>(observed.sourceSettings);
+    const pendingDraft = observed.draft
+      ? cloneView<NonNullable<ForkOperationState["draft"]>>(observed.draft)
+      : undefined;
+    const pendingMessages = cloneView<QueuedMessage[]>(observed.queuedMessages);
+    await store.update((state) => {
+      const operation = state.forkOperations?.[operationId];
+      if (!operation || operation.status === "ready") return;
+      const now = Date.now();
+      const targetMeta = state.threadMeta[target.id] ?? {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      };
+      targetMeta.settings = sourceSettings;
+      targetMeta.lastOutcome = "completed";
+      targetMeta.outcomeUpdatedAt = target.updatedAt * 1_000;
+      targetMeta.logicalFork = {
+        sourceThreadId: operation.sourceThreadId,
+        operationId,
+        mode: operation.mode,
+      };
+      if (sourceMeta?.managedTeamToolsAvailable === true)
+        targetMeta.managedTeamToolsAvailable = true;
+      if (sourceMeta?.sessionArtifactsVersion === 1) targetMeta.sessionArtifactsVersion = 1;
+      if (pendingDraft) targetMeta.draft = pendingDraft;
+      state.threadMeta[target.id] = targetMeta;
+      if (pendingMessages.length) {
+        state.messageQueues ??= {};
+        state.messageQueues[target.id] = pendingMessages.map((message) => ({
+          ...message,
+          threadId: target.id,
+          status: "queued" as const,
+        }));
+      }
+      operation.draft = undefined;
+      operation.queuedMessages = [];
+      operation.agentText = agentText;
+      operation.targetThreadId = target.id;
+      operation.status = "ready";
+      operation.error = null;
+      operation.updatedAt = now;
+    });
+    projection.upsertThread({ ...target, name: observed.title });
+    publishForkOperation(operationId);
+    projection.publishQueue(target.id, queue.list(target.id));
+    void queue.drain(target.id).catch(() => undefined);
+    scheduleForkTitle(operationId, target, agentText);
+  };
+  const scheduleForkReconciliation = (operationId: string, delayMs = 5_000): void => {
+    if (forkOperationsClosed || forkOperationTimers.has(operationId)) return;
+    const timer = setTimeout(
+      () => {
+        forkOperationTimers.delete(operationId);
+        scheduleForkOperation(operationId);
+      },
+      Math.max(0, Math.min(delayMs, 2_147_000_000)),
+    );
+    timer.unref();
+    forkOperationTimers.set(operationId, timer);
+  };
+  const scheduleForkAttemptSettlement = (operationId: string, startedAt: number): void => {
+    scheduleForkReconciliation(
+      operationId,
+      Math.max(0, startedAt + FORK_ATTEMPT_SETTLE_MS - Date.now()),
+    );
+  };
+  const markedCompressedItems = (
+    operationId: string,
+    items: Record<string, unknown>[],
+  ): Record<string, unknown>[] => {
+    const marked = structuredClone(items);
+    const first = marked[0];
+    if (!first) throw new ProjectValidationError("Compressed fork context is empty");
+    const metadata = first.internal_chat_message_metadata_passthrough;
+    first.internal_chat_message_metadata_passthrough = {
+      ...(isRecord(metadata) ? metadata : {}),
+      [FORK_MATERIALIZATION_MARKER_KEY]: operationId,
+    };
+    return marked;
+  };
+  const materializeCompressedFork = async (
+    operationId: string,
+    target: Thread,
+    items: Record<string, unknown>[],
+  ): Promise<boolean> => {
+    const operation = store.view().forkOperations?.[operationId];
+    if (!operation) return false;
+    if (operation.compressedMaterialization?.phase === "injected") return true;
+
+    if (operation.compressedMaterialization?.phase === "injecting") {
+      const startedAt = operation.compressedMaterialization.startedAt;
+      const marker = await hasForkMaterializationMarker(target.path, operationId);
+      if (marker) {
+        await updateForkOperation(operationId, (current) => {
+          current.compressedMaterialization = { phase: "injected", startedAt };
+        });
+        return true;
+      }
+      if (Date.now() < startedAt + FORK_ATTEMPT_SETTLE_MS) {
+        scheduleForkAttemptSettlement(operationId, startedAt);
+        return false;
+      }
+      if (marker === null) {
+        throw new ProjectValidationError(
+          "Compressed fork materialization could not be verified after restart",
+        );
+      }
+    }
+
+    const startedAt = Date.now();
+    await updateForkOperation(operationId, (current) => {
+      current.status = "reconciling";
+      current.compressedMaterialization = { phase: "injecting", startedAt };
+    });
+    try {
+      await bridge.request(
+        "thread/inject_items",
+        { threadId: target.id, items: markedCompressedItems(operationId, items) },
+        FORK_RPC_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const marker = await hasForkMaterializationMarker(target.path, operationId);
+      if (!marker) {
+        if (error instanceof RpcTimeoutError) {
+          scheduleForkAttemptSettlement(operationId, startedAt);
+          return false;
+        }
+        throw error;
+      }
+    }
+    await updateForkOperation(operationId, (current) => {
+      current.compressedMaterialization = { phase: "injected", startedAt };
+    });
+    return true;
+  };
+  const runForkOperation = async (operationId: string): Promise<void> => {
+    const initial = store.view().forkOperations?.[operationId];
+    if (!initial || initial.status === "ready" || initial.status === "failed") return;
+    const sourceName = `codexnest-fork:${operationId}`;
+    try {
+      let target = await findThreadBySource(bridge, sourceName);
+      let operation = store.view().forkOperations?.[operationId];
+      if (!operation) return;
+      if (
+        target &&
+        operation.mode === "compressed" &&
+        operation.compressedMaterialization?.phase === "injected"
+      ) {
+        await finishForkOperation(operationId, target, operation.agentText);
+        return;
+      }
+      if (
+        target &&
+        operation.mode === "compressed" &&
+        operation.compressedMaterialization?.phase === "injecting"
+      ) {
+        const startedAt = operation.compressedMaterialization.startedAt;
+        const marker = await hasForkMaterializationMarker(target.path, operationId);
+        if (marker) {
+          await updateForkOperation(operationId, (current) => {
+            current.compressedMaterialization = { phase: "injected", startedAt };
+          });
+          await finishForkOperation(operationId, target, operation.agentText);
+          return;
+        }
+        if (Date.now() < startedAt + FORK_ATTEMPT_SETTLE_MS) {
+          scheduleForkAttemptSettlement(operationId, startedAt);
+          return;
+        }
+        if (marker === null) {
+          throw new ProjectValidationError(
+            "Compressed fork materialization could not be verified after restart",
+          );
+        }
+      }
+      if (
+        !target &&
+        operation.nativeAttempt &&
+        Date.now() < operation.nativeAttempt.startedAt + FORK_ATTEMPT_SETTLE_MS
+      ) {
+        await updateForkOperation(operationId, (current) => {
+          current.status = "reconciling";
+          current.error = null;
+        });
+        scheduleForkAttemptSettlement(operationId, operation.nativeAttempt.startedAt);
+        return;
+      }
+
+      const point = await validateForkPoint(
+        bridge,
+        operation.sourceThreadId,
+        operation.lastTurnId,
+        operation.agentMessageId,
+      );
+      const rollout = await analyzeForkRollout(operation.rolloutPath, operation.lastTurnId);
+      await updateForkOperation(operationId, (current) => {
+        current.estimate = structuredClone(rollout.estimate[current.mode]);
+        current.agentText = point.text;
+      });
+      operation = store.view().forkOperations?.[operationId];
+      if (!operation) return;
+
+      if (operation.mode === "compressed" && !rollout.compressedItems) {
+        throw new ProjectValidationError(
+          rollout.estimate.compressed.unavailableReason ?? "Compressed fork is unavailable",
+        );
+      }
+      if (!target) {
+        const uncertainAttempt = operation.nativeAttempt;
+        const attemptStartedAt = Date.now();
+        const attemptSequence = (uncertainAttempt?.sequence ?? 0) + 1;
+        await updateForkOperation(operationId, (current) => {
+          current.status = "reconciling";
+          current.error = null;
+          current.nativeAttempt = {
+            startedAt: attemptStartedAt,
+            sequence: attemptSequence,
+          };
+        });
+        if (operation.mode === "exact") {
+          try {
+            target = parseThreadStart(
+              await bridge.request<unknown>(
+                "thread/fork",
+                {
+                  threadId: operation.sourceThreadId,
+                  lastTurnId: operation.lastTurnId,
+                  excludeTurns: true,
+                  serviceTier: null,
+                  threadSource: sourceName,
+                },
+                FORK_RPC_TIMEOUT_MS,
+              ),
+            ).thread;
+          } catch (error) {
+            target = await findThreadBySource(bridge, sourceName);
+            if (!target && error instanceof RpcTimeoutError) {
+              scheduleForkAttemptSettlement(operationId, attemptStartedAt);
+              return;
+            }
+            if (!target) throw error;
+          }
+        } else {
+          try {
+            target = parseThreadStart(
+              await bridge.request<unknown>(
+                "thread/start",
+                {
+                  cwd: operation.sourceCwd,
+                  ...threadSettings(operation.sourceSettings),
+                  threadSource: sourceName,
+                  developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
+                  dynamicTools: ROOT_DYNAMIC_TOOLS,
+                },
+                FORK_RPC_TIMEOUT_MS,
+              ),
+            ).thread;
+          } catch (error) {
+            target = await findThreadBySource(bridge, sourceName);
+            if (!target && error instanceof RpcTimeoutError) {
+              scheduleForkAttemptSettlement(operationId, attemptStartedAt);
+              return;
+            }
+            if (!target) throw error;
+          }
+        }
+        await updateForkOperation(operationId, (current) => {
+          current.targetThreadId = target!.id;
+          delete current.nativeAttempt;
+        });
+      } else if (operation.nativeAttempt || operation.targetThreadId !== target.id) {
+        await updateForkOperation(operationId, (current) => {
+          current.targetThreadId = target!.id;
+          delete current.nativeAttempt;
+        });
+      }
+      if (operation.mode === "compressed") {
+        if (!(await materializeCompressedFork(operationId, target, rollout.compressedItems!))) {
+          return;
+        }
+      } else {
+        await bridge
+          .request("thread/goal/clear", { threadId: target.id }, 30_000)
+          .catch(() => undefined);
+      }
+      await finishForkOperation(operationId, target, point.text);
+    } catch (error) {
+      await updateForkOperation(operationId, (operation) => {
+        operation.status = "failed";
+        operation.error = safeError(error).message;
+      });
+    }
+  };
+  const scheduleForkOperation = (operationId: string): void => {
+    if (forkOperationsClosed || bridge.state !== "ready") return;
+    const pending = withKeyLock(forkOperationLocks, operationId, () =>
+      runForkOperation(operationId),
+    );
+    forkOperationRuns.add(pending);
+    const cleanup = () => forkOperationRuns.delete(pending);
+    void pending.then(cleanup, cleanup);
+  };
+  const recoverForkOperations = (): void => {
+    for (const operation of Object.values(store.view().forkOperations ?? {})) {
+      if (operation.status === "preparing" || operation.status === "reconciling") {
+        scheduleForkOperation(operation.id);
+      }
+    }
+  };
+  const forkBridgeStateHandler = (state: string): void => {
+    if (state === "ready") recoverForkOperations();
+  };
+  bridge.on("state", forkBridgeStateHandler);
+  const initialForkRecovery = setImmediate(recoverForkOperations);
+  app.addHook("onClose", async () => {
+    forkOperationsClosed = true;
+    clearImmediate(initialForkRecovery);
+    for (const timer of forkOperationTimers.values()) clearTimeout(timer);
+    forkOperationTimers.clear();
+    bridge.off("state", forkBridgeStateHandler);
+  });
   const scheduledTeamContinuations = new Set<string>();
   const scheduledTeamTaskStarts = new Set<string>();
   const teamContinuationImmediates = new Map<string, NodeJS.Immediate>();
@@ -1474,6 +1881,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
     } else if (event.type === "thread.removed") {
       void queue.removeThread(event.threadId).catch(() => undefined);
+      void removeReadyForkOperationsForThread(event.threadId).catch(() => undefined);
     }
   });
 
@@ -1835,27 +2243,33 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (request.query.clientUploadId !== undefined && clientUploadId === null) {
         return apiError(reply, 400, "validation_failed", "Voice upload id is invalid");
       }
+      if (clientUploadId) {
+        const duplicate = voiceTranscriptions.duplicate(request.params.id, clientUploadId);
+        if (duplicate !== undefined) {
+          return duplicate ? reply.code(202).send(duplicate) : reply.code(204).send();
+        }
+      }
       const selectionStart = parseNonNegativeInteger(request.query.selectionStart);
       const selectionEnd = parseNonNegativeInteger(request.query.selectionEnd);
       if (selectionStart === null || selectionEnd === null || selectionEnd < selectionStart) {
         return apiError(reply, 400, "validation_failed", "Voice selection is invalid");
       }
-      const inputLength = store.view().threadMeta[request.params.id]?.draft?.input.length ?? 0;
-      if (selectionStart > inputLength || selectionEnd > inputLength) {
-        return apiError(reply, 400, "validation_failed", "Voice selection is outside the draft");
-      }
       const expectedDraftUpdatedAt =
         request.query.draftUpdatedAt === "none"
           ? null
           : parseNonNegativeInteger(request.query.draftUpdatedAt);
-      const currentDraftUpdatedAt =
-        store.view().threadMeta[request.params.id]?.draft?.updatedAt ?? null;
+      const currentDraft = store.view().threadMeta[request.params.id]?.draft;
+      const currentDraftUpdatedAt = currentDraft?.updatedAt ?? null;
       if (
         expectedDraftUpdatedAt === null
           ? request.query.draftUpdatedAt !== "none" || currentDraftUpdatedAt !== null
           : currentDraftUpdatedAt !== expectedDraftUpdatedAt
       ) {
-        return apiError(reply, 409, "conflict", "The draft changed before voice upload");
+        return apiError(reply, 409, "draft_conflict", "The draft changed before voice upload");
+      }
+      const inputLength = currentDraft?.input.length ?? 0;
+      if (selectionStart > inputLength || selectionEnd > inputLength) {
+        return apiError(reply, 400, "validation_failed", "Voice selection is outside the draft");
       }
       const audioDurationMs = parseAudioDurationHeader(
         request.headers["x-codexnest-audio-duration-ms"],
@@ -2277,27 +2691,50 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return projection.readThreadChanges(request.params.id, syncPoint, continuationCursor ?? null);
   });
 
-  app.put<{ Params: { id: string }; Body: UpdateThreadDraftRequest }>(
-    "/api/v1/threads/:id/draft",
-    { bodyLimit: CHAT_BODY_LIMIT },
-    async (request, reply) => {
-      const summary = projection.summary(request.params.id);
-      if (!summary) {
-        return apiError(reply, 404, "not_found", "Thread not found");
+  app.put<{
+    Params: { id: string };
+    Querystring: { expectedUpdatedAt?: string };
+    Body: UpdateThreadDraftRequest;
+  }>("/api/v1/threads/:id/draft", { bodyLimit: CHAT_BODY_LIMIT }, async (request, reply) => {
+    const summary = projection.summary(request.params.id);
+    if (!summary) {
+      return apiError(reply, 404, "not_found", "Thread not found");
+    }
+    assertWritableThread(summary);
+    if (voiceTranscriptions?.active(request.params.id)) {
+      return apiError(
+        reply,
+        409,
+        "conflict",
+        "The composer is locked while voice transcription is active",
+      );
+    }
+    let expectedUpdatedAt: number | null | undefined;
+    if (request.query.expectedUpdatedAt !== undefined) {
+      expectedUpdatedAt =
+        request.query.expectedUpdatedAt === "none"
+          ? null
+          : (parseNonNegativeInteger(request.query.expectedUpdatedAt) ?? undefined);
+      if (expectedUpdatedAt === undefined) {
+        return apiError(reply, 400, "validation_failed", "Draft revision is invalid");
       }
-      assertWritableThread(summary);
-      if (voiceTranscriptions?.active(request.params.id)) {
-        return apiError(
-          reply,
-          409,
-          "conflict",
-          "The composer is locked while voice transcription is active",
-        );
-      }
+    }
+    const draft = validateThreadDraft(request.body);
+    try {
+      const saved = await projection.setDraft(
+        request.params.id,
+        draft,
+        expectedUpdatedAt === undefined ? undefined : { expectedUpdatedAt },
+      );
       await voiceTranscriptions?.clearFailure(request.params.id);
-      return projection.setDraft(request.params.id, validateThreadDraft(request.body));
-    },
-  );
+      return saved;
+    } catch (error) {
+      if (error instanceof ThreadDraftConflictError) {
+        return apiError(reply, 409, "draft_conflict", error.message);
+      }
+      throw error;
+    }
+  });
 
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
     if (!projection.summary(request.params.id)) {
@@ -2411,6 +2848,322 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.post<{ Params: { id: string }; Body: ForkThreadRequest }>(
+    "/api/v1/threads/:id/fork-estimate",
+    async (request, reply): Promise<ForkEstimateResponse | undefined> => {
+      const body = validateForkThreadBody(request.body);
+      const source = projection.summary(request.params.id);
+      if (!source) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(source);
+      const analysis = await analyzeForkRollout(
+        projection.rolloutPath(source.id),
+        body.lastTurnId,
+        body.agentMessageId,
+      );
+      if (analysis.forkPointValidation === "invalid") {
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "agentMessageId must select the last non-empty agent message of the turn",
+        );
+      }
+      return analysis.estimate;
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: CreateForkOperationRequest }>(
+    "/api/v1/threads/:id/fork-operations",
+    async (request, reply): Promise<ForkOperationResponse | undefined> => {
+      codexManager?.assertTurnsAllowed();
+      const body = validateCreateForkOperationBody(request.body);
+      const source = projection.summary(request.params.id);
+      if (!source) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(source);
+      let operation: ForkOperationState;
+      let retry = false;
+      try {
+        await store.update((state) => {
+          state.forkOperations ??= {};
+          const existing = state.forkOperations[body.operationId];
+          if (existing) {
+            if (
+              existing.sourceThreadId !== source.id ||
+              existing.lastTurnId !== body.lastTurnId ||
+              existing.agentMessageId !== body.agentMessageId ||
+              existing.mode !== body.mode
+            ) {
+              throw new ProjectConflictError("operationId has already been used");
+            }
+            if (existing.status === "failed") {
+              existing.status = "preparing";
+              existing.error = null;
+              existing.targetThreadId = null;
+              delete existing.nativeAttempt;
+              delete existing.compressedMaterialization;
+              existing.updatedAt = Date.now();
+              retry = true;
+            }
+            operation = existing;
+            return;
+          }
+          const now = Date.now();
+          operation = {
+            id: body.operationId,
+            sourceThreadId: source.id,
+            lastTurnId: body.lastTurnId,
+            agentMessageId: body.agentMessageId,
+            mode: body.mode,
+            status: "preparing",
+            title: temporaryForkTitle(source.title),
+            createdAt: now,
+            updatedAt: now,
+            targetThreadId: null,
+            estimate: null,
+            error: null,
+            sourceCwd: source.cwd,
+            sourceSettings: structuredClone(source.settings),
+            rolloutPath: projection.rolloutPath(source.id),
+            agentText: "",
+            queuedMessages: [],
+          };
+          state.forkOperations[body.operationId] = operation;
+        });
+      } catch (error) {
+        if (error instanceof ProjectConflictError) {
+          return apiError(reply, 409, "conflict", error.message);
+        }
+        throw error;
+      }
+      publishForkOperation(body.operationId);
+      if (operation!.status === "preparing" || retry)
+        setImmediate(() => scheduleForkOperation(body.operationId));
+      return reply.code(202).send({ operation: publicForkOperation(operation!) });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/fork-operations/:id",
+    async (request, reply): Promise<ForkOperationDetailResponse | undefined> => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      const readyTargetId = operation.status === "ready" ? operation.targetThreadId : null;
+      const draft = readyTargetId ? store.view().threadMeta[readyTargetId]?.draft : operation.draft;
+      return {
+        operation: publicForkOperation(operation),
+        queuedMessages: readyTargetId
+          ? queue.list(readyTargetId)
+          : cloneView<QueuedMessage[]>(operation.queuedMessages),
+        draft: draft ? cloneView<NonNullable<ForkOperationState["draft"]>>(draft) : null,
+      };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/v1/fork-operations/:id", async (request, reply) => {
+    const operation = store.view().forkOperations?.[request.params.id];
+    if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+    if (operation.status !== "failed") {
+      return apiError(reply, 409, "conflict", "Only failed fork operations may be removed");
+    }
+    await store.update((state) => {
+      delete state.forkOperations?.[request.params.id];
+    });
+    projection.removeForkOperation(request.params.id);
+    return reply.code(204).send();
+  });
+
+  app.put<{
+    Params: { id: string };
+    Querystring: { expectedUpdatedAt?: string };
+    Body: UpdateThreadDraftRequest;
+  }>(
+    "/api/v1/fork-operations/:id/draft",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      if (operation.status === "ready" && operation.targetThreadId) {
+        const expected = parseExpectedDraftRevision(request.query.expectedUpdatedAt);
+        try {
+          return await projection.setDraft(
+            operation.targetThreadId,
+            validateThreadDraft(request.body),
+            expected === undefined ? undefined : { expectedUpdatedAt: expected },
+          );
+        } catch (error) {
+          if (error instanceof ThreadDraftConflictError) {
+            return apiError(reply, 409, "draft_conflict", error.message);
+          }
+          throw error;
+        }
+      }
+      const expected = parseExpectedDraftRevision(request.query.expectedUpdatedAt);
+      const draft = validateThreadDraft(request.body);
+      let saved!: ReturnType<typeof validateThreadDraft> & { updatedAt: number };
+      try {
+        await store.update((state) => {
+          const current = state.forkOperations?.[request.params.id];
+          if (!current) throw new MessageQueueNotFoundError("Fork operation not found");
+          const actual = current.draft?.updatedAt ?? null;
+          if (expected !== undefined && expected !== actual) {
+            throw new ThreadDraftConflictError("Draft was updated elsewhere");
+          }
+          saved = { ...draft, updatedAt: Date.now() };
+          current.draft = saved;
+          current.updatedAt = saved.updatedAt;
+        });
+      } catch (error) {
+        if (error instanceof ThreadDraftConflictError) {
+          return apiError(reply, 409, "draft_conflict", error.message);
+        }
+        throw error;
+      }
+      publishForkOperation(request.params.id);
+      return saved;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/fork-operations/:id/draft",
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      const draft =
+        operation.status === "ready" && operation.targetThreadId
+          ? store.view().threadMeta[operation.targetThreadId]?.draft
+          : operation.draft;
+      return draft ? cloneView<NonNullable<ForkOperationState["draft"]>>(draft) : null;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/fork-operations/:id/queue",
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      return operation.status === "ready" && operation.targetThreadId
+        ? queue.list(operation.targetThreadId)
+        : cloneView<QueuedMessage[]>(operation.queuedMessages);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: QueueMessageRequest }>(
+    "/api/v1/fork-operations/:id/queue",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      const body = validateQueueMessageBody(request.body);
+      if (operation.status === "ready" && operation.targetThreadId) {
+        const message = await queue.enqueue(
+          operation.targetThreadId,
+          body.input,
+          body.images,
+          body.clientMessageId,
+          { goal: body.goal },
+        );
+        return reply.code(202).send(message);
+      }
+      const message: QueuedMessage = {
+        id: body.clientMessageId ?? randomUUID(),
+        threadId: operation.id,
+        text: body.input.trim(),
+        ...(body.images.length ? { images: body.images } : {}),
+        ...(body.goal ? { goal: true } : {}),
+        createdAt: Date.now(),
+        status: "queued",
+      };
+      let stored = message;
+      await store.update((state) => {
+        const current = state.forkOperations?.[request.params.id];
+        if (!current) throw new MessageQueueNotFoundError("Fork operation not found");
+        const existing = current.queuedMessages.find((candidate) => candidate.id === message.id);
+        if (existing) {
+          if (
+            messageContentHash(existing.text, existing.images ?? [], !!existing.goal) !==
+            messageContentHash(message.text, message.images ?? [], !!message.goal)
+          ) {
+            throw new MessageQueueConflictError("Message id has already been used");
+          }
+          stored = existing;
+          return;
+        }
+        current.queuedMessages.push(message);
+        delete current.draft;
+        current.updatedAt = Date.now();
+      });
+      publishForkOperation(request.params.id);
+      return reply.code(202).send(stored);
+    },
+  );
+
+  app.patch<{ Params: { id: string; messageId: string }; Body: UpdateQueuedMessageRequest }>(
+    "/api/v1/fork-operations/:id/queue/:messageId",
+    { bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      const body = requireRecord<UpdateQueuedMessageRequest>(request.body);
+      if (typeof body.input !== "string")
+        throw new ProjectValidationError("input must be a string");
+      if (operation.status === "ready" && operation.targetThreadId) {
+        return queue.update(operation.targetThreadId, request.params.messageId, body.input);
+      }
+      let updated!: QueuedMessage;
+      await store.update((state) => {
+        const current = state.forkOperations?.[request.params.id];
+        const message = current?.queuedMessages.find(
+          (item) => item.id === request.params.messageId,
+        );
+        if (!message) throw new MessageQueueNotFoundError("Queued message not found");
+        if (!body.input.trim() && !message.images?.length) {
+          throw new MessageQueueValidationError("Queued message text must not be empty");
+        }
+        message.text = body.input.trim();
+        updated = structuredClone(message);
+        current!.updatedAt = Date.now();
+      });
+      publishForkOperation(request.params.id);
+      return updated;
+    },
+  );
+
+  app.delete<{ Params: { id: string; messageId: string } }>(
+    "/api/v1/fork-operations/:id/queue/:messageId",
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      if (operation.status === "ready" && operation.targetThreadId) {
+        await queue.cancel(operation.targetThreadId, request.params.messageId);
+      } else {
+        await store.update((state) => {
+          const current = state.forkOperations?.[request.params.id];
+          if (!current?.queuedMessages.some((item) => item.id === request.params.messageId)) {
+            throw new MessageQueueNotFoundError("Queued message not found");
+          }
+          current.queuedMessages = current.queuedMessages.filter(
+            (item) => item.id !== request.params.messageId,
+          );
+          current.updatedAt = Date.now();
+        });
+        publishForkOperation(request.params.id);
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { id: string; messageId: string } }>(
+    "/api/v1/fork-operations/:id/queue/:messageId/send",
+    async (request, reply) => {
+      const operation = store.view().forkOperations?.[request.params.id];
+      if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
+      if (operation.status !== "ready" || !operation.targetThreadId) {
+        return apiError(reply, 409, "conflict", "The fork is not ready yet");
+      }
+      return { turnId: await queue.sendNow(operation.targetThreadId, request.params.messageId) };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: ForkThreadRequest }>(
     "/api/v1/threads/:id/forks",
     async (request, reply) => {
       codexManager?.assertTurnsAllowed();
@@ -2453,12 +3206,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         effort: model?.reasoningEfforts[0]?.value,
       });
       const forked = parseThreadStart(
-        await bridge.request<unknown>("thread/fork", {
-          threadId: source.id,
-          lastTurnId: turn.id,
-          excludeTurns: true,
-          serviceTier: null,
-        }),
+        await bridge.request<unknown>(
+          "thread/fork",
+          {
+            threadId: source.id,
+            lastTurnId: turn.id,
+            excludeTurns: true,
+            serviceTier: null,
+          },
+          FORK_RPC_TIMEOUT_MS,
+        ),
       ).thread;
       await bridge.request("thread/goal/clear", { threadId: forked.id });
       await bridge.request("thread/name/set", { threadId: forked.id, name: title });
@@ -2892,6 +3649,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 400, "validation_failed", error.message);
     if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
+    if (error instanceof VoiceTranscriptionDraftConflictError) {
+      return apiError(reply, 409, "draft_conflict", error.message);
+    }
     if (
       error instanceof VoiceTranscriptionConflictError ||
       error instanceof VoiceTranscriptionQueueFullError
@@ -6062,6 +6822,115 @@ function validateForkThreadBody(value: unknown): ForkThreadRequest {
     throw new ProjectValidationError("lastTurnId and agentMessageId are required");
   }
   return body;
+}
+
+function validateCreateForkOperationBody(value: unknown): CreateForkOperationRequest {
+  const body = requireRecord<CreateForkOperationRequest>(value);
+  if (
+    Object.keys(body).some(
+      (key) => !["operationId", "lastTurnId", "agentMessageId", "mode"].includes(key),
+    )
+  ) {
+    throw new ProjectValidationError("Unknown fork operation field");
+  }
+  validateForkThreadBody({ lastTurnId: body.lastTurnId, agentMessageId: body.agentMessageId });
+  if (
+    typeof body.operationId !== "string" ||
+    !body.operationId ||
+    body.operationId.length > 500 ||
+    body.operationId.trim() !== body.operationId
+  ) {
+    throw new ProjectValidationError("operationId is required");
+  }
+  if (body.mode !== "compressed" && body.mode !== "exact") {
+    throw new ProjectValidationError("mode must be compressed or exact");
+  }
+  return body;
+}
+
+async function validateForkPoint(
+  bridge: CodexBridge,
+  threadId: string,
+  lastTurnId: string,
+  agentMessageId: string,
+): Promise<{
+  turn: Turn;
+  response: Extract<ThreadItem, { type: "agentMessage" | "plan" }>;
+  text: string;
+}> {
+  const turn = await readForkTurn(bridge, threadId, lastTurnId);
+  if (!turn) throw new ProjectValidationError("Fork turn was not found");
+  if (turn.status !== "completed") {
+    throw new ProjectConflictError("Only completed turns can be forked");
+  }
+  const response = [...turn.items]
+    .reverse()
+    .find(
+      (item): item is Extract<ThreadItem, { type: "agentMessage" | "plan" }> =>
+        (item.type === "agentMessage" || item.type === "plan") && Boolean(item.text.trim()),
+    );
+  if (!response || response.id !== agentMessageId) {
+    throw new ProjectValidationError(
+      "agentMessageId must select the last non-empty agent message or plan of the turn",
+    );
+  }
+  return { turn, response, text: response.text };
+}
+
+function temporaryForkTitle(sourceTitle: string): string {
+  const prefix = "Ответвление: ";
+  const source = sourceTitle.trim() || "Без названия";
+  const maxCharacters = 100;
+  const characters = [...source];
+  const available = maxCharacters - [...prefix].length;
+  if (characters.length <= available) return `${prefix}${source}`;
+  return `${prefix}${characters
+    .slice(0, Math.max(1, available - 1))
+    .join("")
+    .trimEnd()}…`;
+}
+
+function parseExpectedDraftRevision(value: string | undefined): number | null | undefined {
+  if (value === undefined) return undefined;
+  const parsed = value === "none" ? null : parseNonNegativeInteger(value);
+  if (parsed === undefined || (parsed === null && value !== "none")) {
+    throw new ProjectValidationError("Draft revision is invalid");
+  }
+  return parsed;
+}
+
+function validateQueueMessageBody(value: unknown): {
+  input: string;
+  images: string[];
+  goal: boolean;
+  clientMessageId?: string;
+} {
+  const body = requireRecord<QueueMessageRequest>(value);
+  if (
+    Object.keys(body).some((key) => !["input", "images", "goal", "clientMessageId"].includes(key))
+  ) {
+    throw new ProjectValidationError("Unknown queue field");
+  }
+  const images = validateImages(body.images);
+  const clientMessageId = optionalClientMessageId(body.clientMessageId);
+  if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
+    throw new ProjectValidationError("input or images are required");
+  }
+  if (body.goal !== undefined && typeof body.goal !== "boolean") {
+    throw new ProjectValidationError("goal must be boolean");
+  }
+  if (body.goal && (!body.input.trim() || body.input.trim().length > 4_000)) {
+    throw new ProjectValidationError("goal objective must be 1-4000 characters");
+  }
+  if (body.clientMessageId !== undefined && clientMessageId === null) {
+    throw new ProjectValidationError("clientMessageId must not be empty");
+  }
+  return {
+    input: body.input,
+    images,
+    goal: body.goal ?? false,
+    ...(clientMessageId ? { clientMessageId } : {}),
+  };
 }
 
 async function readForkTurn(
