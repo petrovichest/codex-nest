@@ -239,7 +239,7 @@ export async function readFreshCompaction(
 ): Promise<Record<string, unknown>[] | null> {
   const input = createReadStream(path, { encoding: "utf8", start: startBytes });
   const lines = createInterface({ input, crlfDelay: Infinity });
-  let latest: Record<string, unknown>[] | null = null;
+  let replacement: Record<string, unknown>[] | null = null;
   try {
     for await (const line of lines) {
       if (!line.trim()) continue;
@@ -247,14 +247,14 @@ export async function readFreshCompaction(
       try {
         entry = JSON.parse(line) as unknown;
       } catch {
-        continue;
+        throw new Error("The fresh compaction contains malformed JSON");
       }
       if (!isRecord(entry) || entry.type !== "compacted" || !isRecord(entry.payload)) continue;
-      const replacement = validReplacementHistory(entry.payload.replacement_history);
+      if (replacement) throw new Error("Multiple fresh compactions were appended");
+      replacement = validReplacementHistory(entry.payload.replacement_history);
       if (!replacement) throw new Error("The fresh compaction has an unsupported schema");
-      latest = replacement;
     }
-    return latest;
+    return replacement;
   } finally {
     lines.close();
     input.destroy();

@@ -266,6 +266,7 @@ export interface ForkOperationState {
     phase: "ready" | "compacting" | "compacted";
     startedAt: number;
     sequence: number;
+    compactTurnId?: string;
   };
   compressedMaterialization?: {
     phase: "injecting" | "injected";
@@ -1334,7 +1335,9 @@ function isForkOperation(value: unknown, operationId: string): value is ForkOper
         isNonNegativeFiniteNumber(value.compressedPreparation.startedAt) &&
         typeof value.compressedPreparation.sequence === "number" &&
         Number.isSafeInteger(value.compressedPreparation.sequence) &&
-        value.compressedPreparation.sequence >= 0)) &&
+        value.compressedPreparation.sequence >= 0 &&
+        (value.compressedPreparation.compactTurnId === undefined ||
+          isBoundedString(value.compressedPreparation.compactTurnId, 500)))) &&
     (value.compressedMaterialization === undefined ||
       (value.mode === "compressed" &&
         isRecord(value.compressedMaterialization) &&

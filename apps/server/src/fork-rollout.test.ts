@@ -152,6 +152,27 @@ describe("fork rollout analysis", () => {
       { type: "compaction", id: "encrypted", encrypted_content: "opaque" },
     ]);
   });
+
+  it("rejects malformed or duplicate post-baseline compactions", async () => {
+    const malformed = await rollout([record("session_meta", { id: "temporary" })]);
+    const malformedStart = (await stat(malformed)).size;
+    await appendFile(malformed, "{not-json}\n", "utf8");
+    await expect(readFreshCompaction(malformed, malformedStart)).rejects.toThrow("malformed JSON");
+
+    const duplicate = await rollout([record("session_meta", { id: "temporary" })]);
+    const duplicateStart = (await stat(duplicate)).size;
+    await appendFile(
+      duplicate,
+      `${record("compacted", { replacement_history: [message("first", "first")] })}\n${record(
+        "compacted",
+        { replacement_history: [message("second", "second")] },
+      )}\n`,
+      "utf8",
+    );
+    await expect(readFreshCompaction(duplicate, duplicateStart)).rejects.toThrow(
+      "Multiple fresh compactions",
+    );
+  });
 });
 
 async function rollout(lines: string[]): Promise<string> {

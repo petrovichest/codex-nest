@@ -1946,6 +1946,153 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
+  it("deletes operation-owned temporary and target threads before removing a failed fork", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "failed-cleanup",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["failed-cleanup"];
+      if (!operation) return;
+      operation.status = "failed";
+      operation.error = "compact failed";
+      operation.targetThreadId = "failed-target";
+      operation.compressedPreparation = {
+        temporaryThreadId: "failed-temporary",
+        rolloutPath: join(dirname(harness.store.path), "failed-temporary.jsonl"),
+        compactFromBytes: 0,
+        phase: "compacting",
+        startedAt: Date.now(),
+        sequence: 1,
+      };
+    });
+
+    const response = await harness.app.inject({
+      method: "DELETE",
+      url: "/api/v1/fork-operations/failed-cleanup",
+      headers: harness.headers,
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "failed-temporary" },
+      30_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "failed-target" },
+      30_000,
+    );
+    expect(harness.store.snapshot().forkOperations?.["failed-cleanup"]).toBeUndefined();
+    await harness.app.close();
+  });
+
+  it("cleans a failed fork before retrying with a fresh compact operation", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    const payload = {
+      operationId: "failed-retry",
+      lastTurnId: "selected-turn",
+      agentMessageId: "selected-answer",
+      mode: "compressed",
+    } as const;
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.[payload.operationId];
+      if (!operation) return;
+      operation.status = "failed";
+      operation.error = "compact failed";
+      operation.targetThreadId = "failed-retry-target";
+      operation.estimate = {
+        available: true,
+        estimatedBytes: 42,
+        estimatedSeconds: { minSeconds: 1, maxSeconds: 2 },
+        unavailableReason: null,
+      };
+      operation.agentText = "stale answer";
+      operation.nativeAttempt = { startedAt: 1, sequence: 1 };
+      operation.compressedPreparation = {
+        temporaryThreadId: "failed-retry-temporary",
+        rolloutPath: join(dirname(harness.store.path), "failed-retry-temporary.jsonl"),
+        compactFromBytes: 0,
+        phase: "compacted",
+        startedAt: 1,
+        sequence: 1,
+      };
+      operation.compressedMaterialization = { phase: "injected", startedAt: 1 };
+    });
+
+    const requestImplementation = harness.bridge.request.getMockImplementation()!;
+    harness.bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/delete") throw new Error("cleanup failed");
+      return requestImplementation(method, params);
+    });
+    const failedCleanup = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+    expect(failedCleanup.statusCode).toBe(500);
+    expect(harness.store.snapshot().forkOperations?.[payload.operationId]).toMatchObject({
+      status: "failed",
+      error: "compact failed",
+      targetThreadId: "failed-retry-target",
+    });
+
+    harness.bridge.request.mockImplementation(requestImplementation).mockClear();
+    const retried = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+
+    expect(retried.statusCode).toBe(202);
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "failed-retry-temporary" },
+      30_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "failed-retry-target" },
+      30_000,
+    );
+    expect(harness.store.snapshot().forkOperations?.[payload.operationId]).toMatchObject({
+      status: "preparing",
+      targetThreadId: null,
+      estimate: null,
+      error: null,
+      agentText: "",
+    });
+    expect(
+      harness.store.snapshot().forkOperations?.[payload.operationId].nativeAttempt,
+    ).toBeUndefined();
+    expect(
+      harness.store.snapshot().forkOperations?.[payload.operationId].compressedPreparation,
+    ).toBeUndefined();
+    expect(
+      harness.store.snapshot().forkOperations?.[payload.operationId].compressedMaterialization,
+    ).toBeUndefined();
+    await harness.app.close();
+  });
+
   it("creates a fresh compaction in a temporary fork and injects only its replacement", async () => {
     const harness = await createForkHarness();
     const directory = await mkdtemp(join(tmpdir(), "codexnest-compressed-fork-test-"));
@@ -2036,17 +2183,17 @@ describe("session forks", () => {
         items: [
           {
             type: "message",
-            id: forkMaterializationMarkerId("compressed-operation"),
+            id: "fresh-summary",
             role: "user",
             content: [],
-            internal_chat_message_metadata_passthrough: {
-              codexnest_fork_operation_id: "compressed-operation",
-            },
           },
           {
             type: "compaction",
-            id: "fresh-encrypted-summary",
+            id: forkMaterializationMarkerId("compressed-operation"),
             encrypted_content: "fresh-opaque",
+            internal_chat_message_metadata_passthrough: {
+              codexnest_fork_operation_id: "compressed-operation",
+            },
           },
         ],
       },
@@ -2401,12 +2548,16 @@ describe("session forks", () => {
         phase: "compacting",
         startedAt: Date.now(),
         sequence: 1,
+        compactTurnId: "completed-compact-turn",
       };
     });
     await harness.app.close();
 
     const bridge = new SettingsBridge();
     bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.threadTurns.set("temporary-recovered", [
+      testTurn("completed-compact-turn", "completed"),
+    ]);
     bridge.managedThreads.push({
       ...testThread("temporary-recovered"),
       path: temporaryPath,
@@ -2432,6 +2583,145 @@ describe("session forks", () => {
         }),
       ],
     });
+    await restarted.app.close();
+  });
+
+  it("rejects appended compact context when the persisted compact turn failed", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    harness.bridge.threadTurns.set("thread", [completedForkTurn()]);
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "failed-compact-after-restart",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    const temporaryPath = join(dirname(harness.store.path), "failed-compact-turn.jsonl");
+    const baseline = `${JSON.stringify({ type: "session_meta", payload: { id: "temp" } })}\n`;
+    await writeFile(
+      temporaryPath,
+      `${baseline}${JSON.stringify({
+        type: "compacted",
+        payload: {
+          message: "",
+          replacement_history: [
+            { type: "message", id: "untrusted-summary", role: "user", content: [] },
+          ],
+        },
+      })}\n`,
+      "utf8",
+    );
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["failed-compact-after-restart"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.compressedPreparation = {
+        temporaryThreadId: "failed-compact-temporary",
+        rolloutPath: temporaryPath,
+        compactFromBytes: Buffer.byteLength(baseline),
+        phase: "compacting",
+        startedAt: Date.now(),
+        sequence: 1,
+        compactTurnId: "failed-compact-turn",
+      };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.threadTurns.set("failed-compact-temporary", [
+      {
+        ...testTurn("failed-compact-turn", "failed"),
+        error: {
+          message: "compact terminal failed",
+          codexErrorInfo: null,
+          additionalDetails: null,
+        },
+      },
+    ]);
+    bridge.managedThreads.push({
+      ...testThread("failed-compact-temporary"),
+      path: temporaryPath,
+      forkedFromId: "thread",
+      threadSource: "codexnest-fork-temp:failed-compact-after-restart",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+
+    await vi.waitFor(() => {
+      expect(
+        harness.store.snapshot().forkOperations?.["failed-compact-after-restart"],
+      ).toMatchObject({ status: "failed", error: "compact terminal failed" });
+    });
+    expect(injectRequests(bridge)).toHaveLength(0);
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/compact/start"),
+    ).toHaveLength(0);
+    await restarted.app.close();
+  });
+
+  it("does not replay an ambiguous in-flight compaction before its RPC settle window", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    harness.bridge.threadTurns.set("thread", [completedForkTurn()]);
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-in-flight",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    const temporaryPath = join(dirname(harness.store.path), "compacting-before-restart.jsonl");
+    await writeFile(
+      temporaryPath,
+      `${JSON.stringify({ type: "session_meta", payload: { id: "temp" } })}\n`,
+      "utf8",
+    );
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["compressed-in-flight"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.compressedPreparation = {
+        temporaryThreadId: "temporary-in-flight",
+        rolloutPath: temporaryPath,
+        compactFromBytes: 0,
+        phase: "compacting",
+        startedAt: Date.now() - 2_000,
+        sequence: 1,
+      };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.managedThreads.push({
+      ...testThread("temporary-in-flight"),
+      path: temporaryPath,
+      forkedFromId: "thread",
+      threadSource: "codexnest-fork-temp:compressed-in-flight",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+    await vi.waitFor(() => {
+      expect(bridge.request).toHaveBeenCalledWith(
+        "thread/read",
+        { threadId: "temporary-in-flight", includeTurns: false },
+        30_000,
+      );
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/compact/start"),
+    ).toHaveLength(0);
+    expect(harness.store.snapshot().forkOperations?.["compressed-in-flight"].status).toBe(
+      "reconciling",
+    );
     await restarted.app.close();
   });
 
@@ -6680,15 +6970,17 @@ class SettingsBridge extends EventEmitter {
         })}\n`,
         "utf8",
       );
+      const compactTurn = {
+        ...testTurn(`compact-${thread.id}`, "completed"),
+        itemsView: "full" as const,
+        items: [{ type: "contextCompaction" as const, id: `compaction-${thread.id}` }],
+      };
+      this.threadTurns.set(thread.id, [...(this.threadTurns.get(thread.id) ?? []), compactTurn]);
       this.emit("notification", {
         method: "turn/completed",
         params: {
           threadId: thread.id,
-          turn: {
-            ...testTurn(`compact-${thread.id}`, "completed"),
-            itemsView: "full",
-            items: [{ type: "contextCompaction", id: `compaction-${thread.id}` }],
-          },
+          turn: compactTurn,
         },
       } satisfies ServerNotification);
       return {};

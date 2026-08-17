@@ -1211,7 +1211,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       operation.error = null;
       operation.updatedAt = now;
     });
-    projection.upsertThread({ ...target, name: observed.title });
+    projection.revealThread({ ...target, name: observed.title });
     publishForkOperation(operationId);
     projection.publishQueue(target.id, queue.list(target.id));
     void queue.drain(target.id).catch(() => undefined);
@@ -1240,11 +1240,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     items: Record<string, unknown>[],
   ): Record<string, unknown>[] => {
     const marked = structuredClone(items);
-    const first = marked[0];
-    if (!first) throw new ProjectValidationError("Compressed fork context is empty");
-    first.id = forkMaterializationMarkerId(operationId);
-    const metadata = first.internal_chat_message_metadata_passthrough;
-    first.internal_chat_message_metadata_passthrough = {
+    const last = marked.at(-1);
+    if (!last) throw new ProjectValidationError("Compressed fork context is empty");
+    last.id = forkMaterializationMarkerId(operationId);
+    const metadata = last.internal_chat_message_metadata_passthrough;
+    last.internal_chat_message_metadata_passthrough = {
       ...(isRecord(metadata) ? metadata : {}),
       [FORK_MATERIALIZATION_MARKER_KEY]: operationId,
     };
@@ -1305,59 +1305,113 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     });
     return true;
   };
-  const waitForFreshCompaction = async (threadId: string): Promise<void> => {
+  const waitForFreshCompaction = async (operationId: string, threadId: string): Promise<Turn> => {
     let settled = false;
-    let resolveCompletion!: () => void;
+    let compactTurnId: string | null = null;
+    let turnPersistence = Promise.resolve();
+    let resolveCompletion!: (turn: Turn) => void;
     let rejectCompletion!: (error: Error) => void;
-    const completion = new Promise<void>((resolve, reject) => {
+    const completion = new Promise<Turn>((resolve, reject) => {
       resolveCompletion = resolve;
       rejectCompletion = reject;
     });
-    const finish = (error?: Error) => {
+    const finish = (turn?: Turn, error?: Error) => {
       if (settled) return;
       settled = true;
       if (error) rejectCompletion(error);
-      else resolveCompletion();
+      else if (turn) resolveCompletion(turn);
+    };
+    const persistTurn = (turn: Turn): Promise<void> => {
+      if (compactTurnId === turn.id) return turnPersistence;
+      compactTurnId = turn.id;
+      turnPersistence = turnPersistence.then(() =>
+        updateForkOperation(operationId, (current) => {
+          if (current.compressedPreparation) {
+            current.compressedPreparation.compactTurnId = turn.id;
+          }
+        }),
+      );
+      return turnPersistence;
     };
     const notificationHandler = (notification: ServerNotification) => {
-      if (notification.method === "turn/completed" && notification.params.threadId === threadId) {
-        if (notification.params.turn.status === "completed") finish();
-        else {
-          finish(
-            new Error(
-              notification.params.turn.error?.message ??
-                `Native compaction ${notification.params.turn.status}`,
-            ),
+      if (
+        (notification.method === "turn/started" || notification.method === "turn/completed") &&
+        notification.params.threadId === threadId
+      ) {
+        const turn = notification.params.turn;
+        void persistTurn(turn)
+          .then(() => {
+            if (notification.method !== "turn/completed") return;
+            if (turn.status === "completed") finish(turn);
+            else {
+              finish(
+                undefined,
+                new Error(turn.error?.message ?? `Native compaction ${turn.status}`),
+              );
+            }
+          })
+          .catch((error: unknown) =>
+            finish(undefined, error instanceof Error ? error : new Error(String(error))),
           );
-        }
       } else if (
         notification.method === "error" &&
         notification.params.threadId === threadId &&
         !notification.params.willRetry
       ) {
-        finish(new Error(notification.params.error.message));
+        finish(undefined, new Error(notification.params.error.message));
       }
     };
     const stateHandler = (state: string) => {
-      if (state !== "ready") finish(new BridgeUnavailableError(bridge.state));
+      if (state !== "ready") finish(undefined, new BridgeUnavailableError(bridge.state));
     };
     bridge.on("notification", notificationHandler);
     bridge.on("state", stateHandler);
     const timer = setTimeout(
-      () => finish(new RpcTimeoutError("thread/compact/start", FORK_RPC_TIMEOUT_MS)),
+      () => finish(undefined, new RpcTimeoutError("thread/compact/start", FORK_RPC_TIMEOUT_MS)),
       FORK_RPC_TIMEOUT_MS,
     );
     timer.unref();
     try {
-      await Promise.all([
+      const [, turn] = await Promise.all([
         bridge.request("thread/compact/start", { threadId }, FORK_RPC_TIMEOUT_MS),
         completion,
       ]);
+      return turn;
     } finally {
       clearTimeout(timer);
       bridge.off("notification", notificationHandler);
       bridge.off("state", stateHandler);
     }
+  };
+  const readFreshCompactionTurn = async (
+    operationId: string,
+    preparation: NonNullable<ForkOperationState["compressedPreparation"]>,
+  ): Promise<Turn | null> => {
+    const page = parseTurnsList(
+      await bridge.request<unknown>(
+        "thread/turns/list",
+        {
+          threadId: preparation.temporaryThreadId,
+          limit: 20,
+          sortDirection: "desc",
+          itemsView: "summary",
+        },
+        30_000,
+      ),
+    );
+    const turn = preparation.compactTurnId
+      ? page.data.find((candidate) => candidate.id === preparation.compactTurnId)
+      : page.data.find(
+          (candidate) =>
+            candidate.startedAt !== null &&
+            candidate.startedAt * 1_000 >= preparation.startedAt - 1_000,
+        );
+    if (turn && preparation.compactTurnId !== turn.id) {
+      await updateForkOperation(operationId, (current) => {
+        if (current.compressedPreparation) current.compressedPreparation.compactTurnId = turn.id;
+      });
+    }
+    return turn ?? null;
   };
   const prepareFreshCompressedFork = async (
     operationId: string,
@@ -1443,24 +1497,46 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       preparation = operation.compressedPreparation;
     }
 
-    let items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
-    if (!items && preparation.phase === "compacted") {
-      throw new ProjectValidationError("The fresh compact context could not be recovered");
-    }
-    if (!items && preparation.phase === "compacting") {
-      if (temporary.status.type === "active") {
+    let items: Record<string, unknown>[] | null = null;
+    if (preparation.phase === "compacted") {
+      items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
+      if (!items) {
+        throw new ProjectValidationError("The fresh compact context could not be recovered");
+      }
+    } else if (preparation.phase === "compacting") {
+      let compactTurn: Turn | null;
+      try {
+        compactTurn = await readFreshCompactionTurn(operationId, preparation);
+      } catch (error) {
+        if (bridge.state !== "ready") {
+          scheduleForkReconciliation(operationId);
+          return null;
+        }
+        throw error;
+      }
+      if (!compactTurn) {
+        if (temporary.status.type === "active") {
+          scheduleForkReconciliation(operationId);
+          return null;
+        }
+        if (Date.now() < preparation.startedAt + FORK_ATTEMPT_SETTLE_MS) {
+          scheduleForkAttemptSettlement(operationId, preparation.startedAt);
+          return null;
+        }
+        throw new ProjectValidationError("Native compaction completion could not be verified");
+      }
+      if (compactTurn.status === "inProgress") {
         scheduleForkReconciliation(operationId);
         return null;
       }
-      if (temporary.status.type === "systemError") {
-        throw new ProjectValidationError("Native compaction stopped with a system error");
-      }
-      if (Date.now() < preparation.startedAt + 1_000) {
-        scheduleForkReconciliation(
-          operationId,
-          Math.max(0, preparation.startedAt + 1_000 - Date.now()),
+      if (compactTurn.status !== "completed") {
+        throw new ProjectValidationError(
+          compactTurn.error?.message ?? `Native compaction ${compactTurn.status}`,
         );
-        return null;
+      }
+      items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
+      if (!items) {
+        throw new ProjectValidationError("Native compaction completed without fresh context");
       }
     }
     if (!items) {
@@ -1473,11 +1549,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         current.compressedPreparation.phase = "compacting";
         current.compressedPreparation.startedAt = startedAt;
         current.compressedPreparation.sequence = sequence;
+        delete current.compressedPreparation.compactTurnId;
       });
       try {
-        await waitForFreshCompaction(temporary.id);
+        await waitForFreshCompaction(operationId, temporary.id);
       } catch (error) {
-        if (error instanceof RpcTimeoutError) {
+        if (
+          error instanceof RpcTimeoutError ||
+          error instanceof BridgeUnavailableError ||
+          bridge.state !== "ready"
+        ) {
           scheduleForkAttemptSettlement(operationId, startedAt);
           return null;
         }
@@ -1485,8 +1566,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
       if (!items) {
-        scheduleForkReconciliation(operationId, 250);
-        return null;
+        throw new ProjectValidationError("Native compaction completed without fresh context");
       }
     }
     const estimatedBytes = Buffer.byteLength(JSON.stringify(items));
@@ -1510,6 +1590,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     await updateForkOperation(operationId, (current) => {
       delete current.compressedPreparation;
     });
+  };
+  const deleteForkOperationThreads = async (operation: {
+    readonly targetThreadId: string | null;
+    readonly compressedPreparation?: { readonly temporaryThreadId: string };
+  }): Promise<void> => {
+    const threadIds = [
+      operation.compressedPreparation?.temporaryThreadId,
+      operation.targetThreadId,
+    ].filter((threadId): threadId is string => typeof threadId === "string");
+    for (const threadId of new Set(threadIds)) {
+      try {
+        await bridge.request("thread/delete", { threadId }, 30_000);
+      } catch (error) {
+        if (!isMissingThreadError(error)) throw error;
+      }
+    }
+    if (operation.targetThreadId) {
+      await projection.removeOrphanedThread(operation.targetThreadId);
+    }
   };
   const runForkOperation = async (operationId: string): Promise<void> => {
     const initial = store.view().forkOperations?.[operationId];
@@ -3133,52 +3232,61 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       let operation: ForkOperationState;
       let retry = false;
       try {
-        await store.update((state) => {
-          state.forkOperations ??= {};
-          const existing = state.forkOperations[body.operationId];
-          if (existing) {
+        await withKeyLock(forkOperationLocks, body.operationId, async () => {
+          const observed = store.view().forkOperations?.[body.operationId];
+          if (observed) {
             if (
-              existing.sourceThreadId !== source.id ||
-              existing.lastTurnId !== body.lastTurnId ||
-              existing.agentMessageId !== body.agentMessageId ||
-              existing.mode !== body.mode
+              observed.sourceThreadId !== source.id ||
+              observed.lastTurnId !== body.lastTurnId ||
+              observed.agentMessageId !== body.agentMessageId ||
+              observed.mode !== body.mode
             ) {
               throw new ProjectConflictError("operationId has already been used");
             }
-            if (!existing.rolloutPath && rolloutPath) existing.rolloutPath = rolloutPath;
-            if (existing.status === "failed") {
-              existing.status = "preparing";
-              existing.error = null;
-              delete existing.nativeAttempt;
-              delete existing.compressedPreparation;
-              if (!existing.targetThreadId) delete existing.compressedMaterialization;
-              existing.updatedAt = Date.now();
-              retry = true;
-            }
-            operation = existing;
-            return;
+            if (observed.status === "failed") await deleteForkOperationThreads(observed);
           }
-          const now = Date.now();
-          operation = {
-            id: body.operationId,
-            sourceThreadId: source.id,
-            lastTurnId: body.lastTurnId,
-            agentMessageId: body.agentMessageId,
-            mode: body.mode,
-            status: "preparing",
-            title: temporaryForkTitle(source.title),
-            createdAt: now,
-            updatedAt: now,
-            targetThreadId: null,
-            estimate: null,
-            error: null,
-            sourceCwd: source.cwd,
-            sourceSettings: structuredClone(source.settings),
-            rolloutPath,
-            agentText: "",
-            queuedMessages: [],
-          };
-          state.forkOperations[body.operationId] = operation;
+          await store.update((state) => {
+            state.forkOperations ??= {};
+            const existing = state.forkOperations[body.operationId];
+            if (existing) {
+              if (!existing.rolloutPath && rolloutPath) existing.rolloutPath = rolloutPath;
+              if (existing.status === "failed") {
+                existing.status = "preparing";
+                existing.targetThreadId = null;
+                existing.estimate = null;
+                existing.error = null;
+                existing.agentText = "";
+                delete existing.nativeAttempt;
+                delete existing.compressedPreparation;
+                delete existing.compressedMaterialization;
+                existing.updatedAt = Date.now();
+                retry = true;
+              }
+              operation = existing;
+              return;
+            }
+            const now = Date.now();
+            operation = {
+              id: body.operationId,
+              sourceThreadId: source.id,
+              lastTurnId: body.lastTurnId,
+              agentMessageId: body.agentMessageId,
+              mode: body.mode,
+              status: "preparing",
+              title: temporaryForkTitle(source.title),
+              createdAt: now,
+              updatedAt: now,
+              targetThreadId: null,
+              estimate: null,
+              error: null,
+              sourceCwd: source.cwd,
+              sourceSettings: structuredClone(source.settings),
+              rolloutPath,
+              agentText: "",
+              queuedMessages: [],
+            };
+            state.forkOperations[body.operationId] = operation;
+          });
         });
       } catch (error) {
         if (error instanceof ProjectConflictError) {
@@ -3216,6 +3324,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (operation.status !== "failed") {
       return apiError(reply, 409, "conflict", "Only failed fork operations may be removed");
     }
+    await deleteForkOperationThreads(operation);
     await store.update((state) => {
       delete state.forkOperations?.[request.params.id];
     });

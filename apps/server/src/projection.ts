@@ -128,7 +128,13 @@ export class AppProjection extends EventEmitter {
         if (this.sessionRetentionTimer) clearTimeout(this.sessionRetentionTimer);
         this.sessionRetentionTimer = undefined;
         this.subscribedThreads.clear();
-        this.hiddenThreads.clear();
+        const persistedState = this.store.view();
+        for (const threadId of this.hiddenThreads) {
+          const cached = this.threads.get(threadId);
+          if (!cached || !this.isInternalPendingForkThread(cached.thread, persistedState)) {
+            this.hiddenThreads.delete(threadId);
+          }
+        }
         this.pendingSubagentTitles.clear();
         this.subagentTitleUpdates.clear();
         for (const cached of this.threads.values()) cached.goalStatus = undefined;
@@ -187,8 +193,8 @@ export class AppProjection extends EventEmitter {
 
   snapshot(): AppSnapshot {
     const state = this.store.view();
-    const threads = this.sortedThreads(state).filter((thread) =>
-      this.isCwdVisible(thread.cwd, state),
+    const threads = this.sortedThreads(state).filter(
+      (thread) => !this.hiddenThreads.has(thread.id) && this.isCwdVisible(thread.cwd, state),
     );
     const visibleThreadIds = new Set(threads.map((thread) => thread.id));
     return {
@@ -251,7 +257,7 @@ export class AppProjection extends EventEmitter {
   }
 
   summary(id: string): ThreadSummary | undefined {
-    if (this.removedThreads.has(id)) return undefined;
+    if (this.removedThreads.has(id) || this.hiddenThreads.has(id)) return undefined;
     const cached = this.threads.get(id);
     return cached ? this.toSummary(cached) : undefined;
   }
@@ -679,6 +685,15 @@ export class AppProjection extends EventEmitter {
   }
 
   upsertThread(thread: Thread, archived = false): ThreadSummary {
+    return this.cacheThread(thread, archived, false);
+  }
+
+  revealThread(thread: Thread, archived = false): ThreadSummary {
+    return this.cacheThread(thread, archived, true);
+  }
+
+  private cacheThread(thread: Thread, archived: boolean, reveal: boolean): ThreadSummary {
+    const state = this.store.view();
     const current = this.threads.get(thread.id);
     const latestThread =
       current && current.thread.updatedAt > thread.updatedAt
@@ -692,9 +707,13 @@ export class AppProjection extends EventEmitter {
       goalStatus: current?.goalStatus,
     };
     this.threads.set(thread.id, cached);
+    if (reveal) this.hiddenThreads.delete(thread.id);
+    else if (this.isInternalPendingForkThread(latestThread, state))
+      this.hiddenThreads.add(thread.id);
+    else this.hiddenThreads.delete(thread.id);
     this.queueSessionSnapshot(thread.id);
     if (this.syncedAt !== null) this.scheduleSessionRetention();
-    return this.publishThread(thread.id)!;
+    return this.publishThread(thread.id, state)!;
   }
 
   async refreshThread(threadId: string): Promise<ThreadSummary | undefined> {
@@ -1505,7 +1524,7 @@ export class AppProjection extends EventEmitter {
       threads.push(
         ...page.data.filter(
           (thread) =>
-            !isInternalForkPreparationThread(thread) &&
+            !this.isInternalPendingForkThread(thread) &&
             (!thread.ephemeral || isSpawnedSubagent(thread)),
         ),
       );
@@ -1568,7 +1587,7 @@ export class AppProjection extends EventEmitter {
           );
           return {
             thread:
-              !isInternalForkPreparationThread(response.thread) &&
+              !this.isInternalPendingForkThread(response.thread) &&
               (isSpawnedSubagent(response.thread) ||
                 isRecoverableUserSession(response.thread) ||
                 managedParentIds.has(threadId) ||
@@ -1669,7 +1688,7 @@ export class AppProjection extends EventEmitter {
   private async onNotification(notification: ServerNotification): Promise<void> {
     if (
       notification.method === "thread/started" &&
-      (isInternalForkPreparationThread(notification.params.thread) ||
+      (this.isInternalPendingForkThread(notification.params.thread) ||
         (notification.params.thread.ephemeral && !isSpawnedSubagent(notification.params.thread)))
     ) {
       this.hiddenThreads.add(notification.params.thread.id);
@@ -2356,7 +2375,7 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     if (!cached) return undefined;
     const summary = this.toSummary(cached, state);
-    if (this.isCwdVisible(cached.thread.cwd, state)) {
+    if (!this.hiddenThreads.has(threadId) && this.isCwdVisible(cached.thread.cwd, state)) {
       this.publish({ type: "thread.upserted", thread: summary });
     }
     return summary;
@@ -2367,7 +2386,20 @@ export class AppProjection extends EventEmitter {
     state: CodexNestStateView = this.store.view(),
   ): boolean {
     const cached = this.threads.get(threadId);
-    return !cached || this.isCwdVisible(cached.thread.cwd, state);
+    return (
+      !this.hiddenThreads.has(threadId) && (!cached || this.isCwdVisible(cached.thread.cwd, state))
+    );
+  }
+
+  private isInternalPendingForkThread(
+    thread: Thread,
+    state: CodexNestStateView = this.store.view(),
+  ): boolean {
+    if (isInternalForkPreparationThread(thread)) return true;
+    const prefix = "codexnest-fork:";
+    if (!thread.threadSource?.startsWith(prefix)) return false;
+    const operation = state.forkOperations?.[thread.threadSource.slice(prefix.length)];
+    return operation !== undefined && operation.status !== "ready";
   }
 
   private isCwdVisible(cwd: string, state: CodexNestStateView): boolean {

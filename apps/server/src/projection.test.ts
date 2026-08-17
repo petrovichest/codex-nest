@@ -700,6 +700,87 @@ describe("AppProjection", () => {
     expect(events).toEqual([]);
   });
 
+  it("keeps operation-owned fork threads hidden until the final target is ready", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.forkOperations = {
+        operation: {
+          id: "operation",
+          sourceThreadId: "source",
+          lastTurnId: "turn",
+          agentMessageId: "answer",
+          mode: "compressed",
+          status: "reconciling",
+          title: "Fork",
+          createdAt: 1,
+          updatedAt: 1,
+          targetThreadId: "final",
+          estimate: null,
+          error: null,
+          sourceCwd: "/work",
+          sourceSettings: { collaborationMode: "default" },
+          rolloutPath: null,
+          agentText: "",
+          queuedMessages: [],
+        },
+      };
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const temporary = {
+      ...thread("temporary", "/work", 2),
+      threadSource: "codexnest-fork-temp:operation",
+    };
+    const final = {
+      ...thread("final", "/work", 3),
+      threadSource: "codexnest-fork:operation",
+    };
+
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: temporary },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "thread/started",
+      params: { thread: final },
+    } satisfies ServerNotification);
+    projection.upsertThread(final);
+
+    expect(projection.summary("temporary")).toBeUndefined();
+    expect(projection.summary("final")).toBeUndefined();
+    expect(projection.snapshot().threads).toEqual([]);
+    expect(events).toEqual([]);
+
+    bridge.emit("state", "unavailable");
+
+    expect(projection.summary("final")).toBeUndefined();
+    expect(projection.snapshot().threads).toEqual([]);
+    expect(events.filter((event) => event.type === "thread.upserted")).toEqual([]);
+
+    await store.update((state) => {
+      state.forkOperations!.operation!.status = "ready";
+    });
+    projection.revealThread(final);
+
+    expect(projection.summary("final")?.id).toBe("final");
+    expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["final"]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "thread.upserted",
+        thread: expect.objectContaining({ id: "final" }),
+      }),
+    );
+  });
+
   it("projects native spawned subagents and keeps them after they close", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
