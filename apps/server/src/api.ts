@@ -1081,6 +1081,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const forkOperationRuns = new Set<Promise<unknown>>();
   const forkOperationTimers = new Map<string, NodeJS.Timeout>();
   let forkOperationsClosed = false;
+  const resolveForkRolloutPath = async (threadId: string): Promise<string | null> => {
+    const cachedPath = projection.rolloutPath(threadId);
+    if (cachedPath) return cachedPath;
+    try {
+      await projection.refreshThread(threadId);
+    } catch (error) {
+      app.log.warn(
+        { err: safeError(error), threadId },
+        "Failed to refresh the source rollout path for a fork",
+      );
+    }
+    return projection.rolloutPath(threadId);
+  };
   const publishForkOperation = (operationId: string): void =>
     projection.publishForkOperation(operationId);
   const removeReadyForkOperationsForThread = async (threadId: string): Promise<void> => {
@@ -1293,6 +1306,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       let target = await findThreadBySource(bridge, sourceName);
       let operation = store.view().forkOperations?.[operationId];
       if (!operation) return;
+      if (!operation.rolloutPath) {
+        const rolloutPath = await resolveForkRolloutPath(operation.sourceThreadId);
+        if (rolloutPath) {
+          await updateForkOperation(operationId, (current) => {
+            current.rolloutPath = rolloutPath;
+          });
+          operation = store.view().forkOperations?.[operationId];
+          if (!operation) return;
+        }
+      }
       if (
         target &&
         operation.mode === "compressed" &&
@@ -2855,7 +2878,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!source) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(source);
       const analysis = await analyzeForkRollout(
-        projection.rolloutPath(source.id),
+        await resolveForkRolloutPath(source.id),
         body.lastTurnId,
         body.agentMessageId,
       );
@@ -2879,6 +2902,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const source = projection.summary(request.params.id);
       if (!source) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(source);
+      const rolloutPath = await resolveForkRolloutPath(source.id);
       let operation: ForkOperationState;
       let retry = false;
       try {
@@ -2894,6 +2918,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             ) {
               throw new ProjectConflictError("operationId has already been used");
             }
+            if (!existing.rolloutPath && rolloutPath) existing.rolloutPath = rolloutPath;
             if (existing.status === "failed") {
               existing.status = "preparing";
               existing.error = null;
@@ -2922,7 +2947,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             error: null,
             sourceCwd: source.cwd,
             sourceSettings: structuredClone(source.settings),
-            rolloutPath: projection.rolloutPath(source.id),
+            rolloutPath,
             agentText: "",
             queuedMessages: [],
           };

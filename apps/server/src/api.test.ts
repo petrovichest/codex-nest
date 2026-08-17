@@ -1737,8 +1737,37 @@ describe("file downloads", () => {
 });
 
 describe("session forks", () => {
-  it("estimates without a rollout RPC and keeps exact available when compressed is unavailable", async () => {
+  it("refreshes a missing cached rollout path before estimating a compressed fork", async () => {
     const harness = await createForkHarness();
+    const rolloutPath = join(dirname(harness.store.path), "estimate-source.jsonl");
+    await writeFile(
+      rolloutPath,
+      [
+        JSON.stringify({
+          type: "compacted",
+          payload: {
+            message: "",
+            replacement_history: [{ type: "message", id: "summary", role: "user", content: [] }],
+          },
+        }),
+        JSON.stringify({ type: "turn_context", payload: { turn_id: "selected-turn" } }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: "selected-answer",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Готовый ответ" }],
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "selected-turn" },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    harness.bridge.threadReadPath = rolloutPath;
     harness.bridge.request.mockClear();
 
     const response = await harness.app.inject({
@@ -1750,11 +1779,42 @@ describe("session forks", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      sourceBytes: null,
-      compressed: { available: false, estimatedBytes: null, estimatedSeconds: null },
-      exact: { available: true, estimatedBytes: null },
+      sourceBytes: expect.any(Number),
+      compressed: { available: true, estimatedBytes: expect.any(Number) },
+      exact: { available: true, estimatedBytes: expect.any(Number) },
     });
-    expect(harness.bridge.request).not.toHaveBeenCalled();
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/read",
+      { threadId: "thread", includeTurns: false },
+      30_000,
+    );
+    expect(harness.projection.rolloutPath("thread")).toBe(rolloutPath);
+    await harness.app.close();
+  });
+
+  it("persists a refreshed rollout path when creating a fork without an estimate", async () => {
+    const harness = await createForkHarness();
+    const rolloutPath = join(dirname(harness.store.path), "operation-source.jsonl");
+    await writeSafeForkRollout(rolloutPath);
+    harness.bridge.threadReadPath = rolloutPath;
+    harness.bridge.state = "disconnected" as never;
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "path-refresh-operation",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(harness.store.snapshot().forkOperations?.["path-refresh-operation"].rolloutPath).toBe(
+      rolloutPath,
+    );
     await harness.app.close();
   });
 
@@ -6313,6 +6373,7 @@ class SettingsBridge extends EventEmitter {
   timeoutForkAfterCreate = false;
   timeoutInjectAfterWrite = false;
   nextForkTargetPath: string | null = null;
+  threadReadPath: string | null = null;
   parentTurnStartEntered: (() => void) | null = null;
   parentTurnStartGate: Promise<void> | null = null;
   rejectFullTurnReads = false;
@@ -6497,7 +6558,7 @@ class SettingsBridge extends EventEmitter {
       }
       const thread =
         threadId === "thread"
-          ? testThread()
+          ? { ...testThread(), path: this.threadReadPath }
           : (this.managedThreads.find((candidate) => candidate.id === threadId) ??
             testThread(threadId));
       return { thread: { ...thread, turns: this.threadTurns.get(threadId) ?? [] } };

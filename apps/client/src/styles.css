@@ -4988,7 +4988,7 @@
   font: 450 11px/1.4 var(--font-ui);
 }
 
-.fork-dialog-actions {
+.dialog-actions.fork-dialog-actions {
   margin-top: 18px;
 }
 

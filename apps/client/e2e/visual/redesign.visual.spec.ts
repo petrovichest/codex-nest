@@ -192,6 +192,14 @@ test.describe("CodexNest redesign visual contract", () => {
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
       const dialog = page.getByRole("dialog", { name: "Создать ветку" });
       await expect(dialog.getByRole("radio", { name: /Компактная/ })).toBeChecked();
+      const choices = await dialog.locator(".fork-mode-options").boundingBox();
+      const actions = await dialog.locator(".fork-dialog-actions").boundingBox();
+      expect(choices, "fork choices must have a rendered box").not.toBeNull();
+      expect(actions, "fork actions must have a rendered box").not.toBeNull();
+      expect(
+        actions!.y - (choices!.y + choices!.height),
+        "fork actions must be separated from the choices",
+      ).toBeGreaterThanOrEqual(16);
       expect(
         await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),
         "desktop fork dialog has no horizontal overflow",
