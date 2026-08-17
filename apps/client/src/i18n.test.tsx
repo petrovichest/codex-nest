@@ -66,9 +66,9 @@ describe("interface localization", () => {
   });
 
   it("localizes reliable fork choices and pending states", () => {
-    expect(translate("en", "Как перенести контекст?")).toBe("How should context be transferred?");
-    expect(translate("en", "Сжатая")).toBe("Compressed");
-    expect(translate("en", "Точная")).toBe("Exact");
+    expect(translate("en", "Создать ветку")).toBe("Create a fork");
+    expect(translate("en", "Компактная")).toBe("Compact");
+    expect(translate("en", "Полная история")).toBe("Full history");
     expect(translate("en", "Сверяем контекст")).toBe("Reconciling context");
     expect(translate("en", "Контекст перенесён в сжатом виде из исходной ветки.")).toBe(
       "Context was transferred from the source branch in compressed form.",

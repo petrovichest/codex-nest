@@ -59,20 +59,32 @@ const ENGLISH: Record<string, string> = {
   "Как перенести контекст?": "How should context be transferred?",
   "Выберите баланс между скоростью и буквальной точностью истории.":
     "Choose the balance between speed and a literal copy of the history.",
+  "Создать ветку": "Create a fork",
+  "Выберите, сколько истории взять с собой.": "Choose how much history to bring with you.",
+  "Точка ответвления": "Fork point",
   "Исходный контекст · {{size}}": "Source context · {{size}}",
   "Считаем…": "Calculating…",
   "размер неизвестен": "size unknown",
   "Способ переноса контекста": "Context transfer method",
   Сжатая: "Compressed",
   Точная: "Exact",
+  Компактная: "Compact",
+  "Полная история": "Full history",
+  Быстрее: "Faster",
   Рекомендуем: "Recommended",
   "Переносит смысл и решения в компактном контексте без выдуманных сообщений.":
     "Transfers meaning and decisions in compact context without invented messages.",
   "Копирует доступную историю буквально. Для большой сессии это займёт больше времени и места.":
     "Copies the available history literally. A large session will take more time and space.",
+  "Сохраняет сжатый контекст и недавний ход работы. Лучше для больших сессий.":
+    "Keeps the compacted context and recent work. Better for large sessions.",
+  "Копирует всё до выбранного ответа. Выбирайте, если важны дословные детали.":
+    "Copies everything through the selected answer. Choose this when exact details matter.",
   "Не удалось рассчитать сжатую ветку. Точная копия всё ещё доступна.":
     "The compressed fork could not be estimated. An exact copy is still available.",
   "Этот способ сейчас недоступен": "This method is currently unavailable",
+  "Сжатый контекст для этой точки недоступен. Выберите полную историю.":
+    "Compact context is unavailable at this point. Choose full history.",
   Объём: "Size",
   Время: "Time",
   неизвестно: "unknown",

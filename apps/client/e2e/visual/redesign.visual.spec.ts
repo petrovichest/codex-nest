@@ -190,8 +190,8 @@ test.describe("CodexNest redesign visual contract", () => {
         forkEstimate: "ready",
       });
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
-      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
-      await expect(dialog.getByRole("radio", { name: /Сжатая/ })).toBeChecked();
+      const dialog = page.getByRole("dialog", { name: "Создать ветку" });
+      await expect(dialog.getByRole("radio", { name: /Компактная/ })).toBeChecked();
       expect(
         await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),
         "desktop fork dialog has no horizontal overflow",
@@ -205,9 +205,9 @@ test.describe("CodexNest redesign visual contract", () => {
         forkEstimate: "failure",
       });
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
-      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
-      await expect(dialog.getByRole("radio", { name: /^Точная/u })).toBeChecked();
-      await expect(dialog.getByRole("radio", { name: /^Сжатая/u })).toBeDisabled();
+      const dialog = page.getByRole("dialog", { name: "Создать ветку" });
+      await expect(dialog.getByRole("radio", { name: /^Полная история/u })).toBeChecked();
+      await expect(dialog.getByRole("radio", { name: /^Компактная/u })).toBeDisabled();
       await expect(page).toHaveScreenshot("16-desktop-dark-fork-dialog-failure.png", {
         fullPage: true,
       });
@@ -219,7 +219,7 @@ test.describe("CodexNest redesign visual contract", () => {
         forkEstimate: "loading",
       });
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
-      const dialog = page.getByRole("dialog", { name: "Как перенести контекст?" });
+      const dialog = page.getByRole("dialog", { name: "Создать ветку" });
       await expect(dialog.getByText("Считаем…").first()).toBeVisible();
       await expect(dialog).toHaveCSS("border-bottom-left-radius", "0px");
       expect(

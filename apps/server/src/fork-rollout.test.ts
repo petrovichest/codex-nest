@@ -22,7 +22,14 @@ describe("fork rollout analysis", () => {
       record("turn_context", { turn_id: "earlier" }),
       record("compacted", {
         message: "",
-        replacement_history: [message("summary", "compressed context")],
+        replacement_history: [
+          message("summary", "compressed context"),
+          {
+            type: "compaction",
+            id: "encrypted-summary",
+            encrypted_content: "opaque",
+          },
+        ],
       }),
       record("response_item", message("tail-user", "later question")),
       record("turn_context", { turn_id: "selected" }),
@@ -40,6 +47,7 @@ describe("fork rollout analysis", () => {
     });
     expect(analysis.compressedItems?.map((item) => item.id)).toEqual([
       "summary",
+      "encrypted-summary",
       "tail-user",
       "tail-answer",
     ]);

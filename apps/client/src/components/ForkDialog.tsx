@@ -116,9 +116,8 @@ export function ForkDialog({
     >
       <div className="dialog-header fork-dialog-header">
         <div className="dialog-heading">
-          <span className="dialog-eyebrow">{t("Новое ответвление")}</span>
-          <h2 id="fork-dialog-title">{t("Как перенести контекст?")}</h2>
-          <p>{t("Выберите баланс между скоростью и буквальной точностью истории.")}</p>
+          <h2 id="fork-dialog-title">{t("Создать ветку")}</h2>
+          <p>{t("Выберите, сколько истории взять с собой.")}</p>
         </div>
         <button
           className="icon-button"
@@ -136,24 +135,18 @@ export function ForkDialog({
           <GitBranchIcon />
         </span>
         <span className="fork-source-copy">
+          <small>{t("Точка ответвления")}</small>
           <strong>{sourceTitle}</strong>
-          <small>
-            {estimate || estimateFailed
-              ? t("Исходный контекст · {{size}}", {
-                  size: estimate
-                    ? formatForkBytes(estimate.sourceBytes, language, t)
-                    : t("размер неизвестен"),
-                })
-              : t("Считаем…")}
-          </small>
+        </span>
+        <span className="fork-source-size">
+          {estimate || estimateFailed
+            ? estimate
+              ? formatForkBytes(estimate.sourceBytes, language, t)
+              : t("размер неизвестен")
+            : t("Считаем…")}
         </span>
       </div>
 
-      <div className="fork-choice-rail" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
       <div
         className="fork-mode-options"
         role="radiogroup"
@@ -161,10 +154,10 @@ export function ForkDialog({
       >
         <ForkModeCard
           mode="compressed"
-          title={t("Сжатая")}
-          badge={t("Рекомендуем")}
+          title={t("Компактная")}
+          badge={t("Быстрее")}
           description={t(
-            "Переносит смысл и решения в компактном контексте без выдуманных сообщений.",
+            "Сохраняет сжатый контекст и недавний ход работы. Лучше для больших сессий.",
           )}
           estimate={compressed}
           loading={!estimate && !estimateFailed}
@@ -175,9 +168,9 @@ export function ForkDialog({
         />
         <ForkModeCard
           mode="exact"
-          title={t("Точная")}
+          title={t("Полная история")}
           description={t(
-            "Копирует доступную историю буквально. Для большой сессии это займёт больше времени и места.",
+            "Копирует всё до выбранного ответа. Выбирайте, если важны дословные детали.",
           )}
           estimate={exact}
           loading={!estimate && !estimateFailed}
@@ -204,7 +197,7 @@ export function ForkDialog({
           aria-busy={submitting || undefined}
           onClick={() => void create()}
         >
-          {submitting ? t("Создаём…") : t("Создать ответвление")}
+          {submitting ? t("Создаём…") : t("Создать ветку")}
         </button>
       </div>
     </Dialog>
@@ -234,7 +227,7 @@ function ForkModeCard({
   t: Translate;
   language: "ru" | "en";
 }) {
-  const unavailable = !estimate.available;
+  const unavailable = !loading && !estimate.available;
   return (
     <label
       className={`fork-mode-card${checked ? " selected" : ""}${unavailable ? " unavailable" : ""}`}
@@ -256,13 +249,16 @@ function ForkModeCard({
           </span>
         )}
       </span>
+      <span className="fork-mode-control" aria-hidden="true">
+        {checked && <CheckIcon />}
+      </span>
       <span className="fork-mode-description">{description}</span>
       <span className="fork-mode-metrics">
         {loading ? (
           <span>{t("Считаем…")}</span>
         ) : unavailable ? (
           <span className="fork-mode-unavailable">
-            {estimate.unavailableReason || t("Этот способ сейчас недоступен")}
+            {t("Сжатый контекст для этой точки недоступен. Выберите полную историю.")}
           </span>
         ) : (
           <>

@@ -60,15 +60,15 @@ describe("ForkDialog", () => {
     const onCreated = vi.fn();
 
     renderDialog({ onCreated });
-    const dialog = screen.getByRole("dialog", { name: "Как перенести контекст?" });
+    const dialog = screen.getByRole("dialog", { name: "Создать ветку" });
     expect(dialog).toBeVisible();
     expect(within(dialog).getAllByText("Считаем…").length).toBeGreaterThan(0);
     expect(within(dialog).getByRole("button", { name: "Закрыть" })).toHaveFocus();
 
     await act(async () => resolveEstimate(estimate));
-    const compressed = within(dialog).getByRole("radio", { name: /Сжатая/ });
+    const compressed = within(dialog).getByRole("radio", { name: /Компактная/ });
     expect(compressed).toBeChecked();
-    const create = within(dialog).getByRole("button", { name: "Создать ответвление" });
+    const create = within(dialog).getByRole("button", { name: "Создать ветку" });
     fireEvent.click(create);
     fireEvent.click(create);
 
@@ -92,12 +92,12 @@ describe("ForkDialog", () => {
     });
     renderDialog();
 
-    const exact = await screen.findByRole("radio", { name: /Точная/ });
+    const exact = await screen.findByRole("radio", { name: /Полная история/ });
     expect(exact).toBeEnabled();
     await waitFor(() => expect(exact).toBeChecked());
-    expect(screen.getByRole("radio", { name: /Сжатая/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /Компактная/ })).toBeDisabled();
     expect(
-      screen.getByText("Не удалось рассчитать сжатую ветку. Точная копия всё ещё доступна."),
+      screen.getByText("Сжатый контекст для этой точки недоступен. Выберите полную историю."),
     ).toBeVisible();
     expect(screen.getAllByText("неизвестно").length).toBeGreaterThanOrEqual(2);
   });
@@ -119,8 +119,10 @@ describe("ForkDialog", () => {
       },
     });
     renderDialog({ onClose });
-    expect(await screen.findByRole("radio", { name: /Точная/ })).toBeChecked();
-    expect(screen.getByText("Недостаточно данных для безопасного сжатия")).toBeVisible();
+    expect(await screen.findByRole("radio", { name: /Полная история/ })).toBeChecked();
+    expect(
+      screen.getByText("Сжатый контекст для этой точки недоступен. Выберите полную историю."),
+    ).toBeVisible();
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledOnce();

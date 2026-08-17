@@ -1892,7 +1892,14 @@ describe("session forks", () => {
           type: "compacted",
           payload: {
             message: "",
-            replacement_history: [{ type: "message", id: "summary", role: "user", content: [] }],
+            replacement_history: [
+              { type: "message", id: "summary", role: "user", content: [] },
+              {
+                type: "compaction",
+                id: "encrypted-summary",
+                encrypted_content: "opaque",
+              },
+            ],
           },
         }),
         JSON.stringify({ type: "turn_context", payload: { turn_id: "selected-turn" } }),
@@ -1955,6 +1962,11 @@ describe("session forks", () => {
             internal_chat_message_metadata_passthrough: {
               codexnest_fork_operation_id: "compressed-operation",
             },
+          },
+          {
+            type: "compaction",
+            id: "encrypted-summary",
+            encrypted_content: "opaque",
           },
           { type: "message", id: "answer-item", role: "assistant", content: [] },
         ],

@@ -1630,6 +1630,10 @@
   right: 0;
   z-index: 55;
   width: min(300px, calc(100vw - 20px));
+  max-width: calc(100vw - 20px);
+  min-width: 0;
+  overflow: hidden;
+  box-sizing: border-box;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1646,6 +1650,7 @@
 }
 
 .fork-children-list {
+  min-width: 0;
   max-height: min(320px, calc(100dvh - var(--header-height) - 24px));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1654,6 +1659,7 @@
 }
 
 .fork-child-link {
+  min-width: 0;
   min-height: 36px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -4717,7 +4723,7 @@
 }
 
 .dialog-surface.fork-dialog {
-  width: min(680px, 100%);
+  width: min(610px, 100%);
   gap: 0;
   padding: 22px;
   overflow-x: hidden;
@@ -4743,10 +4749,11 @@
 
 .fork-source-summary {
   min-width: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 11px;
-  padding: 11px 12px;
+  padding: 12px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--surface-muted);
@@ -4771,64 +4778,58 @@
 .fork-source-copy {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 1px;
 }
 
 .fork-source-copy strong {
   overflow: hidden;
   color: var(--text-strong);
   font-size: 13px;
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .fork-source-copy small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.fork-source-size {
+  color: var(--muted-strong);
+  font: 550 11px/1.2 var(--font-mono);
   font-variant-numeric: tabular-nums;
-}
-
-.fork-choice-rail {
-  height: 28px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  margin: 0 16.666%;
-  border-bottom: 1px solid var(--line-strong);
-}
-
-.fork-choice-rail > span:first-child {
-  width: 1px;
-  justify-self: center;
-  grid-column: 1 / -1;
-  background: var(--line-strong);
-}
-
-.fork-choice-rail > span:nth-child(2),
-.fork-choice-rail > span:nth-child(3) {
-  width: 1px;
-  height: 8px;
-  align-self: end;
-  justify-self: center;
-  background: var(--line-strong);
+  white-space: nowrap;
 }
 
 .fork-mode-options {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 0;
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
 }
 
 .fork-mode-card {
   position: relative;
   min-width: 0;
-  min-height: 192px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 15px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
+  min-height: 106px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(150px, auto);
+  grid-template-areas:
+    "control heading metrics"
+    "control description metrics";
+  align-items: center;
+  column-gap: 11px;
+  padding: 14px;
+  border: 0;
+  border-radius: 0;
   color: var(--text);
   background: var(--surface);
   cursor: pointer;
@@ -4837,18 +4838,38 @@
     background-color var(--motion-fast) var(--motion-ease);
 }
 
+.fork-mode-card + .fork-mode-card {
+  border-top: 1px solid var(--line);
+}
+
 .fork-mode-card:hover:not(.unavailable) {
   background: var(--surface-muted);
 }
 
 .fork-mode-card.selected {
-  border-color: var(--text-strong);
-  box-shadow: inset 0 0 0 1px var(--text-strong);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  box-shadow: inset 3px 0 var(--accent);
 }
 
 .fork-mode-card.unavailable {
   cursor: default;
-  opacity: 0.58;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-areas:
+    "control heading"
+    "control description"
+    ". metrics";
+}
+
+.fork-mode-card.unavailable :is(.fork-mode-control, .fork-mode-heading, .fork-mode-description) {
+  opacity: 0.52;
+}
+
+.fork-mode-card.unavailable .fork-mode-metrics {
+  align-self: auto;
+  margin-top: 9px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
+  border-left: 0;
 }
 
 .fork-mode-card > input {
@@ -4862,11 +4883,12 @@
 }
 
 .fork-mode-card:has(input:focus-visible) {
-  outline: 2px solid var(--color-lapis);
-  outline-offset: 2px;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .fork-mode-heading {
+  grid-area: heading;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -4876,7 +4898,8 @@
 
 .fork-mode-heading strong {
   color: var(--text-strong);
-  font-size: 15px;
+  font-size: 14px;
+  letter-spacing: -0.01em;
 }
 
 .fork-mode-badge {
@@ -4884,7 +4907,7 @@
   align-items: center;
   gap: 3px;
   flex: 0 0 auto;
-  color: color-mix(in srgb, var(--success) 60%, var(--text-strong));
+  color: color-mix(in srgb, var(--success) 64%, var(--text-strong));
   font-size: 10px;
   font-weight: 650;
 }
@@ -4895,24 +4918,53 @@
 }
 
 .fork-mode-description {
+  grid-area: description;
+  align-self: start;
+  padding-top: 4px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.5;
 }
 
+.fork-mode-control {
+  grid-area: control;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--surface);
+  background: var(--surface);
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    background-color var(--motion-fast) var(--motion-ease);
+}
+
+.fork-mode-control svg {
+  width: 12px;
+  height: 12px;
+}
+
+.fork-mode-card.selected .fork-mode-control {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
 .fork-mode-metrics {
+  grid-area: metrics;
   min-width: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 11px;
-  border-top: 1px solid var(--line);
+  align-self: stretch;
+  align-items: center;
+  gap: 12px;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
   color: var(--text-strong);
-  font-size: 12px;
+  font: 600 11px/1.35 var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 
 .fork-mode-metrics > span {
@@ -4924,7 +4976,7 @@
   display: block;
   margin-bottom: 2px;
   color: var(--muted);
-  font-size: 9px;
+  font: 600 8px/1.2 var(--font-mono);
   font-weight: 550;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4933,8 +4985,7 @@
 .fork-mode-unavailable {
   grid-column: 1 / -1;
   color: var(--muted);
-  font-weight: 450;
-  line-height: 1.4;
+  font: 450 11px/1.4 var(--font-ui);
 }
 
 .fork-dialog-actions {
@@ -5458,9 +5509,9 @@
   .fork-children-popover {
     position: fixed;
     top: calc(var(--header-height) + 7px);
-    right: 10px;
+    right: auto;
     left: 10px;
-    width: auto;
+    width: calc(100vw - 20px);
   }
 
   .workspace-title {
@@ -5815,6 +5866,12 @@
 }
 
 @media (max-width: 520px) {
+  .workspace-subtitle-row:has(.fork-parent-link, .fork-parent-unavailable) .workspace-context,
+  .workspace-subtitle-row:has(.fork-parent-link, .fork-parent-unavailable)
+    .workspace-meta-separator {
+    display: none;
+  }
+
   .fork-dialog-backdrop {
     place-items: end stretch;
     padding: 0;
@@ -5836,50 +5893,37 @@
     margin-bottom: 14px;
   }
 
-  .fork-choice-rail {
-    height: 20px;
-    grid-template-columns: 1px minmax(0, 1fr);
-    margin: 0 0 0 27px;
-    border-bottom: 0;
-    border-left: 1px solid var(--line-strong);
-  }
-
-  .fork-choice-rail > span:first-child,
-  .fork-choice-rail > span:nth-child(3) {
-    display: none;
-  }
-
-  .fork-choice-rail > span:nth-child(2) {
-    width: 9px;
-    height: 1px;
-    align-self: end;
-    justify-self: start;
-    background: var(--line-strong);
-  }
-
   .fork-mode-options {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
+    margin-top: 8px;
   }
 
   .fork-mode-card {
     min-height: 0;
-    gap: 7px;
+    grid-template-columns: 26px minmax(0, 1fr);
+    grid-template-areas:
+      "control heading"
+      "control description"
+      ". metrics";
+    column-gap: 9px;
     padding: 12px;
   }
 
-  .fork-mode-card + .fork-mode-card::before {
-    position: absolute;
-    top: -9px;
-    left: 12px;
-    width: 1px;
-    height: 8px;
-    background: var(--line-strong);
-    content: "";
+  .fork-source-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 9px;
+    padding: 10px;
+  }
+
+  .fork-source-size {
+    grid-column: 2;
   }
 
   .fork-mode-metrics {
-    padding-top: 8px;
+    align-self: auto;
+    margin-top: 9px;
+    padding: 8px 0 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .fork-dialog-actions button {

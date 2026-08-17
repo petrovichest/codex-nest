@@ -2069,7 +2069,7 @@ describe("Activity", () => {
         agentMessageId: "plan",
       }),
     );
-    expect(screen.getByRole("dialog", { name: "Как перенести контекст?" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Создать ветку" })).toBeVisible();
   });
 
   it("creates one reliable operation, dispatches it, and navigates to the pending route", async () => {
@@ -2109,9 +2109,9 @@ describe("Activity", () => {
 
     const buttons = screen.getAllByRole("button", { name: "Создать ответвление отсюда" });
     fireEvent.click(buttons[1]!);
-    await screen.findByRole("dialog", { name: "Как перенести контекст?" });
-    await waitFor(() => expect(screen.getByRole("radio", { name: /Сжатая/ })).toBeChecked());
-    const create = screen.getByRole("button", { name: "Создать ответвление" });
+    await screen.findByRole("dialog", { name: "Создать ветку" });
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Компактная/ })).toBeChecked());
+    const create = screen.getByRole("button", { name: "Создать ветку" });
     fireEvent.click(create);
     fireEvent.click(create);
     expect(api.createForkOperation).toHaveBeenCalledOnce();
@@ -2140,11 +2140,11 @@ describe("Activity", () => {
     render(forkThreadRoute());
 
     fireEvent.click(screen.getByRole("button", { name: "Создать ответвление отсюда" }));
-    await waitFor(() => expect(screen.getByRole("radio", { name: /Сжатая/ })).toBeChecked());
-    fireEvent.click(screen.getByRole("button", { name: "Создать ответвление" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Компактная/ })).toBeChecked());
+    fireEvent.click(screen.getByRole("button", { name: "Создать ветку" }));
 
     expect(await screen.findByText("Не удалось создать fork")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Создать ответвление" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Создать ветку" })).toBeEnabled();
     expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/thread:false");
   });
 

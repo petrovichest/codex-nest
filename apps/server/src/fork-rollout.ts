@@ -14,11 +14,14 @@ export const FORK_MATERIALIZATION_MARKER_KEY = "codexnest_fork_operation_id";
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
+  "agent_message",
   "reasoning",
   "function_call",
   "function_call_output",
   "custom_tool_call",
   "custom_tool_call_output",
+  "tool_search_call",
+  "tool_search_output",
   "web_search_call",
   "computer_call",
   "computer_call_output",
@@ -29,6 +32,9 @@ const RESPONSE_ITEM_TYPES = new Set([
   "mcp_approval_request",
   "mcp_approval_response",
   "image_generation_call",
+  "compaction",
+  "compaction_trigger",
+  "context_compaction",
 ]);
 
 export async function analyzeForkRollout(
