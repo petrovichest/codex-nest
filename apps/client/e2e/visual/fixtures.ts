@@ -677,8 +677,8 @@ async function mockHttpRoute(
             }
           : {
               available: true,
-              estimatedBytes: 47_891_234,
-              estimatedSeconds: { minSeconds: 18, maxSeconds: 42 },
+              estimatedBytes: null,
+              estimatedSeconds: { minSeconds: 60, maxSeconds: 600 },
               unavailableReason: null,
             },
       exact: {

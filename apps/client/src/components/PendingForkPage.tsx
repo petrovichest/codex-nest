@@ -353,13 +353,11 @@ function ForkStatusBanner({
 }) {
   const { t } = useI18n();
   const copy =
-    operation.status === "preparing"
-      ? t("Готовим ответвление. Можно писать дальше — сообщения встанут в очередь.")
-      : operation.status === "reconciling"
-        ? t("Сверяем перенесённый контекст и готовим ветку к работе.")
-        : operation.status === "failed"
-          ? operation.error || t("Не удалось создать ответвление.")
-          : t("Ответвление готово. Открываем…");
+    operation.status === "failed"
+      ? operation.error || t("Не удалось создать ответвление.")
+      : operation.status === "ready"
+        ? t("Ответвление готово. Открываем…")
+        : forkStageCopy(operation, t);
   return (
     <div
       className={`fork-status-banner ${operation.status}`}
@@ -373,7 +371,7 @@ function ForkStatusBanner({
         <span className="spinner small" />
       )}
       <span className="fork-status-copy">
-        <strong>{forkStatusTitle(operation.status, t)}</strong>
+        <strong>{forkStatusTitle(operation, t)}</strong>
         <small>{copy}</small>
       </span>
       {operation.status === "failed" && (
@@ -386,13 +384,31 @@ function ForkStatusBanner({
 }
 
 function forkStatusTitle(
-  status: ForkOperationSummary["status"],
+  operation: ForkOperationSummary,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
-  if (status === "preparing") return t("Готовим ветку");
-  if (status === "reconciling") return t("Сверяем контекст");
-  if (status === "ready") return t("Ветка готова");
-  return t("Создание остановлено");
+  if (operation.status === "ready") return t("Ветка готова");
+  if (operation.status === "failed") return t("Создание остановлено");
+  if (operation.stage === "copying") return t("Копируем историю");
+  if (operation.stage === "compacting") return t("Сжимаем контекст");
+  if (operation.stage === "materializing") return t("Собираем ветку");
+  return t("Готовим ветку");
+}
+
+function forkStageCopy(
+  operation: ForkOperationSummary,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (operation.stage === "copying") {
+    return t("Переносим полную историю до выбранного ответа.");
+  }
+  if (operation.stage === "compacting") {
+    return t("Создаём свежее сжатие во временной копии. Исходная сессия не меняется.");
+  }
+  if (operation.stage === "materializing") {
+    return t("Переносим только новый компактный контекст в чистую ветку.");
+  }
+  return t("Проверяем точку ответвления. Можно писать дальше — сообщения встанут в очередь.");
 }
 
 function draftValue(draft: ThreadDraft | null): UpdateThreadDraftRequest {

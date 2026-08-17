@@ -63,6 +63,22 @@ beforeEach(() => {
 });
 
 describe("PendingForkPage", () => {
+  it("shows the fresh compaction stage without implying that the source changes", async () => {
+    const compacting = {
+      ...operation,
+      mode: "compressed" as const,
+      status: "reconciling" as const,
+      stage: "compacting" as const,
+    };
+    connection.mockReturnValue(pendingContext(pendingApi(), compacting));
+    renderPage(compacting);
+
+    expect(await screen.findByText("Сжимаем контекст")).toBeVisible();
+    expect(
+      screen.getByText("Создаём свежее сжатие во временной копии. Исходная сессия не меняется."),
+    ).toBeVisible();
+  });
+
   it("shows source history through the selected turn and persists draft/queue on the operation", async () => {
     const api = pendingApi();
     const context = pendingContext(api, operation);

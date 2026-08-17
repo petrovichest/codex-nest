@@ -259,6 +259,14 @@ export interface ForkOperationState {
   rolloutPath: string | null;
   agentText: string;
   nativeAttempt?: { startedAt: number; sequence: number };
+  compressedPreparation?: {
+    temporaryThreadId: string;
+    rolloutPath: string;
+    compactFromBytes: number;
+    phase: "ready" | "compacting" | "compacted";
+    startedAt: number;
+    sequence: number;
+  };
   compressedMaterialization?: {
     phase: "injecting" | "injected";
     startedAt: number;
@@ -1315,6 +1323,18 @@ function isForkOperation(value: unknown, operationId: string): value is ForkOper
         typeof value.nativeAttempt.sequence === "number" &&
         Number.isSafeInteger(value.nativeAttempt.sequence) &&
         value.nativeAttempt.sequence > 0)) &&
+    (value.compressedPreparation === undefined ||
+      (value.mode === "compressed" &&
+        isRecord(value.compressedPreparation) &&
+        isBoundedString(value.compressedPreparation.temporaryThreadId, 500) &&
+        typeof value.compressedPreparation.rolloutPath === "string" &&
+        isAbsolute(value.compressedPreparation.rolloutPath) &&
+        isNonNegativeFiniteNumber(value.compressedPreparation.compactFromBytes) &&
+        ["ready", "compacting", "compacted"].includes(String(value.compressedPreparation.phase)) &&
+        isNonNegativeFiniteNumber(value.compressedPreparation.startedAt) &&
+        typeof value.compressedPreparation.sequence === "number" &&
+        Number.isSafeInteger(value.compressedPreparation.sequence) &&
+        value.compressedPreparation.sequence >= 0)) &&
     (value.compressedMaterialization === undefined ||
       (value.mode === "compressed" &&
         isRecord(value.compressedMaterialization) &&

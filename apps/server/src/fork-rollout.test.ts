@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import {
   analyzeForkRollout,
   FORK_MATERIALIZATION_MARKER_KEY,
   hasForkMaterializationMarker,
+  readFreshCompaction,
 } from "./fork-rollout";
 
 const directories: string[] = [];
@@ -126,6 +127,32 @@ describe("fork rollout analysis", () => {
 
     await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);
     await expect(hasForkMaterializationMarker(path, "different")).resolves.toBe(false);
+  });
+
+  it("reads only a newly appended compaction replacement", async () => {
+    const path = await rollout([
+      record("compacted", {
+        message: "",
+        replacement_history: [message("old-summary", "old context")],
+      }),
+    ]);
+    const startBytes = (await stat(path)).size;
+    await appendFile(
+      path,
+      `${record("compacted", {
+        message: "",
+        replacement_history: [
+          message("fresh-summary", "fresh context"),
+          { type: "compaction", id: "encrypted", encrypted_content: "opaque" },
+        ],
+      })}\n`,
+      "utf8",
+    );
+
+    await expect(readFreshCompaction(path, startBytes)).resolves.toEqual([
+      message("fresh-summary", "fresh context"),
+      { type: "compaction", id: "encrypted", encrypted_content: "opaque" },
+    ]);
   });
 });
 

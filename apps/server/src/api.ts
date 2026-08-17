@@ -115,8 +115,10 @@ import {
 } from "./projects";
 import {
   analyzeForkRollout,
+  freshCompressedForkEstimate,
   FORK_MATERIALIZATION_MARKER_KEY,
   hasForkMaterializationMarker,
+  readFreshCompaction,
 } from "./fork-rollout";
 import { ThreadDraftConflictError, publicForkOperation, type AppProjection } from "./projection";
 import {
@@ -148,6 +150,7 @@ import type {
   TeamToolOperationState,
 } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
+import { isMissingThreadError } from "./thread-state";
 import {
   computeTeamWorkspaceDelta,
   createTeamWorkspace,
@@ -1085,14 +1088,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const cachedPath = projection.rolloutPath(threadId);
     if (cachedPath) return cachedPath;
     try {
-      await projection.refreshThread(threadId);
+      return parseThreadRead(
+        await bridge.request<unknown>("thread/read", { threadId, includeTurns: false }, 30_000),
+      ).thread.path;
     } catch (error) {
       app.log.warn(
         { err: safeError(error), threadId },
-        "Failed to refresh the source rollout path for a fork",
+        "Failed to read the source rollout path for a fork",
       );
+      return null;
     }
-    return projection.rolloutPath(threadId);
   };
   const publishForkOperation = (operationId: string): void =>
     projection.publishForkOperation(operationId);
@@ -1298,6 +1303,212 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     });
     return true;
   };
+  const waitForFreshCompaction = async (threadId: string): Promise<void> => {
+    let settled = false;
+    let resolveCompletion!: () => void;
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (error) rejectCompletion(error);
+      else resolveCompletion();
+    };
+    const notificationHandler = (notification: ServerNotification) => {
+      if (notification.method === "turn/completed" && notification.params.threadId === threadId) {
+        if (notification.params.turn.status === "completed") finish();
+        else {
+          finish(
+            new Error(
+              notification.params.turn.error?.message ??
+                `Native compaction ${notification.params.turn.status}`,
+            ),
+          );
+        }
+      } else if (
+        notification.method === "error" &&
+        notification.params.threadId === threadId &&
+        !notification.params.willRetry
+      ) {
+        finish(new Error(notification.params.error.message));
+      }
+    };
+    const stateHandler = (state: string) => {
+      if (state !== "ready") finish(new BridgeUnavailableError(bridge.state));
+    };
+    bridge.on("notification", notificationHandler);
+    bridge.on("state", stateHandler);
+    const timer = setTimeout(
+      () => finish(new RpcTimeoutError("thread/compact/start", FORK_RPC_TIMEOUT_MS)),
+      FORK_RPC_TIMEOUT_MS,
+    );
+    timer.unref();
+    try {
+      await Promise.all([
+        bridge.request("thread/compact/start", { threadId }, FORK_RPC_TIMEOUT_MS),
+        completion,
+      ]);
+    } finally {
+      clearTimeout(timer);
+      bridge.off("notification", notificationHandler);
+      bridge.off("state", stateHandler);
+    }
+  };
+  const prepareFreshCompressedFork = async (
+    operationId: string,
+  ): Promise<Record<string, unknown>[] | null> => {
+    const temporarySource = `codexnest-fork-temp:${operationId}`;
+    let operation = store.view().forkOperations?.[operationId];
+    if (!operation) return null;
+    let preparation = operation.compressedPreparation;
+    let temporary: Thread | null = null;
+    if (preparation) {
+      try {
+        temporary = parseThreadRead(
+          await bridge.request<unknown>(
+            "thread/read",
+            { threadId: preparation.temporaryThreadId, includeTurns: false },
+            30_000,
+          ),
+        ).thread;
+      } catch (error) {
+        if (!isMissingThreadError(error)) throw error;
+      }
+      if (!temporary) {
+        throw new ProjectValidationError("The temporary compact fork no longer exists");
+      }
+    } else {
+      temporary = await findThreadBySource(bridge, temporarySource);
+      if (!temporary) {
+        if (
+          operation.nativeAttempt &&
+          Date.now() < operation.nativeAttempt.startedAt + FORK_ATTEMPT_SETTLE_MS
+        ) {
+          scheduleForkAttemptSettlement(operationId, operation.nativeAttempt.startedAt);
+          return null;
+        }
+        const startedAt = Date.now();
+        const sequence = (operation.nativeAttempt?.sequence ?? 0) + 1;
+        await updateForkOperation(operationId, (current) => {
+          current.status = "reconciling";
+          current.error = null;
+          current.nativeAttempt = { startedAt, sequence };
+        });
+        try {
+          temporary = parseThreadStart(
+            await bridge.request<unknown>(
+              "thread/fork",
+              {
+                threadId: operation.sourceThreadId,
+                lastTurnId: operation.lastTurnId,
+                excludeTurns: true,
+                serviceTier: null,
+                threadSource: temporarySource,
+              },
+              FORK_RPC_TIMEOUT_MS,
+            ),
+          ).thread;
+        } catch (error) {
+          temporary = await findThreadBySource(bridge, temporarySource);
+          if (!temporary && error instanceof RpcTimeoutError) {
+            scheduleForkAttemptSettlement(operationId, startedAt);
+            return null;
+          }
+          if (!temporary) throw error;
+        }
+      }
+      const rolloutPath = temporary.path ?? (await resolveForkRolloutPath(temporary.id));
+      if (!rolloutPath) {
+        throw new ProjectValidationError("The temporary compact fork rollout is unavailable");
+      }
+      const compactFromBytes = (await stat(rolloutPath)).size;
+      await updateForkOperation(operationId, (current) => {
+        current.compressedPreparation = {
+          temporaryThreadId: temporary!.id,
+          rolloutPath,
+          compactFromBytes,
+          phase: "ready",
+          startedAt: 0,
+          sequence: 0,
+        };
+        delete current.nativeAttempt;
+      });
+      operation = store.view().forkOperations?.[operationId];
+      if (!operation?.compressedPreparation) return null;
+      preparation = operation.compressedPreparation;
+    }
+
+    let items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
+    if (!items && preparation.phase === "compacted") {
+      throw new ProjectValidationError("The fresh compact context could not be recovered");
+    }
+    if (!items && preparation.phase === "compacting") {
+      if (temporary.status.type === "active") {
+        scheduleForkReconciliation(operationId);
+        return null;
+      }
+      if (temporary.status.type === "systemError") {
+        throw new ProjectValidationError("Native compaction stopped with a system error");
+      }
+      if (Date.now() < preparation.startedAt + 1_000) {
+        scheduleForkReconciliation(
+          operationId,
+          Math.max(0, preparation.startedAt + 1_000 - Date.now()),
+        );
+        return null;
+      }
+    }
+    if (!items) {
+      const startedAt = Date.now();
+      const sequence = preparation.sequence + 1;
+      await updateForkOperation(operationId, (current) => {
+        if (!current.compressedPreparation) return;
+        current.status = "reconciling";
+        current.error = null;
+        current.compressedPreparation.phase = "compacting";
+        current.compressedPreparation.startedAt = startedAt;
+        current.compressedPreparation.sequence = sequence;
+      });
+      try {
+        await waitForFreshCompaction(temporary.id);
+      } catch (error) {
+        if (error instanceof RpcTimeoutError) {
+          scheduleForkAttemptSettlement(operationId, startedAt);
+          return null;
+        }
+        throw error;
+      }
+      items = await readFreshCompaction(preparation.rolloutPath, preparation.compactFromBytes);
+      if (!items) {
+        scheduleForkReconciliation(operationId, 250);
+        return null;
+      }
+    }
+    const estimatedBytes = Buffer.byteLength(JSON.stringify(items));
+    await updateForkOperation(operationId, (current) => {
+      if (current.compressedPreparation) current.compressedPreparation.phase = "compacted";
+      current.estimate = {
+        ...freshCompressedForkEstimate(),
+        estimatedBytes,
+      };
+    });
+    return items;
+  };
+  const deleteTemporaryFork = async (operationId: string): Promise<void> => {
+    const preparation = store.view().forkOperations?.[operationId]?.compressedPreparation;
+    if (!preparation) return;
+    try {
+      await bridge.request("thread/delete", { threadId: preparation.temporaryThreadId }, 30_000);
+    } catch (error) {
+      if (!isMissingThreadError(error)) throw error;
+    }
+    await updateForkOperation(operationId, (current) => {
+      delete current.compressedPreparation;
+    });
+  };
   const runForkOperation = async (operationId: string): Promise<void> => {
     const initial = store.view().forkOperations?.[operationId];
     if (!initial || initial.status === "ready" || initial.status === "failed") return;
@@ -1316,49 +1527,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           if (!operation) return;
         }
       }
-      if (
-        target &&
-        operation.mode === "compressed" &&
-        operation.compressedMaterialization?.phase === "injected"
-      ) {
-        await finishForkOperation(operationId, target, operation.agentText);
-        return;
-      }
-      if (
-        target &&
-        operation.mode === "compressed" &&
-        operation.compressedMaterialization?.phase === "injecting"
-      ) {
-        const startedAt = operation.compressedMaterialization.startedAt;
-        const marker = await hasForkMaterializationMarker(target.path, operationId);
+      if (target && operation.mode === "compressed") {
+        const materialization = operation.compressedMaterialization;
+        const marker =
+          materialization?.phase === "injected"
+            ? true
+            : await hasForkMaterializationMarker(target.path, operationId);
         if (marker) {
-          await updateForkOperation(operationId, (current) => {
-            current.compressedMaterialization = { phase: "injected", startedAt };
-          });
+          if (materialization?.phase !== "injected") {
+            await updateForkOperation(operationId, (current) => {
+              current.compressedMaterialization = {
+                phase: "injected",
+                startedAt: materialization?.startedAt ?? Date.now(),
+              };
+            });
+          }
+          await deleteTemporaryFork(operationId);
           await finishForkOperation(operationId, target, operation.agentText);
           return;
         }
-        if (Date.now() < startedAt + FORK_ATTEMPT_SETTLE_MS) {
-          scheduleForkAttemptSettlement(operationId, startedAt);
-          return;
-        }
-        if (marker === null) {
-          throw new ProjectValidationError(
-            "Compressed fork materialization could not be verified after restart",
-          );
-        }
-      }
-      if (
-        !target &&
-        operation.nativeAttempt &&
-        Date.now() < operation.nativeAttempt.startedAt + FORK_ATTEMPT_SETTLE_MS
-      ) {
-        await updateForkOperation(operationId, (current) => {
-          current.status = "reconciling";
-          current.error = null;
-        });
-        scheduleForkAttemptSettlement(operationId, operation.nativeAttempt.startedAt);
-        return;
       }
 
       const point = await validateForkPoint(
@@ -1367,32 +1554,33 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         operation.lastTurnId,
         operation.agentMessageId,
       );
-      const rollout = await analyzeForkRollout(operation.rolloutPath, operation.lastTurnId);
-      await updateForkOperation(operationId, (current) => {
-        current.estimate = structuredClone(rollout.estimate[current.mode]);
-        current.agentText = point.text;
-      });
-      operation = store.view().forkOperations?.[operationId];
-      if (!operation) return;
-
-      if (operation.mode === "compressed" && !rollout.compressedItems) {
-        throw new ProjectValidationError(
-          rollout.estimate.compressed.unavailableReason ?? "Compressed fork is unavailable",
-        );
-      }
-      if (!target) {
-        const uncertainAttempt = operation.nativeAttempt;
-        const attemptStartedAt = Date.now();
-        const attemptSequence = (uncertainAttempt?.sequence ?? 0) + 1;
+      if (operation.mode === "exact") {
+        const rollout = await analyzeForkRollout(operation.rolloutPath, operation.lastTurnId);
         await updateForkOperation(operationId, (current) => {
-          current.status = "reconciling";
-          current.error = null;
-          current.nativeAttempt = {
-            startedAt: attemptStartedAt,
-            sequence: attemptSequence,
-          };
+          current.estimate = structuredClone(rollout.estimate.exact);
+          current.agentText = point.text;
         });
-        if (operation.mode === "exact") {
+        operation = store.view().forkOperations?.[operationId];
+        if (!operation) return;
+        if (
+          !target &&
+          operation.nativeAttempt &&
+          Date.now() < operation.nativeAttempt.startedAt + FORK_ATTEMPT_SETTLE_MS
+        ) {
+          scheduleForkAttemptSettlement(operationId, operation.nativeAttempt.startedAt);
+          return;
+        }
+        if (!target) {
+          const attemptStartedAt = Date.now();
+          const attemptSequence = (operation.nativeAttempt?.sequence ?? 0) + 1;
+          await updateForkOperation(operationId, (current) => {
+            current.status = "reconciling";
+            current.error = null;
+            current.nativeAttempt = {
+              startedAt: attemptStartedAt,
+              sequence: attemptSequence,
+            };
+          });
           try {
             target = parseThreadStart(
               await bridge.request<unknown>(
@@ -1415,29 +1603,71 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             }
             if (!target) throw error;
           }
-        } else {
-          try {
-            target = parseThreadStart(
-              await bridge.request<unknown>(
-                "thread/start",
-                {
-                  cwd: operation.sourceCwd,
-                  ...threadSettings(operation.sourceSettings),
-                  threadSource: sourceName,
-                  developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
-                  dynamicTools: ROOT_DYNAMIC_TOOLS,
-                },
-                FORK_RPC_TIMEOUT_MS,
-              ),
-            ).thread;
-          } catch (error) {
-            target = await findThreadBySource(bridge, sourceName);
-            if (!target && error instanceof RpcTimeoutError) {
-              scheduleForkAttemptSettlement(operationId, attemptStartedAt);
-              return;
-            }
-            if (!target) throw error;
+          await updateForkOperation(operationId, (current) => {
+            current.targetThreadId = target!.id;
+            delete current.nativeAttempt;
+          });
+        } else if (operation.nativeAttempt || operation.targetThreadId !== target.id) {
+          await updateForkOperation(operationId, (current) => {
+            current.targetThreadId = target!.id;
+            delete current.nativeAttempt;
+          });
+        }
+        await bridge
+          .request("thread/goal/clear", { threadId: target.id }, 30_000)
+          .catch(() => undefined);
+        await finishForkOperation(operationId, target, point.text);
+        return;
+      }
+
+      await updateForkOperation(operationId, (current) => {
+        current.estimate = freshCompressedForkEstimate();
+        current.agentText = point.text;
+      });
+      const compressedItems = await prepareFreshCompressedFork(operationId);
+      if (!compressedItems) return;
+      operation = store.view().forkOperations?.[operationId];
+      if (!operation) return;
+      if (
+        !target &&
+        operation.nativeAttempt &&
+        Date.now() < operation.nativeAttempt.startedAt + FORK_ATTEMPT_SETTLE_MS
+      ) {
+        scheduleForkAttemptSettlement(operationId, operation.nativeAttempt.startedAt);
+        return;
+      }
+      if (!target) {
+        const attemptStartedAt = Date.now();
+        const attemptSequence = (operation.nativeAttempt?.sequence ?? 0) + 1;
+        await updateForkOperation(operationId, (current) => {
+          current.status = "reconciling";
+          current.error = null;
+          current.nativeAttempt = {
+            startedAt: attemptStartedAt,
+            sequence: attemptSequence,
+          };
+        });
+        try {
+          target = parseThreadStart(
+            await bridge.request<unknown>(
+              "thread/start",
+              {
+                cwd: operation.sourceCwd,
+                ...threadSettings(operation.sourceSettings),
+                threadSource: sourceName,
+                developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
+                dynamicTools: ROOT_DYNAMIC_TOOLS,
+              },
+              FORK_RPC_TIMEOUT_MS,
+            ),
+          ).thread;
+        } catch (error) {
+          target = await findThreadBySource(bridge, sourceName);
+          if (!target && error instanceof RpcTimeoutError) {
+            scheduleForkAttemptSettlement(operationId, attemptStartedAt);
+            return;
           }
+          if (!target) throw error;
         }
         await updateForkOperation(operationId, (current) => {
           current.targetThreadId = target!.id;
@@ -1449,17 +1679,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           delete current.nativeAttempt;
         });
       }
-      if (operation.mode === "compressed") {
-        if (!(await materializeCompressedFork(operationId, target, rollout.compressedItems!))) {
-          return;
-        }
-      } else {
-        await bridge
-          .request("thread/goal/clear", { threadId: target.id }, 30_000)
-          .catch(() => undefined);
-      }
+      if (!(await materializeCompressedFork(operationId, target, compressedItems))) return;
+      await deleteTemporaryFork(operationId);
       await finishForkOperation(operationId, target, point.text);
     } catch (error) {
+      const preparation = store.view().forkOperations?.[operationId]?.compressedPreparation;
+      if (preparation) {
+        await bridge
+          .request("thread/delete", { threadId: preparation.temporaryThreadId }, 30_000)
+          .catch((cleanupError: unknown) => {
+            app.log.warn(
+              { err: safeError(cleanupError), operationId },
+              "Failed to delete a temporary compact fork",
+            );
+          });
+      }
       await updateForkOperation(operationId, (operation) => {
         operation.status = "failed";
         operation.error = safeError(error).message;
@@ -2880,17 +3114,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const analysis = await analyzeForkRollout(
         await resolveForkRolloutPath(source.id),
         body.lastTurnId,
-        body.agentMessageId,
       );
-      if (analysis.forkPointValidation === "invalid") {
-        return apiError(
-          reply,
-          400,
-          "validation_failed",
-          "agentMessageId must select the last non-empty agent message of the turn",
-        );
-      }
-      return analysis.estimate;
+      return { ...analysis.estimate, compressed: freshCompressedForkEstimate() };
     },
   );
 
@@ -2922,9 +3147,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             if (existing.status === "failed") {
               existing.status = "preparing";
               existing.error = null;
-              existing.targetThreadId = null;
               delete existing.nativeAttempt;
-              delete existing.compressedMaterialization;
+              delete existing.compressedPreparation;
+              if (!existing.targetThreadId) delete existing.compressedMaterialization;
               existing.updatedAt = Date.now();
               retry = true;
             }

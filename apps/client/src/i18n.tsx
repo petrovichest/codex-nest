@@ -78,6 +78,8 @@ const ENGLISH: Record<string, string> = {
     "Copies the available history literally. A large session will take more time and space.",
   "Сохраняет сжатый контекст и недавний ход работы. Лучше для больших сессий.":
     "Keeps the compacted context and recent work. Better for large sessions.",
+  "Создаёт свежее сжатие и переносит только компактный контекст. Лучше для больших сессий.":
+    "Creates a fresh compaction and transfers only compact context. Better for large sessions.",
   "Копирует всё до выбранного ответа. Выбирайте, если важны дословные детали.":
     "Copies everything through the selected answer. Choose this when exact details matter.",
   "Не удалось рассчитать сжатую ветку. Точная копия всё ещё доступна.":
@@ -88,6 +90,7 @@ const ENGLISH: Record<string, string> = {
   Объём: "Size",
   Время: "Time",
   неизвестно: "unknown",
+  "рассчитается при создании": "calculated during creation",
   Б: "B",
   КБ: "KB",
   МБ: "MB",
@@ -104,6 +107,17 @@ const ENGLISH: Record<string, string> = {
   "Сверяем контекст": "Reconciling context",
   "Ветка готова": "Fork ready",
   "Создание остановлено": "Creation stopped",
+  "Копируем историю": "Copying history",
+  "Сжимаем контекст": "Compacting context",
+  "Собираем ветку": "Building fork",
+  "Переносим полную историю до выбранного ответа.":
+    "Copying the full history through the selected answer.",
+  "Создаём свежее сжатие во временной копии. Исходная сессия не меняется.":
+    "Creating a fresh compaction in a temporary copy. The source session stays unchanged.",
+  "Переносим только новый компактный контекст в чистую ветку.":
+    "Transferring only the new compact context into a clean fork.",
+  "Проверяем точку ответвления. Можно писать дальше — сообщения встанут в очередь.":
+    "Checking the fork point. You can keep writing—messages will be queued.",
   "Исходная ветка": "Source branch",
   "Контекст перенесён в сжатом виде из исходной ветки.":
     "Context was transferred from the source branch in compressed form.",

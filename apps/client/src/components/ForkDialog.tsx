@@ -18,6 +18,13 @@ const UNKNOWN_EXACT: ForkModeEstimate = {
   unavailableReason: null,
 };
 
+const FRESH_COMPRESSED: ForkModeEstimate = {
+  available: true,
+  estimatedBytes: null,
+  estimatedSeconds: { minSeconds: 60, maxSeconds: 600 },
+  unavailableReason: null,
+};
+
 export function ForkDialog({
   sourceThreadId,
   sourceTitle,
@@ -41,7 +48,7 @@ export function ForkDialog({
   const submittingRef = useRef(false);
   const [estimate, setEstimate] = useState<ForkEstimateResponse | null>(null);
   const [estimateFailed, setEstimateFailed] = useState(false);
-  const [mode, setMode] = useState<ForkMode | null>(null);
+  const [mode, setMode] = useState<ForkMode>("compressed");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,26 +59,23 @@ export function ForkDialog({
       .then((response) => {
         if (!active) return;
         setEstimate(response);
-        setMode(
-          response.compressed.available ? "compressed" : response.exact.available ? "exact" : null,
-        );
       })
       .catch(() => {
         if (!active) return;
         setEstimateFailed(true);
-        setMode("exact");
       });
     return () => {
       active = false;
     };
   }, [agentMessageId, api, lastTurnId, sourceThreadId]);
 
-  const compressed = estimate?.compressed ?? {
-    ...UNKNOWN_EXACT,
-    available: false,
-    unavailableReason: estimateFailed
-      ? t("Не удалось рассчитать сжатую ветку. Точная копия всё ещё доступна.")
-      : null,
+  const compressed: ForkModeEstimate = {
+    ...FRESH_COMPRESSED,
+    ...(estimate?.compressed ?? {}),
+    available: true,
+    estimatedBytes: null,
+    estimatedSeconds: estimate?.compressed.estimatedSeconds ?? FRESH_COMPRESSED.estimatedSeconds,
+    unavailableReason: null,
   };
   const exact = estimate?.exact ?? UNKNOWN_EXACT;
   const selectedEstimate = mode === "compressed" ? compressed : mode === "exact" ? exact : null;
@@ -157,7 +161,7 @@ export function ForkDialog({
           title={t("Компактная")}
           badge={t("Быстрее")}
           description={t(
-            "Сохраняет сжатый контекст и недавний ход работы. Лучше для больших сессий.",
+            "Создаёт свежее сжатие и переносит только компактный контекст. Лучше для больших сессий.",
           )}
           estimate={compressed}
           loading={!estimate && !estimateFailed}
@@ -264,7 +268,9 @@ function ForkModeCard({
           <>
             <span>
               <small>{t("Объём")}</small>
-              {formatForkBytes(estimate.estimatedBytes, language, t)}
+              {mode === "compressed" && estimate.estimatedBytes === null
+                ? t("рассчитается при создании")
+                : formatForkBytes(estimate.estimatedBytes, language, t)}
             </span>
             <span>
               <small>{t("Время")}</small>

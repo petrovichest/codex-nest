@@ -12,8 +12,8 @@ const estimate: ForkEstimateResponse = {
   sourceBytes: 12_345_678,
   compressed: {
     available: true,
-    estimatedBytes: 456_789,
-    estimatedSeconds: { minSeconds: 8, maxSeconds: 15 },
+    estimatedBytes: null,
+    estimatedSeconds: { minSeconds: 60, maxSeconds: 600 },
     unavailableReason: null,
   },
   exact: {
@@ -66,6 +66,7 @@ describe("ForkDialog", () => {
     expect(within(dialog).getByRole("button", { name: "Закрыть" })).toHaveFocus();
 
     await act(async () => resolveEstimate(estimate));
+    expect(within(dialog).getByText("рассчитается при создании")).toBeVisible();
     const compressed = within(dialog).getByRole("radio", { name: /Компактная/ });
     expect(compressed).toBeChecked();
     const create = within(dialog).getByRole("button", { name: "Создать ветку" });
@@ -83,7 +84,7 @@ describe("ForkDialog", () => {
     expect(onCreated).toHaveBeenCalledWith(operation);
   });
 
-  it("keeps exact selectable with unknown estimates when estimation fails", async () => {
+  it("keeps compact selected and available when estimation fails", async () => {
     connection.mockReturnValue({
       api: {
         estimateFork: vi.fn().mockRejectedValue(new Error("offline")),
@@ -92,17 +93,14 @@ describe("ForkDialog", () => {
     });
     renderDialog();
 
-    const exact = await screen.findByRole("radio", { name: /Полная история/ });
-    expect(exact).toBeEnabled();
-    await waitFor(() => expect(exact).toBeChecked());
-    expect(screen.getByRole("radio", { name: /Компактная/ })).toBeDisabled();
-    expect(
-      screen.getByText("Сжатый контекст для этой точки недоступен. Выберите полную историю."),
-    ).toBeVisible();
-    expect(screen.getAllByText("неизвестно").length).toBeGreaterThanOrEqual(2);
+    const compact = await screen.findByRole("radio", { name: /Компактная/ });
+    await waitFor(() => expect(compact).toBeChecked());
+    expect(compact).toBeEnabled();
+    expect(screen.getByText("рассчитается при создании")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Создать ветку" })).toBeEnabled();
   });
 
-  it("selects exact when compressed is explicitly unavailable and closes by keyboard", async () => {
+  it("keeps compact available when an older estimate marks it unavailable", async () => {
     const onClose = vi.fn();
     connection.mockReturnValue({
       api: {
@@ -119,10 +117,10 @@ describe("ForkDialog", () => {
       },
     });
     renderDialog({ onClose });
-    expect(await screen.findByRole("radio", { name: /Полная история/ })).toBeChecked();
-    expect(
-      screen.getByText("Сжатый контекст для этой точки недоступен. Выберите полную историю."),
-    ).toBeVisible();
+    const compact = await screen.findByRole("radio", { name: /Компактная/ });
+    expect(compact).toBeChecked();
+    expect(compact).toBeEnabled();
+    expect(screen.getByText("рассчитается при создании")).toBeVisible();
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledOnce();

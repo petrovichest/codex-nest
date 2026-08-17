@@ -12,6 +12,10 @@ export interface ForkRolloutAnalysis {
 
 export const FORK_MATERIALIZATION_MARKER_KEY = "codexnest_fork_operation_id";
 
+export function freshCompressedForkEstimate(): ForkModeEstimate {
+  return available(null, { minSeconds: 60, maxSeconds: 600 });
+}
+
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
   "agent_message",
@@ -222,8 +226,36 @@ export async function hasForkMaterializationMarker(
   }
 }
 
+export async function readFreshCompaction(
+  path: string,
+  startBytes: number,
+): Promise<Record<string, unknown>[] | null> {
+  const input = createReadStream(path, { encoding: "utf8", start: startBytes });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  let latest: Record<string, unknown>[] | null = null;
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line) as unknown;
+      } catch {
+        continue;
+      }
+      if (!isRecord(entry) || entry.type !== "compacted" || !isRecord(entry.payload)) continue;
+      const replacement = validReplacementHistory(entry.payload.replacement_history);
+      if (!replacement) throw new Error("The fresh compaction has an unsupported schema");
+      latest = replacement;
+    }
+    return latest;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+
 function validReplacementHistory(value: unknown): Record<string, unknown>[] | null {
-  if (!Array.isArray(value) || !value.every(isResponseItem)) return null;
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isResponseItem)) return null;
   return structuredClone(value) as Record<string, unknown>[];
 }
 

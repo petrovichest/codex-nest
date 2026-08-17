@@ -1502,7 +1502,13 @@ export class AppProjection extends EventEmitter {
           30_000,
         ),
       );
-      threads.push(...page.data.filter((thread) => !thread.ephemeral || isSpawnedSubagent(thread)));
+      threads.push(
+        ...page.data.filter(
+          (thread) =>
+            !isInternalForkPreparationThread(thread) &&
+            (!thread.ephemeral || isSpawnedSubagent(thread)),
+        ),
+      );
       cursor = page.nextCursor;
     } while (cursor);
     return threads;
@@ -1562,10 +1568,11 @@ export class AppProjection extends EventEmitter {
           );
           return {
             thread:
-              isSpawnedSubagent(response.thread) ||
-              isRecoverableUserSession(response.thread) ||
-              managedParentIds.has(threadId) ||
-              managedChildIds.has(threadId)
+              !isInternalForkPreparationThread(response.thread) &&
+              (isSpawnedSubagent(response.thread) ||
+                isRecoverableUserSession(response.thread) ||
+                managedParentIds.has(threadId) ||
+                managedChildIds.has(threadId))
                 ? response.thread
                 : null,
             failed: false,
@@ -1662,8 +1669,8 @@ export class AppProjection extends EventEmitter {
   private async onNotification(notification: ServerNotification): Promise<void> {
     if (
       notification.method === "thread/started" &&
-      notification.params.thread.ephemeral &&
-      !isSpawnedSubagent(notification.params.thread)
+      (isInternalForkPreparationThread(notification.params.thread) ||
+        (notification.params.thread.ephemeral && !isSpawnedSubagent(notification.params.thread)))
     ) {
       this.hiddenThreads.add(notification.params.thread.id);
       return;
@@ -2440,6 +2447,10 @@ function isSpawnedSubagent(thread: Thread): boolean {
   return thread.parentThreadId !== null;
 }
 
+function isInternalForkPreparationThread(thread: Thread): boolean {
+  return thread.threadSource?.startsWith("codexnest-fork-temp:") === true;
+}
+
 function threadLastActivityAt(thread: Thread): number {
   return Math.max(thread.updatedAt, thread.recencyAt ?? 0);
 }
@@ -2720,6 +2731,17 @@ export function publicForkOperation(
     agentMessageId: operation.agentMessageId,
     mode: operation.mode,
     status: operation.status,
+    stage:
+      operation.status === "ready" || operation.status === "failed"
+        ? null
+        : operation.mode === "exact"
+          ? "copying"
+          : operation.compressedMaterialization ||
+              operation.compressedPreparation?.phase === "compacted"
+            ? "materializing"
+            : operation.compressedPreparation
+              ? "compacting"
+              : "preparing",
     title: operation.title,
     createdAt: operation.createdAt,
     updatedAt: operation.updatedAt,

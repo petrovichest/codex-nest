@@ -5,6 +5,7 @@ import {
   access,
   appendFile,
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -1774,13 +1775,17 @@ describe("session forks", () => {
       method: "POST",
       url: "/api/v1/threads/thread/fork-estimate",
       headers: harness.headers,
-      payload: { lastTurnId: "selected-turn", agentMessageId: "selected-answer" },
+      payload: { lastTurnId: "selected-turn", agentMessageId: "item-1630" },
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       sourceBytes: expect.any(Number),
-      compressed: { available: true, estimatedBytes: expect.any(Number) },
+      compressed: {
+        available: true,
+        estimatedBytes: null,
+        estimatedSeconds: { minSeconds: 60, maxSeconds: 600 },
+      },
       exact: { available: true, estimatedBytes: expect.any(Number) },
     });
     expect(harness.bridge.request).toHaveBeenCalledWith(
@@ -1788,7 +1793,7 @@ describe("session forks", () => {
       { threadId: "thread", includeTurns: false },
       30_000,
     );
-    expect(harness.projection.rolloutPath("thread")).toBe(rolloutPath);
+    expect(harness.projection.rolloutPath("thread")).toBeNull();
     await harness.app.close();
   });
 
@@ -1940,7 +1945,7 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
-  it("creates a compressed fork only from a strict safe compaction and injected tail", async () => {
+  it("creates a fresh compaction in a temporary fork and injects only its replacement", async () => {
     const harness = await createForkHarness();
     const directory = await mkdtemp(join(tmpdir(), "codexnest-compressed-fork-test-"));
     directories.push(directory);
@@ -2001,6 +2006,20 @@ describe("session forks", () => {
       );
     });
     expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/fork",
+      expect.objectContaining({
+        threadId: "thread",
+        lastTurnId: "selected-turn",
+        threadSource: "codexnest-fork-temp:compressed-operation",
+      }),
+      600_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/compact/start",
+      { threadId: "temporary-fork" },
+      600_000,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
       "thread/start",
       expect.objectContaining({
         cwd: "/work",
@@ -2016,7 +2035,7 @@ describe("session forks", () => {
         items: [
           {
             type: "message",
-            id: "summary",
+            id: "fresh-summary",
             role: "user",
             content: [],
             internal_chat_message_metadata_passthrough: {
@@ -2025,10 +2044,9 @@ describe("session forks", () => {
           },
           {
             type: "compaction",
-            id: "encrypted-summary",
-            encrypted_content: "opaque",
+            id: "fresh-encrypted-summary",
+            encrypted_content: "fresh-opaque",
           },
-          { type: "message", id: "answer-item", role: "assistant", content: [] },
         ],
       },
       600_000,
@@ -2041,6 +2059,11 @@ describe("session forks", () => {
             "codexnest-fork:compressed-operation",
       ),
     ).toBe(false);
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "temporary-fork" },
+      30_000,
+    );
     expect(harness.store.snapshot().threadMeta.created?.logicalFork).toEqual({
       sourceThreadId: "thread",
       operationId: "compressed-operation",
@@ -2049,8 +2072,68 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
-  it("fails compressed creation before creating a partial thread when no safe compaction exists", async () => {
+  it("leaves the source untouched and removes the full temporary history", async () => {
     const harness = await createForkHarness();
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-compact-size-test-"));
+    directories.push(directory);
+    const sourcePath = join(directory, "source.jsonl");
+    const targetPath = join(directory, "target.jsonl");
+    const sourceContent = `${JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "large-source",
+        role: "user",
+        content: [{ type: "input_text", text: "x".repeat(2 * 1024 * 1024) }],
+      },
+    })}\n`;
+    await Promise.all([
+      writeFile(sourcePath, sourceContent, "utf8"),
+      writeFile(targetPath, "", "utf8"),
+    ]);
+    harness.bridge.threadReadPath = sourcePath;
+    harness.bridge.nextForkTargetPath = targetPath;
+    harness.bridge.threadTurns.set("thread", [completedForkTurn()]);
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "small-final-compressed",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["small-final-compressed"].status).toBe(
+        "ready",
+      );
+    });
+    expect(await readFile(sourcePath, "utf8")).toBe(sourceContent);
+    expect((await readFile(targetPath)).byteLength).toBeLessThan(
+      Buffer.byteLength(sourceContent) / 100,
+    );
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/compact/start",
+      { threadId: "temporary-fork" },
+      600_000,
+    );
+    expect(harness.bridge.request).not.toHaveBeenCalledWith(
+      "thread/compact/start",
+      { threadId: "thread" },
+      expect.anything(),
+    );
+    await expect(access(harness.bridge.lastDeletedThreadPath!)).rejects.toThrow();
+    await harness.app.close();
+  });
+
+  it("surfaces native compaction errors without falling back to an exact fork", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.failCompactionWith = new Error("fresh compaction failed");
     harness.bridge.threadTurns.set("thread", [
       {
         ...testTurn("selected-turn", "completed"),
@@ -2058,10 +2141,6 @@ describe("session forks", () => {
         items: [agentMessage("selected-answer", "Готовый ответ")],
       },
     ]);
-    const starts = harness.bridge.request.mock.calls.filter(
-      ([method]) => method === "thread/start",
-    ).length;
-
     expect(
       (
         await harness.app.inject({
@@ -2082,9 +2161,20 @@ describe("session forks", () => {
         "failed",
       );
     });
+    expect(harness.store.snapshot().forkOperations?.["unavailable-compressed"].error).toBe(
+      "fresh compaction failed",
+    );
     expect(
       harness.bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
-    ).toHaveLength(starts);
+    ).toHaveLength(0);
+    expect(
+      harness.bridge.request.mock.calls.filter(
+        ([method, params]) =>
+          method === "thread/fork" &&
+          (params as Record<string, unknown>).threadSource ===
+            "codexnest-fork:unavailable-compressed",
+      ),
+    ).toHaveLength(0);
     await harness.app.close();
   });
 
@@ -2266,6 +2356,81 @@ describe("session forks", () => {
     expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
       1,
     );
+    await restarted.app.close();
+  });
+
+  it("recovers a fresh compaction written before restart without compacting twice", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    harness.bridge.threadTurns.set("thread", [completedForkTurn()]);
+    await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload: {
+        operationId: "compressed-after-compaction",
+        lastTurnId: "selected-turn",
+        agentMessageId: "selected-answer",
+        mode: "compressed",
+      },
+    });
+    const temporaryPath = join(dirname(harness.store.path), "compacted-before-restart.jsonl");
+    const baseline = `${JSON.stringify({ type: "session_meta", payload: { id: "temp" } })}\n`;
+    await writeFile(
+      temporaryPath,
+      `${baseline}${JSON.stringify({
+        type: "compacted",
+        payload: {
+          message: "",
+          replacement_history: [
+            { type: "message", id: "recovered-summary", role: "user", content: [] },
+          ],
+        },
+      })}\n`,
+      "utf8",
+    );
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.["compressed-after-compaction"];
+      if (!operation) return;
+      operation.status = "reconciling";
+      operation.compressedPreparation = {
+        temporaryThreadId: "temporary-recovered",
+        rolloutPath: temporaryPath,
+        compactFromBytes: Buffer.byteLength(baseline),
+        phase: "compacting",
+        startedAt: Date.now(),
+        sequence: 1,
+      };
+    });
+    await harness.app.close();
+
+    const bridge = new SettingsBridge();
+    bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.managedThreads.push({
+      ...testThread("temporary-recovered"),
+      path: temporaryPath,
+      forkedFromId: "thread",
+      threadSource: "codexnest-fork-temp:compressed-after-compaction",
+    });
+    const restarted = await restartForkApp(harness.store, bridge, harness.threadTitles);
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.["compressed-after-compaction"].status).toBe(
+        "ready",
+      );
+    });
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/compact/start"),
+    ).toHaveLength(0);
+    expect(injectRequests(bridge)[0]?.[1]).toMatchObject({
+      items: [
+        expect.objectContaining({
+          id: "recovered-summary",
+          internal_chat_message_metadata_passthrough: {
+            codexnest_fork_operation_id: "compressed-after-compaction",
+          },
+        }),
+      ],
+    });
     await restarted.app.close();
   });
 
@@ -6374,6 +6539,12 @@ class SettingsBridge extends EventEmitter {
   timeoutInjectAfterWrite = false;
   nextForkTargetPath: string | null = null;
   threadReadPath: string | null = null;
+  freshCompactionItems: Record<string, unknown>[] = [
+    { type: "message", id: "fresh-summary", role: "user", content: [] },
+    { type: "compaction", id: "fresh-encrypted-summary", encrypted_content: "fresh-opaque" },
+  ];
+  failCompactionWith: Error | null = null;
+  lastDeletedThreadPath: string | null = null;
   parentTurnStartEntered: (() => void) | null = null;
   parentTurnStartGate: Promise<void> | null = null;
   rejectFullTurnReads = false;
@@ -6465,14 +6636,30 @@ class SettingsBridge extends EventEmitter {
       return { thread };
     }
     if (method === "thread/fork") {
+      const temporary = String(params.threadSource).startsWith("codexnest-fork-temp:");
+      let temporaryPath: string | null = null;
+      if (temporary) {
+        const directory = await mkdtemp(join(tmpdir(), "codexnest-api-compact-fork-"));
+        directories.push(directory);
+        temporaryPath = join(directory, "rollout.jsonl");
+        if (this.threadReadPath) await copyFile(this.threadReadPath, temporaryPath);
+        else {
+          await writeFile(
+            temporaryPath,
+            `${JSON.stringify({ type: "session_meta", payload: { id: "temporary" } })}\n`,
+            "utf8",
+          );
+        }
+      }
       const thread = {
-        ...testThread("fork"),
-        sessionId: "fork",
+        ...testThread(temporary ? "temporary-fork" : "fork"),
+        sessionId: temporary ? "temporary-fork" : "fork",
         forkedFromId: String(params.threadId),
         createdAt: 3,
         updatedAt: 4,
         recencyAt: 4,
         status: { type: "idle" as const },
+        path: temporaryPath,
         threadSource: typeof params.threadSource === "string" ? params.threadSource : null,
       };
       this.managedThreads.push(thread);
@@ -6481,6 +6668,31 @@ class SettingsBridge extends EventEmitter {
         throw new RpcTimeoutError("thread/fork", 600_000);
       }
       return { thread };
+    }
+    if (method === "thread/compact/start") {
+      if (this.failCompactionWith) throw this.failCompactionWith;
+      const thread = this.managedThreads.find((candidate) => candidate.id === params.threadId);
+      if (!thread?.path) throw new Error("temporary rollout is missing");
+      await appendFile(
+        thread.path,
+        `${JSON.stringify({
+          type: "compacted",
+          payload: { message: "", replacement_history: this.freshCompactionItems },
+        })}\n`,
+        "utf8",
+      );
+      this.emit("notification", {
+        method: "turn/completed",
+        params: {
+          threadId: thread.id,
+          turn: {
+            ...testTurn(`compact-${thread.id}`, "completed"),
+            itemsView: "full",
+            items: [{ type: "contextCompaction", id: `compaction-${thread.id}` }],
+          },
+        },
+      } satisfies ServerNotification);
+      return {};
     }
     if (method === "thread/resume") {
       const threadId = String(params.threadId);
@@ -6525,7 +6737,15 @@ class SettingsBridge extends EventEmitter {
       }
       return {};
     }
-    if (method === "thread/delete") return {};
+    if (method === "thread/delete") {
+      const index = this.managedThreads.findIndex((thread) => thread.id === params.threadId);
+      if (index >= 0) {
+        const [thread] = this.managedThreads.splice(index, 1);
+        this.lastDeletedThreadPath = thread?.path ?? null;
+        if (thread?.path) await rm(thread.path, { force: true });
+      }
+      return {};
+    }
     if (method === "thread/turns/list") {
       if (this.rejectFullTurnReads && params.itemsView === "full") {
         throw new RpcError(-32_000, "Rollout changed while reading turns");

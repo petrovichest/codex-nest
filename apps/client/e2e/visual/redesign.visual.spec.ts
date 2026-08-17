@@ -214,8 +214,9 @@ test.describe("CodexNest redesign visual contract", () => {
       });
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
       const dialog = page.getByRole("dialog", { name: "Создать ветку" });
-      await expect(dialog.getByRole("radio", { name: /^Полная история/u })).toBeChecked();
-      await expect(dialog.getByRole("radio", { name: /^Компактная/u })).toBeDisabled();
+      await expect(dialog.getByRole("radio", { name: /^Компактная/u })).toBeChecked();
+      await expect(dialog.getByRole("radio", { name: /^Компактная/u })).toBeEnabled();
+      await expect(dialog.getByText("рассчитается при создании")).toBeVisible();
       await expect(page).toHaveScreenshot("16-desktop-dark-fork-dialog-failure.png", {
         fullPage: true,
       });

@@ -488,6 +488,8 @@ export type ForkEstimateResponse = {
 
 export type ForkOperationStatus = "preparing" | "reconciling" | "ready" | "failed";
 
+export type ForkOperationStage = "preparing" | "copying" | "compacting" | "materializing";
+
 export type ForkOperationSummary = {
   id: string;
   sourceThreadId: string;
@@ -495,6 +497,7 @@ export type ForkOperationSummary = {
   agentMessageId: string;
   mode: ForkMode;
   status: ForkOperationStatus;
+  stage?: ForkOperationStage | null;
   title: string;
   createdAt: number;
   updatedAt: number;
