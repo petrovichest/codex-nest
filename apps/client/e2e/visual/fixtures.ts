@@ -451,6 +451,7 @@ export type VisualFixtureOptions = {
   forkLineage?: boolean;
   notificationPrompt?: boolean;
   theme: "light" | "dark";
+  voiceFailure?: boolean;
 };
 
 export async function installVisualFixture(
@@ -461,9 +462,28 @@ export async function installVisualFixture(
     forkLineage = false,
     notificationPrompt = false,
     theme,
+    voiceFailure = false,
   }: VisualFixtureOptions,
 ): Promise<void> {
-  const fixtureSnapshot = forkLineage ? forkSnapshot : snapshot;
+  const baseSnapshot = forkLineage ? forkSnapshot : snapshot;
+  const fixtureSnapshot: AppSnapshot = voiceFailure
+    ? {
+        ...baseSnapshot,
+        voiceTranscriptions: [
+          {
+            id: "voice-no-speech",
+            threadId: mainThread.id,
+            mode: "send",
+            status: "failed",
+            createdAt: FIXED_NOW - 30_000,
+            startedAt: FIXED_NOW - 29_000,
+            audioDurationMs: 10_680,
+            estimatedTotalSeconds: 8,
+            error: "No speech was detected in the recording",
+          },
+        ],
+      }
+    : baseSnapshot;
   await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
   await page.addInitScript(
     ({

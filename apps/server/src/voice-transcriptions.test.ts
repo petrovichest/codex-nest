@@ -152,6 +152,46 @@ describe("VoiceTranscriptionManager", () => {
     manager.stop();
   });
 
+  it("fails a no-speech recording immediately without scheduling another attempt", async () => {
+    const { store, directory } = await createStore("");
+    const transcribe = vi.fn(async () => {
+      throw new TranscriptionError("validation", "No speech was detected in the recording");
+    });
+    const manager = new VoiceTranscriptionManager({
+      store,
+      projection: projectionMock(),
+      transcription: { transcribe },
+      queue: queueMock(store),
+    });
+    await manager.start();
+    const job = await manager.accept({
+      threadId: "thread",
+      mode: "draft",
+      audio: Buffer.from("audio"),
+      contentType: "audio/webm",
+      audioDurationMs: 1_000,
+      estimatedTotalSeconds: null,
+      selectionStart: 0,
+      selectionEnd: 0,
+      expectedDraftUpdatedAt: null,
+      timingProfile: null,
+    });
+
+    await vi.waitFor(() =>
+      expect(store.snapshot().voiceTranscriptions?.thread).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        error: "No speech was detected in the recording",
+      }),
+    );
+    expect(store.snapshot().voiceTranscriptions?.thread?.nextAttemptAt).toBeUndefined();
+    expect(manager.active("thread")).toBe(false);
+    expect(transcribe).toHaveBeenCalledOnce();
+    await expect(
+      stat(join(directory, "state.json.voice-transcriptions", `${job.id}.webm`)),
+    ).resolves.toMatchObject({ size: 5 });
+  });
+
   it("recovers an interrupted transcription from disk after restart", async () => {
     const { store } = await createStore("");
     const never = new Promise<string>(() => undefined);

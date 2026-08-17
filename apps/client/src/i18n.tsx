@@ -853,6 +853,11 @@ export function localizeKnownServerText(
   value: string | null | undefined,
 ): string | null {
   if (!value) return null;
+  if (value === "No speech was detected in the recording") {
+    return language === "ru"
+      ? "В записи не обнаружена речь. Проверьте микрофон и запишите ещё раз."
+      : "No speech was detected. Check your microphone and record again.";
+  }
   if (language === "ru") {
     if (value === "The draft changed before voice upload") {
       return "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.";

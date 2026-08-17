@@ -361,6 +361,39 @@ test.describe("CodexNest redesign visual contract", () => {
       await expectA11yClean(page, "mobile Markdown artifact", ".artifact-viewer");
     }
   });
+
+  test("18 mobile dark voice failure remains actionable", async ({
+    browserName,
+    page,
+  }, testInfo) => {
+    test.skip(browserName !== "chromium", "The focused voice-failure audit is Chromium-only.");
+    await openVisualPage(page, "/threads/session-main", "dark", PHONE_VIEWPORT, {
+      voiceFailure: true,
+    });
+
+    const alert = page.getByRole("alert");
+    await expect(alert).toHaveText(
+      "В записи не обнаружена речь. Проверьте микрофон и запишите ещё раз.",
+    );
+    await expect(alert).toHaveCSS("border-top-width", "1px");
+    expect(
+      await alert.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      "voice failure fits without horizontal scrolling",
+    ).toBe(true);
+    const alertBox = await alert.boundingBox();
+    expect(alertBox, "voice failure must have a rendered box").not.toBeNull();
+    expect(alertBox!.x).toBeGreaterThanOrEqual(0);
+    expect(alertBox!.x + alertBox!.width).toBeLessThanOrEqual(PHONE_VIEWPORT.width);
+
+    const microphone = page.getByRole("button", { name: "Начать запись" });
+    await expect(microphone).toBeEnabled();
+    await assertCompactTouchTarget(microphone);
+    await expectA11yClean(page, "mobile voice failure", ".composer");
+    await page.screenshot({
+      path: testInfo.outputPath("mobile-dark-voice-failure.png"),
+      fullPage: true,
+    });
+  });
 });
 
 async function openVisualPage(
@@ -373,6 +406,7 @@ async function openVisualPage(
     forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
     forkLineage?: boolean;
     notificationPrompt?: boolean;
+    voiceFailure?: boolean;
   } = {},
 ): Promise<void> {
   await page.setViewportSize(viewport);

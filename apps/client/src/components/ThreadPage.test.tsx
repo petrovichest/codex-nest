@@ -4720,12 +4720,17 @@ describe("Activity", () => {
         startedAt: Date.now(),
         audioDurationMs: 2_000,
         estimatedTotalSeconds: null,
-        error: "STT failed",
+        error: "No speech was detected in the recording",
       },
     ];
     render(voiceThreadRoute());
 
-    expect(await screen.findByText("STT failed")).toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "В записи не обнаружена речь. Проверьте микрофон и запишите ещё раз.",
+    );
+    expect(alert).toHaveClass("voice-transcription-error");
+    expect(alert.querySelector("svg")).not.toBeNull();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveAttribute(
       "readonly",
     );

@@ -56,6 +56,15 @@ describe("interface localization", () => {
     );
   });
 
+  it("localizes a recording without detected speech", () => {
+    expect(localizeKnownServerText("ru", "No speech was detected in the recording")).toBe(
+      "В записи не обнаружена речь. Проверьте микрофон и запишите ещё раз.",
+    );
+    expect(localizeKnownServerText("en", "No speech was detected in the recording")).toBe(
+      "No speech was detected. Check your microphone and record again.",
+    );
+  });
+
   it("localizes reliable fork choices and pending states", () => {
     expect(translate("en", "Как перенести контекст?")).toBe("How should context be transferred?");
     expect(translate("en", "Сжатая")).toBe("Compressed");

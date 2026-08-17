@@ -198,6 +198,9 @@ export class TranscriptionService {
         },
       );
       if (!response.ok) {
+        if (provider === "local" && response.status === 422) {
+          throw new TranscriptionError("validation", "No speech was detected in the recording");
+        }
         throw new TranscriptionError(
           "failed",
           `${provider === "openai" ? "OpenAI" : "Local"} transcription failed (${response.status})`,

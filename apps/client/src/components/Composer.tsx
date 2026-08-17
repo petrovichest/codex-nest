@@ -364,6 +364,13 @@ export function Composer({
             : voiceUploadPending
               ? t("Отправляем запись — не закрывайте")
               : null));
+  const composerError =
+    localizeKnownServerText(language, error) ??
+    attachmentError ??
+    speechError ??
+    transcriptionError;
+  const voiceTranscriptionErrorVisible =
+    !error && !attachmentError && !speechError && Boolean(transcriptionError);
 
   useLayoutEffect(() => {
     const sessionChanged = draftSessionIdentityRef.current !== sessionIdentity;
@@ -1409,12 +1416,13 @@ export function Composer({
           </span>
         )}
       </div>
-      {(error || attachmentError || speechError || transcriptionError) && (
-        <div className="composer-error">
-          {localizeKnownServerText(language, error) ??
-            attachmentError ??
-            speechError ??
-            transcriptionError}
+      {composerError && (
+        <div
+          className={`composer-error${voiceTranscriptionErrorVisible ? " voice-transcription-error" : ""}`}
+          role="alert"
+        >
+          {voiceTranscriptionErrorVisible && <MicrophoneIcon />}
+          <span>{composerError}</span>
         </div>
       )}
     </form>

@@ -308,6 +308,31 @@ describe("TranscriptionService", () => {
       }),
     ).rejects.toMatchObject({ kind: "validation" });
   });
+
+  it("does not retry a local recording when the provider detects no speech", async () => {
+    const noSpeech = createService({
+      provider: "local",
+      localUrl: "http://127.0.0.1:8178/inference",
+      refineLocal: false,
+      fetch: vi.fn(async () => jsonResponse({ error: "No speech detected" }, 422)),
+    });
+
+    await expect(noSpeech.transcribe(Buffer.from("audio"), "audio/webm")).rejects.toMatchObject({
+      kind: "validation",
+      message: "No speech was detected in the recording",
+    });
+
+    const unavailable = createService({
+      provider: "local",
+      localUrl: "http://127.0.0.1:8178/inference",
+      refineLocal: false,
+      fetch: vi.fn(async () => jsonResponse({ error: "Unavailable" }, 500)),
+    });
+    await expect(unavailable.transcribe(Buffer.from("audio"), "audio/webm")).rejects.toMatchObject({
+      kind: "failed",
+      message: "Local transcription failed (500)",
+    });
+  });
 });
 
 function createService(
@@ -328,9 +353,9 @@ function createService(
   });
 }
 
-function jsonResponse(value: unknown): Response {
+function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
-    status: 200,
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }

@@ -3665,6 +3665,25 @@
   font-size: 12px;
 }
 
+.composer-error.voice-transcription-error {
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  line-height: 1.4;
+}
+
+.voice-transcription-error svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .team-session-upgrade {
   margin: 0 4px 8px;
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
