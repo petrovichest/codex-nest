@@ -41,6 +41,7 @@ import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
 import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
+import { forkMaterializationMarkerId } from "./fork-rollout";
 import { AppProjection } from "./projection";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
@@ -2035,7 +2036,7 @@ describe("session forks", () => {
         items: [
           {
             type: "message",
-            id: "fresh-summary",
+            id: forkMaterializationMarkerId("compressed-operation"),
             role: "user",
             content: [],
             internal_chat_message_metadata_passthrough: {
@@ -2353,8 +2354,8 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(bridge)).toHaveLength(1);
-    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
-      1,
+    expect(await readFile(targetPath, "utf8")).toContain(
+      forkMaterializationMarkerId("compressed-before-inject"),
     );
     await restarted.app.close();
   });
@@ -2424,7 +2425,7 @@ describe("session forks", () => {
     expect(injectRequests(bridge)[0]?.[1]).toMatchObject({
       items: [
         expect.objectContaining({
-          id: "recovered-summary",
+          id: forkMaterializationMarkerId("compressed-after-compaction"),
           internal_chat_message_metadata_passthrough: {
             codexnest_fork_operation_id: "compressed-after-compaction",
           },
@@ -2446,12 +2447,10 @@ describe("session forks", () => {
         type: "response_item",
         payload: {
           type: "message",
-          id: "summary",
+          id: forkMaterializationMarkerId("compressed-after-inject"),
           role: "user",
           content: [],
-          internal_chat_message_metadata_passthrough: {
-            codexnest_fork_operation_id: "compressed-after-inject",
-          },
+          internal_chat_message_metadata_passthrough: { turn_id: "injected" },
         },
       })}\n`,
       "utf8",
@@ -2491,8 +2490,8 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(bridge)).toHaveLength(0);
-    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
-      1,
+    expect(await readFile(targetPath, "utf8")).toContain(
+      forkMaterializationMarkerId("compressed-after-inject"),
     );
     await restarted.app.close();
   });
@@ -2526,8 +2525,8 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(harness.bridge)).toHaveLength(1);
-    expect((await readFile(targetPath, "utf8")).match(/codexnest_fork_operation_id/g)).toHaveLength(
-      1,
+    expect(await readFile(targetPath, "utf8")).toContain(
+      forkMaterializationMarkerId("compressed-response-loss"),
     );
     await harness.app.close();
   });

@@ -115,6 +115,7 @@ import {
 } from "./projects";
 import {
   analyzeForkRollout,
+  forkMaterializationMarkerId,
   freshCompressedForkEstimate,
   FORK_MATERIALIZATION_MARKER_KEY,
   hasForkMaterializationMarker,
@@ -1241,6 +1242,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const marked = structuredClone(items);
     const first = marked[0];
     if (!first) throw new ProjectValidationError("Compressed fork context is empty");
+    first.id = forkMaterializationMarkerId(operationId);
     const metadata = first.internal_chat_message_metadata_passthrough;
     first.internal_chat_message_metadata_passthrough = {
       ...(isRecord(metadata) ? metadata : {}),

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   analyzeForkRollout,
-  FORK_MATERIALIZATION_MARKER_KEY,
+  forkMaterializationMarkerId,
   hasForkMaterializationMarker,
   readFreshCompaction,
 } from "./fork-rollout";
@@ -118,10 +118,8 @@ describe("fork rollout analysis", () => {
   it("detects a deterministic compressed materialization marker while streaming", async () => {
     const path = await rollout([
       record("response_item", {
-        ...message("summary", "context"),
-        internal_chat_message_metadata_passthrough: {
-          [FORK_MATERIALIZATION_MARKER_KEY]: "operation",
-        },
+        ...message(forkMaterializationMarkerId("operation"), "context"),
+        internal_chat_message_metadata_passthrough: { turn_id: "injected" },
       }),
     ]);
 

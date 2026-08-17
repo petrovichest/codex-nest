@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -11,6 +12,11 @@ export interface ForkRolloutAnalysis {
 }
 
 export const FORK_MATERIALIZATION_MARKER_KEY = "codexnest_fork_operation_id";
+
+export function forkMaterializationMarkerId(operationId: string): string {
+  const digest = createHash("sha256").update(operationId, "utf8").digest("hex");
+  return `msg_codexnest_fork_${digest}`;
+}
 
 export function freshCompressedForkEstimate(): ForkModeEstimate {
   return available(null, { minSeconds: 60, maxSeconds: 600 });
@@ -209,10 +215,11 @@ export async function hasForkMaterializationMarker(
         isRecord(entry) &&
         entry.type === "response_item" &&
         isRecord(entry.payload) &&
-        isRecord(entry.payload.internal_chat_message_metadata_passthrough) &&
-        entry.payload.internal_chat_message_metadata_passthrough[
-          FORK_MATERIALIZATION_MARKER_KEY
-        ] === operationId
+        (entry.payload.id === forkMaterializationMarkerId(operationId) ||
+          (isRecord(entry.payload.internal_chat_message_metadata_passthrough) &&
+            entry.payload.internal_chat_message_metadata_passthrough[
+              FORK_MATERIALIZATION_MARKER_KEY
+            ] === operationId))
       ) {
         return true;
       }
