@@ -116,15 +116,28 @@ describe("fork rollout analysis", () => {
   });
 
   it("detects a deterministic compressed materialization marker while streaming", async () => {
+    const markerId = forkMaterializationMarkerId("operation");
+    expect(markerId).toBe(forkMaterializationMarkerId("operation"));
+    expect(markerId.length).toBeLessThanOrEqual(64);
     const path = await rollout([
       record("response_item", {
-        ...message(forkMaterializationMarkerId("operation"), "context"),
+        ...message(markerId, "context"),
         internal_chat_message_metadata_passthrough: { turn_id: "injected" },
       }),
     ]);
 
     await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);
     await expect(hasForkMaterializationMarker(path, "different")).resolves.toBe(false);
+  });
+
+  it("recognizes legacy hex materialization markers during recovery", async () => {
+    const legacyMarkerId =
+      "msg_codexnest_fork_" + "9bf5a24e4aa779981ac41f1a0f8713ec758e12df95fa51866869849c06e51175";
+    const path = await rollout([
+      record("response_item", message(legacyMarkerId, "legacy context")),
+    ]);
+
+    await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);
   });
 
   it("reads only a newly appended compaction replacement", async () => {

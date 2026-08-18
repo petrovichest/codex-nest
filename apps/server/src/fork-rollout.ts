@@ -14,6 +14,11 @@ export interface ForkRolloutAnalysis {
 export const FORK_MATERIALIZATION_MARKER_KEY = "codexnest_fork_operation_id";
 
 export function forkMaterializationMarkerId(operationId: string): string {
+  const digest = createHash("sha256").update(operationId, "utf8").digest("base64url");
+  return `msg_codexnest_fork_${digest}`;
+}
+
+function legacyForkMaterializationMarkerId(operationId: string): string {
   const digest = createHash("sha256").update(operationId, "utf8").digest("hex");
   return `msg_codexnest_fork_${digest}`;
 }
@@ -201,6 +206,8 @@ export async function hasForkMaterializationMarker(
   operationId: string,
 ): Promise<boolean | null> {
   if (!path) return null;
+  const markerId = forkMaterializationMarkerId(operationId);
+  const legacyMarkerId = legacyForkMaterializationMarkerId(operationId);
   const input = createReadStream(path, { encoding: "utf8" });
   const lines = createInterface({ input, crlfDelay: Infinity });
   try {
@@ -215,7 +222,8 @@ export async function hasForkMaterializationMarker(
         isRecord(entry) &&
         entry.type === "response_item" &&
         isRecord(entry.payload) &&
-        (entry.payload.id === forkMaterializationMarkerId(operationId) ||
+        (entry.payload.id === markerId ||
+          entry.payload.id === legacyMarkerId ||
           (isRecord(entry.payload.internal_chat_message_metadata_passthrough) &&
             entry.payload.internal_chat_message_metadata_passthrough[
               FORK_MATERIALIZATION_MARKER_KEY
