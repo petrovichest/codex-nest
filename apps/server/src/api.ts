@@ -115,10 +115,8 @@ import {
 } from "./projects";
 import {
   analyzeForkRollout,
-  forkMaterializationMarkerId,
   freshCompressedForkEstimate,
-  FORK_MATERIALIZATION_MARKER_KEY,
-  hasForkMaterializationMarker,
+  hasForkMaterializedCompaction,
   readFreshCompaction,
 } from "./fork-rollout";
 import { ThreadDraftConflictError, publicForkOperation, type AppProjection } from "./projection";
@@ -1235,23 +1233,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       Math.max(0, startedAt + FORK_ATTEMPT_SETTLE_MS - Date.now()),
     );
   };
-  const markedCompressedItems = (
-    operationId: string,
-    items: Record<string, unknown>[],
-  ): Record<string, unknown>[] => {
-    const marked = structuredClone(items);
-    const last = marked.at(-1);
+  const compressedForkCompactionId = (items: Record<string, unknown>[]): string => {
+    const last = items.at(-1);
     if (!last) throw new ProjectValidationError("Compressed fork context is empty");
     if (last.type !== "compaction") {
       throw new ProjectValidationError("Compressed fork context does not end with compaction");
     }
-    last.id = forkMaterializationMarkerId(operationId);
-    const metadata = last.internal_chat_message_metadata_passthrough;
-    last.internal_chat_message_metadata_passthrough = {
-      ...(isRecord(metadata) ? metadata : {}),
-      [FORK_MATERIALIZATION_MARKER_KEY]: operationId,
-    };
-    return marked;
+    if (typeof last.id !== "string" || !last.id) {
+      throw new ProjectValidationError("Compressed fork compaction has no item ID");
+    }
+    return last.id;
   };
   const materializeCompressedFork = async (
     operationId: string,
@@ -1261,26 +1252,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const operation = store.view().forkOperations?.[operationId];
     if (!operation) return false;
     if (operation.compressedMaterialization?.phase === "injected") return true;
-
-    if (operation.compressedMaterialization?.phase === "injecting") {
-      const startedAt = operation.compressedMaterialization.startedAt;
-      const marker = await hasForkMaterializationMarker(target.path, operationId);
-      if (marker) {
-        await updateForkOperation(operationId, (current) => {
-          current.compressedMaterialization = { phase: "injected", startedAt };
-        });
-        return true;
-      }
-      if (Date.now() < startedAt + FORK_ATTEMPT_SETTLE_MS) {
-        scheduleForkAttemptSettlement(operationId, startedAt);
-        return false;
-      }
-      if (marker === null) {
-        throw new ProjectValidationError(
-          "Compressed fork materialization could not be verified after restart",
-        );
-      }
-    }
+    const compactionId = compressedForkCompactionId(items);
 
     const startedAt = Date.now();
     await updateForkOperation(operationId, (current) => {
@@ -1290,12 +1262,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     try {
       await bridge.request(
         "thread/inject_items",
-        { threadId: target.id, items: markedCompressedItems(operationId, items) },
+        { threadId: target.id, items },
         FORK_RPC_TIMEOUT_MS,
       );
     } catch (error) {
-      const marker = await hasForkMaterializationMarker(target.path, operationId);
-      if (!marker) {
+      const materialized = await hasForkMaterializedCompaction(
+        target.path ?? (await resolveForkRolloutPath(target.id)),
+        compactionId,
+      );
+      if (!materialized) {
         if (error instanceof RpcTimeoutError) {
           scheduleForkAttemptSettlement(operationId, startedAt);
           return false;
@@ -1631,25 +1606,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           if (!operation) return;
         }
       }
-      if (target && operation.mode === "compressed") {
-        const materialization = operation.compressedMaterialization;
-        const marker =
-          materialization?.phase === "injected"
-            ? true
-            : await hasForkMaterializationMarker(target.path, operationId);
-        if (marker) {
-          if (materialization?.phase !== "injected") {
-            await updateForkOperation(operationId, (current) => {
-              current.compressedMaterialization = {
-                phase: "injected",
-                startedAt: materialization?.startedAt ?? Date.now(),
-              };
-            });
-          }
-          await deleteTemporaryFork(operationId);
-          await finishForkOperation(operationId, target, operation.agentText);
-          return;
-        }
+      if (
+        target &&
+        operation.mode === "compressed" &&
+        operation.compressedMaterialization?.phase === "injected"
+      ) {
+        await deleteTemporaryFork(operationId);
+        await finishForkOperation(operationId, target, operation.agentText);
+        return;
+      }
+      if (!target && operation.mode === "compressed" && operation.compressedMaterialization) {
+        await updateForkOperation(operationId, (current) => {
+          current.targetThreadId = null;
+          delete current.compressedMaterialization;
+        });
+        operation = store.view().forkOperations?.[operationId];
+        if (!operation) return;
       }
 
       const point = await validateForkPoint(
@@ -1732,6 +1704,43 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!compressedItems) return;
       operation = store.view().forkOperations?.[operationId];
       if (!operation) return;
+      if (target && operation.compressedMaterialization?.phase === "injecting") {
+        const materialization = operation.compressedMaterialization;
+        const materialized = await hasForkMaterializedCompaction(
+          target.path ?? (await resolveForkRolloutPath(target.id)),
+          compressedForkCompactionId(compressedItems),
+        );
+        if (materialized) {
+          await updateForkOperation(operationId, (current) => {
+            current.targetThreadId = target!.id;
+            current.compressedMaterialization = {
+              phase: "injected",
+              startedAt: materialization.startedAt,
+            };
+          });
+          await deleteTemporaryFork(operationId);
+          await finishForkOperation(operationId, target, operation.agentText);
+          return;
+        }
+        if (Date.now() < materialization.startedAt + FORK_ATTEMPT_SETTLE_MS) {
+          scheduleForkAttemptSettlement(operationId, materialization.startedAt);
+          return;
+        }
+        try {
+          await bridge.request("thread/delete", { threadId: target.id }, 30_000);
+        } catch (error) {
+          if (!isMissingThreadError(error)) throw error;
+        }
+        await projection.removeOrphanedThread(target.id);
+        await updateForkOperation(operationId, (current) => {
+          current.targetThreadId = null;
+          delete current.compressedMaterialization;
+          delete current.nativeAttempt;
+        });
+        target = null;
+        operation = store.view().forkOperations?.[operationId];
+        if (!operation) return;
+      }
       if (
         !target &&
         operation.nativeAttempt &&

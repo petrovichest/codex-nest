@@ -41,7 +41,6 @@ import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
 import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
-import { forkMaterializationMarkerId } from "./fork-rollout";
 import { AppProjection } from "./projection";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StateStore } from "./state/store";
@@ -2189,11 +2188,8 @@ describe("session forks", () => {
           },
           {
             type: "compaction",
-            id: forkMaterializationMarkerId("compressed-operation"),
+            id: "fresh-encrypted-summary",
             encrypted_content: "fresh-opaque",
-            internal_chat_message_metadata_passthrough: {
-              codexnest_fork_operation_id: "compressed-operation",
-            },
           },
         ],
       },
@@ -2457,7 +2453,7 @@ describe("session forks", () => {
     await restarted.app.close();
   });
 
-  it("retries compressed injection after a persisted crash before the RPC", async () => {
+  it("replaces an ambiguous compressed target before retrying injection", async () => {
     const harness = await createForkHarness();
     harness.bridge.state = "disconnected" as never;
     const sourcePath = join(dirname(harness.store.path), "compressed-source-before.jsonl");
@@ -2489,6 +2485,7 @@ describe("session forks", () => {
 
     const bridge = new SettingsBridge();
     bridge.threadTurns.set("thread", [completedForkTurn()]);
+    bridge.nextForkTargetPath = targetPath;
     bridge.managedThreads.push({
       ...testThread("compressed-target"),
       path: targetPath,
@@ -2501,9 +2498,13 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(bridge)).toHaveLength(1);
-    expect(await readFile(targetPath, "utf8")).toContain(
-      forkMaterializationMarkerId("compressed-before-inject"),
+    expect(bridge.request).toHaveBeenCalledWith(
+      "thread/delete",
+      { threadId: "compressed-target" },
+      30_000,
     );
+    expect(injectRequests(bridge)[0]?.[1]).toMatchObject({ threadId: "created" });
+    expect(await readFile(targetPath, "utf8")).toContain("fresh-encrypted-summary");
     await restarted.app.close();
   });
 
@@ -2588,10 +2589,8 @@ describe("session forks", () => {
         },
         expect.objectContaining({
           type: "compaction",
-          id: forkMaterializationMarkerId("compressed-after-compaction"),
-          internal_chat_message_metadata_passthrough: {
-            codexnest_fork_operation_id: "compressed-after-compaction",
-          },
+          id: "recovered-compaction",
+          encrypted_content: "recovered-opaque",
         }),
       ],
     });
@@ -2749,8 +2748,8 @@ describe("session forks", () => {
         type: "response_item",
         payload: {
           type: "compaction",
-          id: forkMaterializationMarkerId("compressed-after-inject"),
-          encrypted_content: "opaque",
+          id: "fresh-encrypted-summary",
+          encrypted_content: "fresh-opaque",
           internal_chat_message_metadata_passthrough: { turn_id: "injected" },
         },
       })}\n`,
@@ -2791,9 +2790,7 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(bridge)).toHaveLength(0);
-    expect(await readFile(targetPath, "utf8")).toContain(
-      forkMaterializationMarkerId("compressed-after-inject"),
-    );
+    expect(await readFile(targetPath, "utf8")).toContain("fresh-encrypted-summary");
     await restarted.app.close();
   });
 
@@ -2826,9 +2823,7 @@ describe("session forks", () => {
       );
     });
     expect(injectRequests(harness.bridge)).toHaveLength(1);
-    expect(await readFile(targetPath, "utf8")).toContain(
-      forkMaterializationMarkerId("compressed-response-loss"),
-    );
+    expect(await readFile(targetPath, "utf8")).toContain("fresh-encrypted-summary");
     await harness.app.close();
   });
 
