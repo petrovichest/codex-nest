@@ -119,9 +119,12 @@ describe("fork rollout analysis", () => {
     const markerId = forkMaterializationMarkerId("operation");
     expect(markerId).toBe(forkMaterializationMarkerId("operation"));
     expect(markerId.length).toBeLessThanOrEqual(64);
+    expect(markerId).toMatch(/^cmp_/u);
     const path = await rollout([
       record("response_item", {
-        ...message(markerId, "context"),
+        type: "compaction",
+        id: markerId,
+        encrypted_content: "opaque",
         internal_chat_message_metadata_passthrough: { turn_id: "injected" },
       }),
     ]);
@@ -135,6 +138,19 @@ describe("fork rollout analysis", () => {
       "msg_codexnest_fork_" + "9bf5a24e4aa779981ac41f1a0f8713ec758e12df95fa51866869849c06e51175";
     const path = await rollout([
       record("response_item", message(legacyMarkerId, "legacy context")),
+    ]);
+
+    await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);
+  });
+
+  it("recognizes the previous base64url marker during recovery", async () => {
+    const previousMarkerId = "msg_codexnest_fork_" + "m_WiTkqneZgaxB8aD4cT7HWOEt-V-lGGaGmEnAblEXU";
+    const path = await rollout([
+      record("response_item", {
+        type: "compaction",
+        id: previousMarkerId,
+        encrypted_content: "opaque",
+      }),
     ]);
 
     await expect(hasForkMaterializationMarker(path, "operation")).resolves.toBe(true);

@@ -1242,6 +1242,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const marked = structuredClone(items);
     const last = marked.at(-1);
     if (!last) throw new ProjectValidationError("Compressed fork context is empty");
+    if (last.type !== "compaction") {
+      throw new ProjectValidationError("Compressed fork context does not end with compaction");
+    }
     last.id = forkMaterializationMarkerId(operationId);
     const metadata = last.internal_chat_message_metadata_passthrough;
     last.internal_chat_message_metadata_passthrough = {

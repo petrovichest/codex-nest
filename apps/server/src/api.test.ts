@@ -2532,6 +2532,11 @@ describe("session forks", () => {
           message: "",
           replacement_history: [
             { type: "message", id: "recovered-summary", role: "user", content: [] },
+            {
+              type: "compaction",
+              id: "recovered-compaction",
+              encrypted_content: "recovered-opaque",
+            },
           ],
         },
       })}\n`,
@@ -2575,7 +2580,14 @@ describe("session forks", () => {
     ).toHaveLength(0);
     expect(injectRequests(bridge)[0]?.[1]).toMatchObject({
       items: [
+        {
+          type: "message",
+          id: "recovered-summary",
+          role: "user",
+          content: [],
+        },
         expect.objectContaining({
+          type: "compaction",
           id: forkMaterializationMarkerId("compressed-after-compaction"),
           internal_chat_message_metadata_passthrough: {
             codexnest_fork_operation_id: "compressed-after-compaction",
@@ -2736,10 +2748,9 @@ describe("session forks", () => {
       `${JSON.stringify({
         type: "response_item",
         payload: {
-          type: "message",
+          type: "compaction",
           id: forkMaterializationMarkerId("compressed-after-inject"),
-          role: "user",
-          content: [],
+          encrypted_content: "opaque",
           internal_chat_message_metadata_passthrough: { turn_id: "injected" },
         },
       })}\n`,
