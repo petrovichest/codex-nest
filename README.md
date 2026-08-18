@@ -184,10 +184,23 @@ npm test
 npm run build
 ```
 
-The real app-server smoke test is opt-in:
+The real app-server integration suite is opt-in. It contacts the configured model provider,
+creates and deletes temporary sessions, and verifies both the protocol smoke path and a
+context-aware turn after unchanged native compaction is injected into a clean thread:
 
 ```bash
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
+```
+
+To additionally exercise the full large-session acceptance path, set the separate gate and source
+path. The test first makes an isolated snapshot, verifies that snapshot's size, mtime, and inode
+remain unchanged, and deletes only the snapshot and newly created test threads:
+
+```bash
+RUN_CODEX_INTEGRATION=1 \
+RUN_CODEX_COMPACTION_ACCEPTANCE=1 \
+CODEXNEST_COMPACTION_SOURCE_PATH=/absolute/path/to/rollout.jsonl \
+npm run test:integration -w @codexnest/server
 ```
 
 Build the load-unpacked directory and deterministic Chrome ZIP with:

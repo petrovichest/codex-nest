@@ -188,10 +188,23 @@ npm test
 npm run build
 ```
 
-Реальный smoke test app-server запускается только явно:
+Реальный integration-набор app-server запускается только явно. Он обращается к настроенному
+провайдеру модели, создаёт и удаляет временные сессии и проверяет как протокольный smoke path,
+так и осмысленный следующий ход после переноса неизменённой нативной компактизации в чистый тред:
 
 ```bash
 RUN_CODEX_INTEGRATION=1 npm run test:integration -w @codexnest/server
+```
+
+Чтобы дополнительно проверить полный сценарий на большой существующей сессии, укажите отдельный
+флаг и путь к rollout. Тест сначала делает изолированный снимок, проверяет неизменность его размера,
+mtime и inode, а затем удаляет только снимок и созданные им новые треды:
+
+```bash
+RUN_CODEX_INTEGRATION=1 \
+RUN_CODEX_COMPACTION_ACCEPTANCE=1 \
+CODEXNEST_COMPACTION_SOURCE_PATH=/absolute/path/to/rollout.jsonl \
+npm run test:integration -w @codexnest/server
 ```
 
 Собрать папку для load-unpacked и детерминированный Chrome ZIP:

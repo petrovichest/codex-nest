@@ -2218,6 +2218,10 @@ describe("session forks", () => {
 
   it("leaves the source untouched and removes the full temporary history", async () => {
     const harness = await createForkHarness();
+    harness.bridge.freshCompactionItems = [
+      { type: "message", id: "fresh-summary", role: "user", content: [] },
+      { type: "compaction", encrypted_content: "fresh-opaque" },
+    ];
     const directory = await mkdtemp(join(tmpdir(), "codexnest-compact-size-test-"));
     directories.push(directory);
     const sourcePath = join(directory, "source.jsonl");
@@ -2453,12 +2457,22 @@ describe("session forks", () => {
     await restarted.app.close();
   });
 
-  it("replaces an ambiguous compressed target before retrying injection", async () => {
+  it("replaces a partially injected compressed target before retrying injection", async () => {
     const harness = await createForkHarness();
     harness.bridge.state = "disconnected" as never;
     const sourcePath = join(dirname(harness.store.path), "compressed-source-before.jsonl");
     const targetPath = join(dirname(harness.store.path), "compressed-target-before.jsonl");
-    await Promise.all([writeSafeForkRollout(sourcePath), writeFile(targetPath, "", "utf8")]);
+    await Promise.all([
+      writeSafeForkRollout(sourcePath),
+      writeFile(
+        targetPath,
+        `${JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", id: "fresh-summary", role: "user", content: [] },
+        })}\n`,
+        "utf8",
+      ),
+    ]);
     harness.projection.upsertThread({ ...testThread(), path: sourcePath });
     await harness.app.inject({
       method: "POST",

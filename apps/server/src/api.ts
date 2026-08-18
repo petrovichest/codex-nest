@@ -1233,16 +1233,24 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       Math.max(0, startedAt + FORK_ATTEMPT_SETTLE_MS - Date.now()),
     );
   };
-  const compressedForkCompactionId = (items: Record<string, unknown>[]): string => {
+  const compressedForkCompaction = (
+    items: Record<string, unknown>[],
+  ): { id: string | null; encryptedContent: string } => {
     const last = items.at(-1);
     if (!last) throw new ProjectValidationError("Compressed fork context is empty");
     if (last.type !== "compaction") {
       throw new ProjectValidationError("Compressed fork context does not end with compaction");
     }
-    if (typeof last.id !== "string" || !last.id) {
-      throw new ProjectValidationError("Compressed fork compaction has no item ID");
+    if (last.id !== undefined && (typeof last.id !== "string" || !last.id)) {
+      throw new ProjectValidationError("Compressed fork compaction has an invalid item ID");
     }
-    return last.id;
+    if (typeof last.encrypted_content !== "string") {
+      throw new ProjectValidationError("Compressed fork compaction has no encrypted content");
+    }
+    return {
+      id: typeof last.id === "string" ? last.id : null,
+      encryptedContent: last.encrypted_content,
+    };
   };
   const materializeCompressedFork = async (
     operationId: string,
@@ -1252,7 +1260,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const operation = store.view().forkOperations?.[operationId];
     if (!operation) return false;
     if (operation.compressedMaterialization?.phase === "injected") return true;
-    const compactionId = compressedForkCompactionId(items);
+    const compaction = compressedForkCompaction(items);
 
     const startedAt = Date.now();
     await updateForkOperation(operationId, (current) => {
@@ -1268,7 +1276,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     } catch (error) {
       const materialized = await hasForkMaterializedCompaction(
         target.path ?? (await resolveForkRolloutPath(target.id)),
-        compactionId,
+        compaction,
       );
       if (!materialized) {
         if (error instanceof RpcTimeoutError) {
@@ -1708,7 +1716,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const materialization = operation.compressedMaterialization;
         const materialized = await hasForkMaterializedCompaction(
           target.path ?? (await resolveForkRolloutPath(target.id)),
-          compressedForkCompactionId(compressedItems),
+          compressedForkCompaction(compressedItems),
         );
         if (materialized) {
           await updateForkOperation(operationId, (current) => {

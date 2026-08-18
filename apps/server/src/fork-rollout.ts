@@ -190,7 +190,7 @@ export async function analyzeForkRollout(
 
 export async function hasForkMaterializedCompaction(
   path: string | null,
-  compactionId: string,
+  compaction: { id: string | null; encryptedContent: string },
 ): Promise<boolean | null> {
   if (!path) return null;
   const input = createReadStream(path, { encoding: "utf8" });
@@ -208,7 +208,8 @@ export async function hasForkMaterializedCompaction(
         entry.type === "response_item" &&
         isRecord(entry.payload) &&
         entry.payload.type === "compaction" &&
-        entry.payload.id === compactionId
+        (typeof entry.payload.id === "string" ? entry.payload.id : null) === compaction.id &&
+        entry.payload.encrypted_content === compaction.encryptedContent
       ) {
         return true;
       }

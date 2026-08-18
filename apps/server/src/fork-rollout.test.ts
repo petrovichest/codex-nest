@@ -114,7 +114,7 @@ describe("fork rollout analysis", () => {
     expect(analysis.estimate.exact.available).toBe(true);
   });
 
-  it("detects the original compact item after materialization", async () => {
+  it("detects only the original compact item and ciphertext after materialization", async () => {
     const path = await rollout([
       record("response_item", {
         type: "compaction",
@@ -122,10 +122,30 @@ describe("fork rollout analysis", () => {
         encrypted_content: "opaque",
         internal_chat_message_metadata_passthrough: { turn_id: "injected" },
       }),
+      record("response_item", {
+        type: "compaction",
+        encrypted_content: "idless-opaque",
+      }),
     ]);
 
-    await expect(hasForkMaterializedCompaction(path, "cmp_original")).resolves.toBe(true);
-    await expect(hasForkMaterializedCompaction(path, "cmp_different")).resolves.toBe(false);
+    await expect(
+      hasForkMaterializedCompaction(path, {
+        id: "cmp_original",
+        encryptedContent: "opaque",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      hasForkMaterializedCompaction(path, {
+        id: "cmp_original",
+        encryptedContent: "different",
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      hasForkMaterializedCompaction(path, {
+        id: null,
+        encryptedContent: "idless-opaque",
+      }),
+    ).resolves.toBe(true);
   });
 
   it("reads only a newly appended compaction replacement", async () => {
