@@ -368,6 +368,14 @@ export class AppProjection extends EventEmitter {
       }
     }
     await this.restoreActiveTurnFromPage(cached, turns);
+    if (
+      page.nextCursor === null &&
+      cached.currentTurnId &&
+      cached.currentTurnId !== syncPoint.anchorTurnId &&
+      !page.turns.some((turn) => turn.id === cached.currentTurnId)
+    ) {
+      return this.resetThreadChanges(id);
+    }
 
     const state = this.store.view();
     let nextSyncPoint: ThreadSyncPoint | null = null;

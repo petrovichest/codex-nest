@@ -840,6 +840,185 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("lets authoritative recovery supersede an in-flight stale delta", async () => {
+    const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+    const running = {
+      ...completed,
+      state: "running" as const,
+      currentTurnId: "implementation-turn",
+      updatedAt: 4,
+    };
+    const planTurn: ThreadDetail["turns"][number] = {
+      id: "plan-turn",
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+      durationMs: 1,
+      progress: {
+        startedAt: 1,
+        explanation: null,
+        steps: [],
+        filesChanged: 0,
+        additions: 0,
+        deletions: 0,
+      },
+      items: [
+        {
+          type: "plan",
+          id: "plan",
+          status: "completed",
+          text: "Одобренный план",
+          images: [],
+          timestamp: 2,
+          phase: null,
+        },
+      ],
+      itemsLoaded: false,
+    };
+    const staleDetail: ThreadDetail = {
+      summary: completed,
+      turns: [planTurn],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      syncPoint: {
+        cursor: "plan-cursor",
+        anchorTurnId: "plan-turn",
+        anchorRevision: "plan-revision",
+      },
+    };
+    const canonicalDetail: ThreadDetail = {
+      ...staleDetail,
+      summary: running,
+      turns: [
+        planTurn,
+        {
+          id: "implementation-turn",
+          status: "inProgress",
+          startedAt: 4,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 4,
+            explanation: "Реализация",
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "working",
+              status: "inProgress",
+              text: "Работа продолжается",
+              images: [],
+              timestamp: 4,
+              phase: "commentary",
+            },
+          ],
+          itemsLoaded: false,
+        },
+      ],
+      syncPoint: {
+        cursor: "implementation-cursor",
+        anchorTurnId: "implementation-turn",
+        anchorRevision: "implementation-revision",
+      },
+    };
+    let resolveChanges!: (response: Response) => void;
+    let resolveCanonical!: (response: Response) => void;
+    const changesResponse = new Promise<Response>((resolve) => {
+      resolveChanges = resolve;
+    });
+    const canonicalResponse = new Promise<Response>((resolve) => {
+      resolveCanonical = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = input instanceof URL ? input : new URL(String(input));
+      return url.pathname.endsWith("/changes") ? changesResponse : canonicalResponse;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refreshIncremental!: () => Promise<ThreadDetail>;
+    let refreshAuthoritative!: () => Promise<ThreadDetail>;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, refreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: staleDetail, page: "latest" });
+      }, [dispatch]);
+      refreshIncremental = () => refreshDetail("thread", { force: true });
+      refreshAuthoritative = () => refreshDetail("thread", { authoritative: true });
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : "Ожидание"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [completed]) });
+    });
+    expect(await screen.findByText("Одобренный план")).toBeInTheDocument();
+
+    let incremental!: Promise<ThreadDetail>;
+    act(() => {
+      incremental = refreshIncremental();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      socket.receive({
+        type: "event",
+        sequence: 2,
+        event: { type: "thread.upserted", thread: running },
+      });
+    });
+
+    let authoritative!: Promise<ThreadDetail>;
+    act(() => {
+      authoritative = refreshAuthoritative();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "https://codexnest.example/api/v1/threads/thread",
+    );
+
+    await act(async () => {
+      resolveCanonical(new Response(JSON.stringify(canonicalDetail), { status: 200 }));
+      await authoritative;
+    });
+    expect(screen.getByText("Работа продолжается")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveChanges(
+        new Response(
+          JSON.stringify({
+            summary: completed,
+            turns: [],
+            queuedMessages: [],
+            draft: null,
+            continuationCursor: null,
+            syncPoint: staleDetail.syncPoint,
+            resetLatest: false,
+            olderTurnsCursor: null,
+          }),
+          { status: 200 },
+        ),
+      );
+      await incremental;
+    });
+    expect(screen.getByText("Работа продолжается")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    view.unmount();
+  });
+
   it("falls back to an authoritative page when a cached delta cursor fails", async () => {
     const staleSummary = { ...summary, state: "completed" as const, updatedAt: 3 };
     const staleDetail: ThreadDetail = {

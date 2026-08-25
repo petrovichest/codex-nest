@@ -4345,14 +4345,39 @@ describe("Activity", () => {
     }
   });
 
-  it("shows a fallback working row and refreshes only when turn details disagree", async () => {
+  it("forces an authoritative refresh only when turn details disagree", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "missing-turn" };
-    const context = mockThreadConnection(api, running);
+    const context = mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "plan-turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "plan",
+              id: "plan",
+              status: "completed",
+              text: "Одобренный план",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
     const view = renderThread();
 
     expect(screen.getByText("Codex работает")).toBeInTheDocument();
-    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(context.refreshDetail).toHaveBeenCalledWith("thread", { authoritative: true }),
+    );
+    expect(context.forceRefreshDetail).not.toHaveBeenCalled();
 
     context.state.snapshot.threads = [{ ...running, state: "completed", currentTurnId: null }];
     context.state.details.thread = {
@@ -4372,6 +4397,20 @@ describe("Activity", () => {
     };
     view.rerender(threadRoute());
     expect(screen.queryByText(/Codex работает/)).toBeNull();
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(3));
+
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [
+        {
+          ...context.state.details.thread.turns[0]!,
+          status: "completed",
+          completedAt: Date.now(),
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+    expect(context.refreshDetail).toHaveBeenCalledTimes(3);
   });
 
   it("opens a loaded conversation at the bottom", () => {

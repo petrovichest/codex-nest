@@ -3481,6 +3481,59 @@ describe("AppProjection", () => {
     );
   });
 
+  it("resets incremental history when the current turn changes during the read", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const plan = testTurn("plan", "completed");
+    const implementation = testTurn("implementation", "inProgress");
+    let fullReads = 0;
+    let releaseIncremental!: () => void;
+    let markIncrementalStarted!: () => void;
+    const incrementalStarted = new Promise<void>((resolve) => {
+      markIncrementalStarted = resolve;
+    });
+    const incrementalGate = new Promise<void>((resolve) => {
+      releaseIncremental = resolve;
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      if (params.sortDirection === "asc") {
+        markIncrementalStarted();
+        await incrementalGate;
+        return { data: [plan], nextCursor: null, backwardsCursor: null };
+      }
+      fullReads += 1;
+      return {
+        data: fullReads === 1 ? [plan] : [implementation, plan],
+        nextCursor: null,
+        backwardsCursor: fullReads === 1 ? "plan-cursor" : "implementation-cursor",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    const initial = await projection.readThread("one");
+
+    const pending = projection.readThreadChanges("one", initial.syncPoint!);
+    await incrementalStarted;
+    await projection.setCurrentTurn("one", "implementation");
+    releaseIncremental();
+    const changes = await pending;
+
+    expect(changes).toMatchObject({
+      resetLatest: true,
+      summary: { currentTurnId: "implementation", state: "running" },
+    });
+    expect(changes.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
+    expect(fullReads).toBe(2);
+  });
+
   it("falls back to a full page when the incremental turn read returns an RPC error", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

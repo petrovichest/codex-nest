@@ -1978,7 +1978,7 @@ export function ThreadPage({
     const key = `${threadId}:${currentTurnId ?? "idle"}:${staleTurn ? "stale" : "missing"}`;
     if (detailReconcileKey.current === key) return;
     detailReconcileKey.current = key;
-    void refreshDetail(threadId, { force: true }).catch(() => {
+    void refreshDetail(threadId, { authoritative: true }).catch(() => {
       detailReconcileKey.current = null;
     });
   }, [detail, refreshDetail, summary?.currentTurnId, threadId]);

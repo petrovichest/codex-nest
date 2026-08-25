@@ -353,15 +353,23 @@ export function ConnectionProvider({
 
   const readDetail = useCallback(
     (threadId: string, cursor?: string, options: DetailReadOptions = {}) => {
-      const key = JSON.stringify([threadId, cursor ?? null]);
+      const versionKey = JSON.stringify([threadId, cursor ?? null]);
+      const authoritativeKey = JSON.stringify([threadId, cursor ?? null, "authoritative"]);
+      const incrementalKey = JSON.stringify([threadId, cursor ?? null, "incremental"]);
+      if (!options.authoritative) {
+        const authoritative = detailRequests.current.get(authoritativeKey);
+        if (authoritative) return authoritative;
+      }
+      const key = options.authoritative ? authoritativeKey : incrementalKey;
       const current = detailRequests.current.get(key);
       if (current) return current;
-      const version = (detailRequestVersions.current.get(key) ?? 0) + 1;
-      detailRequestVersions.current.set(key, version);
+      if (options.authoritative) detailRequests.current.delete(incrementalKey);
+      const version = (detailRequestVersions.current.get(versionKey) ?? 0) + 1;
+      detailRequestVersions.current.set(versionKey, version);
       const targetGeneration = generationRef.current;
       const targetSequence = appliedThreadSequences.current.get(threadId) ?? null;
       const canApply = () =>
-        detailRequestVersions.current.get(key) === version &&
+        detailRequestVersions.current.get(versionKey) === version &&
         generationRef.current === targetGeneration;
       const liveAdvanced = () =>
         (appliedThreadSequences.current.get(threadId) ?? null) !== targetSequence;
@@ -437,7 +445,16 @@ export function ConnectionProvider({
               const rollsBackLiveTurn = wouldRollbackLive(merged);
               const preserveLive = liveAdvanced() || rollsBackLiveTurn;
               const summary = preferredSummary(merged.summary, preserveLive);
-              if (threadDetailNeedsRecovery(merged, summary) && !rollsBackLiveTurn) {
+              const currentDetail = stateRef.current.details[threadId];
+              const canPreserveLiveTurn = Boolean(
+                currentDetail && !threadDetailNeedsRecovery(currentDetail, summary),
+              );
+              if (!canApply()) {
+                detail = merged;
+              } else if (
+                threadDetailNeedsRecovery(merged, summary) &&
+                (!rollsBackLiveTurn || !canPreserveLiveTurn)
+              ) {
                 detail = await authoritativeLatest();
               } else {
                 if (canApply()) {
@@ -470,8 +487,11 @@ export function ConnectionProvider({
               acceptedSummary ??
               stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
               detail.summary;
-            if (liveAdvanced()) clearDetailRetry(threadId);
-            else if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
+            const currentDetail = stateRef.current.details[threadId];
+            const needsRecovery =
+              threadDetailNeedsRecovery(detail, summary) &&
+              (!currentDetail || threadDetailNeedsRecovery(currentDetail, summary));
+            if (needsRecovery) scheduleDetailRetry(threadId);
             else clearDetailRetry(threadId);
           }
           return detail;
