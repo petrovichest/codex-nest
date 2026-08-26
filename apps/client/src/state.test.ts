@@ -909,6 +909,72 @@ describe("clientReducer", () => {
     expect(state.details.one?.olderTurnsCursor).toBe("page-3");
   });
 
+  it("treats an older page as history-only and preserves latest thread metadata", () => {
+    const currentSummary = { ...baseThread, title: "Актуальная сессия", updatedAt: 10 };
+    const currentDraft = {
+      input: "Актуальный черновик",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 10,
+    };
+    const currentQueue = {
+      id: "current-queue",
+      threadId: "one",
+      text: "Актуальная очередь",
+      createdAt: 10,
+      status: "queued" as const,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "latest",
+      detail: {
+        summary: currentSummary,
+        turns: [turn("newer")],
+        queuedMessages: [currentQueue],
+        olderTurnsCursor: "page-2",
+        draft: currentDraft,
+        syncPoint: {
+          cursor: "current-sync",
+          anchorTurnId: "newer",
+          anchorRevision: "current-revision",
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      page: "older",
+      detail: {
+        summary: { ...baseThread, title: "Устаревшая сессия", updatedAt: 1 },
+        turns: [turn("older")],
+        queuedMessages: [],
+        olderTurnsCursor: "page-3",
+        draft: {
+          input: "Устаревший черновик",
+          images: [],
+          goalMode: false,
+          annotations: [],
+          updatedAt: 1,
+        },
+        syncPoint: {
+          cursor: "stale-sync",
+          anchorTurnId: "older",
+          anchorRevision: "stale-revision",
+        },
+      },
+    });
+
+    expect(state.details.one).toMatchObject({
+      summary: currentSummary,
+      queuedMessages: [currentQueue],
+      draft: currentDraft,
+      syncPoint: { cursor: "current-sync" },
+      olderTurnsCursor: "page-3",
+    });
+    expect(state.details.one?.turns.map((item) => item.id)).toEqual(["older", "newer"]);
+  });
+
   it("replaces inherited history when a subagent detail refreshes", () => {
     const subagent: ThreadSummary = {
       ...baseThread,

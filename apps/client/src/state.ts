@@ -581,22 +581,24 @@ function applyDetail(
             return existing ? mergeTurn(existing, turn, preserveLive) : turn;
           }),
         }
-      : {
-          ...detail,
-          summary: liveSummary ?? detail.summary,
-          turns: subagent
-            ? page === "older"
-              ? current.turns
-              : detail.turns
-            : page === "older"
-              ? mergeTurns(detail.turns, current.turns, preserveLive)
-              : mergeTurns(current.turns, detail.turns, preserveLive),
-          olderTurnsCursor: subagent
-            ? null
-            : page === "latest" && expanded
-              ? current.olderTurnsCursor
-              : detail.olderTurnsCursor,
-        }
+      : page === "older"
+        ? subagent
+          ? { ...current, olderTurnsCursor: null }
+          : {
+              ...current,
+              turns: mergeTurns(detail.turns, current.turns, preserveLive),
+              olderTurnsCursor: detail.olderTurnsCursor,
+            }
+        : {
+            ...detail,
+            summary: liveSummary ?? detail.summary,
+            turns: subagent ? detail.turns : mergeTurns(current.turns, detail.turns, preserveLive),
+            olderTurnsCursor: subagent
+              ? null
+              : expanded
+                ? current.olderTurnsCursor
+                : detail.olderTurnsCursor,
+          }
     : subagent
       ? { ...detail, olderTurnsCursor: null }
       : detail;

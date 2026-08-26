@@ -148,9 +148,11 @@ export function ConnectionProvider({
   const receivedStreamSnapshot = useRef(false);
   const appliedSequence = useRef<number | null>(null);
   const appliedThreadSequences = useRef(new Map<string, number>());
+  const appliedThreadEventSequences = useRef(new Map<string, number>());
   const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
   const detailRequestVersions = useRef(new Map<string, number>());
+  const detailResetEpochs = useRef(new Map<string, number>());
   const turnItemRequests = useRef(new Map<string, Promise<void>>());
   const detailReader = useRef<DetailReader | null>(null);
   const detailRetryAttempts = useRef(new Map<string, number>());
@@ -297,7 +299,9 @@ export function ConnectionProvider({
     const next = generationRef.current + 1;
     generationRef.current = next;
     detailRequests.current.clear();
+    detailResetEpochs.current.clear();
     turnItemRequests.current.clear();
+    appliedThreadEventSequences.current.clear();
     setGeneration(next);
     return next;
   }, []);
@@ -311,6 +315,7 @@ export function ConnectionProvider({
       appliedThreadSequences.current = new Map(
         snapshot.threads.map((thread) => [thread.id, snapshot.sequence]),
       );
+      appliedThreadEventSequences.current.clear();
       syncedSnapshotFloor.current = {
         generation: targetGeneration,
         sequence: snapshot.sequence,
@@ -375,10 +380,18 @@ export function ConnectionProvider({
       const version = (detailRequestVersions.current.get(versionKey) ?? 0) + 1;
       detailRequestVersions.current.set(versionKey, version);
       const targetGeneration = generationRef.current;
+      const targetResetEpoch = detailResetEpochs.current.get(threadId) ?? 0;
       const targetSequence = appliedThreadSequences.current.get(threadId) ?? null;
-      const canApply = () =>
+      const canApplyRequest = () =>
         detailRequestVersions.current.get(versionKey) === version &&
         generationRef.current === targetGeneration;
+      const canApply = () =>
+        canApplyRequest() &&
+        (cursor === undefined ||
+          (detailResetEpochs.current.get(threadId) ?? 0) === targetResetEpoch);
+      const advanceResetEpoch = () => {
+        detailResetEpochs.current.set(threadId, (detailResetEpochs.current.get(threadId) ?? 0) + 1);
+      };
       const liveAdvanced = () =>
         (appliedThreadSequences.current.get(threadId) ?? null) !== targetSequence;
       const wouldRollbackLive = (incoming: ThreadDetail) =>
@@ -408,17 +421,61 @@ export function ConnectionProvider({
           const { snapshot, detail } = await api.refreshThread(threadId);
           if (canApply()) {
             const preserveLive = liveAdvanced() || wouldRollbackLive(detail);
-            if (acceptSyncedSnapshot(snapshot, targetGeneration)) {
-              acceptedSummary = preferredSummary(detail.summary, preserveLive);
+            const snapshotAccepted = acceptSyncedSnapshot(snapshot, targetGeneration);
+            const appliedThreadEventSequence = appliedThreadEventSequences.current.get(threadId);
+            const currentSummary =
+              stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
+              detail.summary;
+            const currentDetail = stateRef.current.details[threadId];
+            const snapshotSummary =
+              snapshot.threads.find((thread) => thread.id === threadId) ?? detail.summary;
+            const snapshotCoversCurrentSummary =
+              snapshotSummary.updatedAt > currentSummary.updatedAt ||
+              (snapshotSummary.updatedAt === currentSummary.updatedAt &&
+                snapshotSummary.currentTurnId === currentSummary.currentTurnId &&
+                snapshotSummary.state === currentSummary.state);
+            const repairsCurrentDetail =
+              (!currentDetail || threadDetailNeedsRecovery(currentDetail, currentSummary)) &&
+              !threadDetailNeedsRecovery(detail, currentSummary);
+            if (
+              snapshotAccepted ||
+              ((appliedThreadEventSequence === undefined ||
+                appliedThreadEventSequence <= snapshot.sequence) &&
+                snapshotCoversCurrentSummary) ||
+              repairsCurrentDetail
+            ) {
+              if (!snapshotAccepted) {
+                appliedThreadSequences.current.set(
+                  threadId,
+                  Math.max(
+                    appliedThreadSequences.current.get(threadId) ?? snapshot.sequence,
+                    snapshot.sequence,
+                  ),
+                );
+                if (
+                  appliedThreadEventSequence !== undefined &&
+                  appliedThreadEventSequence <= snapshot.sequence
+                ) {
+                  appliedThreadEventSequences.current.delete(threadId);
+                }
+                acceptedSummary = acceptLatestSummary(snapshotSummary, preserveLive);
+              } else {
+                acceptedSummary = preferredSummary(snapshotSummary, preserveLive);
+              }
+              advanceResetEpoch();
               dispatch({
                 type: "detail",
-                detail,
+                detail:
+                  acceptedSummary === detail.summary
+                    ? detail
+                    : { ...detail, summary: acceptedSummary },
                 page: "reset",
                 preserveLive,
               });
+              return detail;
             }
           }
-          return detail;
+          return stateRef.current.details[threadId] ?? detail;
         };
         try {
           let detail: ThreadDetail;
@@ -443,6 +500,7 @@ export function ConnectionProvider({
                 merged = mergeThreadDetailChanges(merged, changes);
                 if (canApply()) {
                   const preserveLive = liveAdvanced() || wouldRollbackLive(merged);
+                  if (changes.resetLatest) advanceResetEpoch();
                   dispatch({
                     type: "changes",
                     threadId,
@@ -1074,6 +1132,7 @@ export function ConnectionProvider({
           appliedThreadSequences.current = new Map(
             frame.snapshot.threads.map((thread) => [thread.id, frame.snapshot.sequence]),
           );
+          appliedThreadEventSequences.current.clear();
           browserNotifications?.acceptSnapshot(frame.snapshot);
           observeNativeNotificationSnapshot(frame.snapshot);
           dispatch({ type: "snapshot", snapshot: frame.snapshot });
@@ -1102,6 +1161,7 @@ export function ConnectionProvider({
           }
           for (const threadId of serverEventThreadIds(frame.event)) {
             appliedThreadSequences.current.set(threadId, frame.sequence);
+            appliedThreadEventSequences.current.set(threadId, frame.sequence);
           }
           browserNotifications?.acceptEvent(frame.event);
           observeNativeNotificationEvent(frame.sequence, frame.event);
