@@ -3488,7 +3488,7 @@ describe("AppProjection", () => {
     await store.load();
     const plan = testTurn("plan", "completed");
     const implementation = testTurn("implementation", "inProgress");
-    let fullReads = 0;
+    let projectionRefreshed = false;
     let releaseIncremental!: () => void;
     let markIncrementalStarted!: () => void;
     const incrementalStarted = new Promise<void>((resolve) => {
@@ -3499,17 +3499,22 @@ describe("AppProjection", () => {
     });
     const bridge = new FakeBridge();
     bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/read") {
+        projectionRefreshed = true;
+        return {
+          thread: thread("one", "/work", 11, { type: "active", activeFlags: [] }, [implementation]),
+        };
+      }
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
       if (params.sortDirection === "asc") {
         markIncrementalStarted();
         await incrementalGate;
         return { data: [plan], nextCursor: null, backwardsCursor: null };
       }
-      fullReads += 1;
       return {
-        data: fullReads === 1 ? [plan] : [implementation, plan],
+        data: projectionRefreshed ? [implementation, plan] : [plan],
         nextCursor: null,
-        backwardsCursor: fullReads === 1 ? "plan-cursor" : "implementation-cursor",
+        backwardsCursor: projectionRefreshed ? "implementation-cursor" : "plan-cursor",
       };
     });
     const projection = new AppProjection(
@@ -3531,7 +3536,11 @@ describe("AppProjection", () => {
       summary: { currentTurnId: "implementation", state: "running" },
     });
     expect(changes.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
-    expect(fullReads).toBe(2);
+    expect(bridge.request).toHaveBeenCalledWith(
+      "thread/read",
+      { threadId: "one", includeTurns: false },
+      30_000,
+    );
   });
 
   it("falls back to a full page when the incremental turn read returns an RPC error", async () => {

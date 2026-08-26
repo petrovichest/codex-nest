@@ -397,10 +397,11 @@ export function ConnectionProvider({
       const request = (async () => {
         let acceptedSummary: ThreadSummary | undefined;
         const authoritativeLatest = async (): Promise<ThreadDetail> => {
-          const detail = await api.readThread(threadId, undefined, { fresh: true });
+          const { snapshot, detail } = await api.refreshThread(threadId);
           if (canApply()) {
             const preserveLive = liveAdvanced() || wouldRollbackLive(detail);
-            acceptedSummary = acceptLatestSummary(detail.summary, preserveLive);
+            acceptSyncedSnapshot(snapshot, targetGeneration);
+            acceptedSummary = preferredSummary(detail.summary, preserveLive);
             dispatch({
               type: "detail",
               detail,
@@ -505,7 +506,7 @@ export function ConnectionProvider({
       detailRequests.current.set(key, request);
       return request;
     },
-    [api, clearDetailRetry, scheduleDetailRetry, settings],
+    [acceptSyncedSnapshot, api, clearDetailRetry, scheduleDetailRetry, settings],
   );
   detailReader.current = readDetail;
 

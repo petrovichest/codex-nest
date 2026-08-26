@@ -840,6 +840,126 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("recovers activity missed while a live thread was not selected", async () => {
+    const running = {
+      ...summary,
+      state: "running" as const,
+      currentTurnId: "live-turn",
+      updatedAt: 4,
+    };
+    const staleDetail: ThreadDetail = {
+      summary: running,
+      turns: [
+        {
+          id: "live-turn",
+          status: "inProgress",
+          startedAt: 3,
+          completedAt: null,
+          durationMs: null,
+          progress: {
+            startedAt: 3,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: "visible-before-navigation",
+              status: "completed",
+              text: "Видно до переключения",
+              images: [],
+              timestamp: 3,
+              phase: "commentary",
+            },
+          ],
+          itemsLoaded: false,
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      syncPoint: {
+        cursor: "live-cursor",
+        anchorTurnId: "live-turn",
+        anchorRevision: "before-navigation",
+      },
+    };
+    const recoveredChanges = {
+      summary: running,
+      turns: [
+        {
+          ...staleDetail.turns[0]!,
+          items: [
+            ...staleDetail.turns[0]!.items,
+            {
+              type: "agentMessage" as const,
+              id: "missed-while-away",
+              status: "completed" as const,
+              text: "Пропущенное live-сообщение",
+              images: [],
+              timestamp: 4,
+              phase: "commentary" as const,
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      draft: null,
+      continuationCursor: null,
+      syncPoint: {
+        cursor: "live-cursor",
+        anchorTurnId: "live-turn",
+        anchorRevision: "after-navigation",
+      },
+      resetLatest: false,
+      olderTurnsCursor: null,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(recoveredChanges), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh: (() => Promise<ThreadDetail>) | undefined;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, refreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: staleDetail, page: "latest" });
+      }, [dispatch]);
+      refresh = () => refreshDetail("thread", { force: true });
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : "Ожидание"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [running]) });
+    });
+    expect(await screen.findByText("Видно до переключения")).toBeInTheDocument();
+
+    await act(async () => {
+      await refresh?.();
+    });
+
+    expect(screen.getByText("Пропущенное live-сообщение")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe(
+      "/api/v1/threads/thread/changes",
+    );
+    view.unmount();
+  });
+
   it("lets authoritative recovery supersede an in-flight stale delta", async () => {
     const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
     const running = {
@@ -987,11 +1107,19 @@ describe("ConnectionProvider", () => {
     });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
-      "https://codexnest.example/api/v1/threads/thread",
+      "https://codexnest.example/api/v1/threads/thread/refresh",
     );
 
     await act(async () => {
-      resolveCanonical(new Response(JSON.stringify(canonicalDetail), { status: 200 }));
+      resolveCanonical(
+        new Response(
+          JSON.stringify({
+            snapshot: snapshot(2, [running]),
+            detail: canonicalDetail,
+          }),
+          { status: 200 },
+        ),
+      );
       await authoritative;
     });
     expect(screen.getByText("Работа продолжается")).toBeInTheDocument();
@@ -1108,7 +1236,12 @@ describe("ConnectionProvider", () => {
           { status: 400 },
         ),
       )
-      .mockResolvedValueOnce(new Response(JSON.stringify(canonical), { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ snapshot: snapshot(2, [canonical.summary]), detail: canonical }),
+          { status: 200 },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let refresh: (() => Promise<ThreadDetail>) | undefined;
@@ -1140,9 +1273,9 @@ describe("ConnectionProvider", () => {
     expect(await screen.findByText("Канонический финальный ответ")).toBeInTheDocument();
     expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
       "/api/v1/threads/thread/changes",
-      "/api/v1/threads/thread",
+      "/api/v1/threads/thread/refresh",
     ]);
-    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ cache: "no-store" }));
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ method: "POST" }));
     view.unmount();
   });
 
@@ -1185,7 +1318,11 @@ describe("ConnectionProvider", () => {
     };
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(new Response(JSON.stringify(canonical), { status: 200 }));
+      .mockResolvedValue(
+        new Response(JSON.stringify({ snapshot: snapshot(2, [running]), detail: canonical }), {
+          status: 200,
+        }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let refresh: (() => Promise<ThreadDetail>) | undefined;
@@ -1560,7 +1697,11 @@ describe("ConnectionProvider", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(unchangedDelta), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(canonical), { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ snapshot: snapshot(2, [completed]), detail: canonical }), {
+          status: 200,
+        }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let refresh: (() => Promise<ThreadDetail>) | undefined;
@@ -1592,7 +1733,7 @@ describe("ConnectionProvider", () => {
     expect(screen.getByText("Свежий финальный ответ")).toBeInTheDocument();
     expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
       "/api/v1/threads/thread/changes",
-      "/api/v1/threads/thread",
+      "/api/v1/threads/thread/refresh",
     ]);
     view.unmount();
   });
@@ -1667,7 +1808,11 @@ describe("ConnectionProvider", () => {
       .mockResolvedValueOnce(unavailable())
       .mockResolvedValueOnce(unavailable())
       .mockResolvedValueOnce(unavailable())
-      .mockResolvedValueOnce(new Response(JSON.stringify(canonical), { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ snapshot: snapshot(2, [running]), detail: canonical }), {
+          status: 200,
+        }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let seeded = false;

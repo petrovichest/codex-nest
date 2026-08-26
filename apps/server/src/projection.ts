@@ -374,7 +374,7 @@ export class AppProjection extends EventEmitter {
       cached.currentTurnId !== syncPoint.anchorTurnId &&
       !page.turns.some((turn) => turn.id === cached.currentTurnId)
     ) {
-      return this.resetThreadChanges(id);
+      return this.resetThreadChanges(id, true);
     }
 
     const state = this.store.view();
@@ -408,7 +408,8 @@ export class AppProjection extends EventEmitter {
     return this.historyCache.invalidateThread(threadId);
   }
 
-  private async resetThreadChanges(id: string): Promise<ThreadChanges> {
+  private async resetThreadChanges(id: string, refreshProjection = false): Promise<ThreadChanges> {
+    if (refreshProjection) await this.refreshThread(id);
     await this.historyCache.invalidateThread(id).catch(() => undefined);
     const detail = await this.readThread(id);
     return {
