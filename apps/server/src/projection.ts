@@ -346,8 +346,13 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
     if (hasSubagentTranscript(cached.thread, this.store.view().threadMeta[id])) {
-      return this.resetThreadChanges(id);
+      return this.resetThreadChanges(id, false);
     }
+    const currentTurnAtStart = cached.currentTurnId;
+    const latestTurnAtStart = cached.thread.turns.at(-1);
+    const latestTurnBoundaryAtStart = latestTurnAtStart
+      ? `${latestTurnAtStart.id}:${latestTurnAtStart.status}`
+      : null;
 
     let page: CachedTurnsPage;
     try {
@@ -368,11 +373,26 @@ export class AppProjection extends EventEmitter {
       }
     }
     await this.restoreActiveTurnFromPage(cached, turns);
+    const latestTurn = cached.thread.turns.at(-1);
+    const latestTurnBoundary = latestTurn ? `${latestTurn.id}:${latestTurn.status}` : null;
+    const turnBoundaryChanged =
+      currentTurnAtStart !== cached.currentTurnId ||
+      latestTurnBoundaryAtStart !== latestTurnBoundary;
+    const changedBoundaryTurnIds = [
+      currentTurnAtStart,
+      cached.currentTurnId,
+      latestTurn?.id,
+    ].filter((turnId): turnId is string => Boolean(turnId));
     if (
       page.nextCursor === null &&
-      cached.currentTurnId &&
-      cached.currentTurnId !== syncPoint.anchorTurnId &&
-      !page.turns.some((turn) => turn.id === cached.currentTurnId)
+      ((turnBoundaryChanged &&
+        changedBoundaryTurnIds.some(
+          (turnId) =>
+            turnId !== syncPoint.anchorTurnId && !page.turns.some((turn) => turn.id === turnId),
+        )) ||
+        (cached.currentTurnId &&
+          cached.currentTurnId !== syncPoint.anchorTurnId &&
+          !page.turns.some((turn) => turn.id === cached.currentTurnId)))
     ) {
       return this.resetThreadChanges(id, true);
     }
@@ -405,12 +425,13 @@ export class AppProjection extends EventEmitter {
   }
 
   invalidateHistory(threadId: string): Promise<void> {
+    this.bumpHistoryRevision(threadId);
     return this.historyCache.invalidateThread(threadId);
   }
 
-  private async resetThreadChanges(id: string, refreshProjection = false): Promise<ThreadChanges> {
+  private async resetThreadChanges(id: string, refreshProjection = true): Promise<ThreadChanges> {
     if (refreshProjection) await this.refreshThread(id);
-    await this.historyCache.invalidateThread(id).catch(() => undefined);
+    await this.invalidateHistory(id).catch(() => undefined);
     const detail = await this.readThread(id);
     return {
       summary: detail.summary,
@@ -448,6 +469,7 @@ export class AppProjection extends EventEmitter {
     const local = this.threads.get(id);
     if (!local) throw new Error("Thread not found");
     const threadUpdatedAt = local.thread.updatedAt * 1_000;
+    const historyRevision = this.historyRevision(id);
     const canReadCache =
       allowCache &&
       direction === "desc" &&
@@ -493,7 +515,7 @@ export class AppProjection extends EventEmitter {
       cursor,
       direction,
       threadUpdatedAt,
-      historyRevision: this.historyRevision(id),
+      historyRevision,
       turns: ordered.map((turn) =>
         normalizeTurn(
           turn,
@@ -506,10 +528,20 @@ export class AppProjection extends EventEmitter {
       nextCursor: response.nextCursor,
       backwardsCursor: response.backwardsCursor ?? null,
     };
-    if (canReadCache) {
+    if (
+      canReadCache &&
+      local.thread.updatedAt * 1_000 === threadUpdatedAt &&
+      this.historyRevision(id) === historyRevision
+    ) {
       await this.historyCache.set(page).catch((error: unknown) => {
         this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
       });
+      if (
+        local.thread.updatedAt * 1_000 !== threadUpdatedAt ||
+        this.historyRevision(id) !== historyRevision
+      ) {
+        await this.historyCache.invalidateThread(id).catch(() => undefined);
+      }
     }
     return page;
   }

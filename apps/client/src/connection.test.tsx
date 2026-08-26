@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
 import { ConnectionProvider, useConnection } from "./connection";
-import type { PendingVoiceRecording } from "./offline-store";
+import type { CachedMeta, PendingVoiceRecording } from "./offline-store";
 
 const capacitor = vi.hoisted(() => ({ native: false }));
 const addAppListener = vi.hoisted(() => vi.fn());
@@ -22,6 +22,9 @@ const putPendingVoiceRecording = vi.hoisted(() =>
 const observeNativeNotificationEvent = vi.hoisted(() => vi.fn());
 const observeNativeNotificationSnapshot = vi.hoisted(() => vi.fn());
 const setNativeNotificationAppActive = vi.hoisted(() => vi.fn());
+const loadCachedMeta = vi.hoisted(() =>
+  vi.fn<() => Promise<CachedMeta | null>>(() => Promise.resolve(null)),
+);
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
@@ -34,6 +37,7 @@ vi.mock("./push", () => ({
 }));
 vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  loadCachedMeta,
   listPendingVoiceRecordings,
   deletePendingVoiceRecording,
   loadPendingVoiceRecording,
@@ -75,10 +79,50 @@ describe("ConnectionProvider", () => {
     observeNativeNotificationEvent.mockReset();
     observeNativeNotificationSnapshot.mockReset();
     setNativeNotificationAppActive.mockReset();
+    loadCachedMeta.mockReset();
+    loadCachedMeta.mockResolvedValue(null);
     FakeWebSocket.instances = [];
   });
 
   afterEach(() => vi.useRealTimers());
+
+  it("does not hydrate stale cached metadata over a newer stream snapshot", async () => {
+    const stale = { ...summary, title: "Старый заголовок", updatedAt: 2 };
+    const fresh = { ...summary, title: "Актуальный заголовок", updatedAt: 5 };
+    let resolveCached!: (cached: CachedMeta | null) => void;
+    loadCachedMeta.mockReturnValueOnce(
+      new Promise<CachedMeta | null>((resolve) => {
+        resolveCached = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    function Probe() {
+      const { state } = useConnection();
+      return <span>{state.snapshot?.threads[0]?.title ?? "Ожидание"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(5, [fresh]) });
+    });
+    expect(await screen.findByText("Актуальный заголовок")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveCached({ snapshot: snapshot(1, [stale]), goals: {}, updatedAt: 1 });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Актуальный заголовок")).toBeInTheDocument();
+    view.unmount();
+  });
 
   it("uploads a persisted voice recording after reload and deletes it only after acceptance", async () => {
     listPendingVoiceRecordings.mockResolvedValue([
@@ -514,6 +558,261 @@ describe("ConnectionProvider", () => {
       new URL("https://codexnest.example/api/v1/threads/thread/refresh"),
       expect.objectContaining({ method: "POST" }),
     );
+    view.unmount();
+  });
+
+  it("rejects stale detail paired with a lower-sequence refresh snapshot", async () => {
+    const terminalDetail = (
+      detailSummary: ThreadSummary,
+      turnId: string,
+      text: string,
+    ): ThreadDetail => ({
+      summary: detailSummary,
+      turns: [
+        {
+          id: turnId,
+          status: "completed",
+          startedAt: detailSummary.updatedAt,
+          completedAt: detailSummary.updatedAt,
+          durationMs: 1,
+          progress: {
+            startedAt: detailSummary.updatedAt,
+            explanation: null,
+            steps: [],
+            filesChanged: 0,
+            additions: 0,
+            deletions: 0,
+          },
+          items: [
+            {
+              type: "agentMessage",
+              id: `${turnId}-answer`,
+              status: "completed",
+              text,
+              images: [],
+              timestamp: detailSummary.updatedAt,
+              phase: "final_answer",
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    });
+    const freshSummary = { ...summary, state: "completed" as const, updatedAt: 5 };
+    const staleSummary = { ...summary, state: "completed" as const, updatedAt: 3 };
+    const freshDetail = terminalDetail(freshSummary, "fresh-turn", "Актуальный ответ");
+    const staleDetail = terminalDetail(staleSummary, "stale-turn", "Старый ответ");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ snapshot: snapshot(4, [staleSummary]), detail: staleDetail }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refresh!: () => Promise<ThreadDetail>;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, forceRefreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: freshDetail, page: "latest" });
+      }, [dispatch]);
+      refresh = () => forceRefreshDetail("thread");
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : "Ожидание"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(5, [freshSummary]) });
+    });
+    expect(await screen.findByText("Актуальный ответ")).toBeInTheDocument();
+
+    await act(async () => {
+      await refresh();
+    });
+
+    expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
+    expect(screen.queryByText("Старый ответ")).not.toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("does not let an older incremental reset overwrite a completed manual refresh", async () => {
+    const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
+    const refreshed = { ...completed, updatedAt: 5 };
+    const planTurn: ThreadDetail["turns"][number] = {
+      id: "plan-turn",
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+      durationMs: 1,
+      progress: {
+        startedAt: 1,
+        explanation: null,
+        steps: [],
+        filesChanged: 0,
+        additions: 0,
+        deletions: 0,
+      },
+      items: [
+        {
+          type: "plan",
+          id: "plan",
+          status: "completed",
+          text: "Старый план",
+          images: [],
+          timestamp: 2,
+          phase: null,
+        },
+      ],
+      itemsLoaded: false,
+    };
+    const answerTurn: ThreadDetail["turns"][number] = {
+      id: "answer-turn",
+      status: "completed",
+      startedAt: 4,
+      completedAt: 5,
+      durationMs: 1,
+      progress: {
+        startedAt: 4,
+        explanation: null,
+        steps: [],
+        filesChanged: 0,
+        additions: 0,
+        deletions: 0,
+      },
+      items: [
+        {
+          type: "agentMessage",
+          id: "answer",
+          status: "completed",
+          text: "Актуальный ответ",
+          images: [],
+          timestamp: 5,
+          phase: "final_answer",
+        },
+      ],
+      itemsLoaded: false,
+    };
+    const staleDetail: ThreadDetail = {
+      summary: completed,
+      turns: [planTurn],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+      syncPoint: {
+        cursor: "plan-cursor",
+        anchorTurnId: "plan-turn",
+        anchorRevision: "plan-revision",
+      },
+    };
+    const refreshedDetail: ThreadDetail = {
+      ...staleDetail,
+      summary: refreshed,
+      turns: [planTurn, answerTurn],
+      syncPoint: {
+        cursor: "answer-cursor",
+        anchorTurnId: "answer-turn",
+        anchorRevision: "answer-revision",
+      },
+    };
+    let resolveChanges!: (response: Response) => void;
+    let resolveRefresh!: (response: Response) => void;
+    const changesResponse = new Promise<Response>((resolve) => {
+      resolveChanges = resolve;
+    });
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = input instanceof URL ? input : new URL(String(input));
+      return url.pathname.endsWith("/changes") ? changesResponse : refreshResponse;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let refreshIncremental!: () => Promise<ThreadDetail>;
+    let refreshManual!: () => Promise<ThreadDetail>;
+    let seeded = false;
+
+    function Probe() {
+      const { dispatch, forceRefreshDetail, refreshDetail, state } = useConnection();
+      useEffect(() => {
+        if (seeded) return;
+        seeded = true;
+        dispatch({ type: "detail", detail: staleDetail, page: "latest" });
+      }, [dispatch]);
+      refreshIncremental = () => refreshDetail("thread", { force: true });
+      refreshManual = () => forceRefreshDetail("thread");
+      const latest = state.details.thread?.turns.at(-1)?.items.at(-1);
+      return <span>{latest && "text" in latest ? latest.text : "Ожидание"}</span>;
+    }
+
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    const socket = FakeWebSocket.instances[0]!;
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", snapshot: snapshot(1, [completed]) });
+    });
+    expect(await screen.findByText("Старый план")).toBeInTheDocument();
+
+    let incremental!: Promise<ThreadDetail>;
+    act(() => {
+      incremental = refreshIncremental();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    let manual!: Promise<ThreadDetail>;
+    act(() => {
+      manual = refreshManual();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      resolveRefresh(
+        new Response(
+          JSON.stringify({ snapshot: snapshot(2, [refreshed]), detail: refreshedDetail }),
+          { status: 200 },
+        ),
+      );
+      await manual;
+    });
+    expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveChanges(
+        new Response(
+          JSON.stringify({
+            summary: completed,
+            turns: [planTurn],
+            queuedMessages: [],
+            draft: null,
+            continuationCursor: null,
+            syncPoint: staleDetail.syncPoint,
+            resetLatest: true,
+            olderTurnsCursor: null,
+          }),
+          { status: 200 },
+        ),
+      );
+      await incremental;
+    });
+
+    expect(screen.getByText("Актуальный ответ")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     view.unmount();
   });
 

@@ -3481,6 +3481,58 @@ describe("AppProjection", () => {
     );
   });
 
+  it("does not let a history read finishing after invalidation repopulate stale cache", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const plan = testTurn("plan", "completed");
+    const implementation = testTurn("implementation", "completed");
+    let reads = 0;
+    let releaseStaleRead!: () => void;
+    let markStaleReadStarted!: () => void;
+    const staleReadStarted = new Promise<void>((resolve) => {
+      markStaleReadStarted = resolve;
+    });
+    const staleReadGate = new Promise<void>((resolve) => {
+      releaseStaleRead = resolve;
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      reads += 1;
+      if (reads === 1) {
+        markStaleReadStarted();
+        await staleReadGate;
+        return { data: [plan], nextCursor: null, backwardsCursor: "plan-cursor" };
+      }
+      return {
+        data: [implementation, plan],
+        nextCursor: null,
+        backwardsCursor: "implementation-cursor",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+
+    const stalePending = projection.readThread("one");
+    await staleReadStarted;
+    await projection.invalidateHistory("one");
+    const fresh = await projection.readThread("one");
+    expect(fresh.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
+
+    releaseStaleRead();
+    await stalePending;
+    const cached = await projection.readThread("one");
+
+    expect(cached.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
+    expect(reads).toBe(2);
+  });
+
   it("resets incremental history when the current turn changes during the read", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -3543,6 +3595,70 @@ describe("AppProjection", () => {
     );
   });
 
+  it("resets incremental history when a turn completes during the read", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const plan = testTurn("plan", "completed");
+    const implementation = testTurn("implementation", "completed");
+    let projectionRefreshed = false;
+    let releaseIncremental!: () => void;
+    let markIncrementalStarted!: () => void;
+    const incrementalStarted = new Promise<void>((resolve) => {
+      markIncrementalStarted = resolve;
+    });
+    const incrementalGate = new Promise<void>((resolve) => {
+      releaseIncremental = resolve;
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/read") {
+        projectionRefreshed = true;
+        return {
+          thread: thread("one", "/work", 12, { type: "idle" }, [plan, implementation]),
+        };
+      }
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      if (params.sortDirection === "asc") {
+        markIncrementalStarted();
+        await incrementalGate;
+        return { data: [plan], nextCursor: null, backwardsCursor: null };
+      }
+      return {
+        data: projectionRefreshed ? [implementation, plan] : [plan],
+        nextCursor: null,
+        backwardsCursor: projectionRefreshed ? "implementation-cursor" : "plan-cursor",
+      };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    const initial = await projection.readThread("one");
+    await projection.setCurrentTurn("one", "implementation");
+
+    const pending = projection.readThreadChanges("one", initial.syncPoint!);
+    await incrementalStarted;
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: implementation },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBeNull());
+    releaseIncremental();
+    const changes = await pending;
+
+    expect(changes.resetLatest).toBe(true);
+    expect(changes.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
+    expect(bridge.request).toHaveBeenCalledWith(
+      "thread/read",
+      { threadId: "one", includeTurns: false },
+      30_000,
+    );
+  });
+
   it("falls back to a full page when the incremental turn read returns an RPC error", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -3553,6 +3669,9 @@ describe("AppProjection", () => {
     const second = testTurn("second", "completed");
     let incremental = false;
     bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/read") {
+        return { thread: thread("one", "/work", 11, { type: "idle" }, [first, second]) };
+      }
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
       if (params.sortDirection === "asc") {
         incremental = true;
@@ -3585,6 +3704,12 @@ describe("AppProjection", () => {
     );
     expect(bridge.request).toHaveBeenNthCalledWith(
       2,
+      "thread/read",
+      { threadId: "one", includeTurns: false },
+      30_000,
+    );
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      3,
       "thread/turns/list",
       expect.objectContaining({ cursor: null, sortDirection: "desc" }),
       30_000,

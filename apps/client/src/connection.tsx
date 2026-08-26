@@ -215,10 +215,17 @@ export function ConnectionProvider({
 
   useEffect(() => {
     let active = true;
+    const targetGeneration = generationRef.current;
     void Promise.all([loadCachedMeta(settings), listOutboxMessages(settings)]).then(
       ([cached, outbox]) => {
         if (!active) return;
-        if (cached) dispatch({ type: "hydrate", snapshot: cached.snapshot, goals: cached.goals });
+        if (
+          cached &&
+          generationRef.current === targetGeneration &&
+          appliedSequence.current === null
+        ) {
+          dispatch({ type: "hydrate", snapshot: cached.snapshot, goals: cached.goals });
+        }
         for (const message of outbox) {
           dispatch({
             type: "optimistic.add",
@@ -295,10 +302,10 @@ export function ConnectionProvider({
     return next;
   }, []);
   const acceptSyncedSnapshot = useCallback(
-    (snapshot: AppSnapshot, targetGeneration: number) => {
-      if (generationRef.current !== targetGeneration) return;
+    (snapshot: AppSnapshot, targetGeneration: number): boolean => {
+      if (generationRef.current !== targetGeneration) return false;
       if (appliedSequence.current !== null && snapshot.sequence < appliedSequence.current) {
-        return;
+        return false;
       }
       appliedSequence.current = snapshot.sequence;
       appliedThreadSequences.current = new Map(
@@ -311,6 +318,7 @@ export function ConnectionProvider({
       browserNotifications?.acceptSnapshot(snapshot);
       observeNativeNotificationSnapshot(snapshot);
       dispatch({ type: "snapshot", snapshot });
+      return true;
     },
     [browserNotifications],
   );
@@ -400,14 +408,15 @@ export function ConnectionProvider({
           const { snapshot, detail } = await api.refreshThread(threadId);
           if (canApply()) {
             const preserveLive = liveAdvanced() || wouldRollbackLive(detail);
-            acceptSyncedSnapshot(snapshot, targetGeneration);
-            acceptedSummary = preferredSummary(detail.summary, preserveLive);
-            dispatch({
-              type: "detail",
-              detail,
-              page: "reset",
-              preserveLive,
-            });
+            if (acceptSyncedSnapshot(snapshot, targetGeneration)) {
+              acceptedSummary = preferredSummary(detail.summary, preserveLive);
+              dispatch({
+                type: "detail",
+                detail,
+                page: "reset",
+                preserveLive,
+              });
+            }
           }
           return detail;
         };
@@ -515,24 +524,9 @@ export function ConnectionProvider({
     [readDetail],
   );
   const forceRefreshDetail = useCallback(
-    async (threadId: string): Promise<ThreadDetail> => {
-      const targetGeneration = generationRef.current;
-      const targetSequence = appliedThreadSequences.current.get(threadId) ?? null;
-      const { snapshot, detail } = await api.refreshThread(threadId);
-      const liveAdvanced =
-        (appliedThreadSequences.current.get(threadId) ?? null) !== targetSequence;
-      acceptSyncedSnapshot(snapshot, targetGeneration);
-      if (generationRef.current === targetGeneration) {
-        dispatch({
-          type: "detail",
-          detail,
-          page: "reset",
-          preserveLive: liveAdvanced,
-        });
-      }
-      return detail;
-    },
-    [acceptSyncedSnapshot, api],
+    (threadId: string): Promise<ThreadDetail> =>
+      readDetail(threadId, undefined, { authoritative: true, force: true }),
+    [readDetail],
   );
   const loadOlderDetail = useCallback(
     (threadId: string, cursor: string) => readDetail(threadId, cursor),
