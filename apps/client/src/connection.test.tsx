@@ -1316,13 +1316,11 @@ describe("ConnectionProvider", () => {
       queuedMessages: [],
       olderTurnsCursor: null,
     };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ snapshot: snapshot(2, [running]), detail: canonical }), {
-          status: 200,
-        }),
-      );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ snapshot: snapshot(2, [running]), detail: canonical }), {
+        status: 200,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let refresh: (() => Promise<ThreadDetail>) | undefined;
