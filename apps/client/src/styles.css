@@ -2920,6 +2920,7 @@
   color: var(--text);
 }
 
+.implement-plan.goal,
 .implement-plan.orchestrator {
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
   color: var(--accent);

@@ -92,6 +92,7 @@ import {
   RefreshIcon,
   SendIcon,
   StopIcon,
+  TargetIcon,
   TeamIcon,
   TerminalIcon,
   ToolIcon,
@@ -2591,18 +2592,21 @@ export function ThreadPage({
     }
   }
 
-  async function implementPlan(targetMode: "default" | "team") {
+  async function implementPlan(targetMode: "default" | "goal" | "team") {
+    const goalMode = targetMode === "goal";
     const implementationMessage =
       targetMode === "team"
         ? t("Да, реализуй этот план в режиме оркестратора")
-        : t("Да, реализуй этот план");
+        : goalMode
+          ? t("Да, реализуй этот план в режиме цели")
+          : t("Да, реализуй этот план");
     if (planAcceptanceInFlightRef.current) {
       setError(t("Это сообщение уже отправлено"));
       return;
     }
     const clientMessageId = createClientMessageId();
     const messageClaimKey = claimSubmittedMessage(
-      { text: implementationMessage, images: [], goal: false },
+      { text: implementationMessage, images: [], goal: goalMode },
       clientMessageId,
     );
     if (!messageClaimKey) return;
@@ -2614,7 +2618,7 @@ export function ThreadPage({
     let optimisticAdded = false;
     try {
       const thread = await api.updateThreadSettings(threadId, {
-        collaborationMode: targetMode,
+        collaborationMode: targetMode === "team" ? "team" : "default",
       });
       changedMode = true;
       dispatch({ type: "thread", thread });
@@ -2627,6 +2631,7 @@ export function ThreadPage({
           threadId,
           text: implementationMessage,
           images: [],
+          ...(goalMode ? { goal: true } : {}),
           createdAt: Date.now(),
           destination: "turn",
           turnId: null,
@@ -2635,6 +2640,7 @@ export function ThreadPage({
       const result = await api.startTurn(threadId, {
         input: implementationMessage,
         clientMessageId,
+        ...(goalMode ? { goal: true } : {}),
       });
       dispatch({
         type: "optimistic.accept",
@@ -2659,7 +2665,9 @@ export function ThreadPage({
           ? localizeKnownServerText(language, caught.message)
           : targetMode === "team"
             ? t("Не удалось начать реализацию плана в режиме оркестратора")
-            : t("Не удалось начать реализацию плана"),
+            : goalMode
+              ? t("Не удалось начать реализацию плана в режиме цели")
+              : t("Не удалось начать реализацию плана"),
       );
     } finally {
       planAcceptanceInFlightRef.current = false;
@@ -3321,6 +3329,20 @@ export function ThreadPage({
                                   onClick={() => void implementPlan("default")}
                                 >
                                   {t("Да, реализуй этот план")}
+                                </button>
+                                <button
+                                  className="implement-plan goal"
+                                  disabled={busy || latestPlanHasAnnotations}
+                                  title={
+                                    latestPlanHasAnnotations
+                                      ? t("Сначала отправьте или удалите аннотации к плану")
+                                      : undefined
+                                  }
+                                  type="button"
+                                  onClick={() => void implementPlan("goal")}
+                                >
+                                  <TargetIcon />
+                                  {t("Запустить в режиме цели")}
                                 </button>
                                 <button
                                   className="implement-plan orchestrator"

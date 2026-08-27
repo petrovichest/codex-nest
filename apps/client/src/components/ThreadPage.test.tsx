@@ -2045,7 +2045,7 @@ describe("Activity", () => {
     expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/attention:true");
   });
 
-  it("offers a fork on a completed plan alongside both implementation choices", async () => {
+  it("offers a fork on a completed plan alongside all implementation choices", async () => {
     const api = threadApi();
     const planThread = {
       ...summary,
@@ -2057,6 +2057,7 @@ describe("Activity", () => {
     const fork = screen.getByRole("button", { name: "Создать ответвление отсюда" });
     expect(fork.closest("article")).toHaveClass("plan");
     expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Запустить в режиме цели" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Запустить в режиме оркестратора" }),
     ).toBeInTheDocument();
@@ -3583,6 +3584,32 @@ describe("Activity", () => {
     );
   });
 
+  it("starts a completed plan in goal mode", async () => {
+    const api = threadApi();
+    const planThread = {
+      ...summary,
+      settings: { collaborationMode: "plan" as const },
+    };
+    mockThreadConnection(api, planThread, completedPlanDetail());
+    renderThread();
+
+    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме цели" }));
+
+    await waitFor(() =>
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
+        collaborationMode: "default",
+      }),
+    );
+    expect(api.startTurn).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({
+        input: "Да, реализуй этот план в режиме цели",
+        goal: true,
+        clientMessageId: expect.any(String),
+      }),
+    );
+  });
+
   it("returns to Plan mode when orchestrator implementation fails to start", async () => {
     const api = threadApi();
     api.startTurn.mockRejectedValueOnce(new Error("Codex недоступен"));
@@ -3647,6 +3674,7 @@ describe("Activity", () => {
     renderThread();
 
     expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Запустить в режиме цели" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Запустить в режиме оркестратора" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
