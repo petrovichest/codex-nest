@@ -1084,9 +1084,7 @@ describe("App routing and navigation", () => {
     const overflowingLink = view.container.querySelector(
       'a[href="/threads/overflowing-title"]',
     ) as HTMLAnchorElement;
-    const overflowingTitle = overflowingLink.querySelector(
-      ".thread-link-title",
-    ) as HTMLSpanElement;
+    const overflowingTitle = overflowingLink.querySelector(".thread-link-title") as HTMLSpanElement;
     const fittingLink = view.container.querySelector(
       'a[href="/threads/fitting-title"]',
     ) as HTMLAnchorElement;
@@ -1104,9 +1102,7 @@ describe("App routing and navigation", () => {
     fireEvent.mouseEnter(fittingLink);
 
     expect(overflowingTitle).toHaveAttribute("data-overflowing", "true");
-    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe(
-      "90px",
-    );
+    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe("90px");
     expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-duration")).toBe(
       "2000ms",
     );
