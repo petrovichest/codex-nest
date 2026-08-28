@@ -325,6 +325,31 @@
   white-space: nowrap;
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .thread-link:hover .thread-link-title[data-overflowing="true"] {
+    animation: thread-title-scroll var(--thread-title-scroll-duration, 1.5s) linear 350ms
+      forwards;
+  }
+}
+
+@keyframes thread-title-scroll {
+  from {
+    text-indent: 0;
+    text-overflow: clip;
+  }
+
+  to {
+    text-indent: calc(-1 * var(--thread-title-scroll-distance, 0px));
+    text-overflow: clip;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread-link:hover .thread-link-title[data-overflowing="true"] {
+    animation: none;
+  }
+}
+
 .thread-link-copy {
   min-width: 0;
   display: flex;

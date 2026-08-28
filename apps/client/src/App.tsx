@@ -80,6 +80,8 @@ const PROJECT_LONG_PRESS_MOVE_TOLERANCE = 10;
 const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
+const THREAD_TITLE_SCROLL_MIN_DURATION_MS = 1_500;
+const THREAD_TITLE_SCROLL_PX_PER_SECOND = 45;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
 const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
 
@@ -1906,18 +1908,21 @@ function ThreadLink({
 }) {
   const { language, t } = useI18n();
   const location = useLocation();
+  const titleRef = useRef<HTMLSpanElement>(null);
   const title = localizeKnownServerText(language, thread.title) ?? thread.title;
   const target = `/threads/${encodeURIComponent(thread.id)}`;
   const agentName =
     thread.relation.kind === "subagent"
       ? thread.relation.nickname?.trim() || thread.relation.role?.trim() || null
       : null;
+  const displayTitle = agentName ? `${agentName} · ${title}` : title;
   return (
     <NavLink
       className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
       end
       state={{ focusComposer: true }}
       to={target}
+      onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
       onClick={(event) => {
         if (
           location.pathname === target &&
@@ -1934,11 +1939,15 @@ function ThreadLink({
     >
       {secondaryLabel ? (
         <span className="thread-link-copy">
-          <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+          <span className="thread-link-title" ref={titleRef}>
+            {displayTitle}
+          </span>
           <span className="thread-link-project">{secondaryLabel}</span>
         </span>
       ) : (
-        <span className="thread-link-title">{agentName ? `${agentName} · ${title}` : title}</span>
+        <span className="thread-link-title" ref={titleRef}>
+          {displayTitle}
+        </span>
       )}
       {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
         <span
@@ -1954,6 +1963,26 @@ function ThreadLink({
       <span className={threadStatusClasses(thread)} title={thread.state} />
     </NavLink>
   );
+}
+
+function prepareThreadTitleScroll(element: HTMLSpanElement | null): void {
+  if (!element) return;
+
+  const overflow = Math.max(0, element.scrollWidth - element.clientWidth);
+  if (overflow <= 1) {
+    element.removeAttribute("data-overflowing");
+    element.style.removeProperty("--thread-title-scroll-distance");
+    element.style.removeProperty("--thread-title-scroll-duration");
+    return;
+  }
+
+  const duration = Math.max(
+    THREAD_TITLE_SCROLL_MIN_DURATION_MS,
+    Math.round((overflow / THREAD_TITLE_SCROLL_PX_PER_SECOND) * 1_000),
+  );
+  element.dataset.overflowing = "true";
+  element.style.setProperty("--thread-title-scroll-distance", `${overflow}px`);
+  element.style.setProperty("--thread-title-scroll-duration", `${duration}ms`);
 }
 
 function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {

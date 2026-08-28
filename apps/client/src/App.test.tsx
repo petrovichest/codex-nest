@@ -1068,6 +1068,53 @@ describe("App routing and navigation", () => {
     expect(enabledMarker).toHaveAttribute("title", "Браузер включён");
   });
 
+  it("prepares only overflowing session titles to scroll on hover", () => {
+    const overflowingThread = {
+      ...baseThread,
+      id: "overflowing-title",
+      title: "Очень длинное название сессии",
+    };
+    const fittingThread = {
+      ...baseThread,
+      id: "fitting-title",
+      title: "Короткое название",
+    };
+    mockConnection(snapshot([overflowingThread, fittingThread]));
+    const view = renderApp("/threads/overflowing-title");
+    const overflowingLink = view.container.querySelector(
+      'a[href="/threads/overflowing-title"]',
+    ) as HTMLAnchorElement;
+    const overflowingTitle = overflowingLink.querySelector(
+      ".thread-link-title",
+    ) as HTMLSpanElement;
+    const fittingLink = view.container.querySelector(
+      'a[href="/threads/fitting-title"]',
+    ) as HTMLAnchorElement;
+    const fittingTitle = fittingLink.querySelector(".thread-link-title") as HTMLSpanElement;
+    Object.defineProperties(overflowingTitle, {
+      clientWidth: { configurable: true, value: 120 },
+      scrollWidth: { configurable: true, value: 210 },
+    });
+    Object.defineProperties(fittingTitle, {
+      clientWidth: { configurable: true, value: 160 },
+      scrollWidth: { configurable: true, value: 160 },
+    });
+
+    fireEvent.mouseEnter(overflowingLink);
+    fireEvent.mouseEnter(fittingLink);
+
+    expect(overflowingTitle).toHaveAttribute("data-overflowing", "true");
+    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe(
+      "90px",
+    );
+    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-duration")).toBe(
+      "2000ms",
+    );
+    expect(fittingTitle).not.toHaveAttribute("data-overflowing");
+    expect(fittingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe("");
+    expect(fittingTitle.style.getPropertyValue("--thread-title-scroll-duration")).toBe("");
+  });
+
   it("nests pending fork operations under their source and limits actions to failures", () => {
     const preparing: ForkOperationSummary = {
       id: "preparing-fork",
