@@ -797,6 +797,12 @@ function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem
     return next;
   }
   if (item.type !== "userInputResponse" && item.type !== "planChecklist") {
+    if (
+      item.type === "userMessage" &&
+      !items.some((candidate) => candidate.type === "userMessage")
+    ) {
+      return [item, ...items];
+    }
     const anchoredArtifact = items.findIndex(
       (candidate) =>
         (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&

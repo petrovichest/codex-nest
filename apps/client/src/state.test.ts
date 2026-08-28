@@ -747,6 +747,87 @@ describe("clientReducer", () => {
     ]);
   });
 
+  it("keeps the first user message ahead of a response that streamed before it", () => {
+    const userMessage = (id: string, timestamp: number) => ({
+      type: "userMessage" as const,
+      id,
+      status: "completed" as const,
+      text: id,
+      images: [],
+      timestamp,
+      phase: null,
+    });
+    const streamedResponse = {
+      type: "agentMessage" as const,
+      id: "answer",
+      status: "inProgress" as const,
+      text: "Ответ",
+      images: [],
+      timestamp: 100,
+      phase: null,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [streamedResponse],
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+      page: "latest",
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 5,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: userMessage("question", 101),
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 6,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: {
+          ...streamedResponse,
+          status: "completed",
+          timestamp: 140,
+          phase: "final_answer",
+        },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      sequence: 7,
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: userMessage("steer", 120),
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "question",
+      "steer",
+      "answer",
+    ]);
+  });
+
   it("applies server-owned settings to the list and loaded detail", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
