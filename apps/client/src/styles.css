@@ -327,7 +327,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .thread-link:hover .thread-link-title[data-overflowing="true"] {
-    animation: thread-title-scroll var(--thread-title-scroll-duration, 1.5s) linear 350ms forwards;
+    animation: thread-title-scroll var(--thread-title-scroll-duration, 1.5s) linear forwards;
   }
 }
 
