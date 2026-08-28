@@ -93,6 +93,41 @@ test.describe("CodexNest redesign visual contract", () => {
     if (browserName === "chromium") await expectA11yClean(page, "desktop session");
   });
 
+  test.describe("sidebar finish action", () => {
+    test.skip(
+      ({ browserName }) => browserName !== "chromium",
+      "The focused pixel contract is Chromium-only.",
+    );
+
+    test("18 desktop light active session", async ({ page }) => {
+      await openVisualPage(page, "/threads/session-active", "light", DESKTOP_VIEWPORT, {
+        finishableSidebar: true,
+      });
+      await page.getByRole("button", { name: "Активные" }).click();
+
+      const row = page.locator('a[href="/threads/session-main"]').locator("..");
+      const link = row.locator("a.thread-link");
+      const widthBeforeHover = await link.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
+      await row.hover();
+
+      const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
+      await expect(finish).toBeVisible();
+      await expect(link).toHaveClass(/finishable/);
+      expect(await link.evaluate((element) => element.getBoundingClientRect().width)).toBe(
+        widthBeforeHover,
+      );
+      await expect(row).toHaveScreenshot("18-desktop-light-sidebar-finish.png");
+
+      await finish.click();
+      await expect(finish).toHaveAccessibleName(
+        "Нажмите ещё раз, чтобы закончить сессию «Полировка мастерской»",
+      );
+      await expect(finish).toHaveClass(/confirming/);
+    });
+  });
+
   test.describe("compact activity disclosure", () => {
     test.skip(
       ({ browserName }) => browserName !== "chromium",

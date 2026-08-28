@@ -447,6 +447,7 @@ const codexStatus: CodexManagementStatus = {
 
 export type VisualFixtureOptions = {
   connected?: boolean;
+  finishableSidebar?: boolean;
   forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
   forkLineage?: boolean;
   notificationPrompt?: boolean;
@@ -458,6 +459,7 @@ export async function installVisualFixture(
   page: Page,
   {
     connected = true,
+    finishableSidebar = false,
     forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
@@ -466,9 +468,17 @@ export async function installVisualFixture(
   }: VisualFixtureOptions,
 ): Promise<void> {
   const baseSnapshot = forkLineage ? forkSnapshot : snapshot;
-  const fixtureSnapshot: AppSnapshot = voiceFailure
+  const sidebarSnapshot: AppSnapshot = finishableSidebar
     ? {
         ...baseSnapshot,
+        threads: baseSnapshot.threads.map((candidate) =>
+          candidate.id === mainThread.id ? { ...candidate, unread: true } : candidate,
+        ),
+      }
+    : baseSnapshot;
+  const fixtureSnapshot: AppSnapshot = voiceFailure
+    ? {
+        ...sidebarSnapshot,
         voiceTranscriptions: [
           {
             id: "voice-no-speech",
@@ -483,7 +493,7 @@ export async function installVisualFixture(
           },
         ],
       }
-    : baseSnapshot;
+    : sidebarSnapshot;
   await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
   await page.addInitScript(
     ({

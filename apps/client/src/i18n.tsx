@@ -671,7 +671,9 @@ const ENGLISH: Record<string, string> = {
   Задача: "Task",
   "Задача не найдена": "Task not found",
   "Заканчиваем…": "Finishing…",
+  "Заканчиваем сессию «{{title}}»": "Finishing session “{{title}}”",
   Закончить: "Finish",
+  "Закончить сессию «{{title}}»": "Finish session “{{title}}”",
   "Запись {{time}}": "Recording {{time}}",
   "Запись не содержит аудио": "The recording contains no audio",
   "Запись с микрофона не поддерживается на этом устройстве":
@@ -705,6 +707,8 @@ const ENGLISH: Record<string, string> = {
   "Направить текущую задачу…": "Steer the current task…",
   "Начать запись": "Start recording",
   "Не выполнено": "Not completed",
+  "Нажмите ещё раз, чтобы закончить сессию «{{title}}»":
+    "Click again to finish session “{{title}}”",
   "Не удалось закончить сессию": "Failed to finish the session",
   "Не удалось записать аудио": "Failed to record audio",
   "Не удалось изменить настройки": "Failed to change settings",

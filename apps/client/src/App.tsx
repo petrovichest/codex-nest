@@ -36,6 +36,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   BrowserIcon,
+  CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -1713,10 +1714,7 @@ function ThreadBranch({
 
   return (
     <div className="thread-branch">
-      <div className="thread-branch-row">
-        <span className="thread-branch-spacer" />
-        <ThreadLink thread={thread} onNavigate={onNavigate} />
-      </div>
+      <ThreadLink thread={thread} onNavigate={onNavigate} />
       {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
           {forkOperations.map((operation) => (
@@ -1784,10 +1782,7 @@ function ActiveThreadBranch({
 
   return (
     <div className="thread-branch">
-      <div className="thread-branch-row">
-        <span className="thread-branch-spacer" />
-        <ThreadLink thread={thread} onNavigate={onNavigate} secondaryLabel={projectLabel} />
-      </div>
+      <ThreadLink thread={thread} onNavigate={onNavigate} secondaryLabel={projectLabel} />
       {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
           {forkOperations.map((operation) => (
@@ -1906,9 +1901,15 @@ function ThreadLink({
   onNavigate(): void;
   secondaryLabel?: string;
 }) {
+  const { api } = useConnection();
   const { language, t } = useI18n();
   const location = useLocation();
   const titleRef = useRef<HTMLSpanElement>(null);
+  const [finishConfirmationUpdatedAt, setFinishConfirmationUpdatedAt] = useState<number | null>(
+    null,
+  );
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState<string | null>(null);
   const title = localizeKnownServerText(language, thread.title) ?? thread.title;
   const target = `/threads/${encodeURIComponent(thread.id)}`;
   const agentName =
@@ -1916,52 +1917,122 @@ function ThreadLink({
       ? thread.relation.nickname?.trim() || thread.relation.role?.trim() || null
       : null;
   const displayTitle = agentName ? `${agentName} · ${title}` : title;
+  const canFinish =
+    thread.relation.kind === "session" && thread.state === "completed" && thread.unread;
+  const finishConfirmationArmed = finishConfirmationUpdatedAt === thread.updatedAt;
+  const finishLabel = finishing
+    ? t("Заканчиваем сессию «{{title}}»", { title: displayTitle })
+    : finishConfirmationArmed
+      ? t("Нажмите ещё раз, чтобы закончить сессию «{{title}}»", { title: displayTitle })
+      : t("Закончить сессию «{{title}}»", { title: displayTitle });
+
+  function resetFinishInteraction() {
+    if (finishing) return;
+    setFinishConfirmationUpdatedAt(null);
+    setFinishError(null);
+  }
+
+  async function finishThreadFromSidebar() {
+    setFinishError(null);
+    if (!finishConfirmationArmed) {
+      setFinishConfirmationUpdatedAt(thread.updatedAt);
+      return;
+    }
+
+    setFinishConfirmationUpdatedAt(null);
+    setFinishing(true);
+    try {
+      await api.markRead(thread.id, { observedUpdatedAt: thread.updatedAt });
+    } catch (caught) {
+      setFinishError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось закончить сессию"),
+      );
+    } finally {
+      setFinishing(false);
+    }
+  }
+
   return (
-    <NavLink
-      className={({ isActive }) => `thread-link ${isActive ? "active" : ""}`}
-      end
-      state={{ focusComposer: true }}
-      to={target}
-      onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
-      onClick={(event) => {
-        if (
-          location.pathname === target &&
-          !event.defaultPrevented &&
-          event.button === 0 &&
-          !event.metaKey &&
-          !event.altKey &&
-          !event.ctrlKey &&
-          !event.shiftKey
-        ) {
-          onNavigate();
-        }
+    <div
+      className="thread-branch-row"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) resetFinishInteraction();
       }}
+      onMouseLeave={resetFinishInteraction}
     >
-      {secondaryLabel ? (
-        <span className="thread-link-copy">
+      <span className="thread-branch-spacer" />
+      <NavLink
+        className={({ isActive }) =>
+          `thread-link${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
+        }
+        end
+        state={{ focusComposer: true }}
+        to={target}
+        onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
+        onClick={(event) => {
+          if (
+            location.pathname === target &&
+            !event.defaultPrevented &&
+            event.button === 0 &&
+            !event.metaKey &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.shiftKey
+          ) {
+            onNavigate();
+          }
+        }}
+      >
+        {secondaryLabel ? (
+          <span className="thread-link-copy">
+            <span className="thread-link-title" ref={titleRef}>
+              {displayTitle}
+            </span>
+            <span className="thread-link-project">{secondaryLabel}</span>
+          </span>
+        ) : (
           <span className="thread-link-title" ref={titleRef}>
             {displayTitle}
           </span>
-          <span className="thread-link-project">{secondaryLabel}</span>
-        </span>
-      ) : (
-        <span className="thread-link-title" ref={titleRef}>
-          {displayTitle}
-        </span>
-      )}
-      {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
-        <span
-          aria-hidden="true"
-          className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
-          title={
-            thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
-          }
+        )}
+        {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
+          <span
+            aria-hidden="true"
+            className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
+            title={
+              thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
+            }
+          >
+            <BrowserIcon />
+          </span>
+        )}
+        <span className={threadStatusClasses(thread)} title={thread.state} />
+      </NavLink>
+      {canFinish && (
+        <button
+          aria-busy={finishing}
+          aria-label={finishLabel}
+          className={`thread-finish-action${finishConfirmationArmed ? " confirming" : ""}${finishError ? " failed" : ""}`}
+          disabled={finishing}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void finishThreadFromSidebar();
+          }}
+          title={finishError ?? finishLabel}
+          type="button"
         >
-          <BrowserIcon />
+          {finishing ? <span className="spinner small" /> : <CheckIcon />}
+        </button>
+      )}
+      {finishError && (
+        <span className="sr-only" role="alert">
+          {finishError}
         </span>
       )}
-      <span className={threadStatusClasses(thread)} title={thread.state} />
-    </NavLink>
+    </div>
   );
 }
 

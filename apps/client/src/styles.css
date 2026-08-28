@@ -407,6 +407,7 @@
 }
 
 .thread-branch-row {
+  position: relative;
   display: flex;
   align-items: center;
 }
@@ -415,6 +416,73 @@
   min-width: 0;
   flex: 1;
   padding-left: 4px;
+}
+
+.thread-branch-row > .thread-link.finishable {
+  padding-right: 36px;
+}
+
+.thread-finish-action {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  z-index: 1;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-color: color-mix(in srgb, var(--status-complete) 34%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--status-complete) 14%, var(--sidebar-hover));
+  color: var(--status-complete);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) scale(0.92);
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.thread-finish-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .thread-branch-row:hover > .thread-finish-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+.thread-finish-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) scale(1);
+}
+
+.thread-finish-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--status-complete) 55%, var(--line));
+  background: color-mix(in srgb, var(--status-complete) 22%, var(--sidebar-hover));
+}
+
+.thread-finish-action.confirming,
+.thread-finish-action.confirming:hover:not(:disabled) {
+  border-color: var(--status-complete);
+  background: var(--status-complete);
+  color: var(--accent-text);
+}
+
+.thread-finish-action.failed,
+.thread-finish-action.failed:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger) 14%, var(--sidebar-hover));
+  color: var(--danger);
 }
 
 .thread-branch-toggle,

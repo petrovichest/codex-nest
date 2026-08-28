@@ -1040,6 +1040,158 @@ describe("App routing and navigation", () => {
     expect(container.querySelector(".unread")).toBeNull();
   });
 
+  it("finishes only a green root session after two sidebar clicks", async () => {
+    const finishable = {
+      ...baseThread,
+      id: "finishable",
+      title: "Готовая сессия",
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 123,
+    };
+    const threads: ThreadSummary[] = [
+      finishable,
+      { ...baseThread, id: "completed-read", title: "Прочитана", state: "completed" },
+      { ...baseThread, id: "failed", title: "Ошибка", state: "failed", unread: true },
+      {
+        ...baseThread,
+        id: "interrupted",
+        title: "Прервана",
+        state: "interrupted",
+        unread: true,
+      },
+      { ...baseThread, id: "running", title: "Выполняется", state: "running" },
+    ];
+    let resolveFinish: (() => void) | undefined;
+    const api = mockConnection(snapshot(threads));
+    api.markRead.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveFinish = resolve;
+      }),
+    );
+    renderApp("/threads/running");
+
+    const finish = screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" });
+    expect(screen.getAllByRole("button", { name: /Закончить сессию/ })).toHaveLength(1);
+    expect(finish.closest(".thread-branch-row")?.querySelector(".thread-link")).toHaveClass(
+      "finishable",
+    );
+
+    fireEvent.click(finish);
+    expect(api.markRead).not.toHaveBeenCalled();
+    const confirmation = screen.getByRole("button", {
+      name: "Нажмите ещё раз, чтобы закончить сессию «Готовая сессия»",
+    });
+    expect(confirmation).toHaveClass("confirming");
+
+    fireEvent.click(confirmation);
+    expect(api.markRead).toHaveBeenCalledWith("finishable", { observedUpdatedAt: 123 });
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "Заканчиваем сессию «Готовая сессия»" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("link", { name: /Выполняется/ })).toHaveClass("active");
+
+    resolveFinish?.();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("shows the finish action in active mode and resets confirmation on leave or blur", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const finishable = {
+      ...baseThread,
+      id: "finishable",
+      title: "Результат",
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 123,
+    };
+    const api = mockConnection(
+      snapshot([finishable, { ...baseThread, id: "running", state: "running" }]),
+    );
+    renderApp("/threads/running");
+
+    const finish = screen.getByRole("button", { name: "Закончить сессию «Результат»" });
+    fireEvent.click(finish);
+    expect(finish).toHaveAccessibleName("Нажмите ещё раз, чтобы закончить сессию «Результат»");
+    fireEvent.mouseLeave(finish.closest(".thread-branch-row")!);
+    expect(finish).toHaveAccessibleName("Закончить сессию «Результат»");
+
+    fireEvent.click(finish);
+    fireEvent.blur(finish, { relatedTarget: document.body });
+    expect(finish).toHaveAccessibleName("Закончить сессию «Результат»");
+    expect(api.markRead).not.toHaveBeenCalled();
+
+    fireEvent.click(finish);
+    fireEvent.click(finish);
+    expect(api.markRead).toHaveBeenCalledWith("finishable", { observedUpdatedAt: 123 });
+  });
+
+  it("keeps a failed sidebar finish action available for another two-click attempt", async () => {
+    const finishable = {
+      ...baseThread,
+      id: "finishable",
+      title: "Готовая сессия",
+      state: "completed" as const,
+      unread: true,
+      updatedAt: 123,
+    };
+    const api = mockConnection(snapshot([finishable]));
+    api.markRead.mockRejectedValue(new Error("Сеть недоступна"));
+    renderApp("/threads/finishable");
+
+    const finish = screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" });
+    fireEvent.click(finish);
+    fireEvent.click(finish);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Сеть недоступна");
+    expect(finish).toBeEnabled();
+    expect(finish).toHaveClass("failed");
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(finish);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+    fireEvent.click(finish);
+    expect(api.markRead).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not offer sidebar finishing for a green managed subagent", () => {
+    const parent = {
+      ...baseThread,
+      id: "parent",
+      title: "Родитель",
+      state: "running" as const,
+    };
+    const child: ThreadSummary = {
+      ...baseThread,
+      id: "child",
+      title: "Дочерний результат",
+      state: "completed",
+      unread: true,
+      relation: {
+        kind: "subagent",
+        sessionId: "child-session",
+        parentThreadId: "parent",
+        nickname: null,
+        role: null,
+      },
+    };
+    mockConnection(snapshot([parent, child]));
+    renderApp("/threads/parent");
+
+    const parentBranch = screen.getByRole("link", { name: /Родитель/ }).closest(".thread-branch")!;
+    fireEvent.click(
+      within(parentBranch as HTMLElement).getByRole("button", { name: "Показать ещё 1" }),
+    );
+
+    expect(screen.getByRole("link", { name: /Дочерний результат/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Дочерний результат/ })).toBeNull();
+  });
+
   it("marks browser-enabled sessions in the sidebar", () => {
     const connectedThread = {
       ...baseThread,
