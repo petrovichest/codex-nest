@@ -110,14 +110,31 @@ test.describe("CodexNest redesign visual contract", () => {
       const widthBeforeHover = await link.evaluate(
         (element) => element.getBoundingClientRect().width,
       );
-      await row.hover();
+      await link.hover();
 
       const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
       await expect(finish).toBeVisible();
       await expect(link).toHaveClass(/finishable/);
+      const rowHoverBackground = await link.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      );
       expect(await link.evaluate((element) => element.getBoundingClientRect().width)).toBe(
         widthBeforeHover,
       );
+
+      await finish.hover();
+      expect(await row.evaluate((element) => element.matches(":hover"))).toBe(true);
+      expect(await link.evaluate((element) => element.matches(":hover"))).toBe(false);
+      await expect(link).toHaveCSS("background-color", rowHoverBackground);
+      expect(
+        await row.evaluate((element) => {
+          const action = element.querySelector<HTMLElement>(".thread-finish-action");
+          if (!action) return null;
+          return Math.round(
+            element.getBoundingClientRect().right - action.getBoundingClientRect().right,
+          );
+        }),
+      ).toBe(4);
       await expect(row).toHaveScreenshot("18-desktop-light-sidebar-finish.png");
 
       await finish.click();

@@ -310,6 +310,11 @@
     color: var(--text);
     background: var(--sidebar-hover);
   }
+
+  .thread-branch-row:hover > .thread-link:not(.active) {
+    color: var(--text);
+    background: var(--sidebar-hover);
+  }
 }
 
 .thread-link.active {
@@ -326,7 +331,8 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .thread-link:hover .thread-link-title[data-overflowing="true"] {
+  .thread-link:hover .thread-link-title[data-overflowing="true"],
+  .thread-branch-row:hover > .thread-link .thread-link-title[data-overflowing="true"] {
     animation: thread-title-scroll var(--thread-title-scroll-duration, 1.5s) linear forwards;
   }
 }
@@ -344,7 +350,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-link:hover .thread-link-title[data-overflowing="true"] {
+  .thread-link:hover .thread-link-title[data-overflowing="true"],
+  .thread-branch-row:hover > .thread-link .thread-link-title[data-overflowing="true"] {
     animation: none;
   }
 }
@@ -419,13 +426,13 @@
 }
 
 .thread-branch-row > .thread-link.finishable {
-  padding-right: 36px;
+  padding-right: 40px;
 }
 
 .thread-finish-action {
   position: absolute;
   top: 50%;
-  right: 0;
+  right: 4px;
   z-index: 1;
   width: 28px;
   min-width: 28px;
@@ -457,6 +464,10 @@
     opacity: 1;
     pointer-events: auto;
     transform: translateY(-50%) scale(1);
+  }
+
+  .thread-branch-row:hover > .thread-link.finishable .status {
+    opacity: 0;
   }
 }
 
