@@ -747,10 +747,7 @@ describe("clientReducer", () => {
       });
     }
 
-    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
-      "first",
-      "second",
-    ]);
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["first", "second"]);
   });
 
   it("inserts delayed activities by timestamp without disturbing untimed activities", () => {
