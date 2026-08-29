@@ -766,7 +766,10 @@ function applyActivity(
     });
   } else {
     const turn = turns[index];
-    turns[index] = { ...turn, items: upsertActivity(turn.items, item) };
+    turns[index] = {
+      ...turn,
+      items: upsertActivity(turn.items, item, turn.status !== "inProgress"),
+    };
   }
   const queuedMessages =
     item.type === "userMessage"
@@ -835,12 +838,28 @@ function applyActivityDelta(
   return { ...state, details: { ...state.details, [event.threadId]: { ...detail, turns } } };
 }
 
-function upsertActivity(items: ActivityItem[], item: ActivityItem): ActivityItem[] {
+function upsertActivity(
+  items: ActivityItem[],
+  item: ActivityItem,
+  reconcileTerminalAlias = false,
+): ActivityItem[] {
   const existing = items.findIndex((candidate) => candidate.id === item.id);
   if (existing >= 0) {
     const next = [...items];
     next[existing] = fresherActivity(next[existing]!, item);
     return next;
+  }
+  if (reconcileTerminalAlias && item.status !== "inProgress") {
+    const alias = items.findIndex(
+      (candidate) =>
+        candidate.status !== "inProgress" && sameRenderedActivity(candidate, item, false),
+    );
+    if (alias >= 0) {
+      const next = [...items];
+      const canonical = next[alias]!;
+      next[alias] = { ...fresherActivity(canonical, item), id: canonical.id } as ActivityItem;
+      return next;
+    }
   }
   if (item.type !== "userInputResponse" && item.type !== "planChecklist") {
     if (

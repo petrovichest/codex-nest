@@ -659,6 +659,100 @@ describe("clientReducer", () => {
     ]);
   });
 
+  it("reconciles a late live completion after canonical terminal detail", () => {
+    const live = {
+      type: "agentMessage" as const,
+      id: "msg-live",
+      status: "inProgress" as const,
+      text: "Готово",
+      images: [],
+      timestamp: 1,
+      phase: "final_answer" as const,
+    };
+    const canonical = {
+      ...live,
+      id: "item-20",
+      status: "completed" as const,
+      timestamp: 2,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null, items: [live] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), items: [canonical] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["item-20"]);
+
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...live, status: "completed", timestamp: 2 },
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([canonical]);
+  });
+
+  it("keeps independent identical completions while a turn is active", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+
+    for (const [sequence, id] of [
+      [5, "first"],
+      [6, "second"],
+    ] as const) {
+      state = clientReducer(state, {
+        type: "event",
+        version: { instanceId: "legacy", sequence },
+        event: {
+          type: "activity.upserted",
+          threadId: "one",
+          turnId: "turn",
+          item: {
+            type: "agentMessage",
+            id,
+            status: "completed",
+            text: "Повтор",
+            images: [],
+            timestamp: sequence,
+            phase: "commentary",
+          },
+        },
+      });
+    }
+
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
   it("inserts delayed activities by timestamp without disturbing untimed activities", () => {
     const message = (id: string, timestamp: number | null) => ({
       type: "agentMessage" as const,
