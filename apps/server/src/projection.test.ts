@@ -3832,6 +3832,109 @@ describe("AppProjection", () => {
     );
   });
 
+  it("reconciles an agent item started under a provisional id with its canonical completion", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const canonicalMessage = {
+      type: "agentMessage" as const,
+      id: "canonical-agent",
+      text: "Готово",
+      phase: "final_answer" as const,
+      memoryCitation: null,
+    };
+    const canonicalTurn = {
+      ...testTurn("live", "completed"),
+      itemsView: "full" as const,
+      items: [canonicalMessage],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [canonicalTurn], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    const activities: ActivityItem[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "activity.upserted") activities.push(event.item);
+    });
+    projection.upsertThread(thread("one", "/work", 10));
+
+    bridge.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: { ...canonicalMessage, id: "provisional-agent", text: "Гот" },
+        startedAtMs: 11_000,
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: canonicalMessage,
+        completedAtMs: 12_000,
+      },
+    } satisfies ServerNotification);
+
+    expect(activities).toMatchObject([
+      { id: "provisional-agent", status: "inProgress", text: "Гот" },
+      { id: "provisional-agent", status: "completed", text: "Готово" },
+    ]);
+    expect((await projection.readThread("one")).turns[0]?.items).toMatchObject([
+      { id: "canonical-agent", status: "completed", text: "Готово" },
+    ]);
+  });
+
+  it("keeps independent completed agent messages with identical text", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    const activities: ActivityItem[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "activity.upserted") activities.push(event.item);
+    });
+
+    for (const [id, completedAtMs] of [
+      ["first-agent", 11_000],
+      ["second-agent", 12_000],
+    ] as const) {
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: {
+          threadId: "one",
+          turnId: "live",
+          item: {
+            type: "agentMessage",
+            id,
+            text: "Повтор",
+            phase: "commentary",
+            memoryCitation: null,
+          },
+          completedAtMs,
+        },
+      } satisfies ServerNotification);
+    }
+
+    expect(activities.map((item) => item.id)).toEqual(["first-agent", "second-agent"]);
+  });
+
   it("reconciles a streamed agent message when the canonical item id changes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

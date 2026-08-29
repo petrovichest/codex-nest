@@ -2125,7 +2125,11 @@ export class AppProjection extends EventEmitter {
             ? notification.params.startedAtMs
             : notification.params.completedAtMs;
         const timestamp = previous?.type === "userMessage" ? previous.timestamp : eventTimestamp;
-        let item = normalizeActivity(notification.params.item, timestamp);
+        let item = normalizeActivity(
+          notification.params.item,
+          timestamp,
+          notification.method === "item/started",
+        );
         if (notification.method === "item/completed" && !previous) {
           const alias = this.streamingActivityAlias(
             notification.params.threadId,
@@ -3116,6 +3120,7 @@ function isInternalTeamContinuationItem(item: Turn["items"][number]): boolean {
 function normalizeActivity(
   item: Turn["items"][number],
   timestamp: number | null = null,
+  lifecycleStarted = false,
 ): ActivityItem {
   switch (item.type) {
     case "userMessage":
@@ -3135,7 +3140,7 @@ function normalizeActivity(
       return {
         type: "agentMessage",
         id: item.id,
-        status: "completed",
+        status: lifecycleStarted ? "inProgress" : "completed",
         text: item.text,
         images: [],
         timestamp,
@@ -3145,7 +3150,7 @@ function normalizeActivity(
       return {
         type: "plan",
         id: item.id,
-        status: "completed",
+        status: lifecycleStarted ? "inProgress" : "completed",
         text: item.text,
         images: [],
         timestamp,
@@ -3155,7 +3160,7 @@ function normalizeActivity(
       return {
         type: "reasoning",
         id: item.id,
-        status: "completed",
+        status: lifecycleStarted ? "inProgress" : "completed",
         text: item.summary.join("\n"),
         images: [],
         timestamp,
