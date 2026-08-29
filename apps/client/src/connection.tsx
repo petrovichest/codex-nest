@@ -16,10 +16,10 @@ import {
 import {
   isServerFrame,
   type AppSnapshot,
+  type ProjectionVersion,
   type QueueMessageRequest,
   type ServerEvent,
   type ThreadDetail,
-  type ThreadSummary,
   type UpdateUserInputDraftRequest,
 } from "@codexnest/protocol";
 
@@ -35,8 +35,8 @@ import {
   loadCachedMeta,
   loadCachedThread,
   connectionCacheKey,
-  deleteOutboxMessage,
   deleteCachedThread,
+  deleteOutboxMessage,
   deletePendingVoiceRecording,
   confirmLocalDraft,
   listOutboxMessages,
@@ -50,29 +50,17 @@ import {
   type OutboxMessage,
   type PendingVoiceRecording,
 } from "./offline-store";
-import {
-  clientReducer,
-  initialState,
-  mergeThreadDetailChanges,
-  type ClientAction,
-  type ClientState,
-} from "./state";
+import { clientReducer, initialState, type ClientAction, type ClientState } from "./state";
 import type { ConnectionSettings } from "./storage";
 
 const HEARTBEAT_IDLE_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
-const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+const LEGACY_CACHE_INSTANCE_ID = "legacy-cache";
 
 type DetailReadOptions = {
   authoritative?: boolean;
   force?: boolean;
 };
-
-type DetailReader = (
-  threadId: string,
-  cursor?: string,
-  options?: DetailReadOptions,
-) => Promise<ThreadDetail>;
 
 type VoiceRecordingUpload = Omit<
   PendingVoiceRecording,
@@ -100,9 +88,10 @@ interface ConnectionContextValue {
   foregroundEpoch: number;
   streamRecoveryEpoch: number;
   dispatch: Dispatch<ClientAction>;
+  hydrateCachedDetail(threadId: string): Promise<void>;
   refreshDetail(threadId: string, options?: DetailReadOptions): Promise<ThreadDetail>;
   forceRefreshDetail(threadId: string): Promise<ThreadDetail>;
-  loadOlderDetail(threadId: string, cursor: string): Promise<ThreadDetail>;
+  loadOlderDetail(threadId: string, cursor: string): Promise<void>;
   loadTurnItems(threadId: string, turnId: string): Promise<void>;
   sendReliable(
     threadId: string,
@@ -144,19 +133,13 @@ export function ConnectionProvider({
   >({});
   const [appActive, setAppActive] = useState(() => document.visibilityState === "visible");
   const generationRef = useRef(0);
-  const streamSequence = useRef<number | null>(null);
+  const connectionEpoch = useRef(0);
+  const streamVersion = useRef<{ instanceId: string; sequence: number } | null>(null);
   const receivedStreamSnapshot = useRef(false);
-  const appliedSequence = useRef<number | null>(null);
-  const appliedThreadSequences = useRef(new Map<string, number>());
-  const appliedThreadEventSequences = useRef(new Map<string, number>());
-  const syncedSnapshotFloor = useRef<{ generation: number; sequence: number } | null>(null);
+  const threadEventVersions = useRef(new Map<string, ProjectionVersion>());
   const detailRequests = useRef(new Map<string, Promise<ThreadDetail>>());
-  const detailRequestVersions = useRef(new Map<string, number>());
-  const detailResetEpochs = useRef(new Map<string, number>());
+  const historyRequests = useRef(new Map<string, Promise<void>>());
   const turnItemRequests = useRef(new Map<string, Promise<void>>());
-  const detailReader = useRef<DetailReader | null>(null);
-  const detailRetryAttempts = useRef(new Map<string, number>());
-  const detailRetryTimers = useRef(new Map<string, number>());
   const persistedDetails = useRef<Record<string, ThreadDetail>>({});
   const detailPersistTimers = useRef(new Map<string, number>());
   const persistenceConnectionKey = useRef(connectionCacheKey(settings));
@@ -222,11 +205,15 @@ export function ConnectionProvider({
       ([cached, outbox]) => {
         if (!active) return;
         if (
-          cached &&
+          cached?.snapshot &&
           generationRef.current === targetGeneration &&
-          appliedSequence.current === null
+          !streamVersion.current
         ) {
-          dispatch({ type: "hydrate", snapshot: cached.snapshot, goals: cached.goals });
+          dispatch({
+            type: "hydrate",
+            snapshot: normalizeCachedSnapshot(cached.snapshot),
+            goals: cached.goals,
+          });
         }
         for (const message of outbox) {
           dispatch({
@@ -295,300 +282,244 @@ export function ConnectionProvider({
     [],
   );
 
+  const invalidateRequests = useCallback(() => {
+    connectionEpoch.current += 1;
+    detailRequests.current.clear();
+    historyRequests.current.clear();
+    turnItemRequests.current.clear();
+  }, []);
+
   const reconnect = useCallback(() => {
     const next = generationRef.current + 1;
     generationRef.current = next;
-    detailRequests.current.clear();
-    detailResetEpochs.current.clear();
-    turnItemRequests.current.clear();
-    appliedThreadEventSequences.current.clear();
+    invalidateRequests();
+    threadEventVersions.current.clear();
     setGeneration(next);
     return next;
-  }, []);
-  const acceptSyncedSnapshot = useCallback(
-    (snapshot: AppSnapshot, targetGeneration: number): boolean => {
-      if (generationRef.current !== targetGeneration) return false;
-      if (appliedSequence.current !== null && snapshot.sequence < appliedSequence.current) {
-        return false;
-      }
-      appliedSequence.current = snapshot.sequence;
-      appliedThreadSequences.current = new Map(
-        snapshot.threads.map((thread) => [thread.id, snapshot.sequence]),
-      );
-      appliedThreadEventSequences.current.clear();
-      syncedSnapshotFloor.current = {
-        generation: targetGeneration,
-        sequence: snapshot.sequence,
-      };
-      browserNotifications?.acceptSnapshot(snapshot);
-      observeNativeNotificationSnapshot(snapshot);
-      dispatch({ type: "snapshot", snapshot });
-      return true;
+  }, [invalidateRequests]);
+
+  const hydrateCachedDetail = useCallback(
+    async (threadId: string): Promise<void> => {
+      const snapshot = stateRef.current.snapshot;
+      if (!snapshot?.instanceId || stateRef.current.details[threadId]) return;
+      const cached = await loadCachedThread(settings, threadId);
+      if (stateRef.current.details[threadId]) return;
+      const normalized = cached ? normalizeCachedDetail(cached, snapshot) : null;
+      if (normalized) dispatch({ type: "hydrate.detail", detail: normalized });
     },
-    [browserNotifications],
+    [settings],
   );
 
-  const clearDetailRetry = useCallback((threadId: string) => {
-    const timer = detailRetryTimers.current.get(threadId);
-    if (timer !== undefined) window.clearTimeout(timer);
-    detailRetryTimers.current.delete(threadId);
-    detailRetryAttempts.current.delete(threadId);
-  }, []);
-
-  const scheduleDetailRetry = useCallback(function schedule(threadId: string): void {
-    if (detailRetryTimers.current.has(threadId)) return;
-    const attempt = detailRetryAttempts.current.get(threadId) ?? 0;
-    const delay =
-      DETAIL_RETRY_DELAYS_MS[Math.min(attempt, DETAIL_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
-    detailRetryAttempts.current.set(threadId, attempt + 1);
-    const timer = window.setTimeout(() => {
-      if (detailRetryTimers.current.get(threadId) !== timer) return;
-      detailRetryTimers.current.delete(threadId);
-      const read = detailReader.current;
-      if (!read) return;
-      void read(threadId, undefined, { authoritative: true, force: true })
-        .then((detail) => {
-          const summary =
-            stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
-            detail.summary;
-          if (threadDetailNeedsRecovery(detail, summary)) schedule(threadId);
-          else {
-            detailRetryAttempts.current.delete(threadId);
-          }
-        })
-        .catch((error: unknown) => {
-          if (isRetryableApiError(error)) schedule(threadId);
-          else detailRetryAttempts.current.delete(threadId);
-        });
-    }, delay);
-    detailRetryTimers.current.set(threadId, timer);
-  }, []);
-
   const readDetail = useCallback(
-    (threadId: string, cursor?: string, options: DetailReadOptions = {}) => {
-      const versionKey = JSON.stringify([threadId, cursor ?? null]);
-      const authoritativeKey = JSON.stringify([threadId, cursor ?? null, "authoritative"]);
-      const incrementalKey = JSON.stringify([threadId, cursor ?? null, "incremental"]);
-      if (!options.authoritative) {
-        const authoritative = detailRequests.current.get(authoritativeKey);
-        if (authoritative) return authoritative;
-      }
-      const key = options.authoritative ? authoritativeKey : incrementalKey;
+    (threadId: string, options: DetailReadOptions = {}): Promise<ThreadDetail> => {
+      const key = `${threadId}:${options.authoritative ? "refresh" : "read"}`;
       const current = detailRequests.current.get(key);
       if (current) return current;
-      if (options.authoritative) detailRequests.current.delete(incrementalKey);
-      const version = (detailRequestVersions.current.get(versionKey) ?? 0) + 1;
-      detailRequestVersions.current.set(versionKey, version);
       const targetGeneration = generationRef.current;
-      const targetResetEpoch = detailResetEpochs.current.get(threadId) ?? 0;
-      const targetSequence = appliedThreadSequences.current.get(threadId) ?? null;
-      const canApplyRequest = () =>
-        detailRequestVersions.current.get(versionKey) === version &&
-        generationRef.current === targetGeneration;
-      const canApply = () =>
-        canApplyRequest() &&
-        (cursor === undefined ||
-          (detailResetEpochs.current.get(threadId) ?? 0) === targetResetEpoch);
-      const advanceResetEpoch = () => {
-        detailResetEpochs.current.set(threadId, (detailResetEpochs.current.get(threadId) ?? 0) + 1);
-      };
-      const liveAdvanced = () =>
-        (appliedThreadSequences.current.get(threadId) ?? null) !== targetSequence;
-      const wouldRollbackLive = (incoming: ThreadDetail) =>
-        threadDetailWouldRollbackLiveTurn(
-          stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId),
-          stateRef.current.details[threadId],
-          incoming,
-        );
-      const preferredSummary = (incoming: ThreadSummary, preserveLive: boolean): ThreadSummary => {
-        const current = stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId);
-        if (preserveLive) return current ?? incoming;
-        return current && current.updatedAt > incoming.updatedAt ? current : incoming;
-      };
-      const acceptLatestSummary = (
-        incoming: ThreadSummary,
-        preserveLive: boolean,
-      ): ThreadSummary => {
-        const preferred = preferredSummary(incoming, preserveLive);
-        if (!preserveLive && preferred === incoming && canApply()) {
-          dispatch({ type: "thread", thread: incoming });
-        }
-        return preferred;
-      };
+      const targetConnectionEpoch = connectionEpoch.current;
+      const targetSnapshot = stateRef.current.snapshot;
       const request = (async () => {
-        let acceptedSummary: ThreadSummary | undefined;
-        const authoritativeLatest = async (): Promise<ThreadDetail> => {
-          const { snapshot, detail } = await api.refreshThread(threadId);
-          if (canApply()) {
-            const preserveLive = liveAdvanced() || wouldRollbackLive(detail);
-            const snapshotAccepted = acceptSyncedSnapshot(snapshot, targetGeneration);
-            const appliedThreadEventSequence = appliedThreadEventSequences.current.get(threadId);
-            const currentSummary =
-              stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
-              detail.summary;
-            const currentDetail = stateRef.current.details[threadId];
-            const snapshotSummary =
-              snapshot.threads.find((thread) => thread.id === threadId) ?? detail.summary;
-            const snapshotCoversCurrentSummary =
-              snapshotSummary.updatedAt > currentSummary.updatedAt ||
-              (snapshotSummary.updatedAt === currentSummary.updatedAt &&
-                snapshotSummary.currentTurnId === currentSummary.currentTurnId &&
-                snapshotSummary.state === currentSummary.state);
-            const repairsCurrentDetail =
-              (!currentDetail || threadDetailNeedsRecovery(currentDetail, currentSummary)) &&
-              !threadDetailNeedsRecovery(detail, currentSummary);
-            if (
-              snapshotAccepted ||
-              ((appliedThreadEventSequence === undefined ||
-                appliedThreadEventSequence <= snapshot.sequence) &&
-                snapshotCoversCurrentSummary) ||
-              repairsCurrentDetail
-            ) {
-              if (!snapshotAccepted) {
-                appliedThreadSequences.current.set(
-                  threadId,
-                  Math.max(
-                    appliedThreadSequences.current.get(threadId) ?? snapshot.sequence,
-                    snapshot.sequence,
-                  ),
-                );
-                if (
-                  appliedThreadEventSequence !== undefined &&
-                  appliedThreadEventSequence <= snapshot.sequence
-                ) {
-                  appliedThreadEventSequences.current.delete(threadId);
-                }
-                acceptedSummary = acceptLatestSummary(snapshotSummary, preserveLive);
-              } else {
-                acceptedSummary = preferredSummary(snapshotSummary, preserveLive);
-              }
-              advanceResetEpoch();
-              dispatch({
-                type: "detail",
-                detail:
-                  acceptedSummary === detail.summary
-                    ? detail
-                    : { ...detail, summary: acceptedSummary },
-                page: "reset",
-                preserveLive,
-              });
-              return detail;
-            }
+        if (!stateRef.current.details[threadId] && targetSnapshot?.instanceId) {
+          const cached = await loadCachedThread(settings, threadId);
+          if (
+            cached &&
+            generationRef.current === targetGeneration &&
+            connectionEpoch.current === targetConnectionEpoch
+          ) {
+            const normalized = normalizeCachedDetail(cached, targetSnapshot);
+            if (normalized) dispatch({ type: "hydrate.detail", detail: normalized });
           }
-          return stateRef.current.details[threadId] ?? detail;
-        };
-        try {
-          let detail: ThreadDetail;
-          let baseline = stateRef.current.details[threadId];
-          if (!cursor && !baseline) {
-            const cached = await loadCachedThread(settings, threadId);
-            if (cached && canApply()) {
-              baseline = cached;
-              dispatch({ type: "hydrate.detail", detail: cached });
-            }
-          }
-          if (!cursor && baseline?.syncPoint && !options.authoritative) {
-            try {
-              let merged = baseline;
-              let continuationCursor: string | undefined;
-              do {
-                const changes = await api.readThreadChanges(
-                  threadId,
-                  merged.syncPoint ?? baseline.syncPoint,
-                  continuationCursor,
-                );
-                merged = mergeThreadDetailChanges(merged, changes);
-                if (canApply()) {
-                  const preserveLive = liveAdvanced() || wouldRollbackLive(merged);
-                  if (changes.resetLatest) advanceResetEpoch();
-                  dispatch({
-                    type: "changes",
-                    threadId,
-                    changes,
-                    preserveLive,
-                  });
-                }
-                continuationCursor = changes.continuationCursor ?? undefined;
-              } while (continuationCursor);
-              const rollsBackLiveTurn = wouldRollbackLive(merged);
-              const preserveLive = liveAdvanced() || rollsBackLiveTurn;
-              const summary = preferredSummary(merged.summary, preserveLive);
-              const currentDetail = stateRef.current.details[threadId];
-              const canPreserveLiveTurn = Boolean(
-                currentDetail && !threadDetailNeedsRecovery(currentDetail, summary),
-              );
-              if (!canApply()) {
-                detail = merged;
-              } else if (
-                threadDetailNeedsRecovery(merged, summary) &&
-                (!rollsBackLiveTurn || !canPreserveLiveTurn)
-              ) {
-                detail = await authoritativeLatest();
-              } else {
-                if (canApply()) {
-                  acceptedSummary = acceptLatestSummary(merged.summary, preserveLive);
-                }
-                detail = merged;
-              }
-            } catch {
-              detail = await authoritativeLatest();
-            }
-          } else if (!cursor && options.authoritative) {
-            detail = await authoritativeLatest();
-          } else {
-            detail = await api.readThread(threadId, cursor, { fresh: options.force });
-            if (canApply()) {
-              const preserveLive = liveAdvanced() || (!cursor && wouldRollbackLive(detail));
-              if (!cursor) {
-                acceptedSummary = acceptLatestSummary(detail.summary, preserveLive);
-              }
-              dispatch({
-                type: "detail",
-                detail,
-                page: cursor ? "older" : "latest",
-                preserveLive,
-              });
-            }
-          }
-          if (!cursor && canApply()) {
-            const summary =
-              acceptedSummary ??
-              stateRef.current.snapshot?.threads.find((thread) => thread.id === threadId) ??
-              detail.summary;
-            const currentDetail = stateRef.current.details[threadId];
-            const needsRecovery =
-              threadDetailNeedsRecovery(detail, summary) &&
-              (!currentDetail || threadDetailNeedsRecovery(currentDetail, summary));
-            if (needsRecovery) scheduleDetailRetry(threadId);
-            else clearDetailRetry(threadId);
-          }
-          return detail;
-        } catch (error) {
-          if (!cursor && canApply() && isRetryableApiError(error)) scheduleDetailRetry(threadId);
-          throw error;
         }
+        let rawDetail: ThreadDetail;
+        let refreshSnapshot: AppSnapshot | null = null;
+        if (options.authoritative) {
+          const refreshed = await api.refreshThread(threadId);
+          rawDetail = refreshed.detail;
+          refreshSnapshot = refreshed.snapshot;
+        } else {
+          rawDetail = await api.readThread(threadId, { fresh: options.force });
+        }
+        const fallbackVersion =
+          streamVersion.current ??
+          (targetSnapshot?.instanceId
+            ? { instanceId: targetSnapshot.instanceId, sequence: targetSnapshot.sequence }
+            : null);
+        if (!rawDetail.version && !fallbackVersion) return rawDetail;
+        const detail = normalizeThreadDetail(rawDetail, fallbackVersion);
+        if (
+          generationRef.current !== targetGeneration ||
+          connectionEpoch.current !== targetConnectionEpoch
+        ) {
+          return detail;
+        }
+        const activeSnapshot = stateRef.current.snapshot;
+        if (
+          !activeSnapshot?.instanceId ||
+          detail.version?.instanceId !== activeSnapshot.instanceId
+        ) {
+          throw new ApiClientError(
+            "projection_advanced",
+            "The backend projection changed while the session was loading",
+            425,
+          );
+        }
+        const threadVersion = threadEventVersions.current.get(threadId);
+        if (
+          threadVersion?.instanceId === detail.version.instanceId &&
+          threadVersion.sequence > detail.version.sequence
+        ) {
+          throw new ApiClientError(
+            "projection_advanced",
+            "The session changed while its detail was loading",
+            425,
+          );
+        }
+        if (refreshSnapshot) {
+          const refreshedSnapshot = normalizeServerSnapshot(
+            refreshSnapshot,
+            detail.version.instanceId,
+          );
+          if (
+            refreshedSnapshot.instanceId === activeSnapshot.instanceId &&
+            refreshedSnapshot.sequence >= activeSnapshot.sequence
+          ) {
+            acceptSnapshotVersion(refreshedSnapshot, threadEventVersions.current);
+            dispatch({ type: "snapshot", snapshot: refreshedSnapshot });
+          }
+        }
+        dispatch({ type: "detail", detail });
+        return detail;
       })().finally(() => {
         if (detailRequests.current.get(key) === request) detailRequests.current.delete(key);
       });
       detailRequests.current.set(key, request);
       return request;
     },
-    [acceptSyncedSnapshot, api, clearDetailRetry, scheduleDetailRetry, settings],
+    [api, settings],
   );
-  detailReader.current = readDetail;
 
   const refreshDetail = useCallback(
-    (threadId: string, options?: DetailReadOptions) => readDetail(threadId, undefined, options),
+    (threadId: string, options?: DetailReadOptions) => readDetail(threadId, options),
     [readDetail],
   );
   const forceRefreshDetail = useCallback(
     (threadId: string): Promise<ThreadDetail> =>
-      readDetail(threadId, undefined, { authoritative: true, force: true }),
+      readDetail(threadId, { authoritative: true, force: true }),
     [readDetail],
   );
   const loadOlderDetail = useCallback(
-    (threadId: string, cursor: string) => readDetail(threadId, cursor),
-    [readDetail],
+    (threadId: string, cursor: string): Promise<void> => {
+      const startingDetail = stateRef.current.details[threadId];
+      const anchorTurnId = startingDetail?.turns[0]?.id;
+      if (!anchorTurnId) return Promise.resolve();
+      const key = `${threadId}:${cursor}:${anchorTurnId}`;
+      const current = historyRequests.current.get(key);
+      if (current) return current;
+      const targetGeneration = generationRef.current;
+      const targetConnectionEpoch = connectionEpoch.current;
+      const request = (async () => {
+        const instanceId = stateRef.current.snapshot?.instanceId;
+        if (!instanceId) return;
+        const readPage = async (pageCursor: string, pageAnchor: string) => {
+          if (isLegacyInstanceId(instanceId)) {
+            const legacy = await api.readLegacyThreadPage(threadId, pageCursor);
+            return {
+              instanceId,
+              anchorTurnId: pageAnchor,
+              turns: legacy.turns,
+              olderTurnsCursor: legacy.olderTurnsCursor,
+            };
+          }
+          return api.readThreadHistory(threadId, pageCursor, pageAnchor);
+        };
+        const readRebasedPage = async () => {
+          const refreshed = await api.refreshThread(threadId);
+          const refreshedSnapshot = normalizeServerSnapshot(refreshed.snapshot, instanceId);
+          const detail = normalizeThreadDetail(refreshed.detail, {
+            instanceId: refreshedSnapshot.instanceId,
+            sequence: refreshedSnapshot.sequence,
+          });
+          if (detail.version.instanceId !== refreshedSnapshot.instanceId) {
+            throw new ApiClientError(
+              "projection_advanced",
+              "The backend projection changed while history was rebasing",
+              425,
+            );
+          }
+          const pageCursor = detail.olderTurnsCursor;
+          const pageAnchor = detail.turns[0]?.id;
+          if (!pageCursor || !pageAnchor) return null;
+          const page = await readPage(pageCursor, pageAnchor);
+          if (page.instanceId !== detail.version.instanceId || page.anchorTurnId !== pageAnchor) {
+            throw new ApiClientError(
+              "history_changed",
+              "The session history changed again while it was rebasing",
+              409,
+            );
+          }
+          return { detail, page, snapshot: refreshedSnapshot };
+        };
+        let page;
+        let rebasedDetail: VersionedThreadDetail | null = null;
+        let rebasedSnapshot: VersionedSnapshot | null = null;
+        try {
+          page = await readPage(cursor, anchorTurnId);
+        } catch (error) {
+          if (!(error instanceof ApiClientError) || error.code !== "history_changed") throw error;
+          const rebased = await readRebasedPage();
+          if (!rebased) return;
+          ({ detail: rebasedDetail, page, snapshot: rebasedSnapshot } = rebased);
+        }
+        const activeDetail = stateRef.current.details[threadId];
+        if (
+          !rebasedDetail &&
+          (stateRef.current.snapshot?.instanceId !== page.instanceId ||
+            activeDetail?.turns[0]?.id !== page.anchorTurnId)
+        ) {
+          const rebased = await readRebasedPage();
+          if (!rebased) return;
+          ({ detail: rebasedDetail, page, snapshot: rebasedSnapshot } = rebased);
+        }
+        if (
+          generationRef.current === targetGeneration &&
+          connectionEpoch.current === targetConnectionEpoch
+        ) {
+          if (rebasedDetail && rebasedSnapshot) {
+            const activeSnapshot = stateRef.current.snapshot;
+            const threadVersion = threadEventVersions.current.get(threadId);
+            if (
+              !activeSnapshot?.instanceId ||
+              activeSnapshot.instanceId !== rebasedDetail.version.instanceId ||
+              (threadVersion?.instanceId === rebasedDetail.version.instanceId &&
+                threadVersion.sequence > rebasedDetail.version.sequence)
+            ) {
+              throw new ApiClientError(
+                "projection_advanced",
+                "The session changed while history was rebasing",
+                425,
+              );
+            }
+            if (
+              rebasedSnapshot.instanceId === activeSnapshot.instanceId &&
+              rebasedSnapshot.sequence >= activeSnapshot.sequence
+            ) {
+              acceptSnapshotVersion(rebasedSnapshot, threadEventVersions.current);
+              dispatch({ type: "snapshot", snapshot: rebasedSnapshot });
+            }
+          }
+          dispatch(
+            rebasedDetail
+              ? { type: "history.rebase", detail: rebasedDetail, page }
+              : { type: "history", threadId, page },
+          );
+        }
+      })().finally(() => {
+        if (historyRequests.current.get(key) === request) historyRequests.current.delete(key);
+      });
+      historyRequests.current.set(key, request);
+      return request;
+    },
+    [api],
   );
   const loadTurnItems = useCallback(
     (threadId: string, turnId: string): Promise<void> => {
@@ -596,10 +527,16 @@ export function ConnectionProvider({
       const current = turnItemRequests.current.get(key);
       if (current) return current;
       const targetGeneration = generationRef.current;
+      const targetConnectionEpoch = connectionEpoch.current;
       const request = api
         .readTurnItems(threadId, turnId)
         .then((response) => {
-          if (generationRef.current !== targetGeneration) return;
+          if (
+            generationRef.current !== targetGeneration ||
+            connectionEpoch.current !== targetConnectionEpoch
+          ) {
+            return;
+          }
           dispatch({ type: "turn.items", threadId, turnId, items: response.items });
         })
         .finally(() => {
@@ -609,24 +546,6 @@ export function ConnectionProvider({
       return request;
     },
     [api],
-  );
-
-  useEffect(() => {
-    for (const [threadId, detail] of Object.entries(state.details)) {
-      const summary =
-        state.snapshot?.threads.find((thread) => thread.id === threadId) ?? detail.summary;
-      if (threadDetailNeedsRecovery(detail, summary)) scheduleDetailRetry(threadId);
-      else clearDetailRetry(threadId);
-    }
-  }, [clearDetailRetry, scheduleDetailRetry, state.details, state.snapshot?.threads]);
-
-  useEffect(
-    () => () => {
-      for (const timer of detailRetryTimers.current.values()) window.clearTimeout(timer);
-      detailRetryTimers.current.clear();
-      detailRetryAttempts.current.clear();
-    },
-    [settings],
   );
 
   const scheduleOutboxRetry = useCallback((attempt: number, drain: () => void) => {
@@ -1101,6 +1020,7 @@ export function ConnectionProvider({
       if (stopped) return;
       dispatch({ type: "network", network: "connecting" });
       const candidate = new WebSocket(api.webSocketUrl());
+      const legacyInstanceId = `legacy:${generationRef.current}:${connectionEpoch.current}`;
       socket = candidate;
       candidate.addEventListener("open", () => {
         if (stopped || socket !== candidate) return;
@@ -1121,21 +1041,17 @@ export function ConnectionProvider({
         }
         scheduleHeartbeat(candidate);
         if (frame.type === "snapshot") {
+          const snapshot = normalizeServerSnapshot(frame.snapshot, legacyInstanceId);
+          if (streamVersion.current) invalidateRequests();
           retry = 0;
-          streamSequence.current = frame.snapshot.sequence;
-          const floor = syncedSnapshotFloor.current;
-          if (floor?.generation === generation && frame.snapshot.sequence < floor.sequence) {
-            return;
-          }
-          if (floor?.generation === generation) syncedSnapshotFloor.current = null;
-          appliedSequence.current = frame.snapshot.sequence;
-          appliedThreadSequences.current = new Map(
-            frame.snapshot.threads.map((thread) => [thread.id, frame.snapshot.sequence]),
-          );
-          appliedThreadEventSequences.current.clear();
-          browserNotifications?.acceptSnapshot(frame.snapshot);
-          observeNativeNotificationSnapshot(frame.snapshot);
-          dispatch({ type: "snapshot", snapshot: frame.snapshot });
+          streamVersion.current = {
+            instanceId: snapshot.instanceId,
+            sequence: snapshot.sequence,
+          };
+          acceptSnapshotVersion(snapshot, threadEventVersions.current);
+          browserNotifications?.acceptSnapshot(snapshot);
+          observeNativeNotificationSnapshot(snapshot);
+          dispatch({ type: "snapshot", snapshot });
           if (receivedStreamSnapshot.current) {
             setStreamRecoveryEpoch((current) => current + 1);
           } else {
@@ -1143,29 +1059,25 @@ export function ConnectionProvider({
           }
           void drainReliableOutbox();
         } else if (frame.type === "event") {
-          if (streamSequence.current === null || frame.sequence !== streamSequence.current + 1) {
+          const current = streamVersion.current;
+          const version =
+            frame.version ??
+            (current ? { instanceId: current.instanceId, sequence: frame.sequence } : null);
+          if (
+            !current ||
+            !version ||
+            version.instanceId !== current.instanceId ||
+            version.sequence !== current.sequence + 1
+          ) {
             candidate.close();
             return;
           }
-          streamSequence.current = frame.sequence;
-          if (appliedSequence.current !== null && frame.sequence <= appliedSequence.current) {
-            const floor = syncedSnapshotFloor.current;
-            if (floor?.generation === generation && frame.sequence >= floor.sequence) {
-              syncedSnapshotFloor.current = null;
-            }
-            return;
-          }
-          appliedSequence.current = frame.sequence;
-          if (syncedSnapshotFloor.current?.generation === generation) {
-            syncedSnapshotFloor.current = null;
-          }
-          for (const threadId of serverEventThreadIds(frame.event)) {
-            appliedThreadSequences.current.set(threadId, frame.sequence);
-            appliedThreadEventSequences.current.set(threadId, frame.sequence);
-          }
+          streamVersion.current = version;
+          const threadId = serverEventThreadId(frame.event);
+          if (threadId) threadEventVersions.current.set(threadId, version);
           browserNotifications?.acceptEvent(frame.event);
-          observeNativeNotificationEvent(frame.sequence, frame.event);
-          dispatch({ type: "event", sequence: frame.sequence, event: frame.event });
+          observeNativeNotificationEvent(version.sequence, frame.event);
+          dispatch({ type: "event", version, event: frame.event });
         } else if (frame.type === "error") {
           dispatch({ type: "network", network: "offline", error: frame.error.message });
         }
@@ -1174,7 +1086,9 @@ export function ConnectionProvider({
         if (stopped || socket !== candidate) return;
         socket = undefined;
         clearHeartbeat();
-        streamSequence.current = null;
+        invalidateRequests();
+        threadEventVersions.current.clear();
+        streamVersion.current = null;
         dispatch({
           type: "network",
           network: "offline",
@@ -1193,10 +1107,19 @@ export function ConnectionProvider({
       stopped = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       clearHeartbeat();
-      streamSequence.current = null;
+      invalidateRequests();
+      threadEventVersions.current.clear();
+      streamVersion.current = null;
       socket?.close();
     };
-  }, [api, browserNotifications, drainReliableOutbox, generation, settings.token]);
+  }, [
+    api,
+    browserNotifications,
+    drainReliableOutbox,
+    generation,
+    invalidateRequests,
+    settings.token,
+  ]);
 
   useEffect(() => {
     const refresh = () => {
@@ -1245,6 +1168,7 @@ export function ConnectionProvider({
       foregroundEpoch,
       streamRecoveryEpoch,
       dispatch,
+      hydrateCachedDetail,
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
@@ -1265,6 +1189,7 @@ export function ConnectionProvider({
       appActive,
       foregroundEpoch,
       streamRecoveryEpoch,
+      hydrateCachedDetail,
       refreshDetail,
       forceRefreshDetail,
       loadOlderDetail,
@@ -1289,65 +1214,83 @@ export function useConnection(): ConnectionContextValue {
   return value;
 }
 
-function threadDetailNeedsRecovery(detail: ThreadDetail, summary: ThreadSummary): boolean {
-  const currentTurn = summary.currentTurnId
-    ? detail.turns.find((turn) => turn.id === summary.currentTurnId)
-    : null;
-  if (summary.currentTurnId && (!currentTurn || currentTurn.status !== "inProgress")) return true;
-  if (!summary.currentTurnId && detail.turns.some((turn) => turn.status === "inProgress")) {
-    return true;
-  }
-  if (
-    summary.relation.kind !== "session" ||
-    summary.state !== "completed" ||
-    !detail.turns.length
-  ) {
-    return false;
-  }
-  const latestTurn = detail.turns.at(-1)!;
-  const latestKnownAt = Math.max(
-    latestTurn.completedAt ?? latestTurn.startedAt ?? 0,
-    ...latestTurn.items.map((item) => ("timestamp" in item ? (item.timestamp ?? 0) : 0)),
-  );
-  if (latestKnownAt > 0 && summary.updatedAt - latestKnownAt > 5_000) return true;
-  const hasFinalAnswer = latestTurn.items.some(
-    (item) =>
-      item.type === "agentMessage" &&
-      item.phase === "final_answer" &&
-      Boolean(item.text.trim() || item.images.length),
-  );
-  const hasPlan = latestTurn.items.some(
-    (item) => item.type === "plan" && item.status === "completed",
-  );
-  return !hasFinalAnswer && !hasPlan;
+type VersionedThreadDetail = ThreadDetail & { version: ProjectionVersion };
+type VersionedSnapshot = AppSnapshot & { instanceId: string };
+
+function normalizeServerSnapshot(
+  snapshot: AppSnapshot,
+  fallbackInstanceId: string,
+): VersionedSnapshot {
+  return {
+    ...snapshot,
+    instanceId: snapshot.instanceId?.trim() || fallbackInstanceId,
+  };
 }
 
-function threadDetailWouldRollbackLiveTurn(
-  snapshotSummary: ThreadSummary | undefined,
-  current: ThreadDetail | undefined,
-  incoming: ThreadDetail,
-): boolean {
-  if (!current) return false;
-  const currentSummary =
-    snapshotSummary && snapshotSummary.updatedAt > current.summary.updatedAt
-      ? snapshotSummary
-      : current.summary;
-  let currentTurnId = currentSummary.currentTurnId;
-  for (let index = current.turns.length - 1; currentTurnId === null && index >= 0; index -= 1) {
-    const turn = current.turns[index];
-    if (turn?.status === "inProgress") currentTurnId = turn.id;
-  }
-  if (!currentTurnId || incoming.summary.updatedAt > currentSummary.updatedAt) return false;
-  return !incoming.turns.some((turn) => turn.id === currentTurnId);
+function normalizeCachedSnapshot(snapshot: AppSnapshot): VersionedSnapshot {
+  return normalizeServerSnapshot(snapshot, LEGACY_CACHE_INSTANCE_ID);
 }
 
-function serverEventThreadIds(event: ServerEvent): string[] {
-  if (event.type === "thread.upserted") return [event.thread.id];
-  if (event.type === "attention.upserted") {
-    return event.attention.threadId ? [event.attention.threadId] : [];
+function normalizeCachedDetail(
+  detail: ThreadDetail,
+  snapshot: AppSnapshot,
+): VersionedThreadDetail | null {
+  if (!snapshot.instanceId) return null;
+  if (detail.version?.instanceId === snapshot.instanceId) return detail as VersionedThreadDetail;
+  if (!detail.version && snapshot.instanceId === LEGACY_CACHE_INSTANCE_ID) {
+    return {
+      ...detail,
+      version: { instanceId: snapshot.instanceId, sequence: snapshot.sequence },
+    };
   }
-  if ("threadId" in event && typeof event.threadId === "string") return [event.threadId];
-  return [];
+  return null;
+}
+
+function normalizeThreadDetail(
+  detail: ThreadDetail,
+  fallbackVersion: ProjectionVersion | null,
+): VersionedThreadDetail {
+  if (detail.version) return detail as VersionedThreadDetail;
+  if (!fallbackVersion) {
+    throw new ApiClientError(
+      "projection_unavailable",
+      "The backend projection version is unavailable",
+      425,
+    );
+  }
+  return { ...detail, version: fallbackVersion };
+}
+
+function acceptSnapshotVersion(
+  snapshot: VersionedSnapshot,
+  versions: Map<string, ProjectionVersion>,
+): void {
+  versions.clear();
+  const version = { instanceId: snapshot.instanceId, sequence: snapshot.sequence };
+  for (const thread of snapshot.threads) versions.set(thread.id, version);
+}
+
+function isLegacyInstanceId(instanceId: string): boolean {
+  return instanceId === LEGACY_CACHE_INSTANCE_ID || instanceId.startsWith("legacy:");
+}
+
+function serverEventThreadId(event: ServerEvent): string | null {
+  switch (event.type) {
+    case "thread.upserted":
+      return event.thread.id;
+    case "thread.removed":
+    case "activity.upserted":
+    case "activity.delta":
+    case "turn.progressed":
+    case "queue.changed":
+    case "goal.changed":
+    case "voiceTranscription.removed":
+      return event.threadId;
+    case "voiceTranscription.upserted":
+      return event.job.threadId;
+    default:
+      return null;
+  }
 }
 
 function normalizeUserInputDraft(input: UpdateUserInputDraftRequest): UpdateUserInputDraftRequest {

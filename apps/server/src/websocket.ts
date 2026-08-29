@@ -21,7 +21,12 @@ export function registerEventsWebSocket(
   const eventListener = (sequence: number, event: unknown) => {
     const frame: ServerFrame = isResyncRequired(event)
       ? { type: "snapshot", snapshot: projection.snapshot() }
-      : ({ type: "event", sequence, event } as ServerFrame);
+      : ({
+          type: "event",
+          sequence,
+          version: { ...projection.version, sequence },
+          event,
+        } as ServerFrame);
     broadcast(frame);
   };
   const broadcast = (frame: ServerFrame) => {

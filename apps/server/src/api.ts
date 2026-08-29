@@ -42,8 +42,8 @@ import type {
   ThreadGoal,
   ThreadChanges,
   ThreadArtifactsResponse,
+  ThreadHistoryPage,
   ThreadOutcome,
-  ThreadSyncPoint,
   ThreadSummary,
   TranscriptionConfigResponse,
   TranscriptionResponse,
@@ -119,7 +119,13 @@ import {
   hasForkMaterializedCompaction,
   readFreshCompaction,
 } from "./fork-rollout";
-import { ThreadDraftConflictError, publicForkOperation, type AppProjection } from "./projection";
+import {
+  ThreadDraftConflictError,
+  ThreadHistoryConflictError,
+  ThreadViewUnavailableError,
+  publicForkOperation,
+  type AppProjection,
+} from "./projection";
 import {
   RESTART_RECOVERY_PROTOCOL_VERSION,
   RestartPreparationTimeoutError,
@@ -2992,11 +2998,56 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         observed = await projection.refreshThread(request.params.id);
       }
       if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
-      const cursor =
-        typeof request.query.cursor === "string" && request.query.cursor.length
-          ? request.query.cursor
-          : null;
-      return projection.readThread(request.params.id, cursor);
+      try {
+        const cursor =
+          typeof request.query.cursor === "string" && request.query.cursor.length > 0
+            ? request.query.cursor
+            : null;
+        return await projection.readThread(request.params.id, cursor ?? {});
+      } catch (error) {
+        if (error instanceof ThreadViewUnavailableError) {
+          return apiError(
+            reply,
+            503,
+            "app_server_unavailable",
+            "Session state is temporarily unavailable",
+          );
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { cursor?: string; anchorTurnId?: string };
+  }>(
+    "/api/v1/threads/:id/history",
+    async (request, reply): Promise<ThreadHistoryPage | undefined> => {
+      const observed = projection.summary(request.params.id);
+      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+      const { cursor, anchorTurnId } = request.query;
+      if (
+        typeof cursor !== "string" ||
+        !cursor ||
+        typeof anchorTurnId !== "string" ||
+        !anchorTurnId
+      ) {
+        return apiError(reply, 400, "validation_failed", "A valid history anchor is required");
+      }
+      try {
+        return await projection.readThreadHistory(request.params.id, cursor, anchorTurnId);
+      } catch (error) {
+        if (error instanceof ThreadHistoryConflictError) {
+          return apiError(
+            reply,
+            409,
+            "history_changed",
+            "Session history changed; reload and retry",
+          );
+        }
+        throw error;
+      }
     },
   );
 
@@ -3018,14 +3069,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   );
 
   app.post<{ Params: { id: string } }>("/api/v1/threads/:id/refresh", async (request, reply) => {
-    const observed = await projection.refreshThread(request.params.id);
-    if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
-    await projection.invalidateHistory(request.params.id);
-    const detail = await projection.readThread(request.params.id);
-    return {
-      snapshot: projection.snapshot(),
-      detail,
-    } satisfies RefreshThreadResponse;
+    try {
+      const observed = await projection.refreshThread(request.params.id, { requireFresh: true });
+      if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+      const detail = await projection.readThread(request.params.id, { refresh: true });
+      return { snapshot: projection.snapshot(), detail } satisfies RefreshThreadResponse;
+    } catch (error) {
+      if (error instanceof ThreadViewUnavailableError) {
+        return apiError(
+          reply,
+          503,
+          "app_server_unavailable",
+          "Session state is temporarily unavailable",
+        );
+      }
+      throw error;
+    }
   });
 
   app.get<{ Params: { id: string; turnId: string } }>(
@@ -3047,11 +3106,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       continuationCursor?: string;
     };
   }>("/api/v1/threads/:id/changes", async (request, reply): Promise<ThreadChanges | undefined> => {
-    let observed = projection.summary(request.params.id);
-    if (!observed) {
-      observed = await projection.refreshThread(request.params.id);
-    }
-    if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
     const { cursor, anchorTurnId, anchorRevision, continuationCursor } = request.query;
     if (
       typeof cursor !== "string" ||
@@ -3065,8 +3119,32 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     ) {
       return apiError(reply, 400, "validation_failed", "A valid thread sync point is required");
     }
-    const syncPoint: ThreadSyncPoint = { cursor, anchorTurnId, anchorRevision };
-    return projection.readThreadChanges(request.params.id, syncPoint, continuationCursor ?? null);
+    let observed = projection.summary(request.params.id);
+    if (!observed) observed = await projection.refreshThread(request.params.id);
+    if (!observed) return apiError(reply, 404, "not_found", "Thread not found");
+    try {
+      const detail = await projection.readThread(request.params.id, { refresh: true });
+      return {
+        summary: detail.summary,
+        turns: detail.turns,
+        queuedMessages: detail.queuedMessages,
+        draft: detail.draft ?? null,
+        continuationCursor: null,
+        syncPoint: null,
+        resetLatest: true,
+        olderTurnsCursor: detail.olderTurnsCursor,
+      };
+    } catch (error) {
+      if (error instanceof ThreadViewUnavailableError) {
+        return apiError(
+          reply,
+          503,
+          "app_server_unavailable",
+          "Session state is temporarily unavailable",
+        );
+      }
+      throw error;
+    }
   });
 
   app.put<{

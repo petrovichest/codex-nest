@@ -4193,6 +4193,50 @@ describe("Activity", () => {
     expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
   });
 
+  it("retries a transient detail failure with bounded exponential backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = mockThreadConnection(threadApi(), summary);
+      context.refreshDetail
+        .mockRejectedValueOnce(new ApiClientError("app_server_unavailable", "retry", 503))
+        .mockResolvedValue(context.state.details.thread);
+      renderThread();
+      await act(async () => Promise.resolve());
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+
+      act(() => vi.advanceTimersByTime(999));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+        await Promise.resolve();
+      });
+      expect(context.refreshDetail).toHaveBeenCalledTimes(2);
+      expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled detail retry when the connection goes offline", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = mockThreadConnection(threadApi(), summary);
+      context.refreshDetail.mockRejectedValue(
+        new ApiClientError("app_server_unavailable", "retry", 503),
+      );
+      const view = renderThread();
+      await act(async () => Promise.resolve());
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+
+      context.state.network = "offline";
+      view.rerender(threadRoute());
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reloads the open chat as soon as the native app returns to the foreground", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary);
@@ -4276,7 +4320,7 @@ describe("Activity", () => {
     await waitFor(() => expect(api.markViewed).toHaveBeenCalledTimes(2));
   });
 
-  it("retries one completed chat read when only a plan is available", () => {
+  it("does not poll completed chat content when only a plan is available", () => {
     vi.useFakeTimers();
     try {
       const completed = { ...summary, state: "completed" as const, updatedAt: 3 };
@@ -4309,10 +4353,9 @@ describe("Activity", () => {
       act(() => vi.advanceTimersByTime(499));
       expect(context.refreshDetail).toHaveBeenCalledTimes(1);
       act(() => vi.advanceTimersByTime(1));
-      expect(context.refreshDetail).toHaveBeenCalledTimes(2);
-      expect(context.refreshDetail).toHaveBeenLastCalledWith("thread", { force: true });
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
       act(() => vi.advanceTimersByTime(5_000));
-      expect(context.refreshDetail).toHaveBeenCalledTimes(2);
+      expect(context.refreshDetail).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -4373,7 +4416,7 @@ describe("Activity", () => {
     }
   });
 
-  it("forces an authoritative refresh only when turn details disagree", async () => {
+  it("does not start content-based recovery reads when turn details disagree", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "missing-turn" };
     const context = mockThreadConnection(api, running, {
@@ -4402,9 +4445,8 @@ describe("Activity", () => {
     const view = renderThread();
 
     expect(screen.getByText("Codex работает")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(context.refreshDetail).toHaveBeenCalledWith("thread", { authoritative: true }),
-    );
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(1));
+    expect(context.refreshDetail).not.toHaveBeenCalledWith("thread", { authoritative: true });
     expect(context.forceRefreshDetail).not.toHaveBeenCalled();
 
     context.state.snapshot.threads = [{ ...running, state: "completed", currentTurnId: null }];
@@ -4425,7 +4467,7 @@ describe("Activity", () => {
     };
     view.rerender(threadRoute());
     expect(screen.queryByText(/Codex работает/)).toBeNull();
-    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(3));
+    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
 
     context.state.details.thread = {
       ...context.state.details.thread,
@@ -4438,7 +4480,7 @@ describe("Activity", () => {
       ],
     };
     view.rerender(threadRoute());
-    expect(context.refreshDetail).toHaveBeenCalledTimes(3);
+    expect(context.refreshDetail).toHaveBeenCalledTimes(1);
   });
 
   it("opens a loaded conversation at the bottom", () => {
@@ -5156,6 +5198,8 @@ function mockThreadConnection(
     streamRecoveryEpoch: 0,
     state: {
       snapshot: {
+        instanceId: "test-instance",
+        sequence: 1,
         projects: [
           {
             id: "project",

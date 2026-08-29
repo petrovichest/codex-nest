@@ -2203,7 +2203,7 @@ describe("AppProjection", () => {
       name: "Короткий заголовок",
     });
 
-    const detail = await projection.readThread("child", "parent-cursor");
+    const detail = await projection.readThread("child");
 
     expect(detail.turns.map((turn) => turn.id)).toEqual(["child-task"]);
     expect(detail.turns.flatMap((turn) => turn.items.map((item) => item.id))).toEqual([
@@ -2217,24 +2217,13 @@ describe("AppProjection", () => {
     expect(detail).not.toHaveProperty("syncPoint");
 
     bridge.request.mockClear();
-    const changes = await projection.readThreadChanges("child", {
-      cursor: "parent-sync",
-      anchorTurnId: "stale-parent-turn",
-      anchorRevision: "parent-revision",
+    const history = await projection.readThreadHistory("child", "parent-history", "child-task");
+    expect(history).toMatchObject({
+      anchorTurnId: "child-task",
+      turns: [],
+      olderTurnsCursor: null,
     });
-
-    expect(changes.resetLatest).toBe(true);
-    expect(changes.turns.flatMap((turn) => turn.items.map((item) => item.id))).toEqual([
-      "child-input-one",
-      "child-final",
-    ]);
-    expect(
-      changes.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage"),
-    ).toHaveLength(1);
-    expect(changes.continuationCursor).toBeNull();
-    expect(changes.olderTurnsCursor).toBeNull();
-    expect(changes.syncPoint).toBeNull();
-    expect(bridge.request).toHaveBeenCalledTimes(1);
+    expect(bridge.request).not.toHaveBeenCalled();
   });
 
   it("sorts sessions only by most recent activity", async () => {
@@ -3417,70 +3406,6 @@ describe("AppProjection", () => {
     });
   });
 
-  it("reads only turns after the cached history anchor", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
-    directories.push(directory);
-    const store = new StateStore(join(directory, "state.json"));
-    await store.load();
-    const bridge = new FakeBridge();
-    const first = testTurn("first", "completed");
-    const second = testTurn("second", "completed");
-    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
-      if (params.sortDirection === "asc") {
-        return {
-          data: [first, second],
-          nextCursor: null,
-          backwardsCursor: null,
-        };
-      }
-      return {
-        data: params.limit === 1 ? [second] : [first],
-        nextCursor: null,
-        backwardsCursor: params.limit === 1 ? "next-delta" : "delta-cursor",
-      };
-    });
-    const projection = new AppProjection(
-      bridge as unknown as CodexBridge,
-      store,
-      new AttentionManager(),
-    );
-    projection.upsertThread(thread("one", "/work", 10));
-
-    const initial = await projection.readThread("one");
-    expect(initial.turns.map((turn) => turn.id)).toEqual(["first"]);
-    expect(initial.syncPoint).toMatchObject({
-      cursor: "delta-cursor",
-      anchorTurnId: "first",
-    });
-    bridge.request.mockClear();
-
-    const changes = await projection.readThreadChanges("one", initial.syncPoint!);
-
-    expect(changes.resetLatest).toBe(false);
-    expect(changes.turns.map((turn) => turn.id)).toEqual(["second"]);
-    expect(changes.syncPoint).toMatchObject({
-      cursor: "next-delta",
-      anchorTurnId: "second",
-    });
-    expect(bridge.request).toHaveBeenNthCalledWith(
-      1,
-      "thread/turns/list",
-      expect.objectContaining({
-        threadId: "one",
-        cursor: "delta-cursor",
-        sortDirection: "asc",
-      }),
-      30_000,
-    );
-    expect(bridge.request).toHaveBeenNthCalledWith(
-      2,
-      "thread/turns/list",
-      expect.objectContaining({ threadId: "one", limit: 1, sortDirection: "desc" }),
-      30_000,
-    );
-  });
-
   it("does not let a history read finishing after invalidation repopulate stale cache", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -3533,154 +3458,107 @@ describe("AppProjection", () => {
     expect(reads).toBe(2);
   });
 
-  it("resets incremental history when the current turn changes during the read", async () => {
+  it("rejects an authoritative refresh when the rollout changes mid-read", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
     await store.load();
-    const plan = testTurn("plan", "completed");
-    const implementation = testTurn("implementation", "inProgress");
-    let projectionRefreshed = false;
-    let releaseIncremental!: () => void;
-    let markIncrementalStarted!: () => void;
-    const incrementalStarted = new Promise<void>((resolve) => {
-      markIncrementalStarted = resolve;
-    });
-    const incrementalGate = new Promise<void>((resolve) => {
-      releaseIncremental = resolve;
-    });
     const bridge = new FakeBridge();
-    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method === "thread/read") {
-        projectionRefreshed = true;
-        return {
-          thread: thread("one", "/work", 11, { type: "active", activeFlags: [] }, [implementation]),
-        };
-      }
+    const completed = testTurn("completed", "completed");
+    let failReads = false;
+    bridge.request.mockImplementation(async (method: string) => {
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
-      if (params.sortDirection === "asc") {
-        markIncrementalStarted();
-        await incrementalGate;
-        return { data: [plan], nextCursor: null, backwardsCursor: null };
-      }
-      return {
-        data: projectionRefreshed ? [implementation, plan] : [plan],
-        nextCursor: null,
-        backwardsCursor: projectionRefreshed ? "implementation-cursor" : "plan-cursor",
-      };
+      if (failReads) throw new RpcError(-32_000, "Rollout changed while reading turns");
+      return { data: [completed], nextCursor: null, backwardsCursor: null };
     });
     const projection = new AppProjection(
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
     );
-    projection.upsertThread(thread("one", "/work", 10));
-    const initial = await projection.readThread("one");
+    projection.upsertThread(thread("one", "/work", 10, { type: "idle" }, [completed]));
 
-    const pending = projection.readThreadChanges("one", initial.syncPoint!);
-    await incrementalStarted;
-    await projection.setCurrentTurn("one", "implementation");
-    releaseIncremental();
-    const changes = await pending;
-
-    expect(changes).toMatchObject({
-      resetLatest: true,
-      summary: { currentTurnId: "implementation", state: "running" },
-    });
-    expect(changes.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
-    expect(bridge.request).toHaveBeenCalledWith(
-      "thread/read",
-      { threadId: "one", includeTurns: false },
-      30_000,
+    await projection.readThread("one");
+    failReads = true;
+    await expect(projection.readThread("one", { refresh: true })).rejects.toThrow(
+      "Thread view is temporarily unavailable",
     );
+    const recovered = await projection.readThread("one");
+
+    expect(recovered.turns.map((turn) => turn.id)).toEqual(["completed"]);
+    expect(recovered.summary.currentTurnId).toBeNull();
+    expect(recovered.version).toEqual(projection.version);
   });
 
-  it("resets incremental history when a turn completes during the read", async () => {
+  it("replaces a shifted latest window in canonical order without retaining stale turns", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
     await store.load();
-    const plan = testTurn("plan", "completed");
-    const implementation = testTurn("implementation", "completed");
-    let projectionRefreshed = false;
-    let releaseIncremental!: () => void;
-    let markIncrementalStarted!: () => void;
-    const incrementalStarted = new Promise<void>((resolve) => {
-      markIncrementalStarted = resolve;
-    });
-    const incrementalGate = new Promise<void>((resolve) => {
-      releaseIncremental = resolve;
-    });
+    const initial = Array.from({ length: 20 }, (_, index) =>
+      testTurn(`turn-${String(index + 1).padStart(2, "0")}`, "completed"),
+    );
+    initial[1] = {
+      ...initial[1]!,
+      items: [{ type: "agentMessage", id: "answer", text: "stale", phase: null }],
+    };
+    const shifted = Array.from({ length: 20 }, (_, index) =>
+      testTurn(`turn-${String(index + 2).padStart(2, "0")}`, "completed"),
+    );
+    shifted[0] = {
+      ...shifted[0]!,
+      items: [{ type: "agentMessage", id: "answer", text: "fresh", phase: null }],
+    };
+    let page = initial;
     const bridge = new FakeBridge();
-    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method === "thread/read") {
-        projectionRefreshed = true;
-        return {
-          thread: thread("one", "/work", 12, { type: "idle" }, [plan, implementation]),
-        };
-      }
+    bridge.request.mockImplementation(async (method: string) => {
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
-      if (params.sortDirection === "asc") {
-        markIncrementalStarted();
-        await incrementalGate;
-        return { data: [plan], nextCursor: null, backwardsCursor: null };
-      }
-      return {
-        data: projectionRefreshed ? [implementation, plan] : [plan],
-        nextCursor: null,
-        backwardsCursor: projectionRefreshed ? "implementation-cursor" : "plan-cursor",
-      };
+      return { data: page.slice().reverse(), nextCursor: "older", backwardsCursor: null };
     });
     const projection = new AppProjection(
       bridge as unknown as CodexBridge,
       store,
       new AttentionManager(),
     );
-    projection.upsertThread(thread("one", "/work", 10));
-    const initial = await projection.readThread("one");
-    await projection.setCurrentTurn("one", "implementation");
+    projection.upsertThread(thread("one", "/work", 10, { type: "idle" }, initial));
 
-    const pending = projection.readThreadChanges("one", initial.syncPoint!);
-    await incrementalStarted;
-    bridge.emit("notification", {
-      method: "turn/completed",
-      params: { threadId: "one", turn: implementation },
-    } satisfies ServerNotification);
-    await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBeNull());
-    releaseIncremental();
-    const changes = await pending;
+    const first = await projection.readThread("one");
+    expect(first.turns.map((turn) => turn.id)).toEqual(initial.map((turn) => turn.id));
 
-    expect(changes.resetLatest).toBe(true);
-    expect(changes.turns.map((turn) => turn.id)).toEqual(["plan", "implementation"]);
-    expect(bridge.request).toHaveBeenCalledWith(
-      "thread/read",
-      { threadId: "one", includeTurns: false },
-      30_000,
-    );
+    page = shifted;
+    projection.upsertThread(thread("one", "/work", 11, { type: "idle" }, shifted));
+    const refreshed = await projection.readThread("one");
+
+    expect(refreshed.turns).toHaveLength(20);
+    expect(refreshed.turns.map((turn) => turn.id)).toEqual(shifted.map((turn) => turn.id));
+    expect(refreshed.turns[0]?.items[0]).toMatchObject({ text: "fresh" });
+    expect(refreshed.turns.some((turn) => turn.id === "turn-01")).toBe(false);
   });
 
-  it("falls back to a full page when the incremental turn read returns an RPC error", async () => {
+  it("reads a normal history page in order and rejects a page invalidated in flight", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
     await store.load();
+    let releaseRace!: () => void;
+    let markRaceStarted!: () => void;
+    const raceStarted = new Promise<void>((resolve) => {
+      markRaceStarted = resolve;
+    });
+    const raceGate = new Promise<void>((resolve) => {
+      releaseRace = resolve;
+    });
     const bridge = new FakeBridge();
-    const first = testTurn("first", "completed");
-    const second = testTurn("second", "completed");
-    let incremental = false;
     bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method === "thread/read") {
-        return { thread: thread("one", "/work", 11, { type: "idle" }, [first, second]) };
-      }
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
-      if (params.sortDirection === "asc") {
-        incremental = true;
-        throw new RpcError(-32_000, "Rollout changed while reading turns");
+      if (params.cursor === "race") {
+        markRaceStarted();
+        await raceGate;
       }
       return {
-        data: incremental ? [second, first] : [first],
-        nextCursor: null,
-        backwardsCursor: incremental ? "fresh-cursor" : "stale-cursor",
+        data: [testTurn("older-2", "completed"), testTurn("older-1", "completed")],
+        nextCursor: "even-older",
+        backwardsCursor: null,
       };
     });
     const projection = new AppProjection(
@@ -3689,31 +3567,31 @@ describe("AppProjection", () => {
       new AttentionManager(),
     );
     projection.upsertThread(thread("one", "/work", 10));
-    const initial = await projection.readThread("one");
-    bridge.request.mockClear();
 
-    const changes = await projection.readThreadChanges("one", initial.syncPoint!);
+    const page = await projection.readThreadHistory("one", "older", "newest");
+    expect(page).toMatchObject({
+      instanceId: projection.version.instanceId,
+      anchorTurnId: "newest",
+      olderTurnsCursor: "even-older",
+    });
+    expect(page.turns.map((turn) => turn.id)).toEqual(["older-1", "older-2"]);
+    expect(bridge.request).toHaveBeenLastCalledWith(
+      "thread/turns/list",
+      expect.objectContaining({
+        threadId: "one",
+        cursor: "older",
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "summary",
+      }),
+      30_000,
+    );
 
-    expect(changes.resetLatest).toBe(true);
-    expect(changes.turns.map((turn) => turn.id)).toEqual(["first", "second"]);
-    expect(bridge.request).toHaveBeenNthCalledWith(
-      1,
-      "thread/turns/list",
-      expect.objectContaining({ cursor: "stale-cursor", sortDirection: "asc" }),
-      30_000,
-    );
-    expect(bridge.request).toHaveBeenNthCalledWith(
-      2,
-      "thread/read",
-      { threadId: "one", includeTurns: false },
-      30_000,
-    );
-    expect(bridge.request).toHaveBeenNthCalledWith(
-      3,
-      "thread/turns/list",
-      expect.objectContaining({ cursor: null, sortDirection: "desc" }),
-      30_000,
-    );
+    const pending = projection.readThreadHistory("one", "race", "newest");
+    await raceStarted;
+    await projection.invalidateHistory("one");
+    releaseRace();
+    await expect(pending).rejects.toThrow("Thread history changed while it was being read");
   });
 
   it("overlays accepted user messages onto a lagging turn read", async () => {

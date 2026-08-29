@@ -25,12 +25,11 @@ import type {
   SkillsCatalogResponse,
   SummaryResponse,
   ThreadDetail,
-  ThreadChanges,
   ThreadArtifactsResponse,
   ThreadDraft,
   ThreadGoal,
+  ThreadHistoryPage,
   ThreadSummary,
-  ThreadSyncPoint,
   TurnItemsResponse,
   TranscriptionConfigResponse,
   TranscriptionResponse,
@@ -252,18 +251,22 @@ export class ApiClient {
     });
   }
 
-  readThread(id: string, cursor?: string, options?: { fresh?: boolean }): Promise<ThreadDetail> {
-    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}${query}`, {
+  readThread(id: string, options?: { fresh?: boolean }): Promise<ThreadDetail> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}`, {
       cache: options?.fresh ? "no-store" : undefined,
-      retry: true,
+    });
+  }
+
+  readLegacyThreadPage(id: string, cursor: string): Promise<ThreadDetail> {
+    const query = new URLSearchParams({ cursor });
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}?${query}`, {
+      cache: "no-store",
     });
   }
 
   refreshThread(id: string): Promise<RefreshThreadResponse> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/refresh`, {
       method: "POST",
-      retry: true,
     });
   }
 
@@ -273,20 +276,13 @@ export class ApiClient {
     );
   }
 
-  readThreadChanges(
-    id: string,
-    syncPoint: ThreadSyncPoint,
-    continuationCursor?: string,
-  ): Promise<ThreadChanges> {
+  readThreadHistory(id: string, cursor: string, anchorTurnId: string): Promise<ThreadHistoryPage> {
     const query = new URLSearchParams({
-      cursor: syncPoint.cursor,
-      anchorTurnId: syncPoint.anchorTurnId,
-      anchorRevision: syncPoint.anchorRevision,
+      cursor,
+      anchorTurnId,
     });
-    if (continuationCursor) query.set("continuationCursor", continuationCursor);
-    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/changes?${query}`, {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/history?${query}`, {
       cache: "no-store",
-      retry: true,
     });
   }
 

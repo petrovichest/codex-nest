@@ -160,6 +160,14 @@ describe("protocol guards", () => {
 
   it("recognizes server frames", () => {
     expect(isServerFrame({ type: "pong" })).toBe(true);
+    expect(
+      isServerFrame({
+        type: "event",
+        sequence: 1,
+        version: { instanceId: "server", sequence: 1 },
+        event: { type: "resync.required" },
+      }),
+    ).toBe(true);
     expect(isServerFrame({ type: "event", sequence: 1, event: { type: "resync.required" } })).toBe(
       true,
     );
@@ -167,11 +175,28 @@ describe("protocol guards", () => {
       isServerFrame({
         type: "event",
         sequence: 2,
+        version: { instanceId: "server", sequence: 2 },
         event: { type: "projects.reordered", projects: [] },
       }),
     ).toBe(true);
-    expect(isServerFrame({ type: "event", sequence: 3, event: { type: "skills.changed" } })).toBe(
-      true,
+    expect(
+      isServerFrame({
+        type: "event",
+        sequence: 3,
+        version: { instanceId: "server", sequence: 3 },
+        event: { type: "skills.changed" },
+      }),
+    ).toBe(true);
+    expect(
+      isServerFrame({
+        type: "event",
+        sequence: 2,
+        version: { instanceId: "server", sequence: 3 },
+        event: { type: "skills.changed" },
+      }),
+    ).toBe(false);
+    expect(isServerFrame({ type: "event", sequence: -1, event: { type: "resync.required" } })).toBe(
+      false,
     );
   });
 

@@ -201,6 +201,7 @@ export type ApiErrorCode =
   | "not_found"
   | "draft_conflict"
   | "conflict"
+  | "history_changed"
   | "app_server_unavailable"
   | "internal_error";
 
@@ -507,6 +508,12 @@ export type ForkOperationSummary = {
   error: string | null;
 };
 
+export type ProjectionVersion = {
+  instanceId: string;
+  sequence: number;
+};
+
+/** @deprecated Transitional cursor contract for clients from the previous release. */
 export type ThreadSyncPoint = {
   cursor: string;
   anchorTurnId: string;
@@ -514,12 +521,33 @@ export type ThreadSyncPoint = {
 };
 
 export type ThreadDetail = {
+  version?: ProjectionVersion;
   summary: ThreadSummary;
   turns: TurnView[];
   queuedMessages: QueuedMessage[];
   olderTurnsCursor: string | null;
   draft?: ThreadDraft | null;
+  /** @deprecated Present only when serving the previous release's incremental client. */
   syncPoint?: ThreadSyncPoint | null;
+};
+
+export type ThreadHistoryPage = {
+  instanceId: string;
+  anchorTurnId: string;
+  turns: TurnView[];
+  olderTurnsCursor: string | null;
+};
+
+/** @deprecated Transitional response for clients from the previous release. */
+export type ThreadChanges = {
+  summary: ThreadSummary;
+  turns: TurnView[];
+  queuedMessages: QueuedMessage[];
+  draft?: ThreadDraft | null;
+  continuationCursor: string | null;
+  syncPoint: ThreadSyncPoint | null;
+  resetLatest: boolean;
+  olderTurnsCursor: string | null;
 };
 
 export type SessionArtifact = {
@@ -535,17 +563,6 @@ export type SessionArtifact = {
 export type ThreadArtifactsResponse = {
   capability: "explicit" | "unavailable";
   artifacts: SessionArtifact[];
-};
-
-export type ThreadChanges = {
-  summary: ThreadSummary;
-  turns: TurnView[];
-  queuedMessages: QueuedMessage[];
-  draft?: ThreadDraft | null;
-  continuationCursor: string | null;
-  syncPoint: ThreadSyncPoint | null;
-  resetLatest: boolean;
-  olderTurnsCursor: string | null;
 };
 
 export type ModelOption = {
@@ -782,6 +799,7 @@ export type ConnectionView = {
 };
 
 export type AppSnapshot = {
+  instanceId?: string;
   sequence: number;
   uiLanguage: UiLanguage;
   connection: ConnectionView;
@@ -836,7 +854,12 @@ export type ClientFrame = { type: "authenticate"; token: string } | { type: "pin
 
 export type ServerFrame =
   | { type: "snapshot"; snapshot: AppSnapshot }
-  | { type: "event"; sequence: number; event: ServerEvent }
+  | {
+      type: "event";
+      sequence: number;
+      version?: ProjectionVersion;
+      event: ServerEvent;
+    }
   | { type: "pong" }
   | { type: "error"; error: ApiError["error"] };
 
@@ -1272,10 +1295,22 @@ export function isServerFrame(value: unknown): value is ServerFrame {
   if (!isRecord(value) || typeof value.type !== "string") return false;
   if (value.type === "snapshot") return isRecord(value.snapshot);
   if (value.type === "event") {
-    return typeof value.sequence === "number" && isRecord(value.event);
+    if (!isProjectionSequence(value.sequence) || !isRecord(value.event)) return false;
+    if (value.version === undefined) return true;
+    return (
+      isRecord(value.version) &&
+      typeof value.version.instanceId === "string" &&
+      value.version.instanceId.length > 0 &&
+      isProjectionSequence(value.version.sequence) &&
+      value.version.sequence === value.sequence
+    );
   }
   if (value.type === "error") return isRecord(value.error);
   return value.type === "pong";
+}
+
+function isProjectionSequence(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 export function isBrowserToolName(value: unknown): value is BrowserToolName {

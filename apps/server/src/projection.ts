@@ -12,19 +12,19 @@ import type {
   ForkOperationSummary,
   ModelOption,
   Project,
+  ProjectionVersion,
   QueuedMessage,
   SessionSettings,
   ServerEvent,
   TaskDefaults,
-  ThreadChanges,
   ThreadDetail,
   ThreadDraft,
+  ThreadHistoryPage,
   UpdateThreadDraftRequest,
   ThreadGoal,
   ThreadOutcome,
   ThreadState,
   ThreadSummary,
-  ThreadSyncPoint,
   TurnItemsResponse,
   TurnProgress,
   TurnView,
@@ -71,6 +71,8 @@ interface CachedThread {
 }
 
 export class ThreadDraftConflictError extends Error {}
+export class ThreadViewUnavailableError extends Error {}
+export class ThreadHistoryConflictError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
 const SESSION_RETENTION_BATCH_SIZE = 25;
@@ -82,6 +84,7 @@ export class AppProjection extends EventEmitter {
   private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
+  private readonly latestDetails = new Map<string, ThreadDetail>();
   private readonly historyRevisions = new Map<string, number>();
   private readonly subscribedThreads = new Set<string>();
   private readonly hiddenThreads = new Set<string>();
@@ -92,6 +95,7 @@ export class AppProjection extends EventEmitter {
   private missingThreadCleanup?: (threadId: string) => Promise<void> | void;
   private models: ModelOption[] = [];
   private sequence = 0;
+  private readonly instanceId = randomUUID();
   private syncedAt: string | null = null;
   private syncPromise?: Promise<void>;
   private recoverLoadedThreads = true;
@@ -198,6 +202,7 @@ export class AppProjection extends EventEmitter {
     );
     const visibleThreadIds = new Set(threads.map((thread) => thread.id));
     return {
+      instanceId: this.instanceId,
       sequence: this.sequence,
       uiLanguage: state.uiLanguage,
       connection: this.connection,
@@ -218,6 +223,10 @@ export class AppProjection extends EventEmitter {
         .map(publicForkOperation)
         .sort((left, right) => left.createdAt - right.createdAt),
     };
+  }
+
+  get version(): ProjectionVersion {
+    return { instanceId: this.instanceId, sequence: this.sequence };
   }
 
   get threadCount(): number {
@@ -302,13 +311,21 @@ export class AppProjection extends EventEmitter {
     return this.syncPromise;
   }
 
-  async readThread(id: string, cursor: string | null = null): Promise<ThreadDetail> {
+  async readThread(
+    id: string,
+    optionsOrCursor: { refresh?: boolean } | string = {},
+  ): Promise<ThreadDetail> {
+    if (typeof optionsOrCursor === "string") {
+      return this.readLegacyThreadPage(id, optionsOrCursor);
+    }
+    const options = optionsOrCursor;
     const local = this.threads.get(id);
     const meta = this.store.view().threadMeta[id];
     const subagent = local ? hasSubagentTranscript(local.thread, meta) : false;
     if (local && this.isUnmaterialized(id)) {
       const state = this.store.view();
       return {
+        version: this.version,
         summary: this.toSummary(local),
         turns: [],
         queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
@@ -318,131 +335,196 @@ export class AppProjection extends EventEmitter {
     }
     const cached = this.threads.get(id);
     if (!cached) throw new Error("Thread not found");
-    const page = await this.readTurnsPage(id, subagent ? null : cursor, "desc", !subagent);
-    if (cursor === null) await this.restoreActiveTurnFromPage(cached, page.turns);
-    const state = this.store.view();
-    const visibleTurns = subagent
-      ? subagentTranscriptTurnViews(cached.thread, page.turns, meta)
-      : page.turns;
-    const syncPoint =
-      !subagent && cursor === null
-        ? syncPointForPage(page.backwardsCursor, visibleTurns)
-        : undefined;
-    return {
-      summary: this.toSummary(cached),
-      turns: visibleTurns,
-      queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
-      olderTurnsCursor: subagent ? null : page.nextCursor,
-      draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
-      ...(syncPoint === undefined ? {} : { syncPoint }),
-    };
-  }
-
-  async readThreadChanges(
-    id: string,
-    syncPoint: ThreadSyncPoint,
-    continuationCursor: string | null = null,
-  ): Promise<ThreadChanges> {
-    const cached = this.threads.get(id);
-    if (!cached) throw new Error("Thread not found");
-    if (hasSubagentTranscript(cached.thread, this.store.view().threadMeta[id])) {
-      return this.resetThreadChanges(id, false);
-    }
-    const currentTurnAtStart = cached.currentTurnId;
-    const latestTurnAtStart = cached.thread.turns.at(-1);
-    const latestTurnBoundaryAtStart = latestTurnAtStart
-      ? `${latestTurnAtStart.id}:${latestTurnAtStart.status}`
-      : null;
-
-    let page: CachedTurnsPage;
-    try {
-      page = await this.readTurnsPage(id, continuationCursor ?? syncPoint.cursor, "asc", false);
-    } catch (error) {
-      if (!(error instanceof RpcError)) throw error;
-      return this.resetThreadChanges(id);
-    }
-
-    let turns = page.turns;
-    if (continuationCursor === null) {
-      const anchorIndex = turns.findIndex((turn) => turn.id === syncPoint.anchorTurnId);
-      if (anchorIndex < 0) return this.resetThreadChanges(id);
-      turns = turns.slice(anchorIndex);
-      const boundary = turns[0];
-      if (boundary && turnRevision(boundary) === syncPoint.anchorRevision) {
-        turns = turns.slice(1);
+    const previous = this.latestDetails.get(id);
+    const boundaryIds = new Set(cached.thread.turns.slice(-2).map((turn) => turn.id));
+    if (cached.currentTurnId) boundaryIds.add(cached.currentTurnId);
+    const previousIds = new Set(previous?.turns.map((turn) => turn.id) ?? []);
+    const needsCanonicalPage =
+      !previous || options.refresh || [...boundaryIds].some((turnId) => !previousIds.has(turnId));
+    let page: CachedTurnsPage | undefined;
+    if (needsCanonicalPage) {
+      try {
+        page = await this.readTurnsPage(id, null, "desc", !subagent && !options.refresh);
+        await this.restoreActiveTurnFromPage(cached, page.turns);
+      } catch (error) {
+        if (!(error instanceof RpcError) || isMissingThreadError(error)) throw error;
+        if (options.refresh || !previous) {
+          throw new ThreadViewUnavailableError("Thread view is temporarily unavailable");
+        }
       }
     }
-    await this.restoreActiveTurnFromPage(cached, turns);
-    const latestTurn = cached.thread.turns.at(-1);
-    const latestTurnBoundary = latestTurn ? `${latestTurn.id}:${latestTurn.status}` : null;
-    const turnBoundaryChanged =
-      currentTurnAtStart !== cached.currentTurnId ||
-      latestTurnBoundaryAtStart !== latestTurnBoundary;
-    const changedBoundaryTurnIds = [
-      currentTurnAtStart,
-      cached.currentTurnId,
-      latestTurn?.id,
-    ].filter((turnId): turnId is string => Boolean(turnId));
-    if (
-      page.nextCursor === null &&
-      ((turnBoundaryChanged &&
-        changedBoundaryTurnIds.some(
-          (turnId) =>
-            turnId !== syncPoint.anchorTurnId && !page.turns.some((turn) => turn.id === turnId),
-        )) ||
-        (cached.currentTurnId &&
-          cached.currentTurnId !== syncPoint.anchorTurnId &&
-          !page.turns.some((turn) => turn.id === cached.currentTurnId)))
-    ) {
-      return this.resetThreadChanges(id, true);
-    }
-
     const state = this.store.view();
-    let nextSyncPoint: ThreadSyncPoint | null = null;
-    if (page.nextCursor === null) {
-      const latest = page.turns.at(-1);
-      if (!latest || latest.id === syncPoint.anchorTurnId) {
-        const boundary = page.turns.find((turn) => turn.id === syncPoint.anchorTurnId);
-        nextSyncPoint = {
-          ...syncPoint,
-          anchorRevision: boundary ? turnRevision(boundary) : syncPoint.anchorRevision,
-        };
-      } else {
-        const head = await this.readTurnsPage(id, null, "desc", false, 1);
-        nextSyncPoint = syncPointForPage(head.backwardsCursor, head.turns);
+    if (page && page.historyRevision !== this.historyRevision(id)) {
+      if (options.refresh || !(this.latestDetails.get(id) ?? previous)) {
+        throw new ThreadViewUnavailableError("Thread view changed while it was being refreshed");
       }
+      page = undefined;
     }
-    return {
+    const consistentPrevious = this.latestDetails.get(id) ?? previous;
+    const baseTurns = page?.turns ?? consistentPrevious?.turns ?? [];
+    const visibleTurns = this.materializeLatestTurns(
+      cached,
+      baseTurns,
+      consistentPrevious?.turns ?? [],
+      page !== undefined,
+    );
+    const turns = subagent
+      ? subagentTranscriptTurnViews(cached.thread, visibleTurns, meta)
+      : visibleTurns;
+    const detail: ThreadDetail = {
+      version: this.version,
       summary: this.toSummary(cached),
       turns,
       queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
+      olderTurnsCursor: subagent
+        ? null
+        : (page?.nextCursor ?? consistentPrevious?.olderTurnsCursor ?? null),
       draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
-      continuationCursor: page.nextCursor,
-      syncPoint: nextSyncPoint,
-      resetLatest: false,
-      olderTurnsCursor: null,
+    };
+    this.latestDetails.set(id, cloneView(detail));
+    return detail;
+  }
+
+  private async readLegacyThreadPage(id: string, cursor: string): Promise<ThreadDetail> {
+    const cached = this.threads.get(id);
+    if (!cached) throw new Error("Thread not found");
+    const meta = this.store.view().threadMeta[id];
+    if (hasSubagentTranscript(cached.thread, meta)) return this.readThread(id);
+    const page = await this.readTurnsPage(id, cursor, "desc", false);
+    const state = this.store.view();
+    return {
+      version: this.version,
+      summary: this.toSummary(cached),
+      turns: page.turns,
+      queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
+      olderTurnsCursor: page.nextCursor,
+      draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
+    };
+  }
+
+  async readThreadHistory(
+    id: string,
+    cursor: string,
+    anchorTurnId: string,
+  ): Promise<ThreadHistoryPage> {
+    const cached = this.threads.get(id);
+    if (!cached) throw new Error("Thread not found");
+    if (hasSubagentTranscript(cached.thread, this.store.view().threadMeta[id])) {
+      return { instanceId: this.instanceId, anchorTurnId, turns: [], olderTurnsCursor: null };
+    }
+    const revision = this.historyRevision(id);
+    let page: CachedTurnsPage;
+    try {
+      page = await this.readTurnsPage(id, cursor, "desc", false);
+    } catch (error) {
+      if (error instanceof RpcError) {
+        throw new ThreadHistoryConflictError("Thread history changed");
+      }
+      throw error;
+    }
+    if (revision !== this.historyRevision(id)) {
+      throw new ThreadHistoryConflictError("Thread history changed while it was being read");
+    }
+    return {
+      instanceId: this.instanceId,
+      anchorTurnId,
+      turns: page.turns,
+      olderTurnsCursor: page.nextCursor,
+    };
+  }
+
+  private materializeLatestTurns(
+    cached: CachedThread,
+    pageTurns: TurnView[],
+    previousTurns: TurnView[],
+    hasFreshPage: boolean,
+  ): TurnView[] {
+    const state = this.store.view();
+    const artifacts = state.threadMeta[cached.thread.id]?.timelineArtifacts ?? {};
+    const boundaryTurns = cached.thread.turns
+      .slice(-2)
+      .map((turn) =>
+        normalizeTurn(
+          turn,
+          this.progress.get(turnKey(cached.thread.id, turn.id)),
+          this.liveActivities(cached.thread.id, turn.id),
+          cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
+          false,
+        ),
+      );
+    if (
+      cached.currentTurnId &&
+      ![...pageTurns, ...previousTurns, ...boundaryTurns].some(
+        (turn) => turn.id === cached.currentTurnId,
+      )
+    ) {
+      boundaryTurns.push({
+        id: cached.currentTurnId,
+        status: "inProgress",
+        startedAt:
+          this.progress.get(turnKey(cached.thread.id, cached.currentTurnId))?.startedAt ?? null,
+        completedAt: null,
+        durationMs: null,
+        progress:
+          this.progress.get(turnKey(cached.thread.id, cached.currentTurnId)) ?? emptyProgress(null),
+        items: [],
+        itemsLoaded: false,
+      });
+    }
+    const retainedIds = hasFreshPage
+      ? new Set([...pageTurns, ...boundaryTurns].map((turn) => turn.id))
+      : null;
+    const retainedPrevious = retainedIds
+      ? previousTurns.filter((turn) => retainedIds.has(turn.id))
+      : previousTurns;
+    const orderedIds: string[] = [];
+    const turns = new Map<string, TurnView>();
+    for (const source of [retainedPrevious, pageTurns, boundaryTurns]) {
+      for (const turn of source) {
+        const projected = this.overlayLiveTurn(cached.thread.id, turn, artifacts);
+        if (!turns.has(turn.id)) orderedIds.push(turn.id);
+        const current = turns.get(turn.id);
+        turns.set(turn.id, current ? mergeMaterializedTurn(current, projected) : projected);
+      }
+    }
+    const materializedOrder = hasFreshPage
+      ? [
+          ...pageTurns.map((turn) => turn.id),
+          ...boundaryTurns
+            .map((turn) => turn.id)
+            .filter((turnId) => !pageTurns.some((turn) => turn.id === turnId)),
+        ]
+      : orderedIds;
+    return materializedOrder
+      .map((turnId) => turns.get(turnId)!)
+      .slice(-(THREAD_TURN_PAGE_SIZE + 2));
+  }
+
+  private overlayLiveTurn(
+    threadId: string,
+    turn: TurnView,
+    artifacts: DeepReadonly<Record<string, TimelineArtifact[]>>,
+  ): TurnView {
+    const liveMerge = mergeLiveActivities(
+      turn.items,
+      this.liveActivities(threadId, turn.id),
+      turn.status !== "inProgress",
+    );
+    return {
+      ...turn,
+      progress: this.progress.get(turnKey(threadId, turn.id)) ?? turn.progress,
+      items: mergeTimelineArtifacts(
+        liveMerge.items,
+        cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
+        liveMerge.aliases,
+      ),
     };
   }
 
   invalidateHistory(threadId: string): Promise<void> {
     this.bumpHistoryRevision(threadId);
+    this.latestDetails.delete(threadId);
     return this.historyCache.invalidateThread(threadId);
-  }
-
-  private async resetThreadChanges(id: string, refreshProjection = true): Promise<ThreadChanges> {
-    if (refreshProjection) await this.refreshThread(id);
-    await this.invalidateHistory(id).catch(() => undefined);
-    const detail = await this.readThread(id);
-    return {
-      summary: detail.summary,
-      turns: detail.turns,
-      queuedMessages: detail.queuedMessages,
-      draft: detail.draft ?? null,
-      continuationCursor: null,
-      syncPoint: detail.syncPoint ?? null,
-      resetLatest: true,
-      olderTurnsCursor: detail.olderTurnsCursor,
-    };
   }
 
   private async restoreActiveTurnFromPage(cached: CachedThread, turns: TurnView[]): Promise<void> {
@@ -736,10 +818,13 @@ export class AppProjection extends EventEmitter {
   private cacheThread(thread: Thread, archived: boolean, reveal: boolean): ThreadSummary {
     const state = this.store.view();
     const current = this.threads.get(thread.id);
-    const latestThread =
+    let latestThread =
       current && current.thread.updatedAt > thread.updatedAt
         ? { ...thread, updatedAt: current.thread.updatedAt }
         : thread;
+    if (current?.thread.turns.length && latestThread.turns.length === 0) {
+      latestThread = { ...latestThread, turns: current.thread.turns };
+    }
     const cached = {
       thread: latestThread,
       archived,
@@ -757,7 +842,10 @@ export class AppProjection extends EventEmitter {
     return this.publishThread(thread.id, state)!;
   }
 
-  async refreshThread(threadId: string): Promise<ThreadSummary | undefined> {
+  async refreshThread(
+    threadId: string,
+    options: { requireFresh?: boolean } = {},
+  ): Promise<ThreadSummary | undefined> {
     const baselineRevision = this.historyRevision(threadId);
     let response;
     try {
@@ -770,6 +858,12 @@ export class AppProjection extends EventEmitter {
       );
     } catch (error) {
       if (isMissingThreadError(error)) {
+        return this.summary(threadId);
+      }
+      if (error instanceof RpcError && this.threads.has(threadId)) {
+        if (options.requireFresh) {
+          throw new ThreadViewUnavailableError("Thread summary is temporarily unavailable");
+        }
         return this.summary(threadId);
       }
       throw error;
@@ -1854,6 +1948,14 @@ export class AppProjection extends EventEmitter {
       case "turn/started": {
         this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
+        const cached = this.threads.get(notification.params.threadId);
+        if (cached) {
+          const turnIndex = cached.thread.turns.findIndex(
+            (turn) => turn.id === notification.params.turn.id,
+          );
+          if (turnIndex >= 0) cached.thread.turns[turnIndex] = notification.params.turn;
+          else cached.thread.turns.push(notification.params.turn);
+        }
         const progress = emptyProgress(notification.params.turn.startedAt);
         this.progress.set(
           turnKey(notification.params.threadId, notification.params.turn.id),
@@ -2130,6 +2232,7 @@ export class AppProjection extends EventEmitter {
 
   private forgetThread(threadId: string): void {
     this.threads.delete(threadId);
+    this.latestDetails.delete(threadId);
     this.subscribedThreads.delete(threadId);
     this.unmaterializedThreads.delete(threadId);
     this.hiddenThreads.delete(threadId);
@@ -2708,20 +2811,6 @@ function subagentTranscriptTurnViews(
   }));
 }
 
-function syncPointForPage(cursor: string | null, turns: TurnView[]): ThreadSyncPoint | null {
-  const anchor = turns.at(-1);
-  if (!cursor || !anchor) return null;
-  return {
-    cursor,
-    anchorTurnId: anchor.id,
-    anchorRevision: turnRevision(anchor),
-  };
-}
-
-function turnRevision(turn: TurnView): string {
-  return createHash("sha256").update(JSON.stringify(turn)).digest("base64url");
-}
-
 function subagentTitleFromTurns(turns: Turn[]): string | null {
   for (const turn of turns) {
     for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
@@ -2895,6 +2984,36 @@ function normalizeTurn(
     progress: liveProgress ?? emptyProgress(turn.startedAt),
     items,
     itemsLoaded,
+  };
+}
+
+function mergeMaterializedTurn(current: TurnView, incoming: TurnView): TurnView {
+  const items = [...current.items];
+  const itemIndexes = new Map(items.map((item, index) => [item.id, index]));
+  for (const item of incoming.items) {
+    const index = itemIndexes.get(item.id);
+    if (index === undefined) {
+      itemIndexes.set(item.id, items.length);
+      items.push(item);
+    } else {
+      items[index] = item;
+    }
+  }
+  const incomingIsTerminal = incoming.status !== "inProgress";
+  const currentIsTerminal = current.status !== "inProgress";
+  return {
+    ...current,
+    ...incoming,
+    status: currentIsTerminal && !incomingIsTerminal ? current.status : incoming.status,
+    startedAt: incoming.startedAt ?? current.startedAt,
+    completedAt:
+      incoming.completedAt === null
+        ? current.completedAt
+        : Math.max(current.completedAt ?? 0, incoming.completedAt),
+    durationMs: incoming.durationMs ?? current.durationMs,
+    progress: { ...current.progress, ...incoming.progress },
+    items,
+    itemsLoaded: current.itemsLoaded || incoming.itemsLoaded,
   };
 }
 
@@ -3127,11 +3246,6 @@ function mergeTimelineArtifacts(
 ): ActivityItem[] {
   const result = [...items];
   for (const artifact of artifacts) {
-    const existing = result.findIndex((item) => item.id === artifact.id);
-    if (existing >= 0) {
-      result[existing] = artifact;
-      continue;
-    }
     const resolvedAfterItemId = artifact.afterItemId
       ? (aliases.get(artifact.afterItemId) ?? artifact.afterItemId)
       : null;
@@ -3139,6 +3253,11 @@ function mergeTimelineArtifacts(
       resolvedAfterItemId === artifact.afterItemId
         ? artifact
         : { ...artifact, afterItemId: resolvedAfterItemId };
+    const existing = result.findIndex((item) => item.id === artifact.id);
+    if (existing >= 0) {
+      result[existing] = resolvedArtifact;
+      continue;
+    }
     const anchor = resolvedAfterItemId
       ? result.findIndex((item) => item.id === resolvedAfterItemId)
       : -1;

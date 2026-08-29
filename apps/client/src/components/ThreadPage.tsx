@@ -49,7 +49,7 @@ import {
 } from "../annotations";
 import { copyText } from "../clipboard";
 import { useConnection } from "../connection";
-import { ApiClientError } from "../api";
+import { ApiClientError, isRetryableApiError } from "../api";
 import { openDownloadUrl } from "../downloads";
 import { forkOperationsFromSnapshot } from "../forks";
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
@@ -355,7 +355,7 @@ function pendingThreadSummary(project: Project, settings: SessionSettings): Thre
 }
 
 const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
-const COMPLETED_CHAT_RETRY_MS = 500;
+const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const TAIL_FOLLOW_THRESHOLD_PX = 120;
 const SCROLL_GESTURE_THRESHOLD_PX = 6;
 const DRAFT_SAVE_DELAY_MS = 500;
@@ -458,6 +458,7 @@ export function ThreadPage({
     foregroundEpoch,
     streamRecoveryEpoch,
     dispatch,
+    hydrateCachedDetail = async () => undefined,
     refreshDetail,
     forceRefreshDetail,
     loadOlderDetail,
@@ -538,6 +539,8 @@ export function ThreadPage({
   const summary = reconcileVisibleThreadSummary(
     state.snapshot?.threads.find((thread) => thread.id === threadId),
     detail,
+    state.snapshot?.instanceId,
+    state.snapshot?.sequence,
   );
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
@@ -631,11 +634,6 @@ export function ThreadPage({
   const followsTail = useRef(true);
   const scrollTouchOrigin = useRef<{ x: number; y: number } | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
-  const detailReconcileKey = useRef<string | null>(null);
-  const completedChatRetry = useRef<{
-    key: string;
-    timer: number | null;
-  } | null>(null);
   const scrollTargetMessageId = useRef<string | null>(null);
   const olderScrollAnchor = useRef<{
     threadId: string;
@@ -1179,7 +1177,7 @@ export function ThreadPage({
           : undefined;
         if (!thread) {
           thread = existingThreadId
-            ? (await api.readThread(existingThreadId, undefined, { fresh: true })).summary
+            ? (await api.readThread(existingThreadId, { fresh: true })).summary
             : (await api.createProjectThread(activeProject.id)).thread;
           assertPreparationGeneration(generation);
         }
@@ -1271,17 +1269,20 @@ export function ThreadPage({
       return false;
     }
     dispatch({ type: "thread", thread });
-    dispatch({
-      type: "detail",
-      detail: {
-        summary: thread,
-        turns: [],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-        draft,
-      },
-      page: "latest",
-    });
+    const instanceId = state.snapshot?.instanceId;
+    if (instanceId) {
+      dispatch({
+        type: "detail",
+        detail: {
+          version: { instanceId, sequence: state.snapshot?.sequence ?? 0 },
+          summary: thread,
+          turns: [],
+          queuedMessages: [],
+          olderTurnsCursor: null,
+          draft,
+        },
+      });
+    }
     if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) {
       return false;
     }
@@ -1891,15 +1892,52 @@ export function ThreadPage({
   }, [gitChangesRefreshKey, inspectorOpen, loadGitChanges, threadId]);
 
   useEffect(() => {
+    if (!threadId || createdInWorkspaceRef.current === threadId) return;
+    void hydrateCachedDetail(threadId);
+  }, [hydrateCachedDetail, threadId]);
+
+  useEffect(() => {
     setThreadMissing(false);
-    if (threadId && createdInWorkspaceRef.current !== threadId) {
+    if (
+      !threadId ||
+      !appActive ||
+      state.network !== "connected" ||
+      !state.snapshot?.instanceId ||
+      createdInWorkspaceRef.current === threadId
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let attempt = 0;
+    const load = () => {
       void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
+        if (cancelled) return;
         if (caught instanceof ApiClientError && caught.status === 404) {
           setThreadMissing(true);
+          return;
         }
+        if (!isRetryableApiError(caught)) return;
+        const delay =
+          DETAIL_RETRY_DELAYS_MS[Math.min(attempt, DETAIL_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
+        attempt += 1;
+        retryTimer = window.setTimeout(load, delay);
       });
-    }
-  }, [foregroundEpoch, refreshDetail, streamRecoveryEpoch, threadId]);
+    };
+    load();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [
+    appActive,
+    foregroundEpoch,
+    refreshDetail,
+    state.network,
+    state.snapshot?.instanceId,
+    streamRecoveryEpoch,
+    threadId,
+  ]);
 
   useEffect(() => {
     if (!threadId || !summary?.unseen || !appActive || state.network !== "connected") return;
@@ -1927,62 +1965,6 @@ export function ThreadPage({
     }
     void loadTurnItems(threadId, latestTurn.id).catch(() => undefined);
   }, [detail?.turns, loadTurnItems, summary, threadId]);
-
-  useEffect(
-    () => () => {
-      const retry = completedChatRetry.current;
-      if (retry?.timer !== null && retry?.timer !== undefined) {
-        window.clearTimeout(retry.timer);
-      }
-      completedChatRetry.current = null;
-    },
-    [threadId],
-  );
-
-  useEffect(() => {
-    if (!summary || !completedChatLooksIncomplete(summary.state, detail)) {
-      const retry = completedChatRetry.current;
-      if (retry?.timer !== null && retry?.timer !== undefined) {
-        window.clearTimeout(retry.timer);
-      }
-      completedChatRetry.current = null;
-      return;
-    }
-    const key = `${threadId}:${summary.updatedAt}`;
-    if (completedChatRetry.current?.key === key) return;
-    const previous = completedChatRetry.current;
-    if (previous?.timer !== null && previous?.timer !== undefined) {
-      window.clearTimeout(previous.timer);
-    }
-    const timer = window.setTimeout(() => {
-      if (completedChatRetry.current?.timer !== timer) return;
-      completedChatRetry.current = { key, timer: null };
-      void refreshDetail(threadId, { force: true }).catch(() => undefined);
-    }, COMPLETED_CHAT_RETRY_MS);
-    completedChatRetry.current = { key, timer };
-  }, [detail, refreshDetail, summary, threadId]);
-
-  useEffect(() => {
-    if (!detail) return;
-    const currentTurnId = summary?.currentTurnId ?? null;
-    const currentTurn = currentTurnId
-      ? detail.turns.find((turn) => turn.id === currentTurnId)
-      : null;
-    const staleTurn = !currentTurnId && detail.turns.some((turn) => turn.status === "inProgress");
-    const missingTurn = Boolean(
-      currentTurnId && (!currentTurn || currentTurn.status !== "inProgress"),
-    );
-    if (!staleTurn && !missingTurn) {
-      detailReconcileKey.current = null;
-      return;
-    }
-    const key = `${threadId}:${currentTurnId ?? "idle"}:${staleTurn ? "stale" : "missing"}`;
-    if (detailReconcileKey.current === key) return;
-    detailReconcileKey.current = key;
-    void refreshDetail(threadId, { authoritative: true }).catch(() => {
-      detailReconcileKey.current = null;
-    });
-  }, [detail, refreshDetail, summary?.currentTurnId, threadId]);
 
   function pauseTailFollowing() {
     if (!followsTail.current) return;
@@ -5424,31 +5406,28 @@ function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
   ];
 }
 
-function completedChatLooksIncomplete(
-  state: ThreadState,
-  detail: ThreadDetail | undefined,
-): boolean {
-  if (state !== "completed" || !detail?.turns.length) return false;
-  const latestTurn = detail.turns.at(-1)!;
-  if (latestTurn.status === "inProgress") return true;
-  return !latestTurn.items.some(
-    (item) =>
-      item.type === "agentMessage" &&
-      item.phase === "final_answer" &&
-      Boolean(item.text.trim() || item.images.length),
-  );
-}
-
 function reconcileVisibleThreadSummary(
   snapshotSummary: ThreadSummary | undefined,
   detail: ThreadDetail | undefined,
+  snapshotInstanceId: string | undefined,
+  snapshotSequence: number | undefined,
 ): ThreadSummary | undefined {
   if (!snapshotSummary) return detail?.summary;
-  if (snapshotSummary.currentTurnId) return snapshotSummary;
-  if (detail?.summary.currentTurnId && detail.summary.updatedAt >= snapshotSummary.updatedAt) {
+  if (!detail) return snapshotSummary;
+  const detailVersion = detail.version;
+  if (
+    detailVersion &&
+    detailVersion.instanceId === snapshotInstanceId &&
+    snapshotSequence !== undefined &&
+    detailVersion.sequence >= snapshotSequence
+  ) {
     return detail.summary;
   }
-  return snapshotSummary;
+  if (snapshotSummary.currentTurnId) return snapshotSummary;
+  if (detail.summary.currentTurnId && detail.summary.updatedAt >= snapshotSummary.updatedAt) {
+    return detail.summary;
+  }
+  return snapshotSummary.updatedAt >= detail.summary.updatedAt ? snapshotSummary : detail.summary;
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {

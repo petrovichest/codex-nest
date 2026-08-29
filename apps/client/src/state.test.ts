@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { AppSnapshot, ThreadSummary } from "@codexnest/protocol";
+import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
-import { clientReducer, initialState, mergeThreadDetailChanges, sortThreads } from "./state";
+import { clientReducer, initialState, sortThreads } from "./state";
 import { forkOperationsFromSnapshot, type ForkOperationSummary } from "./forks";
 
 const baseThread: ThreadSummary = {
@@ -26,6 +26,7 @@ const baseThread: ThreadSummary = {
 };
 
 const snapshot: AppSnapshot = {
+  instanceId: "legacy",
   sequence: 4,
   uiLanguage: "ru",
   connection: { state: "ready", message: null, syncedAt: null },
@@ -37,7 +38,7 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
-  it("resets all projection data on a reconnect snapshot", () => {
+  it("clears unversioned projection data on the first backend snapshot", () => {
     const dirty = {
       ...initialState,
       details: {
@@ -45,19 +46,19 @@ describe("clientReducer", () => {
       },
     };
     const next = clientReducer(dirty, { type: "snapshot", snapshot });
-    expect(next.snapshot).toBe(snapshot);
+    expect(next.snapshot).toEqual(snapshot);
     expect(next.network).toBe("connected");
-    expect(next.details.old).toBeDefined();
+    expect(next.details.old).toBeUndefined();
   });
 
-  it("keeps cached sessions until the first authoritative server snapshot", () => {
-    const cached = { ...snapshot, sequence: 40, threads: [baseThread] };
+  it("replaces cached sessions with the first authoritative backend instance", () => {
+    const cached = { ...snapshot, instanceId: "cached", sequence: 40, threads: [baseThread] };
     let state = clientReducer(initialState, { type: "hydrate", snapshot: cached, goals: {} });
     state = clientReducer(state, {
       type: "snapshot",
       snapshot: { ...snapshot, sequence: 1, threads: [] },
     });
-    expect(state.snapshot?.threads).toEqual([baseThread]);
+    expect(state.snapshot?.threads).toEqual([]);
     expect(state.snapshot?.sequence).toBe(1);
 
     state = clientReducer(state, {
@@ -79,7 +80,8 @@ describe("clientReducer", () => {
       revision: 2,
       updatedAt: 20,
     });
-    let state = clientReducer(initialState, {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
       type: "snapshot",
       snapshot: { ...snapshot, attention: [request] },
     });
@@ -91,7 +93,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "attention.upserted",
         attention: {
@@ -133,13 +135,13 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: { type: "attention.upserted", attention: request },
     });
     expect(state.userInputDrafts.questions?.serverRevision).toBe(2);
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      version: { instanceId: "legacy", sequence: 7 },
       event: {
         type: "attention.upserted",
         attention: { ...request, draft: null },
@@ -168,7 +170,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "attention.upserted",
         attention: { ...request, draft: null },
@@ -212,7 +214,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "attention.upserted",
         attention: {
@@ -247,7 +249,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "attention.upserted",
         attention: {
@@ -268,7 +270,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      version: { instanceId: "legacy", sequence: 7 },
       event: { type: "attention.removed", attentionId: "questions" },
     });
     expect(state.userInputDrafts.questions).toBeUndefined();
@@ -305,7 +307,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "activity.delta",
         threadId: "one",
@@ -316,50 +318,6 @@ describe("clientReducer", () => {
       },
     });
     expect(state.details.one?.turns[0]?.items[0]).toMatchObject({ text: "Начало ответа" });
-  });
-
-  it("does not let a stale reset roll back live progress", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [
-          {
-            ...turn("turn"),
-            status: "inProgress",
-            itemsLoaded: false,
-            progress: {
-              startedAt: 1,
-              explanation: "Актуальный шаг",
-              steps: [{ step: "Готово", status: "completed" }],
-              filesChanged: 1,
-              additions: 2,
-              deletions: 0,
-            },
-          },
-        ],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "reset",
-      preserveLive: true,
-      detail: {
-        summary: { ...baseThread, currentTurnId: null, state: "idle" },
-        turns: [{ ...turn("turn"), status: "inProgress", itemsLoaded: false }],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    expect(state.details.one?.summary.currentTurnId).toBe("turn");
-    expect(state.details.one?.turns[0]?.progress).toMatchObject({
-      explanation: "Актуальный шаг",
-      steps: [{ status: "completed" }],
-    });
   });
 
   it("merges lazily loaded turn items in canonical order", () => {
@@ -381,7 +339,8 @@ describe("clientReducer", () => {
       timestamp: 2,
       phase: "final_answer" as const,
     };
-    let state = clientReducer(initialState, {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
       type: "detail",
       page: "latest",
       detail: {
@@ -416,20 +375,37 @@ describe("clientReducer", () => {
       "answer",
     ]);
     expect(state.details.one?.turns[0]?.itemsLoaded).toBe(true);
+
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        version: { instanceId: "legacy", sequence: 5 },
+        summary: baseThread,
+        turns: [{ ...turn("turn"), itemsLoaded: false, items: [user, answer] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "user",
+      "command",
+      "answer",
+    ]);
+    expect(state.details.one?.turns[0]?.itemsLoaded).toBe(true);
   });
 
   it("tracks the reasoning effort used for new sessions", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "defaultReasoningEffort.changed", reasoningEffort: "high" },
     });
     expect(state.snapshot?.defaultReasoningEffort).toBe("high");
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: { type: "defaultReasoningEffort.changed", reasoningEffort: null },
     });
     expect(state.snapshot?.defaultReasoningEffort).toBeUndefined();
@@ -438,7 +414,7 @@ describe("clientReducer", () => {
   it("applies the server-synchronized interface language", () => {
     const state = clientReducer(clientReducer(initialState, { type: "snapshot", snapshot }), {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "uiLanguage.changed", language: "en" },
     });
 
@@ -452,7 +428,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "resync.required" },
     });
 
@@ -466,7 +442,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "skills.changed" },
     });
 
@@ -493,14 +469,14 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "forkOperation.upserted", operation } as never,
     });
     expect(forkOperationsFromSnapshot(state.snapshot)).toEqual([operation]);
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: { type: "forkOperation.removed", operationId: operation.id } as never,
     });
     expect(forkOperationsFromSnapshot(state.snapshot)).toEqual([]);
@@ -510,7 +486,7 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "taskDefaults.changed",
         taskDefaults: { serviceTier: "fast", personality: "friendly" },
@@ -528,7 +504,7 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: { type: "goal.changed", threadId: "one", goal },
     });
 
@@ -558,14 +534,14 @@ describe("clientReducer", () => {
     const transcribing = { ...job, status: "transcribing" as const, startedAt: 11 };
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "voiceTranscription.upserted", job: transcribing },
     });
     expect(state.snapshot?.voiceTranscriptions).toEqual([transcribing]);
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "voiceTranscription.removed",
         threadId: "one",
@@ -596,7 +572,7 @@ describe("clientReducer", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "voiceTranscription.upserted", job: transcribing },
     });
 
@@ -636,7 +612,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -654,7 +630,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -732,7 +708,7 @@ describe("clientReducer", () => {
     ] as const) {
       state = clientReducer(state, {
         type: "event",
-        sequence,
+        version: { instanceId: "legacy", sequence },
         event: { type: "activity.upserted", threadId: "one", turnId: "turn", item },
       });
     }
@@ -787,7 +763,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -797,7 +773,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -812,7 +788,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      version: { instanceId: "legacy", sequence: 7 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -841,7 +817,7 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "thread.upserted", thread: updated },
     });
     expect(state.snapshot?.threads[0]?.settings).toEqual(updated.settings);
@@ -864,7 +840,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: { type: "projects.reordered", projects: [two, one] },
     });
 
@@ -911,7 +887,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "turn.progressed",
         threadId: "one",
@@ -928,7 +904,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "queue.changed",
         threadId: "one",
@@ -946,114 +922,6 @@ describe("clientReducer", () => {
 
     expect(state.details.one?.turns[0]?.progress.steps[0]?.step).toBe("Проверка");
     expect(state.details.one?.queuedMessages[0]?.text).toBe("Следом");
-  });
-
-  it("prepends older pages and keeps their cursor across latest-page refreshes", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [turn("newer")],
-        queuedMessages: [],
-        olderTurnsCursor: "page-2",
-      },
-    });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "older",
-      detail: {
-        summary: baseThread,
-        turns: [turn("oldest"), turn("older")],
-        queuedMessages: [],
-        olderTurnsCursor: "page-3",
-      },
-    });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [turn("newer"), turn("newest")],
-        queuedMessages: [],
-        olderTurnsCursor: "shifted-page-2",
-      },
-    });
-
-    expect(state.details.one?.turns.map((item) => item.id)).toEqual([
-      "oldest",
-      "older",
-      "newer",
-      "newest",
-    ]);
-    expect(state.details.one?.olderTurnsCursor).toBe("page-3");
-  });
-
-  it("treats an older page as history-only and preserves latest thread metadata", () => {
-    const currentSummary = { ...baseThread, title: "Актуальная сессия", updatedAt: 10 };
-    const currentDraft = {
-      input: "Актуальный черновик",
-      images: [],
-      goalMode: false,
-      annotations: [],
-      updatedAt: 10,
-    };
-    const currentQueue = {
-      id: "current-queue",
-      threadId: "one",
-      text: "Актуальная очередь",
-      createdAt: 10,
-      status: "queued" as const,
-    };
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: currentSummary,
-        turns: [turn("newer")],
-        queuedMessages: [currentQueue],
-        olderTurnsCursor: "page-2",
-        draft: currentDraft,
-        syncPoint: {
-          cursor: "current-sync",
-          anchorTurnId: "newer",
-          anchorRevision: "current-revision",
-        },
-      },
-    });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "older",
-      detail: {
-        summary: { ...baseThread, title: "Устаревшая сессия", updatedAt: 1 },
-        turns: [turn("older")],
-        queuedMessages: [],
-        olderTurnsCursor: "page-3",
-        draft: {
-          input: "Устаревший черновик",
-          images: [],
-          goalMode: false,
-          annotations: [],
-          updatedAt: 1,
-        },
-        syncPoint: {
-          cursor: "stale-sync",
-          anchorTurnId: "older",
-          anchorRevision: "stale-revision",
-        },
-      },
-    });
-
-    expect(state.details.one).toMatchObject({
-      summary: currentSummary,
-      queuedMessages: [currentQueue],
-      draft: currentDraft,
-      syncPoint: { cursor: "current-sync" },
-      olderTurnsCursor: "page-3",
-    });
-    expect(state.details.one?.turns.map((item) => item.id)).toEqual(["older", "newer"]);
   });
 
   it("replaces inherited history when a subagent detail refreshes", () => {
@@ -1120,7 +988,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1233,7 +1101,7 @@ describe("clientReducer", () => {
 
     state = clientReducer(state, {
       type: "event",
-      sequence: 5,
+      version: { instanceId: "legacy", sequence: 5 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1253,305 +1121,6 @@ describe("clientReducer", () => {
     );
     expect(state.details.one?.queuedMessages).toEqual([]);
     expect(state.optimisticMessages.one).toBeUndefined();
-  });
-
-  it("does not let a stale detail remove confirmed messages or roll back streamed text", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null, items: [] }],
-        queuedMessages: [
-          {
-            id: "client-message",
-            threadId: "one",
-            text: "Не пропадай",
-            createdAt: 5,
-            status: "dispatching",
-          },
-        ],
-        olderTurnsCursor: null,
-      },
-    });
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 5,
-      event: {
-        type: "activity.upserted",
-        threadId: "one",
-        turnId: "turn",
-        item: {
-          type: "userMessage",
-          id: "client-message",
-          status: "completed",
-          text: "Не пропадай",
-          images: [],
-          timestamp: 5,
-          phase: null,
-        },
-      },
-    });
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 6,
-      event: {
-        type: "activity.upserted",
-        threadId: "one",
-        turnId: "turn",
-        item: {
-          type: "agentMessage",
-          id: "agent",
-          status: "inProgress",
-          text: "Уже пишу длинный ответ",
-          images: [],
-          timestamp: 6,
-          phase: "commentary",
-        },
-      },
-    });
-
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [
-          {
-            ...turn("turn"),
-            status: "inProgress",
-            completedAt: null,
-            items: [
-              {
-                type: "command",
-                id: "command-before-agent",
-                status: "completed",
-                kind: "command",
-                command: "true",
-                cwd: null,
-                output: "",
-                exitCode: 0,
-              },
-              {
-                type: "agentMessage",
-                id: "agent",
-                status: "inProgress",
-                text: "Уже пишу",
-                images: [],
-                timestamp: 6,
-                phase: "commentary",
-              },
-            ],
-          },
-        ],
-        queuedMessages: [
-          {
-            id: "client-message",
-            threadId: "one",
-            text: "Не пропадай",
-            createdAt: 5,
-            status: "dispatching",
-          },
-        ],
-        olderTurnsCursor: null,
-      },
-    });
-
-    expect(state.details.one?.turns[0]?.items).toMatchObject([
-      { type: "userMessage", id: "client-message", text: "Не пропадай" },
-      { type: "command", id: "command-before-agent" },
-      { type: "agentMessage", id: "agent", text: "Уже пишу длинный ответ" },
-    ]);
-    expect(state.details.one?.queuedMessages).toEqual([]);
-    expect(state.optimisticMessages.one).toBeUndefined();
-
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 7,
-      event: {
-        type: "queue.changed",
-        threadId: "one",
-        messages: [
-          {
-            id: "client-message",
-            threadId: "one",
-            text: "Не пропадай",
-            createdAt: 5,
-            status: "dispatching",
-          },
-        ],
-      },
-    });
-    expect(state.details.one?.queuedMessages).toEqual([]);
-
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: { ...baseThread, currentTurnId: null, state: "completed" },
-        turns: [
-          {
-            ...turn("turn"),
-            items: [
-              {
-                type: "agentMessage",
-                id: "agent",
-                status: "completed",
-                text: "Уже пишу",
-                images: [],
-                timestamp: 7,
-                phase: "final_answer",
-              },
-            ],
-          },
-        ],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    expect(state.details.one?.turns[0]?.items[2]).toMatchObject({
-      status: "completed",
-      text: "Уже пишу длинный ответ",
-      phase: "final_answer",
-    });
-
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 8,
-      event: {
-        type: "activity.upserted",
-        threadId: "one",
-        turnId: "turn",
-        item: {
-          type: "agentMessage",
-          id: "agent",
-          status: "inProgress",
-          text: "Уже пишу",
-          images: [],
-          timestamp: 6,
-          phase: "commentary",
-        },
-      },
-    });
-    expect(state.details.one?.turns[0]?.items[2]).toMatchObject({
-      status: "completed",
-      text: "Уже пишу длинный ответ",
-      phase: "final_answer",
-    });
-
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [
-          {
-            ...turn("turn"),
-            status: "inProgress",
-            completedAt: null,
-            durationMs: null,
-            items: [],
-          },
-        ],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    expect(state.details.one?.turns[0]).toMatchObject({
-      status: "completed",
-      completedAt: 2,
-      durationMs: 1,
-    });
-  });
-
-  it("reconciles one streamed message with its differently-id canonical item", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
-    state = clientReducer(state, {
-      type: "detail",
-      page: "latest",
-      detail: {
-        summary: baseThread,
-        turns: [
-          {
-            ...turn("turn"),
-            status: "inProgress",
-            completedAt: null,
-            items: [
-              {
-                type: "agentMessage",
-                id: "stream-agent",
-                status: "inProgress",
-                text: "Готово полностью",
-                images: [],
-                timestamp: 5,
-                phase: null,
-              },
-              {
-                type: "planChecklist",
-                id: "checklist",
-                status: "inProgress",
-                explanation: null,
-                steps: [{ step: "Ответить", status: "completed" }],
-                timestamp: 6,
-                afterItemId: "stream-agent",
-              },
-            ],
-          },
-        ],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-    const canonicalDetail = {
-      summary: { ...baseThread, currentTurnId: null, state: "completed" as const },
-      turns: [
-        {
-          ...turn("turn"),
-          items: [
-            {
-              type: "agentMessage" as const,
-              id: "canonical-agent",
-              status: "completed" as const,
-              text: "Готово",
-              images: [],
-              timestamp: 7,
-              phase: "final_answer" as const,
-            },
-          ],
-        },
-      ],
-      queuedMessages: [],
-      olderTurnsCursor: null,
-    };
-
-    state = clientReducer(state, {
-      type: "event",
-      sequence: 9,
-      event: {
-        type: "activity.upserted",
-        threadId: "one",
-        turnId: "turn",
-        item: canonicalDetail.turns[0].items[0],
-      },
-    });
-    expect(
-      state.details.one?.turns[0]?.items.filter((item) => item.type === "agentMessage"),
-    ).toHaveLength(2);
-
-    state = clientReducer(state, { type: "detail", page: "latest", detail: canonicalDetail });
-    state = clientReducer(state, { type: "detail", page: "latest", detail: canonicalDetail });
-
-    expect(state.details.one?.turns[0]?.items).toMatchObject([
-      {
-        type: "agentMessage",
-        id: "canonical-agent",
-        status: "completed",
-        text: "Готово полностью",
-        phase: "final_answer",
-      },
-      { type: "planChecklist", id: "checklist", afterItemId: "canonical-agent" },
-    ]);
   });
 
   it("keeps chronological plan checklists after their respective anchors", () => {
@@ -1582,7 +1151,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 6,
+      version: { instanceId: "legacy", sequence: 6 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1608,12 +1177,12 @@ describe("clientReducer", () => {
     };
     state = clientReducer(state, {
       type: "event",
-      sequence: 7,
+      version: { instanceId: "legacy", sequence: 7 },
       event: { type: "activity.upserted", threadId: "one", turnId: "turn", item: checklist },
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 8,
+      version: { instanceId: "legacy", sequence: 8 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1631,7 +1200,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 9,
+      version: { instanceId: "legacy", sequence: 9 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1647,7 +1216,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      sequence: 10,
+      version: { instanceId: "legacy", sequence: 10 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -1677,126 +1246,131 @@ describe("clientReducer", () => {
     ).toMatchObject({ steps: [{ status: "completed" }] });
   });
 
-  it("merges an incremental history response without replacing older local turns", () => {
-    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+  it("accepts only forward detail versions from the active backend instance", () => {
+    const authoritative = { ...snapshot, instanceId: "primary", sequence: 4 };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot: authoritative });
+    const detail = (sequence: number, title: string): ThreadDetail => ({
+      version: { instanceId: "primary", sequence },
+      summary: { ...baseThread, title },
+      turns: [turn(`turn-${sequence}`)],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    });
+
+    state = clientReducer(state, { type: "detail", detail: detail(10, "Актуально") });
+    state = clientReducer(state, { type: "detail", detail: detail(9, "Откат") });
+    expect(state.details.one?.summary.title).toBe("Актуально");
+    expect(state.details.one?.version?.sequence).toBe(10);
+
+    state = clientReducer(state, { type: "detail", detail: detail(11, "Новее") });
+    expect(state.details.one?.summary.title).toBe("Новее");
+    expect(state.details.one?.version?.sequence).toBe(11);
+  });
+
+  it("does not replay an older stream event into a newer HTTP detail", () => {
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, instanceId: "primary", sequence: 4 },
+    });
     state = clientReducer(state, {
       type: "detail",
       detail: {
-        summary: baseThread,
-        turns: [turn("old"), turn("anchor")],
+        version: { instanceId: "primary", sequence: 10 },
+        summary: { ...baseThread, title: "Актуально" },
+        turns: [turn("current")],
         queuedMessages: [],
-        olderTurnsCursor: "older",
-        syncPoint: {
-          cursor: "delta",
-          anchorTurnId: "anchor",
-          anchorRevision: "revision-1",
-        },
-      },
-      page: "latest",
-    });
-
-    state = clientReducer(state, {
-      type: "changes",
-      threadId: "one",
-      changes: {
-        summary: { ...baseThread, updatedAt: 3 },
-        turns: [{ ...turn("anchor"), durationMs: 2 }, turn("new")],
-        queuedMessages: [],
-        draft: null,
-        continuationCursor: null,
-        syncPoint: {
-          cursor: "next-delta",
-          anchorTurnId: "new",
-          anchorRevision: "revision-2",
-        },
-        resetLatest: false,
         olderTurnsCursor: null,
       },
     });
 
-    expect(state.details.one?.turns.map((item) => item.id)).toEqual(["old", "anchor", "new"]);
-    expect(state.details.one?.turns[1]?.durationMs).toBe(2);
-    expect(state.details.one?.olderTurnsCursor).toBe("older");
-    expect(state.details.one?.syncPoint?.cursor).toBe("next-delta");
-  });
-
-  it("preserves a matching live turn across a canonical reset and clears a poisoned cursor", () => {
-    const liveTurn = {
-      ...turn("live"),
-      status: "inProgress" as const,
-      completedAt: null,
-      durationMs: null,
-    };
-    const current = {
-      summary: { ...baseThread, currentTurnId: "live" },
-      turns: [turn("anchor"), liveTurn],
-      queuedMessages: [],
-      olderTurnsCursor: null,
-      syncPoint: {
-        cursor: "poisoned",
-        anchorTurnId: "anchor",
-        anchorRevision: "old",
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "primary", sequence: 5 },
+      event: {
+        type: "thread.upserted",
+        thread: { ...baseThread, title: "Старое событие" },
       },
-    };
-
-    const merged = mergeThreadDetailChanges(current, {
-      summary: { ...baseThread, currentTurnId: "live" },
-      turns: [turn("anchor")],
-      queuedMessages: [],
-      draft: null,
-      continuationCursor: null,
-      syncPoint: null,
-      resetLatest: true,
-      olderTurnsCursor: null,
     });
 
-    expect(merged.turns.map((candidate) => candidate.id)).toEqual(["anchor", "live"]);
-    expect(merged.syncPoint).toBeNull();
+    expect(state.snapshot?.sequence).toBe(5);
+    expect(state.details.one?.summary.title).toBe("Актуально");
+    expect(state.details.one?.version?.sequence).toBe(10);
   });
 
-  it("replaces stale terminal message versions during an authoritative reset", () => {
-    const completed = {
-      ...baseThread,
-      state: "completed" as const,
-      currentTurnId: null,
-    };
-    const detail = (text: string) => ({
-      summary: completed,
-      turns: [
-        {
-          ...turn("turn"),
-          items: [
-            {
-              type: "agentMessage" as const,
-              id: "answer",
-              status: "completed" as const,
-              text,
-              images: [],
-              timestamp: 2,
-              phase: "final_answer" as const,
-            },
-          ],
-        },
-      ],
-      queuedMessages: [],
-      olderTurnsCursor: null,
-    });
+  it("keeps rendered session history offline and clears it after a backend restart", () => {
     let state = clientReducer(initialState, {
-      type: "detail",
-      detail: detail("Старая длинная версия ответа"),
-      page: "latest",
+      type: "snapshot",
+      snapshot: { ...snapshot, instanceId: "first" },
     });
-
     state = clientReducer(state, {
       type: "detail",
-      detail: detail("Канонический ответ"),
-      page: "reset",
+      detail: {
+        version: { instanceId: "first", sequence: 5 },
+        summary: baseThread,
+        turns: [turn("turn")],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    expect(state.details.one).toBeDefined();
+
+    state = clientReducer(state, { type: "network", network: "offline" });
+    expect(state.details.one?.turns.map((candidate) => candidate.id)).toEqual(["turn"]);
+
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: { ...snapshot, instanceId: "second", sequence: 0 },
+    });
+    expect(state.details).toEqual({});
+  });
+
+  it("applies older history only to the page anchor without replacing latest metadata", () => {
+    const currentSummary = { ...baseThread, title: "Текущее состояние" };
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, instanceId: "primary" },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        version: { instanceId: "primary", sequence: 8 },
+        summary: currentSummary,
+        turns: [turn("newer"), turn("newest")],
+        queuedMessages: [],
+        olderTurnsCursor: "older-cursor",
+      },
+    });
+    state = clientReducer(state, {
+      type: "history",
+      threadId: "one",
+      page: {
+        instanceId: "primary",
+        anchorTurnId: "newer",
+        turns: [turn("oldest"), turn("older")],
+        olderTurnsCursor: null,
+      },
     });
 
-    expect(state.details.one?.turns[0]?.items[0]).toMatchObject({
-      text: "Канонический ответ",
-      status: "completed",
+    expect(state.details.one?.turns.map((candidate) => candidate.id)).toEqual([
+      "oldest",
+      "older",
+      "newer",
+      "newest",
+    ]);
+    expect(state.details.one?.summary).toEqual(currentSummary);
+    expect(state.details.one?.version?.sequence).toBe(8);
+
+    const unchanged = clientReducer(state, {
+      type: "history",
+      threadId: "one",
+      page: {
+        instanceId: "primary",
+        anchorTurnId: "stale-anchor",
+        turns: [turn("must-not-apply")],
+        olderTurnsCursor: null,
+      },
     });
+    expect(unchanged).toBe(state);
   });
 
   it("sorts sessions only by most recent activity", () => {

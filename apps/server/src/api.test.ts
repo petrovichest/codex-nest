@@ -738,7 +738,8 @@ describe("HTTP authentication", () => {
       );
     });
     authorized.send(JSON.stringify({ type: "authenticate", token: "correct" }));
-    await expect(snapshot).resolves.toMatchObject({ type: "snapshot" });
+    const firstSnapshot = await snapshot;
+    expect(firstSnapshot).toMatchObject({ type: "snapshot" });
 
     const secondAuthorized = await app.injectWS("/api/v1/events", {
       headers: { origin: "http://localhost" },
@@ -765,8 +766,17 @@ describe("HTTP authentication", () => {
     const [firstBroadcast, secondBroadcast] = await Promise.all([firstEvent, secondEvent]);
     expect(firstBroadcast).toMatchObject({
       type: "event",
+      sequence: expect.any(Number),
+      version: {
+        instanceId: expect.any(String),
+        sequence: expect.any(Number),
+      },
       event: { type: "thread.upserted" },
     });
+    expect((firstBroadcast.version as { sequence: number }).sequence).toBe(firstBroadcast.sequence);
+    expect((firstBroadcast.version as { instanceId: string }).instanceId).toBe(
+      (firstSnapshot.snapshot as { instanceId: string }).instanceId,
+    );
     expect(secondBroadcast).toEqual(firstBroadcast);
 
     const resynced = new Promise<Record<string, unknown>>((resolve) => {
@@ -3322,9 +3332,14 @@ describe("thread settings", () => {
     expect(refreshed.statusCode).toBe(200);
     expect(refreshed.json()).toMatchObject({
       snapshot: {
-        threads: [expect.objectContaining({ id: "thread" })],
+        instanceId: expect.any(String),
+        sequence: expect.any(Number),
       },
       detail: {
+        version: {
+          instanceId: expect.any(String),
+          sequence: expect.any(Number),
+        },
         summary: expect.objectContaining({ id: "thread" }),
         turns: [],
       },
@@ -3350,19 +3365,11 @@ describe("thread settings", () => {
       url: "/api/v1/threads/thread/refresh",
       headers,
     });
-    expect(failedRefresh.statusCode).toBe(500);
-    expect(failedRefresh.json()).toEqual({
-      error: { code: "internal_error", message: "Internal server error" },
+    expect(failedRefresh.statusCode).toBe(503);
+    expect(failedRefresh.json()).toMatchObject({
+      error: { code: "app_server_unavailable" },
     });
-    expect(errorLog).toHaveBeenCalledWith(
-      {
-        err: { name: "RpcError", message: "Rollout changed while reading turns" },
-        rpcCode: -32_000,
-        method: "POST",
-        route: "/api/v1/threads/:id/refresh",
-      },
-      "request failed",
-    );
+    expect(errorLog).not.toHaveBeenCalled();
     errorLog.mockRestore();
     requestLogger.mockRestore();
 
@@ -3391,13 +3398,36 @@ describe("thread settings", () => {
     expect(refreshedViewed.json().detail.summary).toMatchObject({ unread: true, unseen: true });
     expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
 
-    const viewedChanges = await app.inject({
+    const viewedHistory = await app.inject({
+      url: "/api/v1/threads/viewed/history?cursor=cursor&anchorTurnId=turn",
+      headers,
+    });
+    expect(viewedHistory.statusCode).toBe(200);
+    expect(viewedHistory.json()).toMatchObject({ anchorTurnId: "turn" });
+    expect(projection.summary("viewed")).toMatchObject({ unread: true, unseen: true });
+    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
+
+    const legacyPage = await app.inject({
+      url: "/api/v1/threads/viewed?cursor=cursor",
+      headers,
+    });
+    expect(legacyPage.statusCode).toBe(200);
+    expect(legacyPage.json()).toMatchObject({
+      summary: { id: "viewed" },
+      version: { instanceId: expect.any(String), sequence: expect.any(Number) },
+    });
+
+    const legacyChanges = await app.inject({
       url: "/api/v1/threads/viewed/changes?cursor=cursor&anchorTurnId=turn&anchorRevision=revision",
       headers,
     });
-    expect(viewedChanges.statusCode).toBe(200);
-    expect(viewedChanges.json().summary).toMatchObject({ unread: true, unseen: true });
-    expect(store.snapshot().threadMeta.viewed?.lastViewedUpdatedAt).toBeUndefined();
+    expect(legacyChanges.statusCode).toBe(200);
+    expect(legacyChanges.json()).toMatchObject({
+      summary: { id: "viewed" },
+      resetLatest: true,
+      continuationCursor: null,
+      syncPoint: null,
+    });
 
     const markedViewed = await app.inject({
       method: "PUT",

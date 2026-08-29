@@ -2,12 +2,13 @@ import type {
   ActivityItem,
   AppSnapshot,
   Project,
+  ProjectionVersion,
   QueuedMessage,
   ServerEvent,
-  ThreadChanges,
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
+  ThreadHistoryPage,
   ThreadSummary,
   UpdateUserInputDraftRequest,
   UserInputDraft,
@@ -61,15 +62,16 @@ export type ClientAction =
     }
   | { type: "hydrate.detail"; detail: ThreadDetail }
   | { type: "snapshot"; snapshot: AppSnapshot }
-  | { type: "event"; sequence: number; event: ServerEvent }
+  | { type: "event"; version: ProjectionVersion; event: ServerEvent }
   | {
       type: "detail";
       detail: ThreadDetail;
-      page: "latest" | "older" | "reset";
+      page?: "latest" | "older" | "reset";
       preserveLive?: boolean;
     }
+  | { type: "history"; threadId: string; page: ThreadHistoryPage }
+  | { type: "history.rebase"; detail: ThreadDetail; page: ThreadHistoryPage }
   | { type: "turn.items"; threadId: string; turnId: string; items: ActivityItem[] }
-  | { type: "changes"; threadId: string; changes: ThreadChanges; preserveLive?: boolean }
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
@@ -128,31 +130,64 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
         goals: action.goals,
       };
     case "hydrate.detail":
-      return applyDetail(state, action.detail, "latest");
-    case "snapshot":
+      return applyDetail(state, action.detail);
+    case "snapshot": {
+      const snapshot = {
+        ...action.snapshot,
+        instanceId: action.snapshot.instanceId ?? state.snapshot?.instanceId ?? "legacy",
+      };
+      const sameInstance = state.snapshot?.instanceId === snapshot.instanceId;
+      if (sameInstance && state.snapshot && action.snapshot.sequence < state.snapshot.sequence) {
+        return state;
+      }
+      const snapshotThreads = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
+      const details = sameInstance
+        ? Object.fromEntries(
+            Object.entries(state.details)
+              .filter(
+                ([threadId, detail]) =>
+                  snapshotThreads.has(threadId) &&
+                  detail.version?.instanceId === snapshot.instanceId,
+              )
+              .map(([threadId, detail]) => [
+                threadId,
+                {
+                  ...detail,
+                  summary:
+                    detail.version && detail.version.sequence > snapshot.sequence
+                      ? detail.summary
+                      : (snapshotThreads.get(threadId) ?? detail.summary),
+                },
+              ]),
+          )
+        : {};
       return {
         ...state,
-        snapshot:
-          action.snapshot.connection.syncedAt === null && state.snapshot
-            ? {
-                ...action.snapshot,
-                threads: state.snapshot.threads,
-                models: state.snapshot.models,
-                defaultReasoningEffort: state.snapshot.defaultReasoningEffort,
-                taskDefaults: state.snapshot.taskDefaults,
-              }
-            : action.snapshot,
+        snapshot,
+        details,
+        expandedHistory: sameInstance
+          ? Object.fromEntries(
+              Object.entries(state.expandedHistory).filter(([threadId]) => threadId in details),
+            )
+          : {},
         userInputDrafts: reconcileUserInputDrafts(state.userInputDrafts, action.snapshot.attention),
         network: "connected",
         error: null,
         snapshotEpoch: state.snapshotEpoch + 1,
       };
+    }
     case "detail":
-      return applyDetail(state, action.detail, action.page, action.preserveLive);
+      return applyDetail(state, action.detail);
+    case "history":
+      return applyHistory(state, action.threadId, action.page);
+    case "history.rebase":
+      return applyHistory(
+        applyDetail(state, action.detail, true),
+        action.detail.summary.id,
+        action.page,
+      );
     case "turn.items":
       return applyTurnItems(state, action.threadId, action.turnId, action.items);
-    case "changes":
-      return applyChanges(state, action.threadId, action.changes, action.preserveLive);
     case "draft": {
       const detail = state.details[action.threadId];
       if (!detail) return state;
@@ -306,34 +341,8 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       };
     case "event":
       if (!state.snapshot) return state;
-      return applyEvent(state, action.sequence, action.event);
+      return applyEvent(state, action.version, action.event);
   }
-}
-
-function applyChanges(
-  state: ClientState,
-  threadId: string,
-  changes: ThreadChanges,
-  preserveLive = false,
-): ClientState {
-  const current = state.details[threadId];
-  if (!current) {
-    return applyDetail(
-      state,
-      {
-        summary: changes.summary,
-        turns: changes.turns,
-        queuedMessages: changes.queuedMessages,
-        olderTurnsCursor: changes.olderTurnsCursor,
-        draft: changes.draft ?? null,
-        syncPoint: changes.syncPoint,
-      },
-      "latest",
-      preserveLive,
-    );
-  }
-  const merged = mergeThreadDetailChanges(current, changes);
-  return applyDetail(state, merged, changes.resetLatest ? "reset" : "latest", preserveLive);
 }
 
 function reconcileUserInputDrafts(
@@ -386,40 +395,47 @@ function cloneAnswers(answers: Record<string, string[]>): Record<string, string[
   return Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, [...values]]));
 }
 
-export function mergeThreadDetailChanges(
-  current: ThreadDetail,
-  changes: ThreadChanges,
-): ThreadDetail {
-  let turns: ThreadDetail["turns"];
-  let olderTurnsCursor = current.olderTurnsCursor;
-  if (changes.resetLatest) {
-    const incomingIds = new Set(changes.turns.map((turn) => turn.id));
-    const overlap = current.turns.findIndex((turn) => incomingIds.has(turn.id));
-    turns =
-      overlap < 0 ? changes.turns : mergeTurns(current.turns.slice(0, overlap), changes.turns);
-    const currentTurnId = changes.summary.currentTurnId;
-    if (currentTurnId && !turns.some((turn) => turn.id === currentTurnId)) {
-      const localCurrentTurn = current.turns.find((turn) => turn.id === currentTurnId);
-      if (localCurrentTurn) turns = [...turns, localCurrentTurn];
-    }
-    if (overlap < 0) olderTurnsCursor = changes.olderTurnsCursor;
-  } else {
-    turns = mergeTurns(current.turns, changes.turns);
+function applyEvent(
+  state: ClientState,
+  version: ProjectionVersion,
+  event: ServerEvent,
+): ClientState {
+  if (
+    !state.snapshot?.instanceId ||
+    version.instanceId !== state.snapshot.instanceId ||
+    version.sequence <= state.snapshot.sequence
+  ) {
+    return state;
   }
+  const threadId = eventThreadId(event);
+  const currentDetail = threadId ? state.details[threadId] : undefined;
+  const detailAlreadyIncludesEvent = Boolean(
+    currentDetail?.version?.instanceId === version.instanceId &&
+    currentDetail.version.sequence >= version.sequence,
+  );
+  const next = applyVersionedEvent(state, version.sequence, event);
+  const detail = threadId ? next.details[threadId] : undefined;
+  if (threadId && currentDetail && detailAlreadyIncludesEvent) {
+    return {
+      ...next,
+      details: { ...next.details, [threadId]: currentDetail },
+    };
+  }
+  if (!threadId || !detail) return next;
   return {
-    ...current,
-    summary: changes.summary,
-    turns,
-    queuedMessages: changes.queuedMessages,
-    draft: changes.draft ?? null,
-    olderTurnsCursor,
-    syncPoint: changes.resetLatest
-      ? changes.syncPoint
-      : (changes.syncPoint ?? current.syncPoint ?? null),
+    ...next,
+    details: {
+      ...next.details,
+      [threadId]: { ...detail, version },
+    },
   };
 }
 
-function applyEvent(state: ClientState, sequence: number, event: ServerEvent): ClientState {
+function applyVersionedEvent(
+  state: ClientState,
+  sequence: number,
+  event: ServerEvent,
+): ClientState {
   let snapshot = { ...state.snapshot!, sequence };
   const forkEvent = event as unknown as
     | { type: "forkOperation.upserted"; operation: ForkOperationSummary }
@@ -555,59 +571,52 @@ function removeThreadState(state: ClientState, threadId: string): ClientState {
   };
 }
 
-function applyDetail(
-  state: ClientState,
-  detail: ThreadDetail,
-  page: "latest" | "older" | "reset",
-  preserveLive = false,
-): ClientState {
+function applyDetail(state: ClientState, detail: ThreadDetail, resetHistory = false): ClientState {
+  const version =
+    detail.version ??
+    (state.snapshot?.instanceId === "legacy"
+      ? { instanceId: "legacy", sequence: state.snapshot.sequence }
+      : undefined);
+  if (!version || !state.snapshot?.instanceId || version.instanceId !== state.snapshot.instanceId) {
+    return state;
+  }
+  detail = { ...detail, version };
   const threadId = detail.summary.id;
   const current = state.details[threadId];
-  const snapshotSummary = state.snapshot?.threads.find((thread) => thread.id === threadId);
-  const liveSummary = preserveLive
-    ? snapshotSummary && (!current || snapshotSummary.updatedAt > current.summary.updatedAt)
-      ? snapshotSummary
-      : (current?.summary ?? snapshotSummary)
-    : undefined;
-  const expanded = state.expandedHistory[threadId] ?? false;
-  const subagent = detail.summary.relation.kind === "subagent";
-  const merged = current
-    ? page === "reset"
-      ? {
-          ...detail,
-          summary: liveSummary ?? detail.summary,
-          turns: detail.turns.map((turn) => {
-            const existing = current.turns.find((candidate) => candidate.id === turn.id);
-            return existing ? mergeTurn(existing, turn, preserveLive) : turn;
-          }),
-        }
-      : page === "older"
-        ? subagent
-          ? { ...current, olderTurnsCursor: null }
-          : {
-              ...current,
-              turns: mergeTurns(detail.turns, current.turns, preserveLive),
-              olderTurnsCursor: detail.olderTurnsCursor,
-            }
-        : {
-            ...detail,
-            summary: liveSummary ?? detail.summary,
-            turns: subagent ? detail.turns : mergeTurns(current.turns, detail.turns, preserveLive),
-            olderTurnsCursor: subagent
-              ? null
-              : expanded
-                ? current.olderTurnsCursor
-                : detail.olderTurnsCursor,
-          }
-    : subagent
-      ? { ...detail, olderTurnsCursor: null }
-      : detail;
-  if (current && preserveLive && liveSummary?.currentTurnId) {
-    const currentTurn = current.turns.find((turn) => turn.id === liveSummary.currentTurnId);
-    if (currentTurn && !merged.turns.some((turn) => turn.id === currentTurn.id)) {
-      merged.turns.push(currentTurn);
-    }
+  if (
+    current?.version?.instanceId === version.instanceId &&
+    current.version.sequence > version.sequence
+  ) {
+    return state;
   }
+  const subagent = detail.summary.relation.kind === "subagent";
+  const preserveHistory = !resetHistory && !subagent && current && state.expandedHistory[threadId];
+  const firstIncomingId = detail.turns[0]?.id;
+  const overlap = firstIncomingId
+    ? current?.turns.findIndex((turn) => turn.id === firstIncomingId)
+    : -1;
+  const historicalPrefix =
+    preserveHistory && overlap !== undefined && overlap > 0 ? current.turns.slice(0, overlap) : [];
+  const currentTurns = new Map(current?.turns.map((turn) => [turn.id, turn]) ?? []);
+  const latestTurns = detail.turns.map((turn) => {
+    const existing = currentTurns.get(turn.id);
+    return existing ? mergeTurn(existing, turn) : turn;
+  });
+  const snapshotSummary = state.snapshot.threads.find((thread) => thread.id === threadId);
+  const merged: ThreadDetail = {
+    ...detail,
+    summary: reconcileThreadSummary(
+      snapshotSummary,
+      detail.summary,
+      version.sequence >= state.snapshot.sequence,
+    ),
+    turns: [...historicalPrefix, ...latestTurns],
+    olderTurnsCursor: subagent
+      ? null
+      : historicalPrefix.length
+        ? current!.olderTurnsCursor
+        : detail.olderTurnsCursor,
+  };
   const confirmedUserIds = userMessageIds(merged);
   const reconciled = {
     ...merged,
@@ -622,16 +631,53 @@ function applyDetail(
     details: { ...state.details, [threadId]: reconciled },
     expandedHistory: subagent
       ? { ...state.expandedHistory, [threadId]: false }
-      : page === "older"
-        ? { ...state.expandedHistory, [threadId]: true }
-        : page === "reset"
-          ? { ...state.expandedHistory, [threadId]: false }
-          : state.expandedHistory,
+      : historicalPrefix.length
+        ? state.expandedHistory
+        : { ...state.expandedHistory, [threadId]: false },
     optimisticMessages: setOptimisticMessages(
       state.optimisticMessages,
       threadId,
       (state.optimisticMessages[threadId] ?? []).filter((message) => !confirmedIds.has(message.id)),
     ),
+  };
+}
+
+function reconcileThreadSummary(
+  snapshotSummary: ThreadSummary | undefined,
+  detailSummary: ThreadSummary,
+  detailCoversSnapshot: boolean,
+): ThreadSummary {
+  if (!snapshotSummary) return detailSummary;
+  if (detailCoversSnapshot) return detailSummary;
+  if (snapshotSummary.currentTurnId) return snapshotSummary;
+  if (detailSummary.currentTurnId && detailSummary.updatedAt >= snapshotSummary.updatedAt) {
+    return detailSummary;
+  }
+  return snapshotSummary.updatedAt >= detailSummary.updatedAt ? snapshotSummary : detailSummary;
+}
+
+function applyHistory(state: ClientState, threadId: string, page: ThreadHistoryPage): ClientState {
+  const detail = state.details[threadId];
+  if (
+    !detail ||
+    page.instanceId !== state.snapshot?.instanceId ||
+    detail.turns[0]?.id !== page.anchorTurnId
+  ) {
+    return state;
+  }
+  const currentIds = new Set(detail.turns.map((turn) => turn.id));
+  const olderTurns = page.turns.filter((turn) => !currentIds.has(turn.id));
+  return {
+    ...state,
+    details: {
+      ...state.details,
+      [threadId]: {
+        ...detail,
+        turns: [...olderTurns, ...detail.turns],
+        olderTurnsCursor: page.olderTurnsCursor,
+      },
+    },
+    expandedHistory: { ...state.expandedHistory, [threadId]: true },
   };
 }
 
@@ -913,21 +959,34 @@ function detailForEvent(state: ClientState, threadId: string): ThreadDetail | un
   const existing = state.details[threadId];
   if (existing) return existing;
   const summary = state.snapshot?.threads.find((thread) => thread.id === threadId);
-  return summary ? { summary, turns: [], queuedMessages: [], olderTurnsCursor: null } : undefined;
+  return summary && state.snapshot?.instanceId
+    ? {
+        version: { instanceId: state.snapshot.instanceId, sequence: state.snapshot.sequence },
+        summary,
+        turns: [],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      }
+    : undefined;
 }
 
-function mergeTurns(
-  first: ThreadDetail["turns"],
-  second: ThreadDetail["turns"],
-  preserveLive = false,
-): ThreadDetail["turns"] {
-  const result = [...first];
-  for (const turn of second) {
-    const index = result.findIndex((candidate) => candidate.id === turn.id);
-    if (index < 0) result.push(turn);
-    else result[index] = mergeTurn(result[index]!, turn, preserveLive);
+function eventThreadId(event: ServerEvent): string | null {
+  switch (event.type) {
+    case "thread.upserted":
+      return event.thread.id;
+    case "thread.removed":
+    case "activity.upserted":
+    case "activity.delta":
+    case "turn.progressed":
+    case "queue.changed":
+    case "goal.changed":
+    case "voiceTranscription.removed":
+      return event.threadId;
+    case "voiceTranscription.upserted":
+      return event.job.threadId;
+    default:
+      return null;
   }
-  return result;
 }
 
 function mergeTurn(
