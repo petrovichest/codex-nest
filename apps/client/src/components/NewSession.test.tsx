@@ -388,7 +388,7 @@ describe("NewSession", () => {
     expect(await screen.findByAltText("saved.png")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
-    expect(textbox).toHaveValue("");
+    expect(textbox).toHaveValue("Сохрани после ухода");
 
     fireEvent.click(screen.getByRole("link", { name: "Покинуть подготовку" }));
     expect(await screen.findByRole("link", { name: "Открыть проект снова" })).toBeInTheDocument();

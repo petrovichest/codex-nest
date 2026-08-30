@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
 import { ConnectionProvider, useConnection } from "./connection";
-import type { CachedMeta, PendingVoiceRecording } from "./offline-store";
+import type { CachedMeta, OutboxMessage, PendingVoiceRecording } from "./offline-store";
 
 const capacitor = vi.hoisted(() => ({ native: false }));
 const addAppListener = vi.hoisted(() => vi.fn());
@@ -25,6 +25,15 @@ const setNativeNotificationAppActive = vi.hoisted(() => vi.fn());
 const loadCachedMeta = vi.hoisted(() =>
   vi.fn<() => Promise<CachedMeta | null>>(() => Promise.resolve(null)),
 );
+const listOutboxMessages = vi.hoisted(() =>
+  vi.fn<() => Promise<OutboxMessage[]>>(() => Promise.resolve([])),
+);
+const putOutboxMessage = vi.hoisted(() =>
+  vi.fn<(message: OutboxMessage) => Promise<boolean>>(() => Promise.resolve(true)),
+);
+const deleteOutboxMessage = vi.hoisted(() =>
+  vi.fn<(id: string) => Promise<void>>(() => Promise.resolve()),
+);
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
@@ -42,6 +51,9 @@ vi.mock("./offline-store", async (importOriginal) => ({
   deletePendingVoiceRecording,
   loadPendingVoiceRecording,
   putPendingVoiceRecording,
+  listOutboxMessages,
+  putOutboxMessage,
+  deleteOutboxMessage,
 }));
 
 const summary: ThreadSummary = {
@@ -81,6 +93,12 @@ describe("ConnectionProvider", () => {
     setNativeNotificationAppActive.mockReset();
     loadCachedMeta.mockReset();
     loadCachedMeta.mockResolvedValue(null);
+    listOutboxMessages.mockReset();
+    listOutboxMessages.mockResolvedValue([]);
+    putOutboxMessage.mockReset();
+    putOutboxMessage.mockResolvedValue(true);
+    deleteOutboxMessage.mockReset();
+    deleteOutboxMessage.mockResolvedValue();
     FakeWebSocket.instances = [];
   });
 
@@ -121,6 +139,118 @@ describe("ConnectionProvider", () => {
     });
 
     expect(screen.getByText("Актуальный заголовок")).toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("commits a reliable message as soon as its outbox record is durable", async () => {
+    const stored = deferred<boolean>();
+    const accepted = deferred<Response>();
+    const fetchMock = vi.fn(() => accepted.promise);
+    putOutboxMessage.mockReturnValueOnce(stored.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const committed = vi.fn();
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+
+    const delivery = controls!.sendReliable(
+      "thread",
+      { input: "Не потерять", clientMessageId: "message" },
+      committed,
+    );
+    expect(committed).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await act(async () => stored.resolve(true));
+
+    expect(committed).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(deleteOutboxMessage).not.toHaveBeenCalled();
+
+    accepted.resolve(
+      new Response(
+        JSON.stringify({
+          id: "message",
+          threadId: "thread",
+          text: "Не потерять",
+          createdAt: 1,
+          status: "queued",
+        }),
+        { status: 202 },
+      ),
+    );
+    await expect(delivery).resolves.toBe("delivered");
+    expect(committed).toHaveBeenCalledOnce();
+    expect(deleteOutboxMessage).toHaveBeenCalledWith("message");
+    view.unmount();
+  });
+
+  it("waits for server acceptance when the outbox is unavailable", async () => {
+    const accepted = deferred<Response>();
+    putOutboxMessage.mockResolvedValue(false);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => accepted.promise),
+    );
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const committed = vi.fn();
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+
+    const delivery = controls!.sendReliable(
+      "thread",
+      { input: "Ждать сервер", clientMessageId: "message" },
+      committed,
+    );
+    await flushPromises();
+    expect(committed).not.toHaveBeenCalled();
+
+    accepted.resolve(
+      new Response(
+        JSON.stringify({
+          id: "message",
+          threadId: "thread",
+          text: "Ждать сервер",
+          createdAt: 1,
+          status: "queued",
+        }),
+        { status: 202 },
+      ),
+    );
+    await expect(delivery).resolves.toBe("delivered");
+    expect(committed).toHaveBeenCalledOnce();
+    view.unmount();
+  });
+
+  it("does not commit when neither the outbox nor the server accepts the message", async () => {
+    putOutboxMessage.mockResolvedValue(false);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const committed = vi.fn();
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+
+    await expect(
+      controls!.sendReliable(
+        "thread",
+        { input: "Оставить в поле", clientMessageId: "message" },
+        committed,
+      ),
+    ).rejects.toThrow("Failed to connect to the server");
+    expect(committed).not.toHaveBeenCalled();
+    expect(putOutboxMessage).toHaveBeenCalledTimes(2);
     view.unmount();
   });
 
@@ -1143,6 +1273,15 @@ function AppActiveProbe() {
   return <span>active:{String(appActive)}</span>;
 }
 
+function ConnectionProbe({
+  onConnection,
+}: {
+  onConnection(value: ReturnType<typeof useConnection>): void;
+}) {
+  onConnection(useConnection());
+  return null;
+}
+
 function ThreadTitleProbe() {
   const { state } = useConnection();
   return <span>{state.snapshot?.threads[0]?.title ?? "none"}</span>;
@@ -1178,6 +1317,16 @@ async function flushPromises(): Promise<void> {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 class FakeWebSocket extends EventTarget {

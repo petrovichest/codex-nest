@@ -2853,14 +2853,16 @@ describe("Activity", () => {
       target: { value: "Сначала проверь тесты" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
-    expect(textbox).toHaveValue("");
-    expect(context.dispatch).toHaveBeenCalledWith({
-      type: "optimistic.add",
-      message: expect.objectContaining({
-        text: "Сначала проверь тесты",
-        destination: "queue",
+    await waitFor(() => expect(textbox).toHaveValue(""));
+    await waitFor(() =>
+      expect(context.dispatch).toHaveBeenCalledWith({
+        type: "optimistic.add",
+        message: expect.objectContaining({
+          text: "Сначала проверь тесты",
+          destination: "queue",
+        }),
       }),
-    });
+    );
     await waitFor(() =>
       expect(api.enqueue).toHaveBeenCalledWith(
         "thread",
@@ -3291,6 +3293,41 @@ describe("Activity", () => {
       ),
     );
     expect(api.sendQueuedNow).not.toHaveBeenCalled();
+  });
+
+  it("keeps the composer text until reliable delivery has a durable owner", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary);
+    let commit: (() => void) | undefined;
+    let resolveDelivery: ((delivery: "delivered") => void) | undefined;
+    context.sendReliable.mockImplementation(
+      (_threadId, _body, onCommitted?: () => void) =>
+        new Promise<"delivered">((resolve) => {
+          commit = onCommitted;
+          resolveDelivery = resolve;
+        }),
+    );
+    renderThread();
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+
+    fireEvent.change(textarea, { target: { value: "Сначала сохрани" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledOnce());
+    expect(textarea).toHaveValue("Сначала сохрани");
+    expect(context.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "optimistic.add" }),
+    );
+
+    act(() => commit?.());
+
+    expect(textarea).toHaveValue("");
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.objectContaining({ text: "Сначала сохрани" }),
+    });
+
+    await act(async () => resolveDelivery?.("delivered"));
   });
 
   it.each([
@@ -4020,10 +4057,14 @@ describe("Activity", () => {
     fireEvent.change(textbox, { target: { value: "Появись сразу" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    expect(textbox).toHaveValue("");
-    const optimistic = context.dispatch.mock.calls.find(
-      ([action]) => action.type === "optimistic.add",
-    )?.[0].message;
+    await waitFor(() => expect(textbox).toHaveValue(""));
+    const optimistic = await waitFor(() => {
+      const message = context.dispatch.mock.calls.find(
+        ([action]) => action.type === "optimistic.add",
+      )?.[0].message;
+      expect(message).toBeDefined();
+      return message;
+    });
     expect(optimistic).toMatchObject({
       text: "Появись сразу",
       destination: "queue",
@@ -5239,11 +5280,13 @@ function mockThreadConnection(
     forceRefreshDetail: vi.fn().mockResolvedValue(detail),
     loadOlderDetail: vi.fn().mockResolvedValue(detail),
     loadTurnItems: vi.fn().mockResolvedValue(undefined),
-    sendReliable: vi
-      .fn()
-      .mockImplementation((threadId, body) =>
-        thread.currentTurnId ? api.enqueue(threadId, body) : api.startTurn(threadId, body),
-      ),
+    sendReliable: vi.fn().mockImplementation((threadId, body, onCommitted?: () => void) => {
+      const delivery = thread.currentTurnId
+        ? api.enqueue(threadId, body)
+        : api.startTurn(threadId, body);
+      onCommitted?.();
+      return delivery;
+    }),
     queueVoiceRecording: vi.fn().mockImplementation((recording) =>
       api.createVoiceTranscription(recording.threadId, recording.audio, {
         recordingDurationMs: recording.durationMs,

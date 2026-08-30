@@ -6,6 +6,7 @@ import type {
   AppSnapshot,
   AppUpdateStatus,
   Project,
+  QueueMessageRequest,
   ThreadDraft,
   ThreadSummary,
   UpdateThreadDraftRequest,
@@ -2790,8 +2791,11 @@ describe("App routing and navigation", () => {
     fireEvent.change(textarea, { target: { value: "Отправь без ожидания" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    expect(screen.getByText("Отправь без ожидания")).toBeInTheDocument();
-    expect(textarea).toHaveValue("");
+    expect(textarea).toHaveValue("Отправь без ожидания");
+    expect(api.dispatch).not.toHaveBeenCalledWith({
+      type: "optimistic.add",
+      message: expect.anything(),
+    });
     expect(api.createProjectThread).toHaveBeenCalledOnce();
 
     creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
@@ -2802,6 +2806,7 @@ describe("App routing and navigation", () => {
         expect.objectContaining({ input: "Отправь без ожидания" }),
       ),
     );
+    expect(textarea).toHaveValue("");
     expect(api.createProjectThread).toHaveBeenCalledOnce();
     expect(api.sendReliable).toHaveBeenCalledOnce();
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
@@ -4059,7 +4064,15 @@ function mockConnection(
     })),
     forceRefreshDetail: vi.fn(),
     loadOlderDetail: vi.fn(),
-    sendReliable: api.sendReliable,
+    sendReliable: (
+      threadId: string,
+      body: QueueMessageRequest & { clientMessageId: string },
+      onCommitted?: () => void,
+    ) => {
+      const delivery = api.sendReliable(threadId, body);
+      onCommitted?.();
+      return delivery;
+    },
     queueVoiceRecording: api.queueVoiceRecording,
   });
   return api;

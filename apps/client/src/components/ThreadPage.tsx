@@ -138,7 +138,7 @@ type NewSessionPreparation = {
 
 type EarlySubmission = {
   attachmentScope: number;
-  clearedRevision: number;
+  claimedRevision: number;
   draft: UpdateThreadDraftRequest;
   editRevision: number;
 };
@@ -2303,21 +2303,33 @@ export function ThreadPage({
       destination: "queue",
       turnId: null,
     };
+    let deliveryCommitted = false;
+    const commitDelivery = () => {
+      if (deliveryCommitted) return;
+      deliveryCommitted = true;
+      dispatch({ type: "optimistic.add", message: optimisticMessage });
+      if (composerEditRevisionRef.current === submittedEditRevision) {
+        replaceComposerDraft(emptyComposerDraft(), false);
+      }
+    };
     setBusy(true);
     setError(null);
     scrollTargetMessageId.current = clientMessageId;
-    dispatch({ type: "optimistic.add", message: optimisticMessage });
-    replaceComposerDraft(emptyComposerDraft(), false);
     try {
       await flushComposerDraftEvent(targetThreadId);
-      const delivery = await sendReliable(targetThreadId, {
-        input: submittedInput,
-        ...(submittedDraft.images.length
-          ? { images: submittedDraft.images.map((image) => image.url) }
-          : {}),
-        ...(submittedDraft.goalMode ? { goal: true } : {}),
-        clientMessageId,
-      });
+      const delivery = await sendReliable(
+        targetThreadId,
+        {
+          input: submittedInput,
+          ...(submittedDraft.images.length
+            ? { images: submittedDraft.images.map((image) => image.url) }
+            : {}),
+          ...(submittedDraft.goalMode ? { goal: true } : {}),
+          clientMessageId,
+        },
+        commitDelivery,
+      );
+      commitDelivery();
       releaseSubmittedMessageClaim(messageClaimKey);
       if (intent === "immediate" && delivery === "delivered") {
         try {
@@ -2328,9 +2340,16 @@ export function ThreadPage({
       }
     } catch (caught) {
       releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
-      dispatch({ type: "optimistic.remove", threadId: targetThreadId, messageId: clientMessageId });
-      const restore =
-        composerEditRevisionRef.current === submittedEditRevision
+      if (deliveryCommitted) {
+        dispatch({
+          type: "optimistic.remove",
+          threadId: targetThreadId,
+          messageId: clientMessageId,
+        });
+      }
+      const restore = !deliveryCommitted
+        ? structuredClone(currentComposerDraft(targetThreadId))
+        : composerEditRevisionRef.current === submittedEditRevision
           ? submittedDraft
           : mergeComposerDrafts(submittedDraft, currentComposerDraft(targetThreadId));
       replaceComposerDraft(restore, "immediate");
@@ -2407,28 +2426,19 @@ export function ThreadPage({
     claimedPreparationDraftTransferRef.current = activePreparationDraftTransferRef.current;
     setBusy(true);
     setError(null);
-    setPendingOptimisticMessage({
-      id: clientMessageId,
-      threadId: "",
-      text: submittedInput.trim(),
-      images: submittedDraft.images.map((image) => image.url),
-      createdAt: Date.now(),
-      destination: "queue",
-      turnId: null,
-    });
-    replacePreparationDraft(emptyComposerDraft());
     const submittedAttachmentScope = attachmentScopeRef.current;
     attachmentScopeRef.current += 1;
     setAttachmentScope(attachmentScopeRef.current);
     earlySubmissionRef.current = {
       attachmentScope: submittedAttachmentScope,
-      clearedRevision: preparationRef.current.revision,
+      claimedRevision: preparationRef.current.revision,
       draft: submittedDraft,
       editRevision: composerEditRevisionRef.current,
     };
 
     let activatedThreadId: string | null = null;
     let accepted = false;
+    let deliveryCommitted = false;
     try {
       await preparationFlush;
       await waitForPendingAttachments(submittedAttachmentScope);
@@ -2462,18 +2472,34 @@ export function ThreadPage({
         turnId: null,
       };
       assertPreparationGeneration(generation);
-      dispatch({ type: "optimistic.add", message: optimisticMessage });
-      setPendingOptimisticMessage(null);
       if (!activateCreatedThread(thread, null, generation)) throw PREPARATION_SUPERSEDED;
       activatedThreadId = thread.id;
-      const delivery = await sendReliable(thread.id, {
-        input: completeInput,
-        ...(completeDraft.images.length
-          ? { images: completeDraft.images.map((image) => image.url) }
-          : {}),
-        ...(completeDraft.goalMode ? { goal: true } : {}),
-        clientMessageId,
-      });
+      const commitDelivery = () => {
+        if (deliveryCommitted) return;
+        deliveryCommitted = true;
+        dispatch({ type: "optimistic.add", message: optimisticMessage });
+        const claimed = earlySubmissionRef.current;
+        if (
+          claimed &&
+          composerEditRevisionRef.current === claimed.editRevision &&
+          preparationRef.current.revision === claimed.claimedRevision
+        ) {
+          replaceComposerDraft(emptyComposerDraft(), false);
+        }
+      };
+      const delivery = await sendReliable(
+        thread.id,
+        {
+          input: completeInput,
+          ...(completeDraft.images.length
+            ? { images: completeDraft.images.map((image) => image.url) }
+            : {}),
+          ...(completeDraft.goalMode ? { goal: true } : {}),
+          clientMessageId,
+        },
+        commitDelivery,
+      );
+      commitDelivery();
       accepted = true;
       releaseSubmittedMessageClaim(messageClaimKey);
       if (intent === "immediate" && delivery === "delivered") {
@@ -2492,7 +2518,7 @@ export function ThreadPage({
       const hasNewerDraft =
         composerEditRevisionRef.current !== submittedEditRevision ||
         (settledSubmission !== null &&
-          preparationRef.current.revision !== settledSubmission.clearedRevision);
+          preparationRef.current.revision !== settledSubmission.claimedRevision);
       const remainingDraft = structuredClone(composerDraftRef.current.value);
       const remainingEditRevision = composerEditRevisionRef.current;
       earlySubmissionRef.current = null;
@@ -2533,7 +2559,7 @@ export function ThreadPage({
       if (caught === PREPARATION_SUPERSEDED) return;
       await waitForPendingAttachments();
       const targetThreadId = activatedThreadId ?? preparationRef.current.threadId;
-      if (activatedThreadId) {
+      if (activatedThreadId && deliveryCommitted) {
         dispatch({
           type: "optimistic.remove",
           threadId: activatedThreadId,
@@ -2546,9 +2572,13 @@ export function ThreadPage({
       const hasNewerDraft =
         composerEditRevisionRef.current !==
           (submission?.editRevision ?? composerEditRevisionRef.current) ||
-        (submission !== null && preparationRef.current.revision !== submission.clearedRevision);
+        (submission !== null && preparationRef.current.revision !== submission.claimedRevision);
       const current = structuredClone(composerDraftRef.current.value);
-      const restore = hasNewerDraft ? mergeComposerDrafts(submitted, current) : submitted;
+      const restore = !deliveryCommitted
+        ? current
+        : hasNewerDraft
+          ? mergeComposerDrafts(submitted, current)
+          : submitted;
       earlySubmissionRef.current = null;
       earlySubmitRef.current = false;
       if (!activatedThreadId) preparationClaimedForSubmitRef.current = false;

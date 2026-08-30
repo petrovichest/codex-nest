@@ -96,6 +96,7 @@ interface ConnectionContextValue {
   sendReliable(
     threadId: string,
     body: QueueMessageRequest & { clientMessageId: string },
+    onCommitted?: () => void,
   ): Promise<"delivered" | "pending">;
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
   pendingVoiceRecordingThreadIds: readonly string[];
@@ -596,6 +597,7 @@ export function ConnectionProvider({
     async (
       threadId: string,
       body: QueueMessageRequest & { clientMessageId: string },
+      onCommitted?: () => void,
     ): Promise<"delivered" | "pending"> => {
       const message: OutboxMessage = {
         id: body.clientMessageId,
@@ -608,9 +610,17 @@ export function ConnectionProvider({
         attempts: 0,
         lastError: null,
       };
-      await putOutboxMessage(message);
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        onCommitted?.();
+      };
+      const persisted = await putOutboxMessage(message);
+      if (persisted) commit();
       try {
         await api.enqueue(threadId, body);
+        commit();
         await deleteOutboxMessage(message.id);
         return "delivered";
       } catch (error) {
@@ -624,6 +634,7 @@ export function ConnectionProvider({
           lastError: error instanceof Error ? error.message : "Delivery failed",
         });
         if (!retryPersisted) throw error;
+        commit();
         scheduleOutboxRetry(1, () => void drainReliableOutbox());
         return "pending";
       }
