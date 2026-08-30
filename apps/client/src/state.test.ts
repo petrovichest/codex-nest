@@ -881,11 +881,28 @@ describe("clientReducer", () => {
       olderTurnsCursor: null,
     };
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    for (const [sequence, id] of [
+      [5, "msg-live-first"],
+      [6, "msg-live-second"],
+    ] as const) {
+      state = clientReducer(state, {
+        type: "event",
+        version: { instanceId: "legacy", sequence },
+        event: {
+          type: "activity.upserted",
+          threadId: "one",
+          turnId: "turn",
+          item: { ...first, id },
+        },
+      });
+    }
+    expect(state.details.one?.turns[0]?.items).toHaveLength(1);
     state = clientReducer(state, { type: "detail", detail: canonicalDetail });
+    expect(state.details.one?.turns[0]?.items).toEqual([first, second]);
     state = clientReducer(state, { type: "detail", detail: canonicalDetail });
     state = clientReducer(state, {
       type: "event",
-      version: { instanceId: "legacy", sequence: 5 },
+      version: { instanceId: "legacy", sequence: 7 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -895,7 +912,7 @@ describe("clientReducer", () => {
     });
     state = clientReducer(state, {
       type: "event",
-      version: { instanceId: "legacy", sequence: 6 },
+      version: { instanceId: "legacy", sequence: 8 },
       event: {
         type: "activity.upserted",
         threadId: "one",
@@ -942,7 +959,7 @@ describe("clientReducer", () => {
     expect(state.details.one?.turns[0]?.items).toEqual([canonical, finalAnswer]);
   });
 
-  it("keeps independent identical live completions before canonical items load", () => {
+  it("reconciles identical live completions before canonical items load", () => {
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
@@ -961,9 +978,9 @@ describe("clientReducer", () => {
       },
     });
 
-    for (const [sequence, id] of [
-      [5, "first"],
-      [6, "second"],
+    for (const [sequence, id, phase] of [
+      [5, "first", "commentary"],
+      [6, "second", "final_answer"],
     ] as const) {
       state = clientReducer(state, {
         type: "event",
@@ -979,13 +996,13 @@ describe("clientReducer", () => {
             text: "Повтор",
             images: [],
             timestamp: sequence,
-            phase: "commentary",
+            phase,
           },
         },
       });
     }
 
-    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["first", "second"]);
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["first"]);
   });
 
   it("inserts delayed activities by timestamp without disturbing untimed activities", () => {

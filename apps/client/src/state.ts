@@ -841,20 +841,26 @@ function applyActivityDelta(
 function upsertActivity(
   items: ActivityItem[],
   item: ActivityItem,
-  reconcileLoadedAlias = false,
+  canonicalItemsLoaded?: boolean,
 ): ActivityItem[] {
+  const reconcileCompletedAlias = canonicalItemsLoaded !== undefined;
+  const allowPhaseMismatch = canonicalItemsLoaded === false;
   const existing = items.findIndex((candidate) => candidate.id === item.id);
   if (existing >= 0) {
     const next = [...items];
     const completedLiveItem =
-      reconcileLoadedAlias &&
+      reconcileCompletedAlias &&
       items[existing]!.status === "inProgress" &&
       item.status === "completed";
     next[existing] = fresherActivity(next[existing]!, item);
-    return completedLiveItem ? reconcileCompletedActivityAlias(next, existing) : next;
+    return completedLiveItem
+      ? reconcileCompletedActivityAlias(next, existing, allowPhaseMismatch)
+      : next;
   }
-  if (reconcileLoadedAlias && item.status === "completed") {
-    const alias = items.findIndex((candidate) => sameCompletedActivity(candidate, item));
+  if (reconcileCompletedAlias && item.status === "completed") {
+    const alias = items.findIndex((candidate) =>
+      sameCompletedActivity(candidate, item, allowPhaseMismatch),
+    );
     if (alias >= 0) {
       const next = [...items];
       const canonical = next[alias]!;
@@ -1148,12 +1154,16 @@ function withPreservedTimestamp(current: ActivityItem, incoming: ActivityItem): 
   return incoming;
 }
 
-function reconcileCompletedActivityAlias(items: ActivityItem[], itemIndex: number): ActivityItem[] {
+function reconcileCompletedActivityAlias(
+  items: ActivityItem[],
+  itemIndex: number,
+  allowPhaseMismatch: boolean,
+): ActivityItem[] {
   const item = items[itemIndex]!;
   if (item.status !== "completed") return items;
   const alias = items.findIndex(
     (candidate, candidateIndex) =>
-      candidateIndex !== itemIndex && sameCompletedActivity(candidate, item),
+      candidateIndex !== itemIndex && sameCompletedActivity(candidate, item, allowPhaseMismatch),
   );
   if (alias < 0) return items;
   const canonical = items[alias]!;
@@ -1163,7 +1173,11 @@ function reconcileCompletedActivityAlias(items: ActivityItem[], itemIndex: numbe
   return remapArtifactAnchors(next, item.id, canonical.id);
 }
 
-function sameCompletedActivity(first: ActivityItem, second: ActivityItem): boolean {
+function sameCompletedActivity(
+  first: ActivityItem,
+  second: ActivityItem,
+  allowPhaseMismatch: boolean,
+): boolean {
   if (
     first.status !== "completed" ||
     second.status !== "completed" ||
@@ -1171,9 +1185,16 @@ function sameCompletedActivity(first: ActivityItem, second: ActivityItem): boole
     !["agentMessage", "reasoning", "plan"].includes(first.type) ||
     !("text" in first) ||
     !("text" in second) ||
-    first.phase !== second.phase ||
     first.text !== second.text ||
     first.images.length !== second.images.length
+  ) {
+    return false;
+  }
+  if (
+    !allowPhaseMismatch &&
+    first.phase !== second.phase &&
+    first.phase !== null &&
+    second.phase !== null
   ) {
     return false;
   }
