@@ -768,7 +768,7 @@ function applyActivity(
     const turn = turns[index];
     turns[index] = {
       ...turn,
-      items: upsertActivity(turn.items, item, turn.status !== "inProgress"),
+      items: upsertActivity(turn.items, item, turn.itemsLoaded !== false),
     };
   }
   const queuedMessages =
@@ -841,24 +841,25 @@ function applyActivityDelta(
 function upsertActivity(
   items: ActivityItem[],
   item: ActivityItem,
-  reconcileTerminalAlias = false,
+  reconcileLoadedAlias = false,
 ): ActivityItem[] {
   const existing = items.findIndex((candidate) => candidate.id === item.id);
   if (existing >= 0) {
     const next = [...items];
+    const completedLiveItem =
+      reconcileLoadedAlias &&
+      items[existing]!.status === "inProgress" &&
+      item.status === "completed";
     next[existing] = fresherActivity(next[existing]!, item);
-    return next;
+    return completedLiveItem ? reconcileCompletedActivityAlias(next, existing) : next;
   }
-  if (reconcileTerminalAlias && item.status !== "inProgress") {
-    const alias = items.findIndex(
-      (candidate) =>
-        candidate.status !== "inProgress" && sameRenderedActivity(candidate, item, false),
-    );
+  if (reconcileLoadedAlias && item.status === "completed") {
+    const alias = items.findIndex((candidate) => sameCompletedActivity(candidate, item));
     if (alias >= 0) {
       const next = [...items];
       const canonical = next[alias]!;
       next[alias] = { ...fresherActivity(canonical, item), id: canonical.id } as ActivityItem;
-      return next;
+      return remapArtifactAnchors(next, item.id, canonical.id);
     }
   }
   if (item.type !== "userInputResponse" && item.type !== "planChecklist") {
@@ -1035,31 +1036,26 @@ function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]): 
   for (const [itemIndex, item] of incoming.entries()) {
     const existing = result.findIndex((candidate) => candidate.id === item.id);
     if (existing >= 0) {
-      let semanticAlias = -1;
-      for (let candidateIndex = existing - 1; candidateIndex >= 0; candidateIndex -= 1) {
-        const candidate = result[candidateIndex]!;
-        if (candidate.type === "userInputResponse" || candidate.type === "planChecklist") continue;
-        if (
+      const semanticAlias = result.findIndex(
+        (candidate, candidateIndex) =>
+          candidateIndex !== existing &&
           !incomingIds.has(candidate.id) &&
           sameRenderedActivity(
             candidate,
             item,
             candidate.status === "inProgress" || item.status === "inProgress",
-          )
-        ) {
-          semanticAlias = candidateIndex;
-        }
-        break;
-      }
+          ),
+      );
       const canonical = fresherActivity(result[existing]!, item);
       if (semanticAlias >= 0) {
         const aliasId = result[semanticAlias]!.id;
-        result[semanticAlias] = {
+        const target = Math.min(existing, semanticAlias);
+        result[target] = {
           ...fresherActivity(result[semanticAlias]!, canonical),
           id: item.id,
         } as ActivityItem;
+        result.splice(Math.max(existing, semanticAlias), 1);
         result = remapArtifactAnchors(result, aliasId, item.id);
-        result.splice(existing, 1);
       } else {
         result[existing] = canonical;
       }
@@ -1150,6 +1146,38 @@ function withPreservedTimestamp(current: ActivityItem, incoming: ActivityItem): 
     return { ...incoming, timestamp: current.timestamp } as ActivityItem;
   }
   return incoming;
+}
+
+function reconcileCompletedActivityAlias(items: ActivityItem[], itemIndex: number): ActivityItem[] {
+  const item = items[itemIndex]!;
+  if (item.status !== "completed") return items;
+  const alias = items.findIndex(
+    (candidate, candidateIndex) =>
+      candidateIndex !== itemIndex && sameCompletedActivity(candidate, item),
+  );
+  if (alias < 0) return items;
+  const canonical = items[alias]!;
+  const next = [...items];
+  next[alias] = { ...fresherActivity(canonical, item), id: canonical.id } as ActivityItem;
+  next.splice(itemIndex, 1);
+  return remapArtifactAnchors(next, item.id, canonical.id);
+}
+
+function sameCompletedActivity(first: ActivityItem, second: ActivityItem): boolean {
+  if (
+    first.status !== "completed" ||
+    second.status !== "completed" ||
+    first.type !== second.type ||
+    !["agentMessage", "reasoning", "plan"].includes(first.type) ||
+    !("text" in first) ||
+    !("text" in second) ||
+    first.phase !== second.phase ||
+    first.text !== second.text ||
+    first.images.length !== second.images.length
+  ) {
+    return false;
+  }
+  return first.images.every((image, index) => image === second.images[index]);
 }
 
 function sameRenderedActivity(

@@ -659,44 +659,38 @@ describe("clientReducer", () => {
     ]);
   });
 
-  it("reconciles a late live completion after canonical terminal detail", () => {
+  it("reconciles a late live completion after canonical active detail", () => {
     const live = {
       type: "agentMessage" as const,
       id: "msg-live",
-      status: "inProgress" as const,
+      status: "completed" as const,
       text: "Готово",
       images: [],
-      timestamp: 1,
+      timestamp: 2,
       phase: "final_answer" as const,
     };
     const canonical = {
       ...live,
       id: "item-20",
-      status: "completed" as const,
-      timestamp: 2,
     };
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
       detail: {
         summary: baseThread,
-        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null, items: [live] }],
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [canonical],
+            itemsLoaded: true,
+          },
+        ],
         queuedMessages: [],
         olderTurnsCursor: null,
       },
     });
-    state = clientReducer(state, {
-      type: "detail",
-      detail: {
-        summary: baseThread,
-        turns: [{ ...turn("turn"), items: [canonical] }],
-        queuedMessages: [],
-        olderTurnsCursor: null,
-      },
-    });
-
-    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["item-20"]);
-
     state = clientReducer(state, {
       type: "event",
       version: { instanceId: "legacy", sequence: 5 },
@@ -704,20 +698,264 @@ describe("clientReducer", () => {
         type: "activity.upserted",
         threadId: "one",
         turnId: "turn",
-        item: { ...live, status: "completed", timestamp: 2 },
+        item: live,
       },
     });
 
     expect(state.details.one?.turns[0]?.items).toEqual([canonical]);
   });
 
-  it("keeps independent identical completions while a turn is active", () => {
+  it("reconciles canonical active detail after a live completion", () => {
+    const live = {
+      type: "agentMessage" as const,
+      id: "msg-live",
+      status: "completed" as const,
+      text: "Готово",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const canonical = { ...live, id: "item-20" };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: live,
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [canonical],
+            itemsLoaded: true,
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([canonical]);
+  });
+
+  it("reconciles a full late live lifecycle after canonical active detail", () => {
+    const canonical = {
+      type: "agentMessage" as const,
+      id: "item-20",
+      status: "completed" as const,
+      text: "Готово",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const liveId = "msg-live";
     let state = clientReducer(initialState, { type: "snapshot", snapshot });
     state = clientReducer(state, {
       type: "detail",
       detail: {
         summary: baseThread,
-        turns: [{ ...turn("turn"), status: "inProgress", completedAt: null }],
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [canonical],
+            itemsLoaded: true,
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...canonical, id: liveId, status: "inProgress", text: "" },
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 6 },
+      event: {
+        type: "activity.delta",
+        threadId: "one",
+        turnId: "turn",
+        itemId: liveId,
+        activityType: "agentMessage",
+        delta: "Готово",
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 7 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...canonical, id: liveId },
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([canonical]);
+  });
+
+  it("heals a late live alias on the next canonical detail", () => {
+    const canonical = {
+      type: "agentMessage" as const,
+      id: "item-20",
+      status: "completed" as const,
+      text: "Готово",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const live = { ...canonical, id: "msg-live" };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [canonical, live],
+            itemsLoaded: true,
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            items: [canonical],
+            itemsLoaded: true,
+          },
+        ],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([canonical]);
+  });
+
+  it("preserves identical items when both are present in canonical detail", () => {
+    const first = {
+      type: "agentMessage" as const,
+      id: "item-20",
+      status: "completed" as const,
+      text: "Повтор",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const second = { ...first, id: "item-21" };
+    const canonicalDetail = {
+      summary: baseThread,
+      turns: [{ ...turn("turn"), items: [first, second], itemsLoaded: true }],
+      queuedMessages: [],
+      olderTurnsCursor: null,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, { type: "detail", detail: canonicalDetail });
+    state = clientReducer(state, { type: "detail", detail: canonicalDetail });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: first,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 6 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...first, id: "msg-live" },
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([first, second]);
+  });
+
+  it("keeps loaded completions with different phases", () => {
+    const canonical = {
+      type: "agentMessage" as const,
+      id: "item-20",
+      status: "completed" as const,
+      text: "Одинаковый текст",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const finalAnswer = { ...canonical, id: "msg-live", phase: "final_answer" as const };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), items: [canonical], itemsLoaded: true }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: finalAnswer,
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([canonical, finalAnswer]);
+  });
+
+  it("keeps independent identical live completions before canonical items load", () => {
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [
+          {
+            ...turn("turn"),
+            status: "inProgress",
+            completedAt: null,
+            itemsLoaded: false,
+          },
+        ],
         queuedMessages: [],
         olderTurnsCursor: null,
       },
