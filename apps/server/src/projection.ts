@@ -450,7 +450,9 @@ export class AppProjection extends EventEmitter {
         normalizeTurn(
           turn,
           this.progress.get(turnKey(cached.thread.id, turn.id)),
-          turn.status === "inProgress" ? this.liveActivities(cached.thread.id, turn.id) : [],
+          turn.status === "inProgress"
+            ? this.liveActivities(cached.thread.id, turn.id)
+            : this.retainedUserActivities(cached.thread.id, turn.id, projectedTurnItemIds(turn)),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         ),
@@ -512,7 +514,13 @@ export class AppProjection extends EventEmitter {
   ): TurnView {
     const liveMerge = mergeLiveActivities(
       turn.items,
-      turn.status === "inProgress" ? this.liveActivities(threadId, turn.id) : [],
+      turn.status === "inProgress"
+        ? this.liveActivities(threadId, turn.id)
+        : this.retainedUserActivities(
+            threadId,
+            turn.id,
+            new Set(turn.items.map((item) => item.id)),
+          ),
       turn.status !== "inProgress",
     );
     return {
@@ -607,7 +615,9 @@ export class AppProjection extends EventEmitter {
         const normalized = normalizeTurn(
           turn,
           this.progress.get(turnKey(id, turn.id)),
-          turn.status === "inProgress" ? this.liveActivities(id, turn.id) : [],
+          turn.status === "inProgress"
+            ? this.liveActivities(id, turn.id)
+            : this.retainedUserActivities(id, turn.id, projectedTurnItemIds(turn)),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         );
@@ -1178,6 +1188,30 @@ export class AppProjection extends EventEmitter {
     return items;
   }
 
+  private retainedUserActivities(
+    threadId: string,
+    turnId: string,
+    existingIds: ReadonlySet<string>,
+  ): ActivityItem[] {
+    // Terminal notifications and summary history pages may omit inputs that were already accepted.
+    // User messages are immutable, so retain only those missing from the new canonical payload.
+    const retained: ActivityItem[] = [];
+    const seen = new Set(existingIds);
+    const append = (items: readonly ActivityItem[] | undefined) => {
+      for (const item of items ?? []) {
+        if (item.type !== "userMessage" || seen.has(item.id)) continue;
+        seen.add(item.id);
+        retained.push(item);
+      }
+    };
+    append(this.liveActivities(threadId, turnId));
+    append(this.turnStates.get(turnKey(threadId, turnId))?.items);
+    append(
+      this.latestDetails.get(threadId)?.turns.find((candidate) => candidate.id === turnId)?.items,
+    );
+    return retained;
+  }
+
   private replaceTurnState(
     threadId: string,
     turnId: string,
@@ -1192,7 +1226,9 @@ export class AppProjection extends EventEmitter {
       turn = normalizeTurn(
         source,
         this.progress.get(key),
-        source.status === "inProgress" ? this.liveActivities(threadId, turnId) : [],
+        source.status === "inProgress"
+          ? this.liveActivities(threadId, turnId)
+          : this.retainedUserActivities(threadId, turnId, projectedTurnItemIds(source)),
         cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
         source.itemsView === "full",
       );
@@ -3056,6 +3092,14 @@ function normalizeModel(model: Model): ModelOption {
 
 function defaultModel(models: ModelOption[]): ModelOption | undefined {
   return models.find((candidate) => candidate.isDefault) ?? models[0];
+}
+
+function projectedTurnItemIds(turn: Turn): Set<string> {
+  return new Set(
+    turn.items
+      .filter((item) => !isInternalTeamContinuationItem(item))
+      .map((item) => (item.type === "userMessage" ? (item.clientId ?? item.id) : item.id)),
+  );
 }
 
 function normalizeTurn(

@@ -4066,6 +4066,8 @@ describe("AppProjection", () => {
       if (event.type === "turn.replaced") replacements.push(event.turn);
     });
     projection.upsertThread(thread("one", "/work", 10));
+    projection.recordUserMessage("one", "live", "client-user", "Проверь доставку", []);
+    replacements.length = 0;
 
     bridge.emit("notification", {
       method: "item/agentMessage/delta",
@@ -4087,8 +4089,12 @@ describe("AppProjection", () => {
     await vi.waitFor(() => expect(replacements).toHaveLength(1));
     await new Promise((resolve) => setTimeout(resolve, TURN_REPLACEMENT_SETTLE_MS));
     expect(replacements).toHaveLength(1);
-    expect(replacements[0]?.items.map((item) => item.id)).toEqual(["canonical-final"]);
+    expect(replacements[0]?.items.map((item) => item.id)).toEqual([
+      "client-user",
+      "canonical-final",
+    ]);
     expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
+      "client-user",
       "canonical-final",
     ]);
   });
