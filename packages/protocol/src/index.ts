@@ -832,6 +832,7 @@ export type ServerEvent =
       delta: string;
     }
   | { type: "turn.progressed"; threadId: string; turnId: string; progress: TurnProgress }
+  | { type: "turn.replaced"; threadId: string; turn: TurnView }
   | { type: "queue.changed"; threadId: string; messages: QueuedMessage[] }
   | { type: "attention.upserted"; attention: AttentionRequest }
   | { type: "attention.removed"; attentionId: string }

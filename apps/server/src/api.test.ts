@@ -3291,7 +3291,7 @@ describe("thread settings", () => {
     await projection.sync();
     const activityEvents: Array<Record<string, unknown>> = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "activity.upserted") activityEvents.push(event);
+      if (event.type === "turn.replaced") activityEvents.push(event);
     });
     const threadTitles = {
       generate: vi.fn(async (input: string) =>
@@ -3831,8 +3831,16 @@ describe("thread settings", () => {
     expect(startCall?.[1]).not.toHaveProperty("approvalsReviewer");
     expect(activityEvents.at(-1)).toMatchObject({
       threadId: "thread",
-      turnId: "turn",
-      item: { type: "userMessage", id: "client-started", text: "Составь план" },
+      turn: {
+        id: "turn",
+        items: [
+          expect.objectContaining({
+            type: "userMessage",
+            id: "client-started",
+            text: "Составь план",
+          }),
+        ],
+      },
     });
 
     const userInputTransport = {
@@ -4123,8 +4131,16 @@ describe("thread settings", () => {
     });
     expect(activityEvents.at(-1)).toMatchObject({
       threadId: "thread",
-      turnId: "turn",
-      item: { type: "userMessage", id: "client-queued", text: "Исправленный текст" },
+      turn: {
+        id: "turn",
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            type: "userMessage",
+            id: "client-queued",
+            text: "Исправленный текст",
+          }),
+        ]),
+      },
     });
     expect(steerWarning).toHaveBeenCalledTimes(1);
     expect(steerWarning).toHaveBeenCalledWith(

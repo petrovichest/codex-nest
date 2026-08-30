@@ -1282,6 +1282,7 @@ function serverEventThreadId(event: ServerEvent): string | null {
     case "activity.upserted":
     case "activity.delta":
     case "turn.progressed":
+    case "turn.replaced":
     case "queue.changed":
     case "goal.changed":
     case "voiceTranscription.removed":

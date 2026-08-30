@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ActivityItem, ServerEvent, ThreadGoal } from "@codexnest/protocol";
+import type { ActivityItem, ServerEvent, ThreadGoal, TurnView } from "@codexnest/protocol";
 
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
@@ -100,6 +100,7 @@ class FakeBridge extends EventEmitter {
 }
 
 const directories: string[] = [];
+const TURN_REPLACEMENT_SETTLE_MS = 75;
 afterEach(async () =>
   Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
@@ -587,7 +588,9 @@ describe("AppProjection", () => {
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "activity.upserted") activities.push(event.item);
+      if (event.type !== "turn.replaced") return;
+      const item = event.turn.items.find((candidate) => candidate.id === "spawn-child");
+      if (item) activities.push(item);
     });
 
     bridge.emit("notification", {
@@ -2583,17 +2586,19 @@ describe("AppProjection", () => {
       },
     } satisfies ServerNotification);
     await vi.waitFor(() =>
-      expect(events.filter((event) => event.type === "turn.progressed").at(-1)).toMatchObject({
-        progress: {
-          startedAt: 123_000,
-          explanation: "Проверяем",
-          steps: [
-            { step: "Первый", status: "completed" },
-            { step: "Второй", status: "inProgress" },
-          ],
-          filesChanged: 1,
-          additions: 1,
-          deletions: 1,
+      expect(events.filter((event) => event.type === "turn.replaced").at(-1)).toMatchObject({
+        turn: {
+          progress: {
+            startedAt: 123_000,
+            explanation: "Проверяем",
+            steps: [
+              { step: "Первый", status: "completed" },
+              { step: "Второй", status: "inProgress" },
+            ],
+            filesChanged: 1,
+            additions: 1,
+            deletions: 1,
+          },
         },
       }),
     );
@@ -2678,11 +2683,15 @@ describe("AppProjection", () => {
       currentTurnId: "first",
       unread: false,
     });
-    expect(events.filter((event) => event.type === "activity.upserted").at(-1)).toMatchObject({
-      threadId: "one",
-      turnId: "first",
-      item: { type: "agentMessage", text: "Продолжаю работу" },
-    });
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === "turn.replaced").at(-1)).toMatchObject({
+        threadId: "one",
+        turn: {
+          id: "first",
+          items: [expect.objectContaining({ type: "agentMessage", text: "Продолжаю работу" })],
+        },
+      }),
+    );
 
     bridge.emit("notification", {
       method: "turn/completed",
@@ -3863,7 +3872,9 @@ describe("AppProjection", () => {
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "activity.upserted") activities.push(event.item);
+      if (event.type !== "turn.replaced") return;
+      const item = event.turn.items.find((candidate) => candidate.id === "provisional-agent");
+      if (item) activities.push(item);
     });
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -3906,9 +3917,9 @@ describe("AppProjection", () => {
       store,
       new AttentionManager(),
     );
-    const activities: ActivityItem[] = [];
+    let latestItems: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "activity.upserted") activities.push(event.item);
+      if (event.type === "turn.replaced") latestItems = event.turn.items;
     });
 
     for (const [id, completedAtMs] of [
@@ -3932,7 +3943,7 @@ describe("AppProjection", () => {
       } satisfies ServerNotification);
     }
 
-    expect(activities.map((item) => item.id)).toEqual(["first-agent", "second-agent"]);
+    expect(latestItems.map((item) => item.id)).toEqual(["first-agent", "second-agent"]);
   });
 
   it("reconciles a streamed agent message when the canonical item id changes", async () => {
@@ -3967,7 +3978,9 @@ describe("AppProjection", () => {
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "activity.upserted") activities.push(event.item);
+      if (event.type !== "turn.replaced") return;
+      const item = event.turn.items.find((candidate) => candidate.id === "stream-agent");
+      if (item) activities.push(item);
     });
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -4001,6 +4014,10 @@ describe("AppProjection", () => {
     await vi.waitFor(() =>
       expect(store.snapshot().threadMeta.one?.timelineArtifacts?.live).toHaveLength(1),
     );
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: canonicalTurn },
+    } as ServerNotification);
 
     expect(activities.slice(0, 2).map((item) => item.id)).toEqual(["stream-agent", "stream-agent"]);
     const items = (await projection.readThread("one")).turns[0]?.items ?? [];
@@ -4014,7 +4031,7 @@ describe("AppProjection", () => {
     });
   });
 
-  it("keeps live activities chronological when a later canonical message has a different id", async () => {
+  it("replaces transient live activities with the terminal canonical turn", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -4044,6 +4061,10 @@ describe("AppProjection", () => {
       store,
       new AttentionManager(),
     );
+    const replacements: TurnView[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "turn.replaced") replacements.push(event.turn);
+    });
     projection.upsertThread(thread("one", "/work", 10));
 
     bridge.emit("notification", {
@@ -4052,52 +4073,22 @@ describe("AppProjection", () => {
         threadId: "one",
         turnId: "live",
         itemId: "stream-commentary",
-        delta: "Сейчас дополнительно проверяю",
-      },
-    } satisfies ServerNotification);
-    bridge.emit("notification", {
-      method: "item/completed",
-      params: {
-        threadId: "one",
-        turnId: "live",
-        item: {
-          type: "commandExecution",
-          id: "command",
-          command: "npm test",
-          cwd: "/work",
-          processId: null,
-          source: "agent",
-          status: "completed",
-          commandActions: [],
-          aggregatedOutput: "passed",
-          exitCode: 0,
-          durationMs: 1,
-        },
-        completedAtMs: 11_000,
-      },
-    } as ServerNotification);
-    bridge.emit("notification", {
-      method: "item/agentMessage/delta",
-      params: {
-        threadId: "one",
-        turnId: "live",
-        itemId: "stream-final",
         delta: "Работа завершена",
       },
     } satisfies ServerNotification);
     bridge.emit("notification", {
-      method: "item/completed",
+      method: "turn/completed",
       params: {
         threadId: "one",
-        turnId: "live",
-        item: canonicalTurn.items[0],
-        completedAtMs: 12_000,
+        turn: canonicalTurn,
       },
     } as ServerNotification);
 
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, TURN_REPLACEMENT_SETTLE_MS));
+    expect(replacements).toHaveLength(1);
+    expect(replacements[0]?.items.map((item) => item.id)).toEqual(["canonical-final"]);
     expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
-      "stream-commentary",
-      "command",
       "canonical-final",
     ]);
   });

@@ -320,7 +320,7 @@ describe("clientReducer", () => {
     expect(state.details.one?.turns[0]?.items[0]).toMatchObject({ text: "Начало ответа" });
   });
 
-  it("merges lazily loaded turn items in canonical order", () => {
+  it("replaces turn items with each authoritative server response", () => {
     const user = {
       type: "userMessage" as const,
       id: "user",
@@ -386,12 +386,8 @@ describe("clientReducer", () => {
         olderTurnsCursor: null,
       },
     });
-    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
-      "user",
-      "command",
-      "answer",
-    ]);
-    expect(state.details.one?.turns[0]?.itemsLoaded).toBe(true);
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["user", "answer"]);
+    expect(state.details.one?.turns[0]?.itemsLoaded).toBe(false);
   });
 
   it("tracks the reasoning effort used for new sessions", () => {
@@ -957,6 +953,46 @@ describe("clientReducer", () => {
     });
 
     expect(state.details.one?.turns[0]?.items).toEqual([canonical, finalAnswer]);
+  });
+
+  it("replaces cached live aliases with the authoritative turn", () => {
+    const commentary = {
+      type: "agentMessage" as const,
+      id: "live-commentary",
+      status: "completed" as const,
+      text: "Одинаковый текст",
+      images: [],
+      timestamp: 2,
+      phase: "commentary" as const,
+    };
+    const finalAnswer = {
+      ...commentary,
+      id: "canonical-final",
+      phase: "final_answer" as const,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), items: [commentary, finalAnswer], itemsLoaded: true }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "turn.replaced",
+        threadId: "one",
+        turn: { ...turn("turn"), items: [finalAnswer], itemsLoaded: true },
+      },
+    });
+
+    expect(state.details.one?.turns[0]?.items).toEqual([finalAnswer]);
+    expect(state.details.one?.version).toEqual({ instanceId: "legacy", sequence: 5 });
   });
 
   it("reconciles identical live completions before canonical items load", () => {

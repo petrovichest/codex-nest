@@ -537,6 +537,8 @@ function applyVersionedEvent(
       return applyActivityDelta({ ...state, snapshot }, event);
     case "turn.progressed":
       return applyProgress({ ...state, snapshot }, event.threadId, event.turnId, event.progress);
+    case "turn.replaced":
+      return applyTurnReplacement({ ...state, snapshot }, event.threadId, event.turn);
     case "queue.changed":
       return removeConfirmedQueuedMessages(
         applyQueue({ ...state, snapshot }, event.threadId, event.messages),
@@ -597,11 +599,7 @@ function applyDetail(state: ClientState, detail: ThreadDetail, resetHistory = fa
     : -1;
   const historicalPrefix =
     preserveHistory && overlap !== undefined && overlap > 0 ? current.turns.slice(0, overlap) : [];
-  const currentTurns = new Map(current?.turns.map((turn) => [turn.id, turn]) ?? []);
-  const latestTurns = detail.turns.map((turn) => {
-    const existing = currentTurns.get(turn.id);
-    return existing ? mergeTurn(existing, turn) : turn;
-  });
+  const latestTurns = detail.turns;
   const snapshotSummary = state.snapshot.threads.find((thread) => thread.id === threadId);
   const merged: ThreadDetail = {
     ...detail,
@@ -726,12 +724,44 @@ function applyTurnItems(
         return item;
     }
   });
-  turns[turnIndex] = mergeTurn(
-    current,
-    { ...current, items: timestamped, itemsLoaded: true },
-    true,
-  );
+  turns[turnIndex] = { ...current, items: timestamped, itemsLoaded: true };
   return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
+function applyTurnReplacement(
+  state: ClientState,
+  threadId: string,
+  turn: ThreadDetail["turns"][number],
+): ClientState {
+  const detail = detailForEvent(state, threadId);
+  if (!detail) return state;
+  const turns = [...detail.turns];
+  const index = turns.findIndex((candidate) => candidate.id === turn.id);
+  if (index >= 0) turns[index] = turn;
+  else turns.push(turn);
+  const confirmedUserIds = new Set(
+    turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
+  );
+  return {
+    ...state,
+    details: {
+      ...state.details,
+      [threadId]: {
+        ...detail,
+        turns,
+        queuedMessages: detail.queuedMessages.filter(
+          (message) => !confirmedUserIds.has(message.id),
+        ),
+      },
+    },
+    optimisticMessages: setOptimisticMessages(
+      state.optimisticMessages,
+      threadId,
+      (state.optimisticMessages[threadId] ?? []).filter(
+        (message) => !confirmedUserIds.has(message.id),
+      ),
+    ),
+  };
 }
 
 function applyActivity(
@@ -1004,6 +1034,7 @@ function eventThreadId(event: ServerEvent): string | null {
     case "activity.upserted":
     case "activity.delta":
     case "turn.progressed":
+    case "turn.replaced":
     case "queue.changed":
     case "goal.changed":
     case "voiceTranscription.removed":
@@ -1013,98 +1044,6 @@ function eventThreadId(event: ServerEvent): string | null {
     default:
       return null;
   }
-}
-
-function mergeTurn(
-  current: ThreadDetail["turns"][number],
-  incoming: ThreadDetail["turns"][number],
-  preserveLive = false,
-): ThreadDetail["turns"][number] {
-  const preserveTerminal = current.status !== "inProgress" && incoming.status === "inProgress";
-  return {
-    ...incoming,
-    ...(preserveTerminal
-      ? {
-          status: current.status,
-          completedAt: current.completedAt,
-          durationMs: current.durationMs,
-        }
-      : {}),
-    ...(preserveLive ? { progress: current.progress } : {}),
-    itemsLoaded: current.itemsLoaded !== false || incoming.itemsLoaded !== false,
-    items: mergeActivityItems(current.items, incoming.items),
-  };
-}
-
-function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
-  let result = [...current];
-  const incomingIds = new Set(incoming.map((item) => item.id));
-  for (const [itemIndex, item] of incoming.entries()) {
-    const existing = result.findIndex((candidate) => candidate.id === item.id);
-    if (existing >= 0) {
-      const semanticAlias = result.findIndex(
-        (candidate, candidateIndex) =>
-          candidateIndex !== existing &&
-          !incomingIds.has(candidate.id) &&
-          sameRenderedActivity(
-            candidate,
-            item,
-            candidate.status === "inProgress" || item.status === "inProgress",
-          ),
-      );
-      const canonical = fresherActivity(result[existing]!, item);
-      if (semanticAlias >= 0) {
-        const aliasId = result[semanticAlias]!.id;
-        const target = Math.min(existing, semanticAlias);
-        result[target] = {
-          ...fresherActivity(result[semanticAlias]!, canonical),
-          id: item.id,
-        } as ActivityItem;
-        result.splice(Math.max(existing, semanticAlias), 1);
-        result = remapArtifactAnchors(result, aliasId, item.id);
-      } else {
-        result[existing] = canonical;
-      }
-      continue;
-    }
-    const semanticMatch = result.findIndex(
-      (candidate) =>
-        !incomingIds.has(candidate.id) &&
-        sameRenderedActivity(
-          candidate,
-          item,
-          candidate.status === "inProgress" || item.status === "inProgress",
-        ),
-    );
-    if (semanticMatch >= 0) {
-      const aliasId = result[semanticMatch]!.id;
-      result[semanticMatch] = {
-        ...fresherActivity(result[semanticMatch]!, item),
-        id: item.id,
-      } as ActivityItem;
-      result = remapArtifactAnchors(result, aliasId, item.id);
-      continue;
-    }
-    if (item.type === "userInputResponse" || item.type === "planChecklist") {
-      result = upsertActivity(result, item);
-      continue;
-    }
-    const anchoredArtifact = result.findIndex(
-      (candidate) =>
-        (candidate.type === "userInputResponse" || candidate.type === "planChecklist") &&
-        candidate.afterItemId === item.id,
-    );
-    const nextIncomingId = incoming
-      .slice(itemIndex + 1)
-      .find((candidate) => result.some((existingItem) => existingItem.id === candidate.id))?.id;
-    const nextIncoming = nextIncomingId
-      ? result.findIndex((candidate) => candidate.id === nextIncomingId)
-      : -1;
-    const insertion =
-      anchoredArtifact >= 0 ? anchoredArtifact : nextIncoming >= 0 ? nextIncoming : result.length;
-    result.splice(insertion, 0, item);
-  }
-  return result;
 }
 
 function remapArtifactAnchors(
@@ -1199,30 +1138,6 @@ function sameCompletedActivity(
     return false;
   }
   return first.images.every((image, index) => image === second.images[index]);
-}
-
-function sameRenderedActivity(
-  first: ActivityItem,
-  second: ActivityItem,
-  allowPrefix: boolean,
-): boolean {
-  if (
-    first.type !== second.type ||
-    !["agentMessage", "reasoning", "plan"].includes(first.type) ||
-    !("text" in first) ||
-    !("text" in second)
-  ) {
-    return false;
-  }
-  const compatiblePhase =
-    first.phase === second.phase || first.phase === null || second.phase === null;
-  if (!compatiblePhase) return false;
-  if (first.text === second.text) return true;
-  return (
-    allowPrefix &&
-    Boolean(first.text && second.text) &&
-    (first.text.startsWith(second.text) || second.text.startsWith(first.text))
-  );
 }
 
 function updateOptimisticMessage(

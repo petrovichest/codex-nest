@@ -75,6 +75,7 @@ export class ThreadViewUnavailableError extends Error {}
 export class ThreadHistoryConflictError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
+const TURN_REPLACEMENT_DEBOUNCE_MS = 50;
 const SESSION_RETENTION_BATCH_SIZE = 25;
 const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 const LOADED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
@@ -84,6 +85,8 @@ export class AppProjection extends EventEmitter {
   private readonly unmaterializedThreads = new Set<string>();
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
+  private readonly turnStates = new Map<string, TurnView>();
+  private readonly turnReplacementTimers = new Map<string, NodeJS.Timeout>();
   private readonly latestDetails = new Map<string, ThreadDetail>();
   private readonly historyRevisions = new Map<string, number>();
   private readonly subscribedThreads = new Set<string>();
@@ -447,7 +450,7 @@ export class AppProjection extends EventEmitter {
         normalizeTurn(
           turn,
           this.progress.get(turnKey(cached.thread.id, turn.id)),
-          this.liveActivities(cached.thread.id, turn.id),
+          turn.status === "inProgress" ? this.liveActivities(cached.thread.id, turn.id) : [],
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         ),
@@ -481,7 +484,9 @@ export class AppProjection extends EventEmitter {
     const turns = new Map<string, TurnView>();
     for (const source of [retainedPrevious, pageTurns, boundaryTurns]) {
       for (const turn of source) {
-        const projected = this.overlayLiveTurn(cached.thread.id, turn, artifacts);
+        const projected =
+          this.turnStates.get(turnKey(cached.thread.id, turn.id)) ??
+          this.overlayLiveTurn(cached.thread.id, turn, artifacts);
         if (!turns.has(turn.id)) orderedIds.push(turn.id);
         const current = turns.get(turn.id);
         turns.set(turn.id, current ? mergeMaterializedTurn(current, projected) : projected);
@@ -507,7 +512,7 @@ export class AppProjection extends EventEmitter {
   ): TurnView {
     const liveMerge = mergeLiveActivities(
       turn.items,
-      this.liveActivities(threadId, turn.id),
+      turn.status === "inProgress" ? this.liveActivities(threadId, turn.id) : [],
       turn.status !== "inProgress",
     );
     return {
@@ -598,15 +603,20 @@ export class AppProjection extends EventEmitter {
       direction,
       threadUpdatedAt,
       historyRevision,
-      turns: ordered.map((turn) =>
-        normalizeTurn(
+      turns: ordered.map((turn) => {
+        const normalized = normalizeTurn(
           turn,
           this.progress.get(turnKey(id, turn.id)),
-          this.liveActivities(id, turn.id),
+          turn.status === "inProgress" ? this.liveActivities(id, turn.id) : [],
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
-        ),
-      ),
+        );
+        if (turn.status !== "inProgress") {
+          this.clearTurnActivities(id, turn.id);
+        }
+        this.turnStates.set(turnKey(id, turn.id), normalized);
+        return normalized;
+      }),
       nextCursor: response.nextCursor,
       backwardsCursor: response.backwardsCursor ?? null,
     };
@@ -891,16 +901,16 @@ export class AppProjection extends EventEmitter {
       pages += 1;
       const turn = page.data.find((candidate) => candidate.id === turnId);
       if (turn) {
-        const turnStartedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
-        const turnCompletedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
-        items = turn.items
-          .filter((item) => !isInternalTeamContinuationItem(item))
-          .map((item) =>
-            normalizeActivity(
-              item,
-              item.type === "userMessage" ? turnStartedAt : (turnCompletedAt ?? turnStartedAt),
-            ),
-          );
+        const artifacts = cloneView<TimelineArtifact[]>(
+          this.store.view().threadMeta[threadId]?.timelineArtifacts?.[turnId] ?? [],
+        );
+        items = normalizeTurn(
+          turn,
+          this.progress.get(turnKey(threadId, turnId)),
+          turn.status === "inProgress" ? this.liveActivities(threadId, turnId) : [],
+          artifacts,
+          true,
+        ).items;
         break;
       }
       cursor = page.nextCursor;
@@ -1107,7 +1117,7 @@ export class AppProjection extends EventEmitter {
     };
     this.activity.set(key, item);
     this.bumpHistoryRevision(threadId);
-    this.publish({ type: "activity.upserted", threadId, turnId, item });
+    this.replaceTurnState(threadId, turnId, { immediate: true });
     this.touchThreadActivity(threadId, item.timestamp ?? Date.now());
   }
 
@@ -1134,7 +1144,7 @@ export class AppProjection extends EventEmitter {
     });
     this.activity.set(activityKey(threadId, turnId, item.id), item);
     this.bumpHistoryRevision(threadId);
-    this.publish({ type: "activity.upserted", threadId, turnId, item });
+    this.replaceTurnState(threadId, turnId, { immediate: true });
     this.touchThreadActivity(threadId, item.timestamp);
     if (markedRead.length) {
       const state = this.store.view();
@@ -1166,6 +1176,91 @@ export class AppProjection extends EventEmitter {
       if (key.startsWith(prefix) && !isTimelineArtifact(item)) items.push(item);
     }
     return items;
+  }
+
+  private replaceTurnState(
+    threadId: string,
+    turnId: string,
+    options: { immediate?: boolean; source?: Turn } = {},
+  ): void {
+    const key = turnKey(threadId, turnId);
+    const cached = this.threads.get(threadId);
+    const source = options.source ?? cached?.thread.turns.find((turn) => turn.id === turnId);
+    const artifacts = this.store.view().threadMeta[threadId]?.timelineArtifacts ?? {};
+    let turn: TurnView;
+    if (source) {
+      turn = normalizeTurn(
+        source,
+        this.progress.get(key),
+        source.status === "inProgress" ? this.liveActivities(threadId, turnId) : [],
+        cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
+        source.itemsView === "full",
+      );
+    } else {
+      const previous =
+        this.turnStates.get(key) ??
+        this.latestDetails.get(threadId)?.turns.find((candidate) => candidate.id === turnId);
+      turn = this.overlayLiveTurn(
+        threadId,
+        previous ?? {
+          id: turnId,
+          status: "inProgress",
+          startedAt: this.progress.get(key)?.startedAt ?? null,
+          completedAt: null,
+          durationMs: null,
+          progress: this.progress.get(key) ?? emptyProgress(null),
+          items: [],
+          itemsLoaded: false,
+        },
+        artifacts,
+      );
+    }
+    this.turnStates.set(key, turn);
+    this.replaceLatestTurn(threadId, turn);
+    if (options.immediate) {
+      this.publishTurnReplacement(threadId, turnId);
+      return;
+    }
+    if (this.turnReplacementTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      if (this.turnReplacementTimers.get(key) !== timer) return;
+      this.turnReplacementTimers.delete(key);
+      this.publishTurnReplacement(threadId, turnId);
+    }, TURN_REPLACEMENT_DEBOUNCE_MS);
+    this.turnReplacementTimers.set(key, timer);
+  }
+
+  private publishTurnReplacement(threadId: string, turnId: string): void {
+    const key = turnKey(threadId, turnId);
+    const timer = this.turnReplacementTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.turnReplacementTimers.delete(key);
+    const turn = this.turnStates.get(key);
+    if (!turn) return;
+    this.publish({ type: "turn.replaced", threadId, turn: cloneView<TurnView>(turn) });
+    const detail = this.latestDetails.get(threadId);
+    if (detail) this.latestDetails.set(threadId, { ...detail, version: this.version });
+  }
+
+  private replaceLatestTurn(threadId: string, turn: TurnView): void {
+    const detail = this.latestDetails.get(threadId);
+    if (!detail) return;
+    const turns = [...detail.turns];
+    const index = turns.findIndex((candidate) => candidate.id === turn.id);
+    if (index >= 0) turns[index] = turn;
+    else turns.push(turn);
+    this.latestDetails.set(threadId, {
+      ...detail,
+      version: this.version,
+      turns: turns.slice(-(THREAD_TURN_PAGE_SIZE + 2)),
+    });
+  }
+
+  private clearTurnActivities(threadId: string, turnId: string): void {
+    const prefix = `${threadId}:${turnId}:`;
+    for (const key of [...this.activity.keys()]) {
+      if (key.startsWith(prefix)) this.activity.delete(key);
+    }
   }
 
   private hasLivePlan(threadId: string, turnId: string): boolean {
@@ -1620,10 +1715,9 @@ export class AppProjection extends EventEmitter {
 
   private hydrateLiveTurn(thread: Thread): void {
     for (const turn of thread.turns) {
-      if (turn.status === "inProgress") {
-        const key = turnKey(thread.id, turn.id);
-        if (!this.progress.has(key)) this.progress.set(key, emptyProgress(turn.startedAt));
-      }
+      if (turn.status !== "inProgress") continue;
+      const key = turnKey(thread.id, turn.id);
+      if (!this.progress.has(key)) this.progress.set(key, emptyProgress(turn.startedAt));
       for (const rawItem of turn.items) {
         if (isInternalTeamContinuationItem(rawItem)) continue;
         const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
@@ -1635,6 +1729,17 @@ export class AppProjection extends EventEmitter {
         const key = activityKey(thread.id, turn.id, item.id);
         if (!this.activity.has(key)) this.activity.set(key, item);
       }
+      const artifacts = this.store.view().threadMeta[thread.id]?.timelineArtifacts?.[turn.id] ?? [];
+      this.turnStates.set(
+        key,
+        normalizeTurn(
+          turn,
+          this.progress.get(key),
+          this.liveActivities(thread.id, turn.id),
+          cloneView<TimelineArtifact[]>(artifacts),
+          turn.itemsView === "full",
+        ),
+      );
     }
   }
 
@@ -1848,11 +1953,12 @@ export class AppProjection extends EventEmitter {
           status: "failed",
           message: notification.params.error.message,
         };
-        this.publish({
-          type: "activity.upserted",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turnId,
+        this.activity.set(
+          activityKey(notification.params.threadId, notification.params.turnId, item.id),
           item,
+        );
+        this.replaceTurnState(notification.params.threadId, notification.params.turnId, {
+          immediate: true,
         });
         this.touchThreadActivity(notification.params.threadId);
         break;
@@ -1961,15 +2067,13 @@ export class AppProjection extends EventEmitter {
           turnKey(notification.params.threadId, notification.params.turn.id),
           progress,
         );
-        this.publish({
-          type: "turn.progressed",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turn.id,
-          progress,
-        });
         if (this.threads.has(notification.params.threadId)) {
           await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }
+        this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
+          immediate: true,
+          source: notification.params.turn,
+        });
         break;
       }
       case "turn/completed": {
@@ -2002,6 +2106,26 @@ export class AppProjection extends EventEmitter {
           const hasPlan =
             turnContainsPlan(notification.params.turn) ||
             this.hasLivePlan(notification.params.threadId, notification.params.turn.id);
+          const startedAt =
+            notification.params.turn.startedAt === null
+              ? null
+              : notification.params.turn.startedAt * 1_000;
+          const completedAt =
+            notification.params.turn.completedAt === null
+              ? null
+              : notification.params.turn.completedAt * 1_000;
+          const artifactAliases = mergeLiveActivities(
+            notification.params.turn.items
+              .filter((item) => !isInternalTeamContinuationItem(item))
+              .map((item) =>
+                normalizeActivity(
+                  item,
+                  item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+                ),
+              ),
+            this.liveActivities(notification.params.threadId, notification.params.turn.id),
+            true,
+          ).aliases;
           await this.store.update((state) => {
             const meta = state.threadMeta[cached.thread.id] ?? {
               pinned: false,
@@ -2015,18 +2139,29 @@ export class AppProjection extends EventEmitter {
               ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
                 latestPlanChecklistIsIncomplete(artifacts));
             if (artifacts) {
-              meta.timelineArtifacts![notification.params.turn.id] = artifacts.map((item) =>
-                item.type === "planChecklist"
-                  ? {
-                      ...item,
-                      status: outcome === "failed" ? "failed" : "completed",
-                    }
-                  : item,
+              meta.timelineArtifacts![notification.params.turn.id] = artifacts.map(
+                (item): TimelineArtifact => {
+                  const afterItemId = item.afterItemId
+                    ? (artifactAliases.get(item.afterItemId) ?? item.afterItemId)
+                    : null;
+                  return item.type === "planChecklist"
+                    ? {
+                        ...item,
+                        afterItemId,
+                        status: outcome === "failed" ? "failed" : "completed",
+                      }
+                    : { ...item, afterItemId };
+                },
               );
             }
             const snapshot = sessionSnapshot(cached);
             if (snapshot) meta.sessionSnapshot = snapshot;
             state.threadMeta[cached.thread.id] = meta;
+          });
+          this.clearTurnActivities(notification.params.threadId, notification.params.turn.id);
+          this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
+            immediate: true,
+            source: notification.params.turn,
           });
           this.publishThread(notification.params.threadId);
         }
@@ -2056,12 +2191,6 @@ export class AppProjection extends EventEmitter {
             ),
           },
         );
-        this.publish({
-          type: "turn.progressed",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turnId,
-          progress,
-        });
         break;
       }
       case "turn/diff/updated": {
@@ -2071,12 +2200,7 @@ export class AppProjection extends EventEmitter {
           ...diffStats(notification.params.diff),
         } satisfies TurnProgress;
         this.progress.set(key, progress);
-        this.publish({
-          type: "turn.progressed",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turnId,
-          progress,
-        });
+        this.replaceTurnState(notification.params.threadId, notification.params.turnId);
         this.touchThreadActivity(notification.params.threadId);
         break;
       }
@@ -2143,11 +2267,8 @@ export class AppProjection extends EventEmitter {
           }
         }
         this.activity.set(key, item);
-        this.publish({
-          type: "activity.upserted",
-          threadId: notification.params.threadId,
-          turnId: notification.params.turnId,
-          item,
+        this.replaceTurnState(notification.params.threadId, notification.params.turnId, {
+          immediate: true,
         });
         this.touchThreadActivity(notification.params.threadId, eventTimestamp);
         break;
@@ -2190,23 +2311,7 @@ export class AppProjection extends EventEmitter {
                 exitCode: null,
               };
         this.activity.set(key, item);
-        this.publish(
-          previous?.type === "command"
-            ? {
-                type: "activity.delta",
-                threadId: notification.params.threadId,
-                turnId: notification.params.turnId,
-                itemId: notification.params.itemId,
-                activityType: "command",
-                delta: notification.params.delta,
-              }
-            : {
-                type: "activity.upserted",
-                threadId: notification.params.threadId,
-                turnId: notification.params.turnId,
-                item,
-              },
-        );
+        this.replaceTurnState(notification.params.threadId, notification.params.turnId);
         this.touchThreadActivity(notification.params.threadId);
         break;
       }
@@ -2244,6 +2349,14 @@ export class AppProjection extends EventEmitter {
     this.subagentTitleUpdates.delete(threadId);
     for (const key of [...this.progress.keys()]) {
       if (key.startsWith(`${threadId}:`)) this.progress.delete(key);
+    }
+    for (const key of [...this.turnStates.keys()]) {
+      if (key.startsWith(`${threadId}:`)) this.turnStates.delete(key);
+    }
+    for (const [key, timer] of [...this.turnReplacementTimers.entries()]) {
+      if (!key.startsWith(`${threadId}:`)) continue;
+      clearTimeout(timer);
+      this.turnReplacementTimers.delete(key);
     }
     for (const key of [...this.activity.keys()]) {
       if (key.startsWith(`${threadId}:`)) this.activity.delete(key);
@@ -2347,11 +2460,7 @@ export class AppProjection extends EventEmitter {
       phase: previous && "phase" in previous ? previous.phase : null,
     };
     this.activity.set(key, item);
-    this.publish(
-      previous && "text" in previous && previous.type === type
-        ? { type: "activity.delta", threadId, turnId, itemId, activityType: type, delta }
-        : { type: "activity.upserted", threadId, turnId, item },
-    );
+    this.replaceTurnState(threadId, turnId);
   }
 
   private touchThreadActivity(
