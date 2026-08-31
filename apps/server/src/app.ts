@@ -66,6 +66,10 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
     },
   });
 
+  app.addContentTypeParser("application/octet-stream", (request, payload, done) => {
+    done(null, payload);
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     if (!isAllowedRequestOrigin(request, allowedOrigins)) {
       return reply

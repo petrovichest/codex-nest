@@ -292,6 +292,7 @@ export type QueuedMessage = {
   threadId: string;
   text: string;
   images?: string[];
+  files?: ThreadFileAttachment[];
   goal?: boolean;
   createdAt: number;
   status: "queued" | "dispatching";
@@ -354,6 +355,7 @@ export type ActivityItem =
       status: "inProgress" | "completed" | "failed";
       text: string;
       images: string[];
+      files?: ActivityFileAttachment[];
       timestamp: number | null;
       phase: "commentary" | "final_answer" | null;
     }
@@ -448,6 +450,19 @@ export type ThreadDraftImage = {
   url: string;
 };
 
+export type ThreadFileAttachment = {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  mediaType: string;
+};
+
+export type ActivityFileAttachment = {
+  name: string;
+  path: string;
+};
+
 export type ThreadDraftAnnotation = {
   id: string;
   messageId: string;
@@ -462,6 +477,7 @@ export type ThreadDraftAnnotation = {
 export type UpdateThreadDraftRequest = {
   input: string;
   images: ThreadDraftImage[];
+  files?: ThreadFileAttachment[];
   goalMode: boolean;
   annotations: ThreadDraftAnnotation[];
 };
@@ -1239,6 +1255,7 @@ export type TurnStartResult = {
 export type StartTurnRequest = {
   input: string;
   images?: string[];
+  files?: ThreadFileAttachment[];
   goal?: boolean;
   clientMessageId?: string;
 };
@@ -1246,6 +1263,7 @@ export type StartTurnRequest = {
 export type QueueMessageRequest = {
   input: string;
   images?: string[];
+  files?: ThreadFileAttachment[];
   goal?: boolean;
   clientMessageId?: string;
 };

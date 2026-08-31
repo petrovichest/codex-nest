@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { QueuedMessage } from "@codexnest/protocol";
+import type { QueuedMessage, ThreadFileAttachment } from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
 import { isMissingThreadError, removeThreadState } from "./thread-state";
@@ -45,18 +45,28 @@ export class MessageQueue {
     text: string,
     images: string[] = [],
     messageId: string = randomUUID(),
-    options: { goal?: boolean; completeVoiceTranscriptionId?: string } = {},
+    options: {
+      goal?: boolean;
+      files?: ThreadFileAttachment[];
+      completeVoiceTranscriptionId?: string;
+    } = {},
   ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
       id: messageId,
       threadId,
       text: text.trim(),
       ...(images.length ? { images } : {}),
+      ...(options.files?.length ? { files: options.files } : {}),
       ...(options.goal ? { goal: true } : {}),
       createdAt: Date.now(),
       status: "queued",
     };
-    const contentHash = messageContentHash(message.text, message.images ?? [], !!message.goal);
+    const contentHash = messageContentHash(
+      message.text,
+      message.images ?? [],
+      message.files ?? [],
+      !!message.goal,
+    );
     let stored = message;
     await this.store.update((state) => {
       const receipt = state.messageReceipts?.[messageId];
@@ -137,7 +147,7 @@ export class MessageQueue {
         throw new MessageQueueConflictError("Queued message is already being sent");
       }
       const trimmed = text.trim();
-      if (!trimmed && !current.images?.length) {
+      if (!trimmed && !current.images?.length && !current.files?.length) {
         throw new MessageQueueValidationError("Queued message text must not be empty");
       }
       const updated = { ...current, text: trimmed };
@@ -202,7 +212,12 @@ export class MessageQueue {
               state.messageReceipts[message.id] = {
                 threadId,
                 turnId: deliveredTurnId,
-                contentHash: messageContentHash(message.text, message.images ?? [], !!message.goal),
+                contentHash: messageContentHash(
+                  message.text,
+                  message.images ?? [],
+                  message.files ?? [],
+                  !!message.goal,
+                ),
                 createdAt: Date.now(),
               };
             }
@@ -310,6 +325,7 @@ export class MessageQueue {
           contentHash: messageContentHash(
             deliveredMessage.text,
             deliveredMessage.images ?? [],
+            deliveredMessage.files ?? [],
             !!deliveredMessage.goal,
           ),
           createdAt: Date.now(),
@@ -340,8 +356,17 @@ export class MessageQueue {
   }
 }
 
-export function messageContentHash(text: string, images: readonly string[], goal: boolean): string {
+export function messageContentHash(
+  text: string,
+  images: readonly string[],
+  files: readonly ThreadFileAttachment[],
+  goal: boolean,
+): string {
   return createHash("sha256")
-    .update(JSON.stringify([text.trim(), images, goal]))
+    .update(
+      JSON.stringify(
+        files.length ? [text.trim(), images, files, goal] : [text.trim(), images, goal],
+      ),
+    )
     .digest("hex");
 }

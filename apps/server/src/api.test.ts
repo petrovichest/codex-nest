@@ -7399,6 +7399,83 @@ async function createForkHarness() {
   };
 }
 
+describe("file attachments", () => {
+  it("uploads, persists, dispatches, and downloads a file attachment", async () => {
+    const repository = await createApiTestRepository();
+    const { app, bridge, headers } = await createTeamHarness({ projectPath: repository });
+    const uploaded = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/attachments?name=notes.txt&mediaType=text%2Fplain",
+      headers: { ...headers, "content-type": "application/octet-stream" },
+      payload: Buffer.from("attachment contents"),
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const file = uploaded.json();
+    expect(file).toMatchObject({ name: "notes.txt", size: 19, mediaType: "text/plain" });
+    await expect(readFile(file.path, "utf8")).resolves.toBe("attachment contents");
+
+    const draft = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: { input: "", images: [], files: [file], goalMode: false, annotations: [] },
+    });
+    expect(draft.statusCode).toBe(200);
+    expect(draft.json().files).toEqual([file]);
+
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: { input: "", files: [file], clientMessageId: "file-message" },
+    });
+    expect(queued.statusCode).toBe(202);
+    await vi.waitFor(() => {
+      const start = bridge.request.mock.calls.find(([method]) => method === "turn/start");
+      expect(start?.[1]).toMatchObject({
+        input: [{ type: "mention", name: "notes.txt", path: file.path }],
+      });
+    });
+
+    const ticket = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/downloads",
+      headers,
+      payload: { path: file.path },
+    });
+    expect(ticket.statusCode).toBe(201);
+    const download = await app.inject({ url: ticket.json().downloadUrl });
+    expect(download.statusCode).toBe(200);
+    expect(download.body).toBe("attachment contents");
+    await app.close();
+  });
+
+  it("rejects forged cross-session attachment metadata", async () => {
+    const repository = await createApiTestRepository();
+    const { app, headers } = await createTeamHarness({ projectPath: repository });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: {
+        input: "",
+        files: [
+          {
+            id: "00000000-0000-0000-0000-000000000000",
+            name: "secret.txt",
+            path: join(repository, "secret.txt"),
+            size: 1,
+            mediaType: "text/plain",
+          },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toContain("does not belong to this session");
+    await app.close();
+  });
+});
+
 async function restartForkApp(
   store: StateStore,
   bridge: SettingsBridge,

@@ -4,6 +4,7 @@ import type {
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
+  ThreadFileAttachment,
   ThreadSummary,
   UpdateThreadDraftRequest,
   VoiceTranscriptionMode,
@@ -65,6 +66,7 @@ export type OutboxMessage = {
   threadId: string;
   input: string;
   images: string[];
+  files?: ThreadFileAttachment[];
   goal: boolean;
   createdAt: number;
   attempts: number;
@@ -253,6 +255,7 @@ export async function confirmLocalDraft(
     confirmed &&
     (confirmed.input ||
       confirmed.images.length ||
+      (confirmed.files?.length ?? 0) > 0 ||
       confirmed.goalMode ||
       confirmed.annotations.length)
   ) {
@@ -262,6 +265,7 @@ export async function confirmLocalDraft(
       {
         input: confirmed.input,
         images: confirmed.images,
+        ...(confirmed.files?.length ? { files: confirmed.files } : {}),
         goalMode: confirmed.goalMode,
         annotations: confirmed.annotations,
       },

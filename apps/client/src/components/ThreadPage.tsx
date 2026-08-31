@@ -14,6 +14,7 @@ import type {
   TaskDefaults,
   ThreadDetail,
   ThreadDraft,
+  ThreadFileAttachment,
   ThreadSummary,
   ThreadState,
   TranscriptionConfigResponse,
@@ -171,6 +172,7 @@ export type QueuedMessageView = QueuedMessage & {
 type SubmittedMessageIdentity = {
   text: string;
   images: readonly string[];
+  files: ReadonlyArray<{ name: string; path: string }>;
   goal: boolean;
 };
 
@@ -197,13 +199,19 @@ function composerDraftHasContent(value: UpdateThreadDraftRequest): boolean {
   return (
     Boolean(value.input) ||
     value.images.length > 0 ||
+    (value.files?.length ?? 0) > 0 ||
     value.goalMode ||
     value.annotations.length > 0
   );
 }
 
 function submittedMessageFingerprint(identity: SubmittedMessageIdentity): string {
-  return JSON.stringify([identity.text.trim(), identity.images, identity.goal]);
+  return JSON.stringify([
+    identity.text.trim(),
+    identity.images,
+    identity.files.map(({ name, path }) => ({ name, path })),
+    identity.goal,
+  ]);
 }
 
 function latestRootUserMessage(detail: ThreadDetail | undefined): ActivityItem | null {
@@ -308,6 +316,20 @@ function mergeComposerImages(
   return merged;
 }
 
+function mergeComposerFiles(
+  first: readonly ThreadFileAttachment[],
+  second: readonly ThreadFileAttachment[],
+): ThreadFileAttachment[] {
+  const merged = [...first];
+  const known = new Set(first.map((file) => file.id));
+  for (const file of second) {
+    if (known.has(file.id)) continue;
+    known.add(file.id);
+    merged.push(file);
+  }
+  return merged;
+}
+
 function mergeComposerDrafts(
   submitted: UpdateThreadDraftRequest,
   newer: UpdateThreadDraftRequest,
@@ -319,9 +341,11 @@ function mergeComposerDrafts(
       ? submittedInput || newerInput
       : `${submittedInput}\n\n${newerInput}`;
   const annotationIds = new Set(submitted.annotations.map((annotation) => annotation.id));
+  const files = mergeComposerFiles(submitted.files ?? [], newer.files ?? []);
   return {
     input,
     images: mergeComposerImages(submitted.images, newer.images),
+    ...(files.length ? { files } : {}),
     goalMode: newer.goalMode || (!newerInput && submitted.goalMode),
     annotations: [
       ...submitted.annotations,
@@ -588,6 +612,7 @@ export function ThreadPage({
       ? {
           input: detail.draft.input,
           images: detail.draft.images,
+          files: detail.draft.files ?? [],
           goalMode: detail.draft.goalMode,
           annotations: detail.draft.annotations,
         }
@@ -598,7 +623,7 @@ export function ThreadPage({
     composerDraftRef.current.threadId === threadId
       ? composerDraftRef.current.value
       : emptyComposerDraft();
-  const { input, images, goalMode, annotations } = activeComposerDraft;
+  const { input, images, files = [], goalMode, annotations } = activeComposerDraft;
   const [composerInputSyncRevision, setComposerInputSyncRevision] = useState(0);
   const [goalBusy, setGoalBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -741,6 +766,7 @@ export function ThreadPage({
     addActiveMessage({
       text: message.text,
       images: message.images,
+      files: message.files ?? [],
       goal:
         submittedGoalMessageIdsRef.current.has(message.id) ||
         Boolean((message as GoalAwareOptimisticMessage).goal),
@@ -750,6 +776,7 @@ export function ThreadPage({
     addActiveMessage({
       text: message.text,
       images: message.images ?? [],
+      files: message.files ?? [],
       goal: Boolean(message.goal),
     });
   }
@@ -761,6 +788,7 @@ export function ThreadPage({
     addActiveMessage({
       text: item.text,
       images: item.images,
+      files: item.files ?? [],
       goal: submittedGoalMessageIdsRef.current.has(item.id),
     });
   }
@@ -774,6 +802,7 @@ export function ThreadPage({
       addActiveMessage({
         text: message.text,
         images: message.images,
+        files: message.files ?? [],
         goal: submittedGoalMessageIdsRef.current.has(message.id),
       });
     }
@@ -1316,6 +1345,7 @@ export function ThreadPage({
       const hasDraft =
         Boolean(transferring.value.input) ||
         transferring.value.images.length > 0 ||
+        (transferring.value.files?.length ?? 0) > 0 ||
         transferring.value.goalMode ||
         transferring.value.annotations.length > 0;
       const saved = hasDraft ? await transferPreparationDraft(thread.id, transferring.value) : null;
@@ -1472,6 +1502,56 @@ export function ThreadPage({
     }
     composerEditRevisionRef.current += 1;
     replaceComposerDraft({ ...currentComposerDraft(), images: value }, "immediate");
+  }
+
+  function setFiles(value: ThreadFileAttachment[], sourceScope = attachmentScopeRef.current): void {
+    if (preparationRef.current.active && earlySubmitRef.current) {
+      const submission = earlySubmissionRef.current;
+      if (submission && sourceScope === submission.attachmentScope) {
+        submission.draft = {
+          ...submission.draft,
+          files: mergeComposerFiles(submission.draft.files ?? [], value),
+        };
+        setPendingOptimisticMessage((message) =>
+          message
+            ? {
+                ...message,
+                files: submission.draft.files ?? [],
+              }
+            : message,
+        );
+        return;
+      }
+    }
+    composerEditRevisionRef.current += 1;
+    replaceComposerDraft({ ...currentComposerDraft(), files: value }, "immediate");
+  }
+
+  async function uploadFiles(selected: readonly File[]): Promise<ThreadFileAttachment[]> {
+    let targetThreadId = activeThreadIdRef.current;
+    if (preparationRef.current.active) {
+      if (!newSessionProject) throw new Error(t("Не удалось создать сессию"));
+      const thread = await ensureCreatedThread(newSessionProject, preparationGenerationRef.current);
+      targetThreadId = thread.id;
+    }
+    if (!targetThreadId) throw new Error(t("Не удалось создать сессию"));
+    const uploaded: ThreadFileAttachment[] = [];
+    try {
+      for (const file of selected) uploaded.push(await api.uploadAttachment(targetThreadId, file));
+      return uploaded;
+    } catch (error) {
+      await Promise.all(
+        uploaded.map((file) =>
+          api.deleteAttachment(targetThreadId, file.id).catch(() => undefined),
+        ),
+      );
+      throw error;
+    }
+  }
+
+  async function deleteFile(file: ThreadFileAttachment): Promise<void> {
+    const targetThreadId = preparationRef.current.threadId || activeThreadIdRef.current;
+    if (targetThreadId) await api.deleteAttachment(targetThreadId, file.id);
   }
 
   function setGoalMode(value: boolean): void {
@@ -1803,6 +1883,7 @@ export function ThreadPage({
       ? {
           input: detailDraft.input,
           images: detailDraft.images,
+          files: detailDraft.files ?? [],
           goalMode: detailDraft.goalMode,
           annotations: detailDraft.annotations,
         }
@@ -2279,7 +2360,7 @@ export function ThreadPage({
       language,
     );
     if (
-      (!submittedInput.trim() && !submittedDraft.images.length) ||
+      (!submittedInput.trim() && !submittedDraft.images.length && !submittedDraft.files?.length) ||
       (submittedDraft.goalMode && !submittedDraft.input.trim())
     ) {
       return;
@@ -2289,6 +2370,7 @@ export function ThreadPage({
     const submittedIdentity: SubmittedMessageIdentity = {
       text: submittedInput,
       images: submittedDraft.images.map((image) => image.url),
+      files: submittedDraft.files ?? [],
       goal: submittedDraft.goalMode,
     };
     const messageClaimKey = claimSubmittedMessage(submittedIdentity, clientMessageId);
@@ -2298,6 +2380,7 @@ export function ThreadPage({
       threadId: targetThreadId,
       text: submittedInput.trim(),
       images: [...submittedIdentity.images],
+      files: submittedDraft.files ?? [],
       goal: submittedIdentity.goal,
       createdAt: Date.now(),
       destination: "queue",
@@ -2324,6 +2407,7 @@ export function ThreadPage({
           ...(submittedDraft.images.length
             ? { images: submittedDraft.images.map((image) => image.url) }
             : {}),
+          ...(submittedDraft.files?.length ? { files: submittedDraft.files } : {}),
           ...(submittedDraft.goalMode ? { goal: true } : {}),
           clientMessageId,
         },
@@ -2404,6 +2488,7 @@ export function ThreadPage({
     if (
       (!submittedInput.trim() &&
         !submittedDraft.images.length &&
+        !submittedDraft.files?.length &&
         !pendingAttachmentScopesRef.current.has(attachmentScopeRef.current)) ||
       (submittedDraft.goalMode && !submittedDraft.input.trim())
     ) {
@@ -2414,6 +2499,7 @@ export function ThreadPage({
       {
         text: submittedInput,
         images: submittedDraft.images.map((image) => image.url),
+        files: submittedDraft.files ?? [],
         goal: submittedDraft.goalMode,
       },
       clientMessageId,
@@ -2453,6 +2539,7 @@ export function ThreadPage({
       const completeIdentity: SubmittedMessageIdentity = {
         text: completeInput,
         images: completeDraft.images.map((image) => image.url),
+        files: completeDraft.files ?? [],
         goal: completeDraft.goalMode,
       };
       messageClaimKey = moveSubmittedMessageClaim(messageClaimKey, completeIdentity);
@@ -2466,6 +2553,7 @@ export function ThreadPage({
         threadId: thread.id,
         text: completeInput.trim(),
         images: [...completeIdentity.images],
+        files: completeDraft.files ?? [],
         goal: completeIdentity.goal,
         createdAt: Date.now(),
         destination: "queue",
@@ -2494,6 +2582,7 @@ export function ThreadPage({
           ...(completeDraft.images.length
             ? { images: completeDraft.images.map((image) => image.url) }
             : {}),
+          ...(completeDraft.files?.length ? { files: completeDraft.files } : {}),
           ...(completeDraft.goalMode ? { goal: true } : {}),
           clientMessageId,
         },
@@ -2618,7 +2707,7 @@ export function ThreadPage({
     }
     const clientMessageId = createClientMessageId();
     const messageClaimKey = claimSubmittedMessage(
-      { text: implementationMessage, images: [], goal: goalMode },
+      { text: implementationMessage, images: [], files: [], goal: goalMode },
       clientMessageId,
     );
     if (!messageClaimKey) return;
@@ -3464,6 +3553,10 @@ export function ThreadPage({
             skillsEpoch={state.skillsEpoch}
             images={images}
             onImagesChange={setImages}
+            files={files}
+            onFilesChange={setFiles}
+            onUploadFiles={uploadFiles}
+            onDeleteFile={deleteFile}
             attachmentScope={attachmentScope}
             onPendingAttachmentsChange={setPendingAttachments}
             onSubmit={submit}
@@ -3768,6 +3861,7 @@ function optimisticActivity(message: OptimisticMessage): ActivityItem {
     status: "completed",
     text: message.text,
     images: message.images,
+    files: (message.files ?? []).map(({ name, path }) => ({ name, path })),
     timestamp: message.createdAt,
     phase: null,
   };
@@ -3802,6 +3896,7 @@ function mergeOptimisticQueue(
         threadId: message.threadId,
         text: message.text,
         ...(message.images.length ? { images: message.images } : {}),
+        ...(message.files?.length ? { files: message.files } : {}),
         createdAt: message.createdAt,
         status: "queued" as const,
         confirmed: false,
@@ -4226,6 +4321,9 @@ export function Activity({
               />
             ))}
           {item.images.length > 0 && <MessageImages images={item.images} />}
+          {(item.files?.length ?? 0) > 0 && (
+            <MessageFiles files={item.files ?? []} onDownload={onDownload} />
+          )}
         </div>
         <MessageFooter
           text={item.text}
@@ -5125,6 +5223,9 @@ export function QueuedMessages({
                     {(message.images?.length ?? 0) > 0 && (
                       <MessageImages images={message.images ?? []} />
                     )}
+                    {(message.files?.length ?? 0) > 0 && (
+                      <MessageFiles files={message.files ?? []} />
+                    )}
                   </>
                 )}
                 <div className="queued-message-actions">
@@ -5209,6 +5310,43 @@ function MessageImages({ images }: { images: string[] }) {
         />
       )}
     </>
+  );
+}
+
+function MessageFiles({
+  files,
+  onDownload,
+}: {
+  files: ReadonlyArray<{ name: string; path: string }>;
+  onDownload?(path: string): Promise<void>;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="message-files" aria-label={t("Файлы")}>
+      {files.map((file, index) => {
+        const content = (
+          <>
+            <FileIcon />
+            <span>{file.name}</span>
+          </>
+        );
+        return onDownload ? (
+          <button
+            type="button"
+            className="message-file"
+            key={`${index}:${file.path}`}
+            title={t("Скачать файл {{name}}", { name: file.name })}
+            onClick={() => void onDownload(file.path)}
+          >
+            {content}
+          </button>
+        ) : (
+          <span className="message-file" key={`${index}:${file.path}`} title={file.name}>
+            {content}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -5461,7 +5599,8 @@ function reconcileVisibleThreadSummary(
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {
-  if ("text" in item) return Boolean(item.text.trim() || item.images.length);
+  if ("text" in item)
+    return Boolean(item.text.trim() || item.images.length || (item.files?.length ?? 0));
   return true;
 }
 

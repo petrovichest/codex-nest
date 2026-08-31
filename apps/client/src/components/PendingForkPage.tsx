@@ -18,6 +18,7 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 const EMPTY_DRAFT: UpdateThreadDraftRequest = {
   input: "",
   images: [],
+  files: [],
   goalMode: false,
   annotations: [],
 };
@@ -416,6 +417,7 @@ function draftValue(draft: ThreadDraft | null): UpdateThreadDraftRequest {
     ? {
         input: draft.input,
         images: draft.images,
+        files: draft.files ?? [],
         goalMode: draft.goalMode,
         annotations: draft.annotations,
       }

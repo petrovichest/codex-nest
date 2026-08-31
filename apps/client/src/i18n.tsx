@@ -653,6 +653,7 @@ const ENGLISH: Record<string, string> = {
   Аннотация: "Annotate",
   "Аннотация {{number}}": "Annotation {{number}}",
   "В очереди": "Queued",
+  Вложения: "Attachments",
   "Выполнен поиск": "Search completed",
   "Выполнена команда": "Command executed",
   Выполнено: "Completed",
@@ -667,6 +668,7 @@ const ENGLISH: Record<string, string> = {
   "Добавить в очередь": "Add to queue",
   "Добавляется…": "Adding…",
   "Добавить изображения": "Add images",
+  "Добавить файлы": "Add files",
   "Загружаем старые сообщения": "Loading older messages",
   Задача: "Task",
   "Задача не найдена": "Task not found",
@@ -691,6 +693,7 @@ const ENGLISH: Record<string, string> = {
   "Изображение {{number}}": "Image {{number}}",
   "Изображение {{current}} из {{total}}": "Image {{current}} of {{total}}",
   Изображения: "Images",
+  Файлы: "Files",
   "Использованы инструменты": "Tools used",
   "Идёт распознавание в другой сессии": "A recording is being transcribed in another session",
   Комментарий: "Comment",
@@ -730,6 +733,10 @@ const ENGLISH: Record<string, string> = {
     "Failed to save the recording safely on this device",
   "Не удалось очистить цель": "Failed to clear the goal",
   "Не удалось прочитать выбранное изображение": "Failed to read the selected image",
+  "Не удалось загрузить выбранный файл": "Failed to upload the selected file",
+  "Размер одного файла не должен превышать 100 МБ": "A single file must not exceed 100 MiB",
+  "Общий размер вложений не должен превышать 250 МБ":
+    "The total attachment size must not exceed 250 MiB",
   "Не удалось распознать запись": "Failed to transcribe the recording",
   "Не удалось скачать файл. Нажмите ещё раз.": "Failed to download the file. Click again.",
   "Просмотр файла {{name}}": "Viewing {{name}}",
@@ -803,6 +810,8 @@ const ENGLISH: Record<string, string> = {
   "Удалить сообщение из очереди": "Delete queued message",
   "Удалить аннотацию": "Delete annotation",
   "Удалить изображение {{name}}": "Delete image {{name}}",
+  "Удалить файл {{name}}": "Delete file {{name}}",
+  "Скачать файл {{name}}": "Download file {{name}}",
   "Удаляем…": "Deleting…",
   "Текст сообщения в очереди": "Queued message text",
   "Ход работы": "Progress",
@@ -896,6 +905,16 @@ export function localizeKnownServerText(
     if (value === "The draft changed before voice upload") {
       return "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.";
     }
+    if (value === "File exceeds the 100 MiB limit") {
+      return "Размер одного файла не должен превышать 100 МБ";
+    }
+    if (value === "Attachments exceed the 250 MiB message limit") {
+      return "Общий размер вложений не должен превышать 250 МБ";
+    }
+    if (value === "File attachment is unavailable") {
+      return "Прикреплённый файл больше недоступен";
+    }
+    if (value === "Upload is too large") return "Загружаемый файл слишком большой";
     return value;
   }
   const direct = ENGLISH[value];

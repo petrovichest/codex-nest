@@ -16,6 +16,7 @@ import type {
   SessionSettings,
   SkillCatalogItem,
   ThreadGoal,
+  ThreadFileAttachment,
   TranscriptionConfigResponse,
   TranscriptionProvider,
   UpdateThreadGoalRequest,
@@ -26,7 +27,15 @@ import type {
 
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import { useSkillsCatalog } from "../useSkillsCatalog";
-import { MicrophoneIcon, PlusIcon, SendIcon, StopIcon, VoiceSendIcon, XIcon } from "./Icons";
+import {
+  FileIcon,
+  MicrophoneIcon,
+  PlusIcon,
+  SendIcon,
+  StopIcon,
+  VoiceSendIcon,
+  XIcon,
+} from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
 import {
@@ -59,6 +68,8 @@ export type ComposerTranscriptionStatus = {
 export type ComposerSubmitIntent = "queue" | "immediate";
 
 const KEYBOARD_VIEWPORT_DELTA = 120;
+const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+const MAX_MESSAGE_ATTACHMENT_BYTES = 250 * 1024 * 1024;
 
 type SpeechState = "idle" | "requesting" | "recording" | "uploading" | "transcribing";
 
@@ -92,6 +103,10 @@ export function Composer({
   onDraftFlush,
   images,
   onImagesChange,
+  files = [],
+  onFilesChange,
+  onUploadFiles,
+  onDeleteFile,
   attachmentScope = 0,
   onPendingAttachmentsChange,
   onSubmit,
@@ -140,6 +155,10 @@ export function Composer({
   onDraftFlush?(): void;
   images: ComposerImage[];
   onImagesChange(value: ComposerImage[], attachmentScope?: number): void;
+  files?: ThreadFileAttachment[];
+  onFilesChange?(value: ThreadFileAttachment[], attachmentScope?: number): void;
+  onUploadFiles?(files: readonly File[], attachmentScope?: number): Promise<ThreadFileAttachment[]>;
+  onDeleteFile?(file: ThreadFileAttachment): Promise<void>;
   attachmentScope?: number;
   onPendingAttachmentsChange?(pending: boolean, attachmentScope?: number): void;
   onSubmit(intent: ComposerSubmitIntent): void;
@@ -229,14 +248,18 @@ export function Composer({
   const pendingAttachmentScopesRef = useRef(new Map<number, number>());
   const attachmentBatchesRef = useRef(new Map<number, Promise<void>>());
   const attachmentImagesRef = useRef(new Map<number, ComposerImage[]>());
+  const attachmentFilesRef = useRef(new Map<number, ThreadFileAttachment[]>());
   const sessionIdentityRef = useRef(sessionIdentity);
   const latestPropsRef = useRef({
     attachmentScope,
     goalMode,
     images,
+    files,
     input: draftInput,
     language,
     onImagesChange,
+    onFilesChange,
+    onUploadFiles,
     onInput,
     onPendingAttachmentsChange,
     onRecordingReady,
@@ -250,9 +273,12 @@ export function Composer({
     attachmentScope,
     goalMode,
     images,
+    files,
     input: draftInput,
     language,
     onImagesChange,
+    onFilesChange,
+    onUploadFiles,
     onInput,
     onPendingAttachmentsChange,
     onRecordingReady,
@@ -282,7 +308,8 @@ export function Composer({
   const speechBusy =
     localSpeechBusy || voiceUploadPending || voiceInputLocked || Boolean(transcriptionStatus);
   const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
-  const hasContent = Boolean(draftInput.trim()) || images.length > 0 || hasSupplementalContent;
+  const hasContent =
+    Boolean(draftInput.trim()) || images.length > 0 || files.length > 0 || hasSupplementalContent;
   const activeSkillToken =
     !goalMode && !busy && !speechBusy && composerFocused
       ? skillTokenAt(draftInput, skillCaret)
@@ -530,6 +557,7 @@ export function Composer({
     pendingAttachmentScopesRef.current.clear();
     attachmentBatchesRef.current.clear();
     attachmentImagesRef.current.clear();
+    attachmentFilesRef.current.clear();
     setViewer(null);
     setAttachmentError(null);
     setSpeechError(null);
@@ -650,6 +678,81 @@ export function Composer({
         latestPropsRef.current.onPendingAttachmentsChange?.(pendingInScope > 0, scope);
       }
     }
+  }
+
+  async function addFiles(selected: readonly File[]) {
+    const upload = latestPropsRef.current.onUploadFiles;
+    if (!selected.length || !upload) return;
+    const operationIdentity = latestPropsRef.current.sessionIdentity;
+    const scope = latestPropsRef.current.attachmentScope;
+    if (!attachmentFilesRef.current.has(scope)) {
+      attachmentFilesRef.current.set(scope, latestPropsRef.current.files);
+    }
+    setAttachmentError(null);
+    pendingAttachmentScopesRef.current.set(
+      scope,
+      (pendingAttachmentScopesRef.current.get(scope) ?? 0) + 1,
+    );
+    latestPropsRef.current.onPendingAttachmentsChange?.(true, scope);
+    const read = upload(selected, scope);
+    const previousBatch = attachmentBatchesRef.current.get(scope) ?? Promise.resolve();
+    const batch = previousBatch
+      .catch(() => undefined)
+      .then(async () => {
+        const added = await read;
+        if (!aliveRef.current || latestPropsRef.current.sessionIdentity !== operationIdentity) {
+          return;
+        }
+        const next = [...(attachmentFilesRef.current.get(scope) ?? []), ...added];
+        attachmentFilesRef.current.set(scope, next);
+        latestPropsRef.current.onFilesChange?.(next, scope);
+      });
+    attachmentBatchesRef.current.set(scope, batch);
+    try {
+      await batch;
+    } catch (caught) {
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === operationIdentity) {
+        setAttachmentError(
+          caught instanceof Error
+            ? localizeKnownServerText(latestPropsRef.current.language, caught.message)
+            : latestPropsRef.current.t("Не удалось загрузить выбранный файл"),
+        );
+      }
+    } finally {
+      if (attachmentBatchesRef.current.get(scope) === batch) {
+        attachmentBatchesRef.current.delete(scope);
+      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      const pendingInScope = Math.max(0, (pendingAttachmentScopesRef.current.get(scope) ?? 1) - 1);
+      if (pendingInScope) pendingAttachmentScopesRef.current.set(scope, pendingInScope);
+      else pendingAttachmentScopesRef.current.delete(scope);
+      if (aliveRef.current && latestPropsRef.current.sessionIdentity === operationIdentity) {
+        latestPropsRef.current.onPendingAttachmentsChange?.(pendingInScope > 0, scope);
+      }
+    }
+  }
+
+  async function addSelectedFiles(selected: readonly File[]) {
+    if (!selected.length) return;
+    const existingBytes =
+      files.reduce((total, file) => total + file.size, 0) +
+      images.reduce((total, image) => total + inlineImageBytes(image.url), 0);
+    if (selected.some((file) => file.size > MAX_ATTACHMENT_BYTES)) {
+      setAttachmentError(t("Размер одного файла не должен превышать 100 МБ"));
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    if (
+      existingBytes + selected.reduce((total, file) => total + file.size, 0) >
+      MAX_MESSAGE_ATTACHMENT_BYTES
+    ) {
+      setAttachmentError(t("Общий размер вложений не должен превышать 250 МБ"));
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    const imageFiles = selected.filter((file) => file.type.startsWith("image/"));
+    const otherFiles = selected.filter((file) => !file.type.startsWith("image/"));
+    await Promise.all([addImages(imageFiles), addFiles(otherFiles)]);
   }
 
   function pasteImages(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -1097,10 +1200,10 @@ export function Composer({
           </button>
         </div>
       )}
-      {images.length > 0 && (
+      {(images.length > 0 || files.length > 0) && (
         <div
           className="composer-attachments"
-          aria-label={t("Изображения")}
+          aria-label={t("Вложения")}
           onPointerDownCapture={preserveTextareaFocus}
         >
           {images.map((image, index) => (
@@ -1131,6 +1234,28 @@ export function Composer({
                   const next = images.filter((item) => item.id !== image.id);
                   attachmentImagesRef.current.set(attachmentScope, next);
                   latestPropsRef.current.onImagesChange(next, attachmentScope);
+                }}
+              >
+                <XIcon />
+              </button>
+            </div>
+          ))}
+          {files.map((file) => (
+            <div className="composer-attachment composer-file-attachment" key={file.id}>
+              <div className="composer-file-summary" title={file.name}>
+                <FileIcon />
+                <span>{file.name}</span>
+                <small>{formatFileSize(file.size, language)}</small>
+              </div>
+              <button
+                type="button"
+                className="composer-attachment-remove"
+                aria-label={t("Удалить файл {{name}}", { name: file.name })}
+                onClick={() => {
+                  const next = files.filter((item) => item.id !== file.id);
+                  attachmentFilesRef.current.set(attachmentScope, next);
+                  latestPropsRef.current.onFilesChange?.(next, attachmentScope);
+                  void onDeleteFile?.(file).catch(() => undefined);
                 }}
               >
                 <XIcon />
@@ -1213,13 +1338,13 @@ export function Composer({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={onUploadFiles ? undefined : "image/*"}
               multiple
               hidden
-              onChange={(event) => void addImages(Array.from(event.target.files ?? []))}
+              onChange={(event) => void addSelectedFiles(Array.from(event.target.files ?? []))}
             />
             <button
-              aria-label={t("Добавить изображения")}
+              aria-label={onUploadFiles ? t("Добавить файлы") : t("Добавить изображения")}
               className="composer-add-image"
               type="button"
               disabled={speechBusy}
@@ -1612,4 +1737,18 @@ function formatTranscriptionTimer(
     return `≈${formatRecordingTime(estimatedTotalSeconds - elapsedSeconds)}`;
   }
   return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
+}
+
+function inlineImageBytes(url: string): number {
+  const comma = url.indexOf(",");
+  return comma < 0 ? 0 : Math.floor(((url.length - comma - 1) * 3) / 4);
+}
+
+function formatFileSize(bytes: number, language: string): string {
+  return new Intl.NumberFormat(language, {
+    style: "unit",
+    unit: bytes >= 1024 * 1024 ? "megabyte" : "kilobyte",
+    unitDisplay: "short",
+    maximumFractionDigits: bytes >= 10 * 1024 * 1024 ? 0 : 1,
+  }).format(bytes / (bytes >= 1024 * 1024 ? 1024 * 1024 : 1024));
 }

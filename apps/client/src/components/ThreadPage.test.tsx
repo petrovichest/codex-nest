@@ -3180,6 +3180,36 @@ describe("Activity", () => {
     await waitFor(() => expect(screen.queryByAltText("screen.png")).toBeNull());
   });
 
+  it("uploads and sends a file-only message", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary);
+    const view = renderThread();
+    const fileInput = view.container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["notes"], "notes.txt", { type: "text/plain" })] },
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Удалить файл notes.txt" }),
+    ).toBeInTheDocument();
+    expect(api.uploadAttachment).toHaveBeenCalledWith("thread", expect.any(File));
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(api.startTurn).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          input: "",
+          files: [expect.objectContaining({ name: "notes.txt", path: "/attachments/notes.txt" })],
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Удалить файл notes.txt" })).toBeNull(),
+    );
+  });
+
   it("does not roll back a delivered message when local draft cleanup rejects", async () => {
     deleteLocalDraft.mockRejectedValueOnce(new Error("IndexedDB недоступен"));
     const api = threadApi();
@@ -5148,11 +5178,25 @@ function threadApi() {
       .fn()
       .mockImplementation((_id, draft) =>
         Promise.resolve(
-          draft.input || draft.images.length || draft.goalMode || draft.annotations.length
+          draft.input ||
+            draft.images.length ||
+            draft.files?.length ||
+            draft.goalMode ||
+            draft.annotations.length
             ? { ...draft, updatedAt: Date.now() }
             : null,
         ),
       ),
+    uploadAttachment: vi.fn().mockImplementation((_id, file: File) =>
+      Promise.resolve({
+        id: "00000000-0000-0000-0000-000000000001",
+        name: file.name,
+        path: `/attachments/${file.name}`,
+        size: file.size,
+        mediaType: file.type || "application/octet-stream",
+      }),
+    ),
+    deleteAttachment: vi.fn().mockResolvedValue(undefined),
     enqueue: vi.fn().mockResolvedValue({ id: "queued" }),
     sendQueuedNow: vi.fn().mockResolvedValue({ turnId: "turn" }),
     updateQueued: vi.fn().mockResolvedValue({ id: "queued" }),

@@ -224,6 +224,7 @@ export function ConnectionProvider({
               threadId: message.threadId,
               text: message.input,
               images: message.images,
+              files: message.files ?? [],
               createdAt: message.createdAt,
               destination: "queue",
               turnId: null,
@@ -569,6 +570,7 @@ export function ConnectionProvider({
           await api.enqueue(message.threadId, {
             input: message.input,
             ...(message.images.length ? { images: message.images } : {}),
+            ...(message.files?.length ? { files: message.files } : {}),
             ...(message.goal ? { goal: true } : {}),
             clientMessageId: message.id,
           });
@@ -605,6 +607,7 @@ export function ConnectionProvider({
         threadId,
         input: body.input,
         images: body.images ?? [],
+        files: body.files ?? [],
         goal: body.goal ?? false,
         createdAt: Date.now(),
         attempts: 0,

@@ -12,6 +12,7 @@ import type {
   ThreadSummary,
   UpdateUserInputDraftRequest,
   UserInputDraft,
+  ThreadFileAttachment,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
 import {
@@ -48,6 +49,7 @@ export type OptimisticMessage = {
   threadId: string;
   text: string;
   images: string[];
+  files?: ThreadFileAttachment[];
   createdAt: number;
   destination: "turn" | "queue";
   turnId: string | null;

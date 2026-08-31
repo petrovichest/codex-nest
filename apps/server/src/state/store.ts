@@ -1960,8 +1960,12 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     typeof value.text === "string" &&
     (value.images === undefined ||
       (Array.isArray(value.images) && value.images.every(isInlineImage))) &&
+    (value.files === undefined ||
+      (Array.isArray(value.files) && value.files.every(isStoredFileAttachment))) &&
     (value.goal === undefined || typeof value.goal === "boolean") &&
-    (Boolean(value.text.trim()) || (Array.isArray(value.images) && value.images.length > 0)) &&
+    (Boolean(value.text.trim()) ||
+      (Array.isArray(value.images) && value.images.length > 0) ||
+      (Array.isArray(value.files) && value.files.length > 0)) &&
     typeof value.createdAt === "number" &&
     ["queued", "dispatching"].includes(String(value.status))
   );
@@ -2040,6 +2044,7 @@ function isThreadDraft(value: unknown): value is ThreadDraft {
     typeof value.updatedAt !== "number" ||
     !Number.isFinite(value.updatedAt) ||
     !Array.isArray(value.images) ||
+    (value.files !== undefined && !Array.isArray(value.files)) ||
     !Array.isArray(value.annotations)
   ) {
     return false;
@@ -2053,7 +2058,26 @@ function isThreadDraft(value: unknown): value is ThreadDraft {
         typeof image.name === "string" &&
         Boolean(image.name) &&
         isInlineImage(image.url),
-    ) && value.annotations.every(isThreadDraftAnnotation)
+    ) &&
+    (value.files === undefined || value.files.every(isStoredFileAttachment)) &&
+    value.annotations.every(isThreadDraftAnnotation)
+  );
+}
+
+function isStoredFileAttachment(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    Boolean(value.id) &&
+    typeof value.name === "string" &&
+    Boolean(value.name) &&
+    typeof value.path === "string" &&
+    isAbsolute(value.path) &&
+    typeof value.size === "number" &&
+    Number.isSafeInteger(value.size) &&
+    value.size >= 0 &&
+    typeof value.mediaType === "string" &&
+    Boolean(value.mediaType)
   );
 }
 

@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
 import { access, lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import type { Readable } from "node:stream";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 
@@ -40,6 +41,7 @@ import type {
   StartTurnRequest,
   TaskDefaults,
   ThreadGoal,
+  ThreadFileAttachment,
   ThreadChanges,
   ThreadArtifactsResponse,
   ThreadHistoryPage,
@@ -69,6 +71,14 @@ import type {
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
+import {
+  AttachmentStore,
+  AttachmentTooLargeError,
+  AttachmentValidationError,
+  MAX_ATTACHMENT_BYTES,
+  MAX_MESSAGE_ATTACHMENT_BYTES,
+  isAttachmentShape,
+} from "./attachments";
 import { AppManagementError, type AppManager } from "./app-management";
 import { bearerToken, verifyToken } from "./auth";
 import { BrowserExtensionError, type BrowserExtensionServer } from "./browser-extension";
@@ -483,6 +493,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     threadTitles,
     browserExtension,
   } = services;
+  const attachments = new AttachmentStore(store.path);
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
   const turnStartLocks = new Map<string, Promise<unknown>>();
@@ -522,6 +533,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     threadId: string,
     input: string,
     images: string[],
+    files: ThreadFileAttachment[],
     clientMessageId: string | null,
     goal = false,
   ): Promise<TurnStartResult> => {
@@ -530,7 +542,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (receipt) {
         if (
           receipt.threadId !== threadId ||
-          receipt.contentHash !== messageContentHash(input, images, goal)
+          receipt.contentHash !== messageContentHash(input, images, files, goal)
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
@@ -540,8 +552,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     let summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
     assertWritableThread(summary);
+    const validatedFiles = await attachments.validate(threadId, files);
     if (summary.settings.collaborationMode === "team") {
-      const automaticContinuation = !clientMessageId && !input.trim() && !images.length;
+      const automaticContinuation =
+        !clientMessageId && !input.trim() && !images.length && !validatedFiles.length;
       if (automaticContinuation && stoppedTeamParents.has(threadId)) {
         throw new TeamContinuationStoppedError();
       }
@@ -574,7 +588,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const teamMarkerId = teamClaim
       ? (clientMessageId ?? teamContinuationMarkerId(teamClaim.claimId))
       : null;
-    const automaticTeamContinuation = Boolean(teamClaim && !input.trim() && !images.length);
+    const automaticTeamContinuation = Boolean(
+      teamClaim && !input.trim() && !images.length && !validatedFiles.length,
+    );
     const turnInput = automaticTeamContinuation ? TEAM_CONTINUATION_MARKER_TEXT : input;
     if (teamClaim && teamMarkerId) {
       await markTeamClaimDispatch(
@@ -610,7 +626,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const startParams = {
         threadId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
-        input: skillAwareMessageInput(skillsByCwd.get(summary.cwd), turnInput, images, goal),
+        input: skillAwareMessageInput(
+          skillsByCwd.get(summary.cwd),
+          turnInput,
+          images,
+          validatedFiles,
+          goal,
+        ),
         ...turnSettings(
           summary.settings,
           projection.availableModels,
@@ -649,13 +671,20 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         state.messageReceipts[clientMessageId] = {
           threadId,
           turnId,
-          contentHash: messageContentHash(input, images, goal),
+          contentHash: messageContentHash(input, images, validatedFiles, goal),
           createdAt: Date.now(),
         };
       });
     }
     if (clientMessageId) {
-      projection.recordUserMessage(threadId, turnId, clientMessageId, input, images);
+      projection.recordUserMessage(
+        threadId,
+        turnId,
+        clientMessageId,
+        input,
+        images,
+        validatedFiles.map(({ name, path }) => ({ name, path })),
+      );
     }
     if (teamClaim) {
       await deliverTeamClaim(store, threadId, teamClaim.claimId, turnId);
@@ -686,12 +715,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     threadId: string,
     input: string,
     images: string[],
+    files: ThreadFileAttachment[],
     clientMessageId: string | null,
     goal = false,
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
-      const run = () => startTurnUnlocked(threadId, input, images, clientMessageId, goal);
+      const run = () => startTurnUnlocked(threadId, input, images, files, clientMessageId, goal);
       const result =
         projection.summary(threadId)?.settings.collaborationMode === "team"
           ? withKeyLock(teamParentLocks, threadId, run)
@@ -933,15 +963,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     turnId: string,
     input: string,
     images: string[],
+    files: ThreadFileAttachment[],
     clientMessageId: string | null,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
     const summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    const validatedFiles = await attachments.validate(threadId, files);
     const structuredInput = skillAwareMessageInput(
       skillsByCwd.get(summary.cwd),
       input,
       images,
+      validatedFiles,
       false,
     );
     const hasRecognizedSkills = structuredInput.some((item) => item.type === "skill");
@@ -951,14 +984,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const response: AttentionResponse = {
         kind: "userInput",
         answers:
-          firstQuestion && input.trim() && images.length === 0
+          firstQuestion && input.trim() && images.length === 0 && validatedFiles.length === 0
             ? { [firstQuestion.id]: [input.trim()] }
             : {},
       };
       const resolved = attention.resolve(userInput.id, response);
       if (resolved) {
         await projection.recordAttentionResponse(resolved, response);
-        if (images.length === 0) return turnId;
+        if (images.length === 0 && validatedFiles.length === 0) return turnId;
       }
     }
     const teamClaim =
@@ -1024,7 +1057,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, resultTurnId);
     if (clientMessageId) {
-      projection.recordUserMessage(threadId, resultTurnId, clientMessageId, input, images);
+      projection.recordUserMessage(
+        threadId,
+        resultTurnId,
+        clientMessageId,
+        input,
+        images,
+        validatedFiles.map(({ name, path }) => ({ name, path })),
+      );
     }
     if (teamClaim) {
       await deliverTeamClaim(store, threadId, teamClaim.claimId, resultTurnId);
@@ -1046,9 +1086,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     turnId: string,
     input: string,
     images: string[],
+    files: ThreadFileAttachment[],
     clientMessageId: string | null,
   ): Promise<string> => {
-    const run = () => steerTurnUnlocked(threadId, turnId, input, images, clientMessageId);
+    const run = () => steerTurnUnlocked(threadId, turnId, input, images, files, clientMessageId);
     return projection.summary(threadId)?.settings.collaborationMode === "team"
       ? withKeyLock(teamParentLocks, threadId, run)
       : run();
@@ -1064,11 +1105,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           threadId,
           message.text,
           message.images ?? [],
+          message.files ?? [],
           message.id,
           message.goal ?? false,
         ).then((result) => result.turnId),
       steer: (threadId, turnId, message) =>
-        steerTurn(threadId, turnId, message.text, message.images ?? [], message.id),
+        steerTurn(
+          threadId,
+          turnId,
+          message.text,
+          message.images ?? [],
+          message.files ?? [],
+          message.id,
+        ),
       deliveredTurnId: async (threadId, messageId) => {
         const result = parseThreadRead(
           await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
@@ -1914,7 +1963,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               await queue.drain(threadId);
               return;
             }
-            await startTurn(threadId, "", [], null);
+            await startTurn(threadId, "", [], [], null);
           } catch (error) {
             if (!(error instanceof TeamContinuationStoppedError)) {
               app.log.warn(
@@ -2152,13 +2201,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   }
   projection.setMissingThreadCleanup(async (threadId) => {
     browserExtension?.forgetThread(threadId);
-    if (!voiceTranscriptions) return;
-    await voiceTranscriptions.cancelThread(threadId).catch((error: unknown) => {
-      app.log.warn(
-        { err: safeError(error), threadId },
-        "Failed to cancel voice transcription for orphaned thread",
-      );
+    await attachments.removeThread(threadId).catch((error: unknown) => {
+      app.log.warn({ err: safeError(error), threadId }, "Failed to remove thread attachments");
     });
+    if (voiceTranscriptions) {
+      await voiceTranscriptions.cancelThread(threadId).catch((error: unknown) => {
+        app.log.warn(
+          { err: safeError(error), threadId },
+          "Failed to cancel voice transcription for orphaned thread",
+        );
+      });
+    }
   });
 
   let recoveryAgain = false;
@@ -3192,6 +3245,51 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
   });
 
+  app.post<{
+    Params: { id: string };
+    Querystring: { name?: string; mediaType?: string };
+    Body: Readable;
+  }>(
+    "/api/v1/threads/:id/attachments",
+    { bodyLimit: MAX_ATTACHMENT_BYTES },
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      if (typeof request.query.name !== "string" || !request.query.name.trim()) {
+        throw new AttachmentValidationError("File name is required");
+      }
+      const contentLengthHeader = request.headers["content-length"];
+      const contentLength =
+        typeof contentLengthHeader === "string" && /^\d+$/u.test(contentLengthHeader)
+          ? Number(contentLengthHeader)
+          : undefined;
+      const body = request.body;
+      if (!body || typeof body[Symbol.asyncIterator] !== "function") {
+        throw new AttachmentValidationError("File body is required");
+      }
+      const saved = await attachments.save(
+        request.params.id,
+        request.query.name,
+        request.query.mediaType ?? "application/octet-stream",
+        body,
+        contentLength,
+      );
+      return reply.code(201).send(saved);
+    },
+  );
+
+  app.delete<{ Params: { id: string; attachmentId: string } }>(
+    "/api/v1/threads/:id/attachments/:attachmentId",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      await attachments.remove(request.params.id, request.params.attachmentId);
+      return reply.code(204).send();
+    },
+  );
+
   app.get<{ Params: { id: string } }>("/api/v1/threads/:id/goal", async (request, reply) => {
     if (!projection.summary(request.params.id)) {
       return apiError(reply, 404, "not_found", "Thread not found");
@@ -3250,7 +3348,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (Object.keys(body).some((key) => key !== "path") || typeof body.path !== "string") {
         return apiError(reply, 400, "validation_failed", "path is required");
       }
-      const file = await resolveDownloadFile(body.path, summary.cwd);
+      const file =
+        (await attachments.resolveDownload(request.params.id, body.path)) ??
+        (await resolveDownloadFile(body.path, summary.cwd));
       const now = Date.now();
       removeExpiredDownloadTickets(downloadTickets, now);
       while (downloadTickets.size >= MAX_DOWNLOAD_TICKETS) {
@@ -3513,20 +3613,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
       const body = validateQueueMessageBody(request.body);
       if (operation.status === "ready" && operation.targetThreadId) {
+        const files = await attachments.validate(operation.targetThreadId, body.files);
         const message = await queue.enqueue(
           operation.targetThreadId,
           body.input,
           body.images,
           body.clientMessageId,
-          { goal: body.goal },
+          { goal: body.goal, files },
         );
         return reply.code(202).send(message);
+      }
+      if (body.files.length) {
+        throw new ProjectConflictError("File uploads are unavailable until the fork is ready");
       }
       const message: QueuedMessage = {
         id: body.clientMessageId ?? randomUUID(),
         threadId: operation.id,
         text: body.input.trim(),
         ...(body.images.length ? { images: body.images } : {}),
+        ...(body.files.length ? { files: body.files } : {}),
         ...(body.goal ? { goal: true } : {}),
         createdAt: Date.now(),
         status: "queued",
@@ -3538,8 +3643,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const existing = current.queuedMessages.find((candidate) => candidate.id === message.id);
         if (existing) {
           if (
-            messageContentHash(existing.text, existing.images ?? [], !!existing.goal) !==
-            messageContentHash(message.text, message.images ?? [], !!message.goal)
+            messageContentHash(
+              existing.text,
+              existing.images ?? [],
+              existing.files ?? [],
+              !!existing.goal,
+            ) !==
+            messageContentHash(
+              message.text,
+              message.images ?? [],
+              message.files ?? [],
+              !!message.goal,
+            )
           ) {
             throw new MessageQueueConflictError("Message id has already been used");
           }
@@ -3574,7 +3689,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           (item) => item.id === request.params.messageId,
         );
         if (!message) throw new MessageQueueNotFoundError("Queued message not found");
-        if (!body.input.trim() && !message.images?.length) {
+        if (!body.input.trim() && !message.images?.length && !message.files?.length) {
           throw new MessageQueueValidationError("Queued message text must not be empty");
         }
         message.text = body.input.trim();
@@ -3592,7 +3707,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const operation = store.view().forkOperations?.[request.params.id];
       if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
       if (operation.status === "ready" && operation.targetThreadId) {
+        const removed = queue
+          .list(operation.targetThreadId)
+          .find((message) => message.id === request.params.messageId);
         await queue.cancel(operation.targetThreadId, request.params.messageId);
+        await Promise.all(
+          (removed?.files ?? []).map((file) =>
+            attachments.remove(operation.targetThreadId!, file.id).catch(() => undefined),
+          ),
+        );
       } else {
         await store.update((state) => {
           const current = state.forkOperations?.[request.params.id];
@@ -3840,6 +3963,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         request.params.id,
         body.input,
         body.images ?? [],
+        body.files ?? [],
         body.clientMessageId ?? null,
         body.goal ?? false,
       );
@@ -3860,37 +3984,19 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         );
       }
       await voiceTranscriptions?.clearFailure(request.params.id);
-      const body = requireRecord<QueueMessageRequest>(request.body);
-      const images = validateImages(body.images);
-      const clientMessageId = optionalClientMessageId(body.clientMessageId);
-      if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
-        return apiError(reply, 400, "validation_failed", "input or images are required");
-      }
-      if (body.goal !== undefined && typeof body.goal !== "boolean") {
-        return apiError(reply, 400, "validation_failed", "goal must be boolean");
-      }
-      if (body.goal && (!body.input.trim() || body.input.trim().length > 4_000)) {
-        return apiError(
-          reply,
-          400,
-          "validation_failed",
-          "goal objective must be 1-4000 characters",
-        );
-      }
-      if (body.clientMessageId !== undefined && clientMessageId === null) {
-        return apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
-      }
+      const body = validateQueueMessageBody(request.body);
       const summary = projection.summary(request.params.id);
       if (!summary) {
         return apiError(reply, 404, "not_found", "Thread not found");
       }
       assertWritableThread(summary);
+      const files = await attachments.validate(request.params.id, body.files);
       const message = await queue.enqueue(
         request.params.id,
         body.input,
-        images,
-        clientMessageId ?? undefined,
-        { goal: body.goal },
+        body.images,
+        body.clientMessageId,
+        { goal: body.goal, files },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
@@ -3930,7 +4036,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      const removed = queue
+        .list(request.params.id)
+        .find((message) => message.id === request.params.messageId);
       await queue.cancel(request.params.id, request.params.messageId);
+      await Promise.all(
+        (removed?.files ?? []).map((file) =>
+          attachments.remove(request.params.id, file.id).catch(() => undefined),
+        ),
+      );
       return reply.code(204).send();
     },
   );
@@ -4092,8 +4206,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         error.message,
       );
     }
+    if (error instanceof AttachmentTooLargeError) {
+      return apiError(reply, 413, "payload_too_large", error.message);
+    }
+    if (error instanceof AttachmentValidationError) {
+      return apiError(reply, 400, "validation_failed", error.message);
+    }
     if ("statusCode" in error && error.statusCode === 413) {
-      return apiError(reply, 413, "payload_too_large", "Audio recording is too large");
+      return apiError(reply, 413, "payload_too_large", "Upload is too large");
     }
     if (error instanceof ProjectValidationError || error instanceof AttentionValidationError) {
       return apiError(reply, 400, "validation_failed", error.message);
@@ -7223,9 +7343,10 @@ function skillAwareMessageInput(
   entry: SkillsListEntry | undefined,
   text: string,
   images: string[],
+  files: ThreadFileAttachment[],
   goal: boolean,
 ): UserInput[] {
-  const input = messageInput(text, images);
+  const input = messageInput(text, images, files);
   if (goal || !entry || !/(?:^|\s)\$[\p{L}\p{N}_.:-]+/u.test(text)) return input;
   input.push(...explicitSkillItems(text, entry.skills));
   return input;
@@ -7258,10 +7379,15 @@ function explicitSkillItems(
   return result;
 }
 
-function messageInput(text: string, images: string[]): UserInput[] {
+function messageInput(
+  text: string,
+  images: string[],
+  files: ThreadFileAttachment[] = [],
+): UserInput[] {
   const result: UserInput[] = [];
   if (text.trim()) result.push({ type: "text", text: text.trim(), text_elements: [] });
   result.push(...images.map((url) => ({ type: "image" as const, url })));
+  result.push(...files.map(({ name, path }) => ({ type: "mention" as const, name, path })));
   return result;
 }
 
@@ -7361,19 +7487,24 @@ function parseExpectedDraftRevision(value: string | undefined): number | null | 
 function validateQueueMessageBody(value: unknown): {
   input: string;
   images: string[];
+  files: ThreadFileAttachment[];
   goal: boolean;
   clientMessageId?: string;
 } {
   const body = requireRecord<QueueMessageRequest>(value);
   if (
-    Object.keys(body).some((key) => !["input", "images", "goal", "clientMessageId"].includes(key))
+    Object.keys(body).some(
+      (key) => !["input", "images", "files", "goal", "clientMessageId"].includes(key),
+    )
   ) {
     throw new ProjectValidationError("Unknown queue field");
   }
   const images = validateImages(body.images);
+  const files = validateFiles(body.files);
+  validateAttachmentPayloadSize(images, files);
   const clientMessageId = optionalClientMessageId(body.clientMessageId);
-  if (typeof body.input !== "string" || (!body.input.trim() && !images.length)) {
-    throw new ProjectValidationError("input or images are required");
+  if (typeof body.input !== "string" || (!body.input.trim() && !images.length && !files.length)) {
+    throw new ProjectValidationError("input, images, or files are required");
   }
   if (body.goal !== undefined && typeof body.goal !== "boolean") {
     throw new ProjectValidationError("goal must be boolean");
@@ -7387,6 +7518,7 @@ function validateQueueMessageBody(value: unknown): {
   return {
     input: body.input,
     images,
+    files,
     goal: body.goal ?? false,
     ...(clientMessageId ? { clientMessageId } : {}),
   };
@@ -7422,13 +7554,17 @@ async function readForkTurn(
 function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnRequest | undefined {
   const value = requireRecord<StartTurnRequest>(body);
   if (
-    Object.keys(value).some((key) => !["input", "images", "goal", "clientMessageId"].includes(key))
+    Object.keys(value).some(
+      (key) => !["input", "images", "files", "goal", "clientMessageId"].includes(key),
+    )
   ) {
     throw new ProjectValidationError("Unknown turn field");
   }
   const images = validateImages(value.images);
-  if (typeof value.input !== "string" || (!value.input.trim() && !images.length)) {
-    apiError(reply, 400, "validation_failed", "input or images are required");
+  const files = validateFiles(value.files);
+  validateAttachmentPayloadSize(images, files);
+  if (typeof value.input !== "string" || (!value.input.trim() && !images.length && !files.length)) {
+    apiError(reply, 400, "validation_failed", "input, images, or files are required");
     return undefined;
   }
   if (value.goal !== undefined && typeof value.goal !== "boolean") {
@@ -7446,7 +7582,7 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
     apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
     return undefined;
   }
-  return { ...value, images };
+  return { ...value, images, files };
 }
 
 function optionalClientMessageId(value: unknown): string | null {
@@ -7472,11 +7608,40 @@ function validateImages(value: unknown): string[] {
   return value;
 }
 
+function validateFiles(value: unknown): ThreadFileAttachment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every(isAttachmentShape)) {
+    throw new ProjectValidationError("files must contain valid uploaded attachments");
+  }
+  return value.map((attachment) => ({ ...attachment }));
+}
+
+function validateAttachmentPayloadSize(
+  images: readonly string[],
+  files: readonly ThreadFileAttachment[],
+): void {
+  const imageBytes = images.reduce((total, image) => {
+    const comma = image.indexOf(",");
+    const encoded = comma >= 0 ? image.length - comma - 1 : 0;
+    const bytes = Math.floor((encoded * 3) / 4);
+    if (bytes > MAX_ATTACHMENT_BYTES) {
+      throw new AttachmentTooLargeError("File exceeds the 100 MiB limit");
+    }
+    return total + bytes;
+  }, 0);
+  if (
+    imageBytes + files.reduce((total, file) => total + file.size, 0) >
+    MAX_MESSAGE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentTooLargeError("Attachments exceed the 250 MiB message limit");
+  }
+}
+
 function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
   const body = requireRecord<UpdateThreadDraftRequest>(value);
   if (
     Object.keys(body).some(
-      (key) => !["input", "images", "goalMode", "annotations"].includes(key),
+      (key) => !["input", "images", "files", "goalMode", "annotations"].includes(key),
     ) ||
     typeof body.input !== "string" ||
     typeof body.goalMode !== "boolean" ||
@@ -7498,6 +7663,11 @@ function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
     }
     return { id: image.id, name: image.name, url: image.url };
   });
+  const files = validateFiles(body.files);
+  validateAttachmentPayloadSize(
+    images.map((image) => image.url),
+    files,
+  );
   const annotations = body.annotations.map((annotation) => {
     if (
       !isRecord(annotation) ||
@@ -7530,7 +7700,7 @@ function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
       createdAt: annotation.createdAt,
     };
   });
-  return { input: body.input, images, goalMode: body.goalMode, annotations };
+  return { input: body.input, images, files, goalMode: body.goalMode, annotations };
 }
 
 function validateUserInputDraft(

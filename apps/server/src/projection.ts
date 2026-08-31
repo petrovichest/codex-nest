@@ -661,6 +661,7 @@ export class AppProjection extends EventEmitter {
     const empty =
       value.input === "" &&
       value.images.length === 0 &&
+      (value.files?.length ?? 0) === 0 &&
       !value.goalMode &&
       value.annotations.length === 0;
     let draft: ThreadDraft | null = null;
@@ -1117,6 +1118,7 @@ export class AppProjection extends EventEmitter {
     messageId: string,
     text: string,
     images: string[],
+    files: Array<{ name: string; path: string }> = [],
   ): void {
     const key = activityKey(threadId, turnId, messageId);
     if (this.activity.get(key)?.type === "userMessage") return;
@@ -1126,6 +1128,7 @@ export class AppProjection extends EventEmitter {
       status: "completed",
       text: text.trim(),
       images,
+      ...(files.length ? { files } : {}),
       timestamp: Date.now(),
       phase: null,
     };
@@ -3287,7 +3290,10 @@ function normalizeActivity(
   lifecycleStarted = false,
 ): ActivityItem {
   switch (item.type) {
-    case "userMessage":
+    case "userMessage": {
+      const files = item.content
+        .filter((part) => part.type === "mention")
+        .map((part) => ({ name: part.name, path: part.path }));
       return {
         type: "userMessage",
         id: item.clientId ?? item.id,
@@ -3297,9 +3303,11 @@ function normalizeActivity(
           .map((part) => part.text)
           .join("\n"),
         images: item.content.filter((part) => part.type === "image").map((part) => part.url),
+        ...(files.length ? { files } : {}),
         timestamp,
         phase: null,
       };
+    }
     case "agentMessage":
       return {
         type: "agentMessage",
@@ -3646,6 +3654,7 @@ function threadDraftMatches(
     return (
       value.input === "" &&
       value.images.length === 0 &&
+      (value.files?.length ?? 0) === 0 &&
       !value.goalMode &&
       value.annotations.length === 0
     );
@@ -3654,10 +3663,11 @@ function threadDraftMatches(
     {
       input: current.input,
       images: current.images,
+      files: current.files ?? [],
       goalMode: current.goalMode,
       annotations: current.annotations,
     },
-    value,
+    { ...value, files: value.files ?? [] },
   );
 }
 

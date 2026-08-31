@@ -28,6 +28,7 @@ import type {
   ThreadArtifactsResponse,
   ThreadDraft,
   ThreadGoal,
+  ThreadFileAttachment,
   ThreadHistoryPage,
   ThreadSummary,
   TurnItemsResponse,
@@ -304,6 +305,7 @@ export class ApiClient {
       body: {
         input: body.input,
         images: body.images,
+        ...(body.files?.length ? { files: body.files } : {}),
         goalMode: body.goalMode,
         annotations: body.annotations,
       },
@@ -315,6 +317,29 @@ export class ApiClient {
 
   readGitChanges(id: string): Promise<GitChangesSummary> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/git-changes`);
+  }
+
+  uploadAttachment(id: string, file: File): Promise<ThreadFileAttachment> {
+    const query = new URLSearchParams({
+      name: file.name || "file",
+      mediaType: file.type || "application/octet-stream",
+    });
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/attachments?${query.toString()}`,
+      {
+        method: "POST",
+        rawBody: file,
+        contentType: "application/octet-stream",
+        timeoutMs: null,
+      },
+    );
+  }
+
+  deleteAttachment(id: string, attachmentId: string): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: "DELETE" },
+    );
   }
 
   readThreadArtifacts(id: string): Promise<ThreadArtifactsResponse> {
@@ -380,6 +405,7 @@ export class ApiClient {
       body: {
         input: body.input,
         images: body.images,
+        ...(body.files?.length ? { files: body.files } : {}),
         goalMode: body.goalMode,
         annotations: body.annotations,
       },
