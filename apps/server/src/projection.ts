@@ -56,9 +56,11 @@ import type {
   CodexNestStateView,
   DeepReadonly,
   ForkOperationState,
+  InterruptedReasoningState,
   ManagedTeamTaskState,
   SessionSnapshotState,
   StateStore,
+  ThreadMetaState,
   TimelineArtifact,
   VoiceTranscriptionState,
 } from "./state/store";
@@ -453,13 +455,15 @@ export class AppProjection extends EventEmitter {
           this.progress.get(turnKey(cached.thread.id, turn.id)),
           turn.status === "inProgress"
             ? this.liveActivities(cached.thread.id, turn.id)
-            : this.terminalUserActivityOverlay(
+            : this.terminalActivityOverlay(
                 cached.thread.id,
                 turn.id,
                 projectedTurnItemIds(turn),
+                normalizeOutcome(turn.status),
               ),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
+          this.interruptedReasoning(cached.thread.id, turn.id),
         ),
       );
     if (
@@ -521,18 +525,19 @@ export class AppProjection extends EventEmitter {
       turn.items,
       turn.status === "inProgress"
         ? this.liveActivities(threadId, turn.id)
-        : this.terminalUserActivityOverlay(
+        : this.terminalActivityOverlay(
             threadId,
             turn.id,
             new Set(turn.items.map((item) => item.id)),
+            turn.status,
           ),
-      turn.status !== "inProgress",
+      turn.status,
     );
     return {
       ...turn,
       progress: this.progress.get(turnKey(threadId, turn.id)) ?? turn.progress,
       items: mergeTimelineArtifacts(
-        liveMerge.items,
+        mergeInterruptedReasoning(liveMerge.items, this.interruptedReasoning(threadId, turn.id)),
         cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
         liveMerge.aliases,
       ),
@@ -622,9 +627,15 @@ export class AppProjection extends EventEmitter {
           this.progress.get(turnKey(id, turn.id)),
           turn.status === "inProgress"
             ? this.liveActivities(id, turn.id)
-            : this.terminalUserActivityOverlay(id, turn.id, projectedTurnItemIds(turn)),
+            : this.terminalActivityOverlay(
+                id,
+                turn.id,
+                projectedTurnItemIds(turn),
+                normalizeOutcome(turn.status),
+              ),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
+          this.interruptedReasoning(id, turn.id),
         );
         if (turn.status !== "inProgress") {
           this.clearTurnActivities(id, turn.id);
@@ -923,9 +934,19 @@ export class AppProjection extends EventEmitter {
         items = normalizeTurn(
           turn,
           this.progress.get(turnKey(threadId, turnId)),
-          turn.status === "inProgress" ? this.liveActivities(threadId, turnId) : [],
+          turn.status === "inProgress"
+            ? this.liveActivities(threadId, turnId)
+            : turn.status === "interrupted"
+              ? this.terminalActivityOverlay(
+                  threadId,
+                  turnId,
+                  projectedTurnItemIds(turn),
+                  "interrupted",
+                )
+              : [],
           artifacts,
           true,
+          this.interruptedReasoning(threadId, turnId),
         ).items;
         break;
       }
@@ -990,17 +1011,29 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
     if (cached.currentTurnId && !expectedTurnIds.includes(cached.currentTurnId)) return;
+    const interruptedReasoning = new Map(
+      expectedTurnIds.map((turnId) => [turnId, this.collectInterruptedReasoning(threadId, turnId)]),
+    );
     cached.currentTurnId = null;
     cached.liveOutcome = "interrupted";
     cached.thread.status = { type: "idle" };
     cached.thread.updatedAt = Math.max(cached.thread.updatedAt, Math.floor(Date.now() / 1_000));
     const updatedAt = cached.thread.updatedAt * 1_000;
+    let reasoningChanged = false;
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.lastOutcome = "interrupted";
       meta.outcomeUpdatedAt = updatedAt;
+      for (const [turnId, items] of interruptedReasoning) {
+        reasoningChanged =
+          updateInterruptedReasoning(meta, turnId, items, "merge") || reasoningChanged;
+      }
       state.threadMeta[threadId] = meta;
     });
+    if (reasoningChanged) {
+      this.bumpHistoryRevision(threadId);
+      await this.historyCache.invalidateThread(threadId);
+    }
     await this.saveSessionSnapshot(threadId, true);
     this.publishThread(threadId);
   }
@@ -1196,14 +1229,60 @@ export class AppProjection extends EventEmitter {
     return items;
   }
 
-  private terminalUserActivityOverlay(
+  private interruptedReasoning(
+    threadId: string,
+    turnId: string,
+  ): DeepReadonly<InterruptedReasoningState[]> {
+    return this.store.view().threadMeta[threadId]?.interruptedReasoning?.[turnId] ?? [];
+  }
+
+  private collectInterruptedReasoning(
+    threadId: string,
+    turnId: string,
+    source?: Turn,
+  ): InterruptedReasoningState[] {
+    const previous =
+      this.turnStates.get(turnKey(threadId, turnId))?.items ??
+      this.latestDetails.get(threadId)?.turns.find((candidate) => candidate.id === turnId)?.items ??
+      [];
+    const startedAt = source && source.startedAt !== null ? source.startedAt * 1_000 : null;
+    const completedAt = source && source.completedAt !== null ? source.completedAt * 1_000 : null;
+    const canonical = (source?.items ?? [])
+      .filter((item) => !isInternalTeamContinuationItem(item))
+      .map((item) =>
+        normalizeActivity(
+          item,
+          item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+        ),
+      );
+    let items = source
+      ? mergeLiveActivities(canonical, previous, "inProgress").items
+      : [...previous];
+    items = mergeLiveActivities(items, this.liveActivities(threadId, turnId), "inProgress").items;
+    const timeline = items.filter((item) => !isTimelineArtifact(item));
+    return timeline.flatMap((item, index): InterruptedReasoningState[] => {
+      if (item.type !== "reasoning" || !item.text.trim()) return [];
+      return [
+        {
+          id: item.id,
+          text: item.text,
+          timestamp: item.timestamp,
+          beforeItemId: timeline[index + 1]?.id ?? null,
+        },
+      ];
+    });
+  }
+
+  private terminalActivityOverlay(
     threadId: string,
     turnId: string,
     existingIds: ReadonlySet<string>,
+    outcome: ThreadOutcome,
   ): ActivityItem[] {
     // Terminal notifications and summary history pages may omit inputs that were already accepted.
     // Retain missing user messages together with canonical timeline anchors so steering inputs keep
-    // their live position instead of being appended after the terminal response.
+    // their live position instead of being appended after the terminal response. Interrupted
+    // reasoning may have an empty canonical summary, so keep the streamed text as completed work.
     const retained: ActivityItem[] = [];
     const seen = new Set<string>();
     const append = (items: readonly ActivityItem[] | undefined) => {
@@ -1212,7 +1291,8 @@ export class AppProjection extends EventEmitter {
         seen.add(item.id);
         if (
           (item.type === "userMessage" && !existingIds.has(item.id)) ||
-          (item.type !== "userMessage" && existingIds.has(item.id))
+          (item.type !== "userMessage" && existingIds.has(item.id)) ||
+          (outcome === "interrupted" && item.type === "reasoning")
         ) {
           retained.push(item);
         }
@@ -1242,9 +1322,15 @@ export class AppProjection extends EventEmitter {
         this.progress.get(key),
         source.status === "inProgress"
           ? this.liveActivities(threadId, turnId)
-          : this.terminalUserActivityOverlay(threadId, turnId, projectedTurnItemIds(source)),
+          : this.terminalActivityOverlay(
+              threadId,
+              turnId,
+              projectedTurnItemIds(source),
+              normalizeOutcome(source.status),
+            ),
         cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
         source.itemsView === "full",
+        this.interruptedReasoning(threadId, turnId),
       );
     } else {
       const previous =
@@ -2133,6 +2219,14 @@ export class AppProjection extends EventEmitter {
         );
         const cached = this.threads.get(notification.params.threadId);
         const outcome = normalizeOutcome(notification.params.turn.status);
+        const interruptedReasoning =
+          outcome === "interrupted"
+            ? this.collectInterruptedReasoning(
+                notification.params.threadId,
+                notification.params.turn.id,
+                notification.params.turn,
+              )
+            : [];
         if (cached) {
           const turnIndex = cached.thread.turns.findIndex(
             (turn) => turn.id === notification.params.turn.id,
@@ -2174,8 +2268,9 @@ export class AppProjection extends EventEmitter {
                 ),
               ),
             this.liveActivities(notification.params.threadId, notification.params.turn.id),
-            true,
+            outcome,
           ).aliases;
+          let reasoningChanged = false;
           await this.store.update((state) => {
             const meta = state.threadMeta[cached.thread.id] ?? {
               pinned: false,
@@ -2183,6 +2278,12 @@ export class AppProjection extends EventEmitter {
             };
             meta.lastOutcome = outcome;
             meta.outcomeUpdatedAt = updatedAt;
+            reasoningChanged = updateInterruptedReasoning(
+              meta,
+              notification.params.turn.id,
+              interruptedReasoning,
+              outcome === "interrupted" ? "merge" : "clear",
+            );
             const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
             meta.awaitingPlanResponse =
               outcome === "completed" &&
@@ -2208,6 +2309,10 @@ export class AppProjection extends EventEmitter {
             if (snapshot) meta.sessionSnapshot = snapshot;
             state.threadMeta[cached.thread.id] = meta;
           });
+          if (reasoningChanged) {
+            this.bumpHistoryRevision(notification.params.threadId);
+            await this.historyCache.invalidateThread(notification.params.threadId);
+          }
           this.clearTurnActivities(notification.params.threadId, notification.params.turn.id);
           this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
             immediate: true,
@@ -3122,9 +3227,11 @@ function normalizeTurn(
   liveActivities: ActivityItem[] = [],
   artifacts: TimelineArtifact[] = [],
   itemsLoaded = true,
+  interruptedReasoning: DeepReadonly<InterruptedReasoningState[]> = [],
 ): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
+  const status = turn.status === "inProgress" ? "inProgress" : normalizeOutcome(turn.status);
   const liveMerge = mergeLiveActivities(
     turn.items
       .filter((item) => !isInternalTeamContinuationItem(item))
@@ -3135,9 +3242,13 @@ function normalizeTurn(
         ),
       ),
     liveActivities,
-    turn.status !== "inProgress",
+    status,
   );
-  const items = mergeTimelineArtifacts(liveMerge.items, artifacts, liveMerge.aliases);
+  const items = mergeTimelineArtifacts(
+    mergeInterruptedReasoning(liveMerge.items, interruptedReasoning),
+    artifacts,
+    liveMerge.aliases,
+  );
   if (turn.error) {
     items.push({
       type: "error",
@@ -3148,7 +3259,7 @@ function normalizeTurn(
   }
   return {
     id: turn.id,
-    status: turn.status === "inProgress" ? "inProgress" : normalizeOutcome(turn.status),
+    status,
     startedAt,
     completedAt,
     durationMs: turn.durationMs,
@@ -3191,7 +3302,7 @@ function mergeMaterializedTurn(current: TurnView, incoming: TurnView): TurnView 
 function mergeLiveActivities(
   items: ActivityItem[],
   liveActivities: ActivityItem[],
-  turnIsTerminal: boolean,
+  turnStatus: TurnView["status"],
 ): { items: ActivityItem[]; aliases: Map<string, string> } {
   const result = [...items];
   const unmatchedCanonicalIds = new Set(items.map((item) => item.id));
@@ -3214,6 +3325,10 @@ function mergeLiveActivities(
     unmatchedCanonicalIds.delete(exact);
   }
   for (const [itemIndex, item] of liveActivities.entries()) {
+    const projectedItem =
+      turnStatus === "interrupted" && isReasoningActivity(item)
+        ? { ...item, status: "completed" as const }
+        : item;
     const canonicalId = canonicalMatchByLiveId.get(item.id);
     const existing = canonicalId
       ? result.findIndex((candidate) => candidate.id === canonicalId)
@@ -3222,7 +3337,7 @@ function mergeLiveActivities(
       const canonical = result[existing]!;
       if (item.id !== canonical.id) aliases.set(item.id, canonical.id);
       result[existing] = {
-        ...fresherLiveActivity(canonical, item, turnIsTerminal),
+        ...fresherLiveActivity(canonical, projectedItem, turnStatus),
         id: canonical.id,
       } as ActivityItem;
       continue;
@@ -3231,7 +3346,7 @@ function mergeLiveActivities(
       item.type === "userMessage" &&
       !result.some((candidate) => candidate.type === "userMessage")
     ) {
-      result.unshift(item);
+      result.unshift(projectedItem);
       continue;
     }
     const nextCanonicalId = liveActivities
@@ -3245,7 +3360,7 @@ function mergeLiveActivities(
     const insertion = nextCanonicalId
       ? result.findIndex((candidate) => candidate.id === nextCanonicalId)
       : result.length;
-    result.splice(insertion, 0, item);
+    result.splice(insertion, 0, projectedItem);
   }
   return { items: result, aliases };
 }
@@ -3253,8 +3368,12 @@ function mergeLiveActivities(
 function fresherLiveActivity(
   current: ActivityItem,
   live: ActivityItem,
-  turnIsTerminal: boolean,
+  turnStatus: TurnView["status"],
 ): ActivityItem {
+  const turnIsTerminal = turnStatus !== "inProgress";
+  if (turnStatus === "interrupted" && isReasoningActivity(current) && isReasoningActivity(live)) {
+    return richerInterruptedReasoning(current, { ...live, status: "completed" });
+  }
   if (current.status === "inProgress" && live.status !== "inProgress") return live;
   if (current.status !== "inProgress" && live.status === "inProgress") {
     return turnIsTerminal ? current : live;
@@ -3274,6 +3393,92 @@ function fresherLiveActivity(
     }
   }
   return live;
+}
+
+type ReasoningActivity = Extract<ActivityItem, { text: string }> & { type: "reasoning" };
+
+function isReasoningActivity(item: ActivityItem): item is ReasoningActivity {
+  return item.type === "reasoning";
+}
+
+function mergeInterruptedReasoning(
+  items: ActivityItem[],
+  retained: DeepReadonly<InterruptedReasoningState[]>,
+): ActivityItem[] {
+  if (!retained.length) return items;
+  const result = [...items];
+  for (let index = retained.length - 1; index >= 0; index -= 1) {
+    const saved = retained[index]!;
+    const activity: ReasoningActivity = {
+      type: "reasoning",
+      id: saved.id,
+      status: "completed",
+      text: saved.text,
+      images: [],
+      timestamp: saved.timestamp,
+      phase: null,
+    };
+    const existing = result.findIndex((item) => item.id === saved.id);
+    if (existing >= 0) {
+      const current = result[existing]!;
+      result[existing] = isReasoningActivity(current)
+        ? richerInterruptedReasoning(current, activity)
+        : current;
+      continue;
+    }
+    const before = saved.beforeItemId
+      ? result.findIndex((item) => item.id === saved.beforeItemId)
+      : -1;
+    result.splice(before >= 0 ? before : result.length, 0, activity);
+  }
+  return result;
+}
+
+function richerInterruptedReasoning(
+  canonical: ReasoningActivity,
+  retained: ReasoningActivity,
+): ReasoningActivity {
+  if (!canonical.text || retained.text.startsWith(canonical.text)) {
+    return { ...retained, status: "completed" };
+  }
+  return { ...canonical, status: "completed" };
+}
+
+function updateInterruptedReasoning(
+  meta: ThreadMetaState,
+  turnId: string,
+  incoming: InterruptedReasoningState[],
+  mode: "merge" | "clear",
+): boolean {
+  const current = meta.interruptedReasoning?.[turnId] ?? [];
+  let next: InterruptedReasoningState[] = [];
+  if (mode === "merge") {
+    next = current.map((item) => ({ ...item }));
+    for (const item of incoming) {
+      const index = next.findIndex((candidate) => candidate.id === item.id);
+      if (index < 0) {
+        next.push({ ...item });
+        continue;
+      }
+      const existing = next[index]!;
+      next[index] = existing.text.startsWith(item.text)
+        ? {
+            ...item,
+            text: existing.text,
+            timestamp: existing.timestamp ?? item.timestamp,
+          }
+        : { ...item };
+    }
+  }
+  if (isDeepStrictEqual(current, next)) return false;
+  if (next.length) {
+    meta.interruptedReasoning ??= {};
+    meta.interruptedReasoning[turnId] = next;
+  } else if (meta.interruptedReasoning) {
+    delete meta.interruptedReasoning[turnId];
+    if (!Object.keys(meta.interruptedReasoning).length) delete meta.interruptedReasoning;
+  }
+  return true;
 }
 
 function isInternalTeamContinuationItem(item: Turn["items"][number]): boolean {

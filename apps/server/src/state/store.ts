@@ -27,6 +27,13 @@ export type TimelineArtifact = Extract<
   { type: "userInputResponse" | "planChecklist" | "orchestrationNotice" }
 >;
 
+export interface InterruptedReasoningState {
+  id: string;
+  text: string;
+  timestamp: number | null;
+  beforeItemId: string | null;
+}
+
 export type ManagedTeamTaskStatus = "queued" | "starting" | "running" | ThreadOutcome;
 
 export type ManagedTeamTaskAccessMode = "readOnly" | "isolatedWrite" | "sharedWrite";
@@ -224,6 +231,7 @@ export interface ThreadMetaState {
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
+  interruptedReasoning?: Record<string, InterruptedReasoningState[]>;
   teamOrchestration?: TeamOrchestrationState;
   managedTeamToolsAvailable?: true;
   sessionArtifactsVersion?: 1;
@@ -1142,6 +1150,8 @@ function validateState(value: unknown): CodexNestState {
       (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
+      (meta.interruptedReasoning !== undefined &&
+        !isInterruptedReasoning(meta.interruptedReasoning)) ||
       (meta.teamOrchestration !== undefined && !isTeamOrchestrationState(meta.teamOrchestration)) ||
       meta.teamToolsVersion !== undefined ||
       (meta.managedTeamToolsAvailable !== undefined && meta.managedTeamToolsAvailable !== true) ||
@@ -1250,6 +1260,28 @@ function isUserInputDrafts(value: unknown): value is Record<string, UserInputDra
       Number.isSafeInteger(draft.revision) &&
       draft.revision > 0 &&
       isNonNegativeFiniteNumber(draft.updatedAt),
+  );
+}
+
+function isInterruptedReasoning(
+  value: unknown,
+): value is Record<string, InterruptedReasoningState[]> {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(
+    ([turnId, items]) =>
+      isBoundedString(turnId, 500) &&
+      Array.isArray(items) &&
+      items.length > 0 &&
+      items.every(
+        (item) =>
+          isRecord(item) &&
+          hasOnlyKeys(item, ["id", "text", "timestamp", "beforeItemId"]) &&
+          isBoundedString(item.id, 500) &&
+          typeof item.text === "string" &&
+          Boolean(item.text.trim()) &&
+          (item.timestamp === null || isNonNegativeFiniteNumber(item.timestamp)) &&
+          (item.beforeItemId === null || isBoundedString(item.beforeItemId, 500)),
+      ),
   );
 }
 

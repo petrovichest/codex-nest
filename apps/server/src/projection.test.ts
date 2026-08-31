@@ -4201,6 +4201,159 @@ describe("AppProjection", () => {
     ]);
   });
 
+  it("persists streamed reasoning across an interruption and projection restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const statePath = join(directory, "state.json");
+    const store = new StateStore(statePath);
+    await store.load();
+    let includeCanonicalReasoning = true;
+    const finalMessage = {
+      type: "agentMessage" as const,
+      id: "after-reasoning",
+      text: "Частичный ответ",
+      phase: "commentary" as const,
+      memoryCitation: null,
+    };
+    const canonicalTurn = (): Thread["turns"][number] => ({
+      ...testTurn("live", "completed"),
+      status: "interrupted",
+      itemsView: "full",
+      items: [
+        ...(includeCanonicalReasoning
+          ? [
+              {
+                type: "reasoning" as const,
+                id: "reasoning",
+                summary: [],
+                content: [],
+              },
+            ]
+          : []),
+        finalMessage,
+      ],
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [canonicalTurn()], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(
+      thread("one", "/work", 10, { type: "active", activeFlags: [] }, [
+        testTurn("live", "inProgress"),
+      ]),
+    );
+    await projection.setCurrentTurn("one", "live");
+
+    bridge.emit("notification", {
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "reasoning",
+        delta: "Проверяю сохранение рассуждения",
+        summaryIndex: 0,
+      },
+    } satisfies ServerNotification);
+
+    await projection.markInterrupted("one", ["live"]);
+    expect(store.snapshot().threadMeta.one?.interruptedReasoning?.live).toMatchObject([
+      {
+        id: "reasoning",
+        text: "Проверяю сохранение рассуждения",
+      },
+    ]);
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: canonicalTurn() },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("interrupted"));
+    const liveItems = (await projection.readThread("one", { refresh: true })).turns[0]?.items ?? [];
+    expect(liveItems.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(liveItems[0]).toMatchObject({
+      type: "reasoning",
+      status: "completed",
+      text: "Проверяю сохранение рассуждения",
+    });
+    await store.flushed();
+
+    const reloadedStore = new StateStore(statePath);
+    await reloadedStore.load();
+    const reloadedBridge = new FakeBridge();
+    reloadedBridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list") {
+        return { data: [canonicalTurn()], nextCursor: null, backwardsCursor: null };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    const reloaded = new AppProjection(
+      reloadedBridge as unknown as CodexBridge,
+      reloadedStore,
+      new AttentionManager(),
+    );
+    const restoredItems =
+      (await reloaded.readThread("one", { refresh: true })).turns[0]?.items ?? [];
+    expect(restoredItems.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(restoredItems[0]).toMatchObject({
+      type: "reasoning",
+      status: "completed",
+      text: "Проверяю сохранение рассуждения",
+    });
+
+    includeCanonicalReasoning = false;
+    const fullyLoaded = await reloaded.readTurnItems("one", "live");
+    expect(fullyLoaded.items.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(fullyLoaded.items[0]).toMatchObject({
+      type: "reasoning",
+      status: "completed",
+      text: "Проверяю сохранение рассуждения",
+    });
+  });
+
+  it("drops captured interrupted reasoning when the turn completes normally", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    await projection.setCurrentTurn("one", "live");
+    bridge.emit("notification", {
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "reasoning",
+        delta: "Почти закончено",
+        summaryIndex: 0,
+      },
+    } satisfies ServerNotification);
+    await projection.markInterrupted("one", ["live"]);
+    expect(store.snapshot().threadMeta.one?.interruptedReasoning?.live).toHaveLength(1);
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: testTurn("live", "completed") },
+    } satisfies ServerNotification);
+
+    await vi.waitFor(() =>
+      expect(store.snapshot().threadMeta.one?.interruptedReasoning).toBeUndefined(),
+    );
+  });
+
   it("rejoins and restores an active turn once per app-server connection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
