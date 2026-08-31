@@ -1688,12 +1688,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         if (!operation) return;
       }
 
-      const point = await validateForkPoint(
-        bridge,
-        operation.sourceThreadId,
-        operation.lastTurnId,
-        operation.agentMessageId,
-      );
+      const point = await validateForkPoint(bridge, operation.sourceThreadId, operation.lastTurnId);
       if (operation.mode === "exact") {
         const rollout = await analyzeForkRollout(operation.rolloutPath, operation.lastTurnId);
         await updateForkOperation(operationId, (current) => {
@@ -3756,34 +3751,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!source) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(source);
 
-      const turn = await readForkTurn(bridge, source.id, body.lastTurnId);
-      if (!turn) {
-        return apiError(reply, 400, "validation_failed", "Fork turn was not found");
-      }
-      if (turn.status !== "completed") {
-        return apiError(reply, 409, "conflict", "Only completed turns can be forked");
-      }
-      const forkResponse = [...turn.items]
-        .reverse()
-        .find(
-          (item): item is Extract<ThreadItem, { type: "agentMessage" | "plan" }> =>
-            (item.type === "agentMessage" || item.type === "plan") && Boolean(item.text.trim()),
-        );
-      if (!forkResponse || forkResponse.id !== body.agentMessageId) {
-        return apiError(
-          reply,
-          400,
-          "validation_failed",
-          "agentMessageId must select the last non-empty agent message or plan of the turn",
-        );
-      }
+      const point = await validateForkPoint(bridge, source.id, body.lastTurnId);
       if (!threadTitles) throw new Error("Thread title generation is unavailable");
       const model = effectiveTitleModel(
         source.settings,
         store.view().taskDefaults,
         projection.availableModels,
       );
-      const title = await threadTitles.generate(forkResponse.text, {
+      const title = await threadTitles.generate(point.text, {
         cwd: source.cwd,
         model: model?.id,
         effort: model?.reasoningEfforts[0]?.value,
@@ -3793,7 +3768,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           "thread/fork",
           {
             threadId: source.id,
-            lastTurnId: turn.id,
+            lastTurnId: point.turn.id,
             excludeTurns: true,
             serviceTier: null,
           },
@@ -7439,7 +7414,6 @@ async function validateForkPoint(
   bridge: CodexBridge,
   threadId: string,
   lastTurnId: string,
-  agentMessageId: string,
 ): Promise<{
   turn: Turn;
   response: Extract<ThreadItem, { type: "agentMessage" | "plan" }>;
@@ -7450,16 +7424,16 @@ async function validateForkPoint(
   if (turn.status !== "completed") {
     throw new ProjectConflictError("Only completed turns can be forked");
   }
+  // Item IDs can change from msg_* in live notifications to item-N in historical reads.
+  // The Codex fork boundary is the stable turn ID, so resolve its response from fresh history.
   const response = [...turn.items]
     .reverse()
     .find(
       (item): item is Extract<ThreadItem, { type: "agentMessage" | "plan" }> =>
         (item.type === "agentMessage" || item.type === "plan") && Boolean(item.text.trim()),
     );
-  if (!response || response.id !== agentMessageId) {
-    throw new ProjectValidationError(
-      "agentMessageId must select the last non-empty agent message or plan of the turn",
-    );
+  if (!response) {
+    throw new ProjectValidationError("Fork turn has no non-empty agent message or plan");
   }
   return { turn, response, text: response.text };
 }

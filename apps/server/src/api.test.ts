@@ -1955,6 +1955,80 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
+  it("retries an exact fork when the live response id differs from the historical id", async () => {
+    const harness = await createForkHarness();
+    harness.bridge.state = "disconnected" as never;
+    harness.bridge.threadTurns.set("thread", [
+      {
+        ...testTurn("selected-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("item-19", "Готовый ответ из истории")],
+      },
+    ]);
+    const payload = {
+      operationId: "unstable-response-id",
+      lastTurnId: "selected-turn",
+      agentMessageId: "msg_live_final_answer",
+      mode: "exact",
+    } as const;
+
+    expect(
+      (
+        await harness.app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/fork-operations",
+          headers: harness.headers,
+          payload,
+        })
+      ).statusCode,
+    ).toBe(202);
+    await harness.store.update((state) => {
+      const operation = state.forkOperations?.[payload.operationId];
+      if (!operation) return;
+      operation.status = "failed";
+      operation.error =
+        "agentMessageId must select the last non-empty agent message or plan of the turn";
+    });
+
+    const retried = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/fork-operations",
+      headers: harness.headers,
+      payload,
+    });
+    expect(retried.statusCode).toBe(202);
+    expect(harness.store.snapshot().forkOperations?.[payload.operationId]).toMatchObject({
+      status: "preparing",
+      agentMessageId: "msg_live_final_answer",
+      error: null,
+    });
+
+    harness.bridge.state = "ready";
+    harness.bridge.emit("state", "ready");
+    await vi.waitFor(() => {
+      expect(harness.store.snapshot().forkOperations?.[payload.operationId]).toMatchObject({
+        status: "ready",
+        agentText: "Готовый ответ из истории",
+        error: null,
+      });
+    });
+    expect(harness.threadTitles.generate).toHaveBeenCalledWith("Готовый ответ из истории", {
+      cwd: "/work",
+      model: "gpt-b",
+      effort: "low",
+    });
+    expect(harness.bridge.request).toHaveBeenCalledWith(
+      "thread/fork",
+      expect.objectContaining({
+        threadId: "thread",
+        lastTurnId: "selected-turn",
+        threadSource: "codexnest-fork:unstable-response-id",
+      }),
+      600_000,
+    );
+    await harness.app.close();
+  });
+
   it("deletes operation-owned temporary and target threads before removing a failed fork", async () => {
     const harness = await createForkHarness();
     harness.bridge.state = "disconnected" as never;
@@ -2152,7 +2226,7 @@ describe("session forks", () => {
       payload: {
         operationId: "compressed-operation",
         lastTurnId: "selected-turn",
-        agentMessageId: "selected-answer",
+        agentMessageId: "msg_live_final_answer",
         mode: "compressed",
       },
     });
@@ -2947,7 +3021,7 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
-  it("forks through the selected completed reply with a generated title and fresh state", async () => {
+  it("forks through the selected turn when live and historical response ids differ", async () => {
     const harness = await createForkHarness();
     await harness.store.update((state) => {
       state.taskDefaults = { titleModel: "gpt-a" };
@@ -2968,7 +3042,7 @@ describe("session forks", () => {
       method: "POST",
       url: "/api/v1/threads/thread/forks",
       headers: harness.headers,
-      payload: { lastTurnId: "selected-turn", agentMessageId: "selected-answer" },
+      payload: { lastTurnId: "selected-turn", agentMessageId: "msg_live_final_answer" },
     });
 
     expect(response.statusCode).toBe(201);
@@ -3111,7 +3185,7 @@ describe("session forks", () => {
     await harness.app.close();
   });
 
-  it("rejects missing, subagent, unfinished, missing, and mismatched fork points", async () => {
+  it("rejects missing, subagent, unfinished, unknown, and empty fork points", async () => {
     const harness = await createForkHarness();
     harness.bridge.missingThreadIds.add("missing");
     harness.projection.upsertThread({
@@ -3133,6 +3207,11 @@ describe("session forks", () => {
           agentMessage("last-answer", "Последний ответ"),
         ],
       },
+      {
+        ...testTurn("empty-turn", "completed"),
+        itemsView: "full",
+        items: [agentMessage("empty-answer", "  ")],
+      },
     ]);
 
     const issue = (id: string, lastTurnId: string, agentMessageId: string) =>
@@ -3147,10 +3226,10 @@ describe("session forks", () => {
     expect((await issue("child", "completed-turn", "last-answer")).statusCode).toBe(409);
     expect((await issue("thread", "running-turn", "running-answer")).statusCode).toBe(409);
     expect((await issue("thread", "unknown-turn", "last-answer")).statusCode).toBe(400);
-    const mismatched = await issue("thread", "completed-turn", "earlier-answer");
-    expect(mismatched.statusCode).toBe(400);
-    expect(mismatched.json()).toMatchObject({
-      error: { message: expect.stringContaining("last non-empty agent message") },
+    const empty = await issue("thread", "empty-turn", "empty-answer");
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json()).toMatchObject({
+      error: { message: expect.stringContaining("no non-empty agent message or plan") },
     });
     expect(harness.threadTitles.generate).not.toHaveBeenCalled();
     expect(harness.bridge.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
