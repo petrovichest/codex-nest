@@ -452,7 +452,11 @@ export class AppProjection extends EventEmitter {
           this.progress.get(turnKey(cached.thread.id, turn.id)),
           turn.status === "inProgress"
             ? this.liveActivities(cached.thread.id, turn.id)
-            : this.retainedUserActivities(cached.thread.id, turn.id, projectedTurnItemIds(turn)),
+            : this.terminalUserActivityOverlay(
+                cached.thread.id,
+                turn.id,
+                projectedTurnItemIds(turn),
+              ),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         ),
@@ -516,7 +520,7 @@ export class AppProjection extends EventEmitter {
       turn.items,
       turn.status === "inProgress"
         ? this.liveActivities(threadId, turn.id)
-        : this.retainedUserActivities(
+        : this.terminalUserActivityOverlay(
             threadId,
             turn.id,
             new Set(turn.items.map((item) => item.id)),
@@ -617,7 +621,7 @@ export class AppProjection extends EventEmitter {
           this.progress.get(turnKey(id, turn.id)),
           turn.status === "inProgress"
             ? this.liveActivities(id, turn.id)
-            : this.retainedUserActivities(id, turn.id, projectedTurnItemIds(turn)),
+            : this.terminalUserActivityOverlay(id, turn.id, projectedTurnItemIds(turn)),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
         );
@@ -1188,27 +1192,33 @@ export class AppProjection extends EventEmitter {
     return items;
   }
 
-  private retainedUserActivities(
+  private terminalUserActivityOverlay(
     threadId: string,
     turnId: string,
     existingIds: ReadonlySet<string>,
   ): ActivityItem[] {
     // Terminal notifications and summary history pages may omit inputs that were already accepted.
-    // User messages are immutable, so retain only those missing from the new canonical payload.
+    // Retain missing user messages together with canonical timeline anchors so steering inputs keep
+    // their live position instead of being appended after the terminal response.
     const retained: ActivityItem[] = [];
-    const seen = new Set(existingIds);
+    const seen = new Set<string>();
     const append = (items: readonly ActivityItem[] | undefined) => {
       for (const item of items ?? []) {
-        if (item.type !== "userMessage" || seen.has(item.id)) continue;
+        if (seen.has(item.id)) continue;
         seen.add(item.id);
-        retained.push(item);
+        if (
+          (item.type === "userMessage" && !existingIds.has(item.id)) ||
+          (item.type !== "userMessage" && existingIds.has(item.id))
+        ) {
+          retained.push(item);
+        }
       }
     };
-    append(this.liveActivities(threadId, turnId));
     append(this.turnStates.get(turnKey(threadId, turnId))?.items);
     append(
       this.latestDetails.get(threadId)?.turns.find((candidate) => candidate.id === turnId)?.items,
     );
+    append(this.liveActivities(threadId, turnId));
     return retained;
   }
 
@@ -1228,7 +1238,7 @@ export class AppProjection extends EventEmitter {
         this.progress.get(key),
         source.status === "inProgress"
           ? this.liveActivities(threadId, turnId)
-          : this.retainedUserActivities(threadId, turnId, projectedTurnItemIds(source)),
+          : this.terminalUserActivityOverlay(threadId, turnId, projectedTurnItemIds(source)),
         cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
         source.itemsView === "full",
       );
@@ -3245,6 +3255,7 @@ function fresherLiveActivity(
   if (current.status !== "inProgress" && live.status === "inProgress") {
     return turnIsTerminal ? current : live;
   }
+  if (turnIsTerminal && current.status !== "inProgress") return current;
   if (current.type === live.type && "text" in current && "text" in live) {
     if (current.text.startsWith(live.text) && current.text.length > live.text.length)
       return current;

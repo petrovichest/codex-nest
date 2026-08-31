@@ -3695,6 +3695,100 @@ describe("AppProjection", () => {
     ]);
   });
 
+  it("keeps accepted steering messages in timeline order when the terminal turn omits them", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    await projection.setCurrentTurn("one", "live");
+
+    const user = {
+      type: "userMessage" as const,
+      id: "server-user",
+      clientId: "client-user",
+      content: [{ type: "text" as const, text: "Начальный запрос", text_elements: [] }],
+    };
+    const beforeFirstSteer = {
+      type: "agentMessage" as const,
+      id: "before-first-steer",
+      text: "Первый этап",
+      phase: "commentary" as const,
+      memoryCitation: null,
+    };
+    const beforeSecondSteer = {
+      type: "agentMessage" as const,
+      id: "before-second-steer",
+      text: "Второй этап",
+      phase: "commentary" as const,
+      memoryCitation: null,
+    };
+    const final = {
+      type: "agentMessage" as const,
+      id: "final",
+      text: "Готово",
+      phase: "final_answer" as const,
+      memoryCitation: null,
+    };
+    const completeItem = (item: typeof beforeFirstSteer | typeof final, completedAtMs: number) =>
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: { threadId: "one", turnId: "live", item, completedAtMs },
+      } as ServerNotification);
+
+    projection.recordUserMessage("one", "live", "client-user", "Начальный запрос", []);
+    completeItem(beforeFirstSteer, 11_000);
+    projection.recordUserMessage("one", "live", "client-steer-one", "Первое уточнение", []);
+    completeItem(beforeSecondSteer, 12_000);
+    projection.recordUserMessage("one", "live", "client-steer-two", "Второе уточнение", []);
+    completeItem(final, 13_000);
+
+    expect(
+      (await projection.readThread("one")).turns
+        .find((turn) => turn.id === "live")
+        ?.items.map((item) => item.id),
+    ).toEqual([
+      "client-user",
+      "before-first-steer",
+      "client-steer-one",
+      "before-second-steer",
+      "client-steer-two",
+      "final",
+    ]);
+
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "one",
+        turn: {
+          ...testTurn("live", "completed"),
+          itemsView: "full",
+          items: [user, beforeFirstSteer, beforeSecondSteer, final],
+        },
+      },
+    } as ServerNotification);
+
+    await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("completed"));
+    expect(
+      (await projection.readThread("one")).turns
+        .find((turn) => turn.id === "live")
+        ?.items.map((item) => item.id),
+    ).toEqual([
+      "client-user",
+      "before-first-steer",
+      "client-steer-one",
+      "before-second-steer",
+      "client-steer-two",
+      "final",
+    ]);
+  });
+
   it("loads one turn's canonical items through bounded full-turn pages", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
