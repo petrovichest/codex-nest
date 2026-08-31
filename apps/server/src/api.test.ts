@@ -7433,7 +7433,10 @@ describe("file attachments", () => {
     await vi.waitFor(() => {
       const start = bridge.request.mock.calls.find(([method]) => method === "turn/start");
       expect(start?.[1]).toMatchObject({
-        input: [{ type: "mention", name: "notes.txt", path: file.path }],
+        input: [
+          { type: "text", text: expect.stringContaining(file.path) },
+          { type: "mention", name: "notes.txt", path: file.path },
+        ],
       });
     });
 

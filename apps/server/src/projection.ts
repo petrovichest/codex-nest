@@ -35,6 +35,7 @@ import type {
 } from "@codexnest/protocol";
 
 import type { AttentionManager } from "./attention";
+import { stripAttachmentContext } from "./attachments";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
@@ -3298,10 +3299,12 @@ function normalizeActivity(
         type: "userMessage",
         id: item.clientId ?? item.id,
         status: "completed",
-        text: item.content
-          .filter((part) => part.type === "text")
-          .map((part) => part.text)
-          .join("\n"),
+        text: stripAttachmentContext(
+          item.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n"),
+        ),
         images: item.content.filter((part) => part.type === "image").map((part) => part.url),
         ...(files.length ? { files } : {}),
         timestamp,

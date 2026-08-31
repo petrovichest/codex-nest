@@ -10,9 +10,37 @@ import { pathContains } from "./projects";
 
 export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+const ATTACHMENT_CONTEXT_START = "<codexnest_attachments>";
+const ATTACHMENT_CONTEXT_END = "</codexnest_attachments>";
 
 export class AttachmentTooLargeError extends Error {}
 export class AttachmentValidationError extends Error {}
+
+export function appendAttachmentContext(
+  text: string,
+  attachments: readonly ThreadFileAttachment[],
+): string {
+  const input = text.trim();
+  if (!attachments.length) return input;
+  const context = [
+    ATTACHMENT_CONTEXT_START,
+    "The user attached local files. Read them from these absolute paths before responding:",
+    JSON.stringify(
+      attachments.map(({ name, path }) => ({ name, path })),
+      null,
+      2,
+    ),
+    ATTACHMENT_CONTEXT_END,
+  ].join("\n");
+  return input ? `${input}\n\n${context}` : context;
+}
+
+export function stripAttachmentContext(text: string): string {
+  const separator = `\n\n${ATTACHMENT_CONTEXT_START}`;
+  const index = text.lastIndexOf(separator);
+  if (index >= 0) return text.slice(0, index).trimEnd();
+  return text.startsWith(ATTACHMENT_CONTEXT_START) ? "" : text;
+}
 
 export class AttachmentStore {
   readonly root: string;

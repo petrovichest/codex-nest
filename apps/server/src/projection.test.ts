@@ -3816,7 +3816,14 @@ describe("AppProjection", () => {
                 type: "userMessage",
                 id: "user",
                 clientId: null,
-                content: [{ type: "text", text: "Запрос", text_elements: [] }],
+                content: [
+                  {
+                    type: "text",
+                    text: 'Запрос\n\n<codexnest_attachments>\nThe user attached local files. Read them from these absolute paths before responding:\n[\n  {"name":"notes.txt","path":"/tmp/notes.txt"}\n]\n</codexnest_attachments>',
+                    text_elements: [],
+                  },
+                  { type: "mention", name: "notes.txt", path: "/tmp/notes.txt" },
+                ],
               },
               {
                 type: "userMessage",
@@ -3856,6 +3863,7 @@ describe("AppProjection", () => {
           status: "completed",
           text: "Запрос",
           images: [],
+          files: [{ name: "notes.txt", path: "/tmp/notes.txt" }],
           timestamp: 10_000,
           phase: null,
         },

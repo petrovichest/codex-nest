@@ -77,6 +77,7 @@ import {
   AttachmentValidationError,
   MAX_ATTACHMENT_BYTES,
   MAX_MESSAGE_ATTACHMENT_BYTES,
+  appendAttachmentContext,
   isAttachmentShape,
 } from "./attachments";
 import { AppManagementError, type AppManager } from "./app-management";
@@ -7385,7 +7386,8 @@ function messageInput(
   files: ThreadFileAttachment[] = [],
 ): UserInput[] {
   const result: UserInput[] = [];
-  if (text.trim()) result.push({ type: "text", text: text.trim(), text_elements: [] });
+  const input = appendAttachmentContext(text, files);
+  if (input) result.push({ type: "text", text: input, text_elements: [] });
   result.push(...images.map((url) => ({ type: "image" as const, url })));
   result.push(...files.map(({ name, path }) => ({ type: "mention" as const, name, path })));
   return result;
