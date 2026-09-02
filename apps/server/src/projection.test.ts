@@ -4201,7 +4201,7 @@ describe("AppProjection", () => {
     ]);
   });
 
-  it("persists streamed reasoning across an interruption and projection restart", async () => {
+  it("persists visible assistant text across an interruption and projection restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const statePath = join(directory, "state.json");
@@ -4262,12 +4262,41 @@ describe("AppProjection", () => {
         summaryIndex: 0,
       },
     } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "commentary",
+        delta: "Показываю промежуточный результат",
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "after-reasoning",
+        delta: finalMessage.text,
+      },
+    } satisfies ServerNotification);
 
     await projection.markInterrupted("one", ["live"]);
     expect(store.snapshot().threadMeta.one?.interruptedReasoning?.live).toMatchObject([
       {
+        type: "reasoning",
         id: "reasoning",
         text: "Проверяю сохранение рассуждения",
+      },
+      {
+        type: "agentMessage",
+        id: "commentary",
+        text: "Показываю промежуточный результат",
+      },
+      {
+        type: "agentMessage",
+        id: "after-reasoning",
+        text: "Частичный ответ",
       },
     ]);
 
@@ -4277,11 +4306,20 @@ describe("AppProjection", () => {
     } satisfies ServerNotification);
     await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("interrupted"));
     const liveItems = (await projection.readThread("one", { refresh: true })).turns[0]?.items ?? [];
-    expect(liveItems.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(liveItems.map((item) => item.id)).toEqual([
+      "reasoning",
+      "commentary",
+      "after-reasoning",
+    ]);
     expect(liveItems[0]).toMatchObject({
       type: "reasoning",
       status: "completed",
       text: "Проверяю сохранение рассуждения",
+    });
+    expect(liveItems[1]).toMatchObject({
+      type: "agentMessage",
+      status: "completed",
+      text: "Показываю промежуточный результат",
     });
     await store.flushed();
 
@@ -4301,24 +4339,42 @@ describe("AppProjection", () => {
     );
     const restoredItems =
       (await reloaded.readThread("one", { refresh: true })).turns[0]?.items ?? [];
-    expect(restoredItems.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(restoredItems.map((item) => item.id)).toEqual([
+      "reasoning",
+      "commentary",
+      "after-reasoning",
+    ]);
     expect(restoredItems[0]).toMatchObject({
       type: "reasoning",
       status: "completed",
       text: "Проверяю сохранение рассуждения",
     });
+    expect(restoredItems[1]).toMatchObject({
+      type: "agentMessage",
+      status: "completed",
+      text: "Показываю промежуточный результат",
+    });
 
     includeCanonicalReasoning = false;
     const fullyLoaded = await reloaded.readTurnItems("one", "live");
-    expect(fullyLoaded.items.map((item) => item.id)).toEqual(["reasoning", "after-reasoning"]);
+    expect(fullyLoaded.items.map((item) => item.id)).toEqual([
+      "reasoning",
+      "commentary",
+      "after-reasoning",
+    ]);
     expect(fullyLoaded.items[0]).toMatchObject({
       type: "reasoning",
       status: "completed",
       text: "Проверяю сохранение рассуждения",
     });
+    expect(fullyLoaded.items[1]).toMatchObject({
+      type: "agentMessage",
+      status: "completed",
+      text: "Показываю промежуточный результат",
+    });
   });
 
-  it("drops captured interrupted reasoning when the turn completes normally", async () => {
+  it("drops captured interrupted assistant text when the turn completes normally", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -4341,8 +4397,17 @@ describe("AppProjection", () => {
         summaryIndex: 0,
       },
     } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        itemId: "commentary",
+        delta: "Промежуточный ответ",
+      },
+    } satisfies ServerNotification);
     await projection.markInterrupted("one", ["live"]);
-    expect(store.snapshot().threadMeta.one?.interruptedReasoning?.live).toHaveLength(1);
+    expect(store.snapshot().threadMeta.one?.interruptedReasoning?.live).toHaveLength(2);
 
     bridge.emit("notification", {
       method: "turn/completed",

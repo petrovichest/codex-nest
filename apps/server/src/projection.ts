@@ -56,7 +56,7 @@ import type {
   CodexNestStateView,
   DeepReadonly,
   ForkOperationState,
-  InterruptedReasoningState,
+  InterruptedTextActivityState,
   ManagedTeamTaskState,
   SessionSnapshotState,
   StateStore,
@@ -463,7 +463,7 @@ export class AppProjection extends EventEmitter {
               ),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
-          this.interruptedReasoning(cached.thread.id, turn.id),
+          this.interruptedTextActivities(cached.thread.id, turn.id),
         ),
       );
     if (
@@ -537,7 +537,10 @@ export class AppProjection extends EventEmitter {
       ...turn,
       progress: this.progress.get(turnKey(threadId, turn.id)) ?? turn.progress,
       items: mergeTimelineArtifacts(
-        mergeInterruptedReasoning(liveMerge.items, this.interruptedReasoning(threadId, turn.id)),
+        mergeInterruptedTextActivities(
+          liveMerge.items,
+          this.interruptedTextActivities(threadId, turn.id),
+        ),
         cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
         liveMerge.aliases,
       ),
@@ -635,7 +638,7 @@ export class AppProjection extends EventEmitter {
               ),
           cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
           false,
-          this.interruptedReasoning(id, turn.id),
+          this.interruptedTextActivities(id, turn.id),
         );
         if (turn.status !== "inProgress") {
           this.clearTurnActivities(id, turn.id);
@@ -946,7 +949,7 @@ export class AppProjection extends EventEmitter {
               : [],
           artifacts,
           true,
-          this.interruptedReasoning(threadId, turnId),
+          this.interruptedTextActivities(threadId, turnId),
         ).items;
         break;
       }
@@ -1011,26 +1014,29 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
     if (cached.currentTurnId && !expectedTurnIds.includes(cached.currentTurnId)) return;
-    const interruptedReasoning = new Map(
-      expectedTurnIds.map((turnId) => [turnId, this.collectInterruptedReasoning(threadId, turnId)]),
+    const interruptedTextActivities = new Map(
+      expectedTurnIds.map((turnId) => [
+        turnId,
+        this.collectInterruptedTextActivities(threadId, turnId),
+      ]),
     );
     cached.currentTurnId = null;
     cached.liveOutcome = "interrupted";
     cached.thread.status = { type: "idle" };
     cached.thread.updatedAt = Math.max(cached.thread.updatedAt, Math.floor(Date.now() / 1_000));
     const updatedAt = cached.thread.updatedAt * 1_000;
-    let reasoningChanged = false;
+    let retainedTextChanged = false;
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.lastOutcome = "interrupted";
       meta.outcomeUpdatedAt = updatedAt;
-      for (const [turnId, items] of interruptedReasoning) {
-        reasoningChanged =
-          updateInterruptedReasoning(meta, turnId, items, "merge") || reasoningChanged;
+      for (const [turnId, items] of interruptedTextActivities) {
+        retainedTextChanged =
+          updateInterruptedTextActivities(meta, turnId, items, "merge") || retainedTextChanged;
       }
       state.threadMeta[threadId] = meta;
     });
-    if (reasoningChanged) {
+    if (retainedTextChanged) {
       this.bumpHistoryRevision(threadId);
       await this.historyCache.invalidateThread(threadId);
     }
@@ -1229,18 +1235,18 @@ export class AppProjection extends EventEmitter {
     return items;
   }
 
-  private interruptedReasoning(
+  private interruptedTextActivities(
     threadId: string,
     turnId: string,
-  ): DeepReadonly<InterruptedReasoningState[]> {
+  ): DeepReadonly<InterruptedTextActivityState[]> {
     return this.store.view().threadMeta[threadId]?.interruptedReasoning?.[turnId] ?? [];
   }
 
-  private collectInterruptedReasoning(
+  private collectInterruptedTextActivities(
     threadId: string,
     turnId: string,
     source?: Turn,
-  ): InterruptedReasoningState[] {
+  ): InterruptedTextActivityState[] {
     const previous =
       this.turnStates.get(turnKey(threadId, turnId))?.items ??
       this.latestDetails.get(threadId)?.turns.find((candidate) => candidate.id === turnId)?.items ??
@@ -1260,14 +1266,16 @@ export class AppProjection extends EventEmitter {
       : [...previous];
     items = mergeLiveActivities(items, this.liveActivities(threadId, turnId), "inProgress").items;
     const timeline = items.filter((item) => !isTimelineArtifact(item));
-    return timeline.flatMap((item, index): InterruptedReasoningState[] => {
-      if (item.type !== "reasoning" || !item.text.trim()) return [];
+    return timeline.flatMap((item, index): InterruptedTextActivityState[] => {
+      if (!isAssistantTextActivity(item) || !item.text.trim()) return [];
       return [
         {
+          type: item.type,
           id: item.id,
           text: item.text,
           timestamp: item.timestamp,
           beforeItemId: timeline[index + 1]?.id ?? null,
+          phase: item.phase,
         },
       ];
     });
@@ -1282,7 +1290,8 @@ export class AppProjection extends EventEmitter {
     // Terminal notifications and summary history pages may omit inputs that were already accepted.
     // Retain missing user messages together with canonical timeline anchors so steering inputs keep
     // their live position instead of being appended after the terminal response. Interrupted
-    // reasoning may have an empty canonical summary, so keep the streamed text as completed work.
+    // assistant text may be absent or empty in an interrupted canonical turn, so keep everything
+    // that was already visible as completed work.
     const retained: ActivityItem[] = [];
     const seen = new Set<string>();
     const append = (items: readonly ActivityItem[] | undefined) => {
@@ -1292,7 +1301,7 @@ export class AppProjection extends EventEmitter {
         if (
           (item.type === "userMessage" && !existingIds.has(item.id)) ||
           (item.type !== "userMessage" && existingIds.has(item.id)) ||
-          (outcome === "interrupted" && item.type === "reasoning")
+          (outcome === "interrupted" && isAssistantTextActivity(item))
         ) {
           retained.push(item);
         }
@@ -1330,7 +1339,7 @@ export class AppProjection extends EventEmitter {
             ),
         cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
         source.itemsView === "full",
-        this.interruptedReasoning(threadId, turnId),
+        this.interruptedTextActivities(threadId, turnId),
       );
     } else {
       const previous =
@@ -2219,9 +2228,9 @@ export class AppProjection extends EventEmitter {
         );
         const cached = this.threads.get(notification.params.threadId);
         const outcome = normalizeOutcome(notification.params.turn.status);
-        const interruptedReasoning =
+        const interruptedTextActivities =
           outcome === "interrupted"
-            ? this.collectInterruptedReasoning(
+            ? this.collectInterruptedTextActivities(
                 notification.params.threadId,
                 notification.params.turn.id,
                 notification.params.turn,
@@ -2270,7 +2279,7 @@ export class AppProjection extends EventEmitter {
             this.liveActivities(notification.params.threadId, notification.params.turn.id),
             outcome,
           ).aliases;
-          let reasoningChanged = false;
+          let retainedTextChanged = false;
           await this.store.update((state) => {
             const meta = state.threadMeta[cached.thread.id] ?? {
               pinned: false,
@@ -2278,10 +2287,10 @@ export class AppProjection extends EventEmitter {
             };
             meta.lastOutcome = outcome;
             meta.outcomeUpdatedAt = updatedAt;
-            reasoningChanged = updateInterruptedReasoning(
+            retainedTextChanged = updateInterruptedTextActivities(
               meta,
               notification.params.turn.id,
-              interruptedReasoning,
+              interruptedTextActivities,
               outcome === "interrupted" ? "merge" : "clear",
             );
             const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
@@ -2309,7 +2318,7 @@ export class AppProjection extends EventEmitter {
             if (snapshot) meta.sessionSnapshot = snapshot;
             state.threadMeta[cached.thread.id] = meta;
           });
-          if (reasoningChanged) {
+          if (retainedTextChanged) {
             this.bumpHistoryRevision(notification.params.threadId);
             await this.historyCache.invalidateThread(notification.params.threadId);
           }
@@ -3227,7 +3236,7 @@ function normalizeTurn(
   liveActivities: ActivityItem[] = [],
   artifacts: TimelineArtifact[] = [],
   itemsLoaded = true,
-  interruptedReasoning: DeepReadonly<InterruptedReasoningState[]> = [],
+  interruptedTextActivities: DeepReadonly<InterruptedTextActivityState[]> = [],
 ): TurnView {
   const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
   const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
@@ -3245,7 +3254,7 @@ function normalizeTurn(
     status,
   );
   const items = mergeTimelineArtifacts(
-    mergeInterruptedReasoning(liveMerge.items, interruptedReasoning),
+    mergeInterruptedTextActivities(liveMerge.items, interruptedTextActivities),
     artifacts,
     liveMerge.aliases,
   );
@@ -3326,7 +3335,7 @@ function mergeLiveActivities(
   }
   for (const [itemIndex, item] of liveActivities.entries()) {
     const projectedItem =
-      turnStatus === "interrupted" && isReasoningActivity(item)
+      turnStatus === "interrupted" && isAssistantTextActivity(item)
         ? { ...item, status: "completed" as const }
         : item;
     const canonicalId = canonicalMatchByLiveId.get(item.id);
@@ -3371,8 +3380,13 @@ function fresherLiveActivity(
   turnStatus: TurnView["status"],
 ): ActivityItem {
   const turnIsTerminal = turnStatus !== "inProgress";
-  if (turnStatus === "interrupted" && isReasoningActivity(current) && isReasoningActivity(live)) {
-    return richerInterruptedReasoning(current, { ...live, status: "completed" });
+  if (
+    turnStatus === "interrupted" &&
+    isAssistantTextActivity(current) &&
+    isAssistantTextActivity(live) &&
+    current.type === live.type
+  ) {
+    return richerInterruptedTextActivity(current, { ...live, status: "completed" });
   }
   if (current.status === "inProgress" && live.status !== "inProgress") return live;
   if (current.status !== "inProgress" && live.status === "inProgress") {
@@ -3395,35 +3409,38 @@ function fresherLiveActivity(
   return live;
 }
 
-type ReasoningActivity = Extract<ActivityItem, { text: string }> & { type: "reasoning" };
+type AssistantTextActivity = Extract<ActivityItem, { text: string }> & {
+  type: "agentMessage" | "plan" | "reasoning";
+};
 
-function isReasoningActivity(item: ActivityItem): item is ReasoningActivity {
-  return item.type === "reasoning";
+function isAssistantTextActivity(item: ActivityItem): item is AssistantTextActivity {
+  return item.type === "agentMessage" || item.type === "plan" || item.type === "reasoning";
 }
 
-function mergeInterruptedReasoning(
+function mergeInterruptedTextActivities(
   items: ActivityItem[],
-  retained: DeepReadonly<InterruptedReasoningState[]>,
+  retained: DeepReadonly<InterruptedTextActivityState[]>,
 ): ActivityItem[] {
   if (!retained.length) return items;
   const result = [...items];
   for (let index = retained.length - 1; index >= 0; index -= 1) {
     const saved = retained[index]!;
-    const activity: ReasoningActivity = {
-      type: "reasoning",
+    const activity: AssistantTextActivity = {
+      type: saved.type ?? "reasoning",
       id: saved.id,
       status: "completed",
       text: saved.text,
       images: [],
       timestamp: saved.timestamp,
-      phase: null,
+      phase: saved.phase ?? null,
     };
     const existing = result.findIndex((item) => item.id === saved.id);
     if (existing >= 0) {
       const current = result[existing]!;
-      result[existing] = isReasoningActivity(current)
-        ? richerInterruptedReasoning(current, activity)
-        : current;
+      result[existing] =
+        isAssistantTextActivity(current) && current.type === activity.type
+          ? richerInterruptedTextActivity(current, activity)
+          : current;
       continue;
     }
     const before = saved.beforeItemId
@@ -3434,24 +3451,24 @@ function mergeInterruptedReasoning(
   return result;
 }
 
-function richerInterruptedReasoning(
-  canonical: ReasoningActivity,
-  retained: ReasoningActivity,
-): ReasoningActivity {
+function richerInterruptedTextActivity<T extends AssistantTextActivity>(
+  canonical: T,
+  retained: T,
+): T {
   if (!canonical.text || retained.text.startsWith(canonical.text)) {
     return { ...retained, status: "completed" };
   }
   return { ...canonical, status: "completed" };
 }
 
-function updateInterruptedReasoning(
+function updateInterruptedTextActivities(
   meta: ThreadMetaState,
   turnId: string,
-  incoming: InterruptedReasoningState[],
+  incoming: InterruptedTextActivityState[],
   mode: "merge" | "clear",
 ): boolean {
   const current = meta.interruptedReasoning?.[turnId] ?? [];
-  let next: InterruptedReasoningState[] = [];
+  let next: InterruptedTextActivityState[] = [];
   if (mode === "merge") {
     next = current.map((item) => ({ ...item }));
     for (const item of incoming) {

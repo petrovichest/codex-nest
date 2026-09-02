@@ -27,11 +27,14 @@ export type TimelineArtifact = Extract<
   { type: "userInputResponse" | "planChecklist" | "orchestrationNotice" }
 >;
 
-export interface InterruptedReasoningState {
+export interface InterruptedTextActivityState {
+  /** Missing for reasoning captured before other assistant text was retained. */
+  type?: "agentMessage" | "plan" | "reasoning";
   id: string;
   text: string;
   timestamp: number | null;
   beforeItemId: string | null;
+  phase?: "commentary" | "final_answer" | null;
 }
 
 export type ManagedTeamTaskStatus = "queued" | "starting" | "running" | ThreadOutcome;
@@ -231,7 +234,8 @@ export interface ThreadMetaState {
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
-  interruptedReasoning?: Record<string, InterruptedReasoningState[]>;
+  /** Historical state key retained for backwards compatibility. */
+  interruptedReasoning?: Record<string, InterruptedTextActivityState[]>;
   teamOrchestration?: TeamOrchestrationState;
   managedTeamToolsAvailable?: true;
   sessionArtifactsVersion?: 1;
@@ -1265,7 +1269,7 @@ function isUserInputDrafts(value: unknown): value is Record<string, UserInputDra
 
 function isInterruptedReasoning(
   value: unknown,
-): value is Record<string, InterruptedReasoningState[]> {
+): value is Record<string, InterruptedTextActivityState[]> {
   if (!isRecord(value)) return false;
   return Object.entries(value).every(
     ([turnId, items]) =>
@@ -1275,12 +1279,17 @@ function isInterruptedReasoning(
       items.every(
         (item) =>
           isRecord(item) &&
-          hasOnlyKeys(item, ["id", "text", "timestamp", "beforeItemId"]) &&
+          hasOnlyKeys(item, ["type", "id", "text", "timestamp", "beforeItemId", "phase"]) &&
+          (item.type === undefined ||
+            ["agentMessage", "plan", "reasoning"].includes(String(item.type))) &&
           isBoundedString(item.id, 500) &&
           typeof item.text === "string" &&
           Boolean(item.text.trim()) &&
           (item.timestamp === null || isNonNegativeFiniteNumber(item.timestamp)) &&
-          (item.beforeItemId === null || isBoundedString(item.beforeItemId, 500)),
+          (item.beforeItemId === null || isBoundedString(item.beforeItemId, 500)) &&
+          (item.phase === undefined ||
+            item.phase === null ||
+            ["commentary", "final_answer"].includes(String(item.phase))),
       ),
   );
 }
