@@ -8,6 +8,17 @@ import { isAllowedRequestOrigin } from "./origin";
 import type { AppProjection } from "./projection";
 import type { StateStore } from "./state/store";
 
+const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const RESYNC_LOW_WATER_BYTES = 256 * 1024;
+const RESYNC_RETRY_MS = 50;
+
+type DeliveryState = {
+  snapshotNeeded: boolean;
+  snapshotSending: boolean;
+  backpressured: boolean;
+  retryTimer?: NodeJS.Timeout;
+};
+
 export function registerEventsWebSocket(
   app: FastifyInstance,
   projection: AppProjection,
@@ -18,27 +29,88 @@ export function registerEventsWebSocket(
   const sockets = new Set<WebSocket>();
   const authenticatedSockets = new Set<WebSocket>();
   const alive = new WeakMap<WebSocket, boolean>();
+  const deliveryStates = new Map<WebSocket, DeliveryState>();
   const eventListener = (sequence: number, event: unknown) => {
-    const frame: ServerFrame = isResyncRequired(event)
-      ? { type: "snapshot", snapshot: projection.snapshot() }
-      : ({
-          type: "event",
-          sequence,
-          version: { ...projection.version, sequence },
-          event,
-        } as ServerFrame);
-    broadcast(frame);
+    if (isResyncRequired(event)) {
+      for (const socket of authenticatedSockets) requestSnapshot(socket);
+      return;
+    }
+    broadcast({
+      type: "event",
+      sequence,
+      version: { ...projection.version, sequence },
+      event,
+    } as ServerFrame);
   };
   const broadcast = (frame: ServerFrame) => {
     const payload = JSON.stringify(frame);
+    const payloadBytes = Buffer.byteLength(payload);
     for (const socket of authenticatedSockets) {
-      if (socket.bufferedAmount > 2 * 1024 * 1024) {
-        app.log.warn({ bufferedBytes: socket.bufferedAmount }, "terminating slow websocket client");
-        socket.terminate();
+      const state = deliveryStates.get(socket);
+      if (!state) continue;
+      if (state.snapshotNeeded || state.snapshotSending || state.retryTimer !== undefined) {
+        state.snapshotNeeded = true;
+        continue;
+      }
+      if (socket.bufferedAmount + payloadBytes > MAX_BUFFERED_BYTES) {
+        if (!state.backpressured) {
+          app.log.warn(
+            { bufferedBytes: socket.bufferedAmount, nextFrameBytes: payloadBytes },
+            "coalescing websocket updates under backpressure",
+          );
+        }
+        state.backpressured = true;
+        requestSnapshot(socket);
         continue;
       }
       sendSerialized(socket, payload);
     }
+  };
+  const requestSnapshot = (socket: WebSocket) => {
+    const state = deliveryStates.get(socket);
+    if (!state) return;
+    state.snapshotNeeded = true;
+    flushSnapshot(socket, state);
+  };
+  const flushSnapshot = (socket: WebSocket, state: DeliveryState) => {
+    if (
+      deliveryStates.get(socket) !== state ||
+      !authenticatedSockets.has(socket) ||
+      socket.readyState !== 1 ||
+      state.snapshotSending ||
+      state.retryTimer !== undefined ||
+      !state.snapshotNeeded
+    ) {
+      return;
+    }
+    if (socket.bufferedAmount > RESYNC_LOW_WATER_BYTES) {
+      state.retryTimer = setTimeout(() => {
+        state.retryTimer = undefined;
+        flushSnapshot(socket, state);
+      }, RESYNC_RETRY_MS);
+      state.retryTimer.unref();
+      return;
+    }
+    state.snapshotNeeded = false;
+    state.snapshotSending = true;
+    const sent = sendSerialized(
+      socket,
+      JSON.stringify({ type: "snapshot", snapshot: projection.snapshot() } satisfies ServerFrame),
+      (error) => {
+        if (deliveryStates.get(socket) !== state) return;
+        state.snapshotSending = false;
+        if (error) {
+          socket.terminate();
+          return;
+        }
+        if (state.snapshotNeeded) {
+          flushSnapshot(socket, state);
+        } else {
+          state.backpressured = false;
+        }
+      },
+    );
+    if (!sent) state.snapshotSending = false;
   };
   projection.on("event", eventListener);
   const heartbeat = setInterval(() => {
@@ -55,6 +127,10 @@ export function registerEventsWebSocket(
   app.addHook("onClose", async () => {
     clearInterval(heartbeat);
     projection.off("event", eventListener);
+    for (const state of deliveryStates.values()) {
+      if (state.retryTimer) clearTimeout(state.retryTimer);
+    }
+    deliveryStates.clear();
   });
   store.on("authRotated", () => {
     for (const socket of sockets) socket.close(1008, "Token rotated");
@@ -99,7 +175,12 @@ export function registerEventsWebSocket(
         authenticated = true;
         clearTimeout(timeout);
         authenticatedSockets.add(socket);
-        send(socket, { type: "snapshot", snapshot: projection.snapshot() });
+        deliveryStates.set(socket, {
+          snapshotNeeded: false,
+          snapshotSending: false,
+          backpressured: false,
+        });
+        requestSnapshot(socket);
         return;
       }
       if (frame.type === "ping") send(socket, { type: "pong" });
@@ -108,6 +189,9 @@ export function registerEventsWebSocket(
       clearTimeout(timeout);
       authenticatedSockets.delete(socket);
       sockets.delete(socket);
+      const state = deliveryStates.get(socket);
+      if (state?.retryTimer) clearTimeout(state.retryTimer);
+      deliveryStates.delete(socket);
     });
   });
 }
@@ -120,8 +204,14 @@ function send(socket: WebSocket, frame: ServerFrame): void {
   sendSerialized(socket, JSON.stringify(frame));
 }
 
-function sendSerialized(socket: WebSocket, payload: string): void {
-  if (socket.readyState === 1) socket.send(payload);
+function sendSerialized(
+  socket: WebSocket,
+  payload: string,
+  callback?: (error?: Error) => void,
+): boolean {
+  if (socket.readyState !== 1) return false;
+  socket.send(payload, callback);
+  return true;
 }
 
 function isResyncRequired(event: unknown): event is { type: "resync.required" } {

@@ -792,6 +792,40 @@ describe("HTTP authentication", () => {
       },
     });
 
+    const backpressureFrames = websocketFrames(authorized);
+    const unexpectedlyClosed = vi.fn();
+    authorized.once("close", unexpectedlyClosed);
+    authorized.pause();
+    projection.upsertThread({
+      ...testThread("large-broadcast-a"),
+      preview: "a".repeat(1_500_000),
+    });
+    projection.upsertThread({
+      ...testThread("large-broadcast-b"),
+      preview: "b".repeat(1_000_000),
+    });
+    authorized.resume();
+
+    let catchupSnapshot: Record<string, unknown>;
+    do {
+      catchupSnapshot = await backpressureFrames.nextType("snapshot");
+    } while (
+      !(catchupSnapshot.snapshot as { threads: Array<{ id: string }> }).threads.some(
+        (thread) => thread.id === "large-broadcast-b",
+      )
+    );
+    expect(unexpectedlyClosed).not.toHaveBeenCalled();
+
+    const afterCatchup = backpressureFrames.nextType("event");
+    projection.upsertThread(testThread("after-backpressure"));
+    await expect(afterCatchup).resolves.toMatchObject({
+      event: { type: "thread.upserted", thread: { id: "after-backpressure" } },
+    });
+
+    await projection.removeOrphanedThread("large-broadcast-a");
+    await projection.removeOrphanedThread("large-broadcast-b");
+    await projection.removeOrphanedThread("after-backpressure");
+
     authorized.terminate();
     secondAuthorized.terminate();
 
