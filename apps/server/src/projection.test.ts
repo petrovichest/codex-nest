@@ -588,9 +588,9 @@ describe("AppProjection", () => {
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type !== "turn.replaced") return;
-      const item = event.turn.items.find((candidate) => candidate.id === "spawn-child");
-      if (item) activities.push(item);
+      if (event.type === "activity.upserted" && event.item.id === "spawn-child") {
+        activities.push(event.item);
+      }
     });
 
     bridge.emit("notification", {
@@ -2250,7 +2250,7 @@ describe("AppProjection", () => {
     expect(projection.snapshot().threads.map((item) => item.id)).toEqual(["blank", "running"]);
   });
 
-  it("tracks live activity monotonically and coalesces streamed updates per second", async () => {
+  it("tracks live activity monotonically and batches incremental streamed updates", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -2263,7 +2263,7 @@ describe("AppProjection", () => {
     );
     projection.upsertThread(thread("running", "/work", 10, { type: "active", activeFlags: [] }));
     projection.upsertThread(thread("newer", "/work", 20));
-    const events: Array<{ type: string; thread?: { id: string } }> = [];
+    const events: ServerEvent[] = [];
     projection.on("event", (_sequence, event) => events.push(event));
     const now = vi.spyOn(Date, "now").mockReturnValue(30_100);
 
@@ -2318,6 +2318,27 @@ describe("AppProjection", () => {
           (event) => event.type === "thread.upserted" && event.thread?.id === "running",
         ),
       ).toHaveLength(2);
+
+      await vi.waitFor(() =>
+        expect(events.filter((event) => event.type === "activity.delta")).toHaveLength(2),
+      );
+      expect(events.filter((event) => event.type === "activity.delta")).toMatchObject([
+        {
+          threadId: "running",
+          turnId: "live",
+          itemId: "answer",
+          activityType: "agentMessage",
+          delta: "Свежая активность продолжается",
+        },
+        {
+          threadId: "running",
+          turnId: "live",
+          itemId: "command",
+          activityType: "command",
+          delta: "output",
+        },
+      ]);
+      expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(0);
 
       bridge.emit("notification", {
         method: "item/completed",
@@ -2586,19 +2607,17 @@ describe("AppProjection", () => {
       },
     } satisfies ServerNotification);
     await vi.waitFor(() =>
-      expect(events.filter((event) => event.type === "turn.replaced").at(-1)).toMatchObject({
-        turn: {
-          progress: {
-            startedAt: 123_000,
-            explanation: "Проверяем",
-            steps: [
-              { step: "Первый", status: "completed" },
-              { step: "Второй", status: "inProgress" },
-            ],
-            filesChanged: 1,
-            additions: 1,
-            deletions: 1,
-          },
+      expect(events.filter((event) => event.type === "turn.progressed").at(-1)).toMatchObject({
+        progress: {
+          startedAt: 123_000,
+          explanation: "Проверяем",
+          steps: [
+            { step: "Первый", status: "completed" },
+            { step: "Второй", status: "inProgress" },
+          ],
+          filesChanged: 1,
+          additions: 1,
+          deletions: 1,
         },
       }),
     );
@@ -2684,12 +2703,12 @@ describe("AppProjection", () => {
       unread: false,
     });
     await vi.waitFor(() =>
-      expect(events.filter((event) => event.type === "turn.replaced").at(-1)).toMatchObject({
+      expect(events.filter((event) => event.type === "activity.delta").at(-1)).toMatchObject({
         threadId: "one",
-        turn: {
-          id: "first",
-          items: [expect.objectContaining({ type: "agentMessage", text: "Продолжаю работу" })],
-        },
+        turnId: "first",
+        itemId: "continuation",
+        activityType: "agentMessage",
+        delta: "Продолжаю работу",
       }),
     );
 
@@ -3974,9 +3993,9 @@ describe("AppProjection", () => {
     );
     const activities: ActivityItem[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type !== "turn.replaced") return;
-      const item = event.turn.items.find((candidate) => candidate.id === "provisional-agent");
-      if (item) activities.push(item);
+      if (event.type === "activity.upserted" && event.item.id === "provisional-agent") {
+        activities.push(event.item);
+      }
     });
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -4019,9 +4038,9 @@ describe("AppProjection", () => {
       store,
       new AttentionManager(),
     );
-    let latestItems: ActivityItem[] = [];
+    const completedItemIds: string[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type === "turn.replaced") latestItems = event.turn.items;
+      if (event.type === "activity.upserted") completedItemIds.push(event.item.id);
     });
 
     for (const [id, completedAtMs] of [
@@ -4045,7 +4064,7 @@ describe("AppProjection", () => {
       } satisfies ServerNotification);
     }
 
-    expect(latestItems.map((item) => item.id)).toEqual(["first-agent", "second-agent"]);
+    expect(completedItemIds).toEqual(["first-agent", "second-agent"]);
   });
 
   it("reconciles a streamed agent message when the canonical item id changes", async () => {
@@ -4078,11 +4097,11 @@ describe("AppProjection", () => {
       store,
       new AttentionManager(),
     );
-    const activities: ActivityItem[] = [];
+    const liveEvents: ServerEvent[] = [];
     projection.on("event", (_sequence, event) => {
-      if (event.type !== "turn.replaced") return;
-      const item = event.turn.items.find((candidate) => candidate.id === "stream-agent");
-      if (item) activities.push(item);
+      if (event.type === "activity.delta" || event.type === "activity.upserted") {
+        liveEvents.push(event);
+      }
     });
     projection.upsertThread(thread("one", "/work", 10));
 
@@ -4121,7 +4140,18 @@ describe("AppProjection", () => {
       params: { threadId: "one", turn: canonicalTurn },
     } as ServerNotification);
 
-    expect(activities.slice(0, 2).map((item) => item.id)).toEqual(["stream-agent", "stream-agent"]);
+    expect(liveEvents.slice(0, 2)).toMatchObject([
+      {
+        type: "activity.delta",
+        itemId: "stream-agent",
+        activityType: "agentMessage",
+        delta: "Готово",
+      },
+      {
+        type: "activity.upserted",
+        item: { id: "stream-agent", status: "completed", text: "Готово" },
+      },
+    ]);
     const items = (await projection.readThread("one")).turns[0]?.items ?? [];
     expect(items.map((item) => item.id)).toEqual([
       "canonical-agent",
@@ -4164,12 +4194,17 @@ describe("AppProjection", () => {
       new AttentionManager(),
     );
     const replacements: TurnView[] = [];
+    const deliveryEvents: ServerEvent[] = [];
     projection.on("event", (_sequence, event) => {
       if (event.type === "turn.replaced") replacements.push(event.turn);
+      if (event.type === "activity.delta" || event.type === "turn.replaced") {
+        deliveryEvents.push(event);
+      }
     });
     projection.upsertThread(thread("one", "/work", 10));
     projection.recordUserMessage("one", "live", "client-user", "Проверь доставку", []);
     replacements.length = 0;
+    deliveryEvents.length = 0;
 
     bridge.emit("notification", {
       method: "item/agentMessage/delta",
@@ -4191,6 +4226,7 @@ describe("AppProjection", () => {
     await vi.waitFor(() => expect(replacements).toHaveLength(1));
     await new Promise((resolve) => setTimeout(resolve, TURN_REPLACEMENT_SETTLE_MS));
     expect(replacements).toHaveLength(1);
+    expect(deliveryEvents.map((event) => event.type)).toEqual(["activity.delta", "turn.replaced"]);
     expect(replacements[0]?.items.map((item) => item.id)).toEqual([
       "client-user",
       "canonical-final",

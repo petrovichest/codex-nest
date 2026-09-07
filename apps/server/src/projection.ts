@@ -73,12 +73,24 @@ interface CachedThread {
   goalStatus?: ThreadGoal["status"] | null;
 }
 
+interface PendingActivityDelta {
+  itemId: string;
+  activityType: "agentMessage" | "plan" | "reasoning" | "command";
+  delta: string;
+}
+
+interface PendingTurnActivityDeltas {
+  threadId: string;
+  turnId: string;
+  items: Map<string, PendingActivityDelta>;
+}
+
 export class ThreadDraftConflictError extends Error {}
 export class ThreadViewUnavailableError extends Error {}
 export class ThreadHistoryConflictError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
-const TURN_REPLACEMENT_DEBOUNCE_MS = 50;
+const LIVE_ACTIVITY_DELTA_FLUSH_MS = 50;
 const SESSION_RETENTION_BATCH_SIZE = 25;
 const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 const LOADED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
@@ -89,7 +101,8 @@ export class AppProjection extends EventEmitter {
   private readonly activity = new Map<string, ActivityItem>();
   private readonly progress = new Map<string, TurnProgress>();
   private readonly turnStates = new Map<string, TurnView>();
-  private readonly turnReplacementTimers = new Map<string, NodeJS.Timeout>();
+  private readonly pendingActivityDeltas = new Map<string, PendingTurnActivityDeltas>();
+  private readonly activityDeltaTimers = new Map<string, NodeJS.Timeout>();
   private readonly latestDetails = new Map<string, ThreadDetail>();
   private readonly historyRevisions = new Map<string, number>();
   private readonly subscribedThreads = new Set<string>();
@@ -1172,9 +1185,10 @@ export class AppProjection extends EventEmitter {
       timestamp: Date.now(),
       phase: null,
     };
+    this.flushActivityDeltas(threadId, turnId);
     this.activity.set(key, item);
     this.bumpHistoryRevision(threadId);
-    this.replaceTurnState(threadId, turnId, { immediate: true });
+    this.publishActivityUpsert(threadId, turnId, item);
     this.touchThreadActivity(threadId, item.timestamp ?? Date.now());
   }
 
@@ -1199,9 +1213,10 @@ export class AppProjection extends EventEmitter {
       state.threadMeta[threadId] = meta;
       if (index < 0) markedRead.push(...applyReadMarkers(state, readMarkers));
     });
+    this.flushActivityDeltas(threadId, turnId);
     this.activity.set(activityKey(threadId, turnId, item.id), item);
     this.bumpHistoryRevision(threadId);
-    this.replaceTurnState(threadId, turnId, { immediate: true });
+    this.publishActivityUpsert(threadId, turnId, item);
     this.touchThreadActivity(threadId, item.timestamp);
     if (markedRead.length) {
       const state = this.store.view();
@@ -1318,7 +1333,7 @@ export class AppProjection extends EventEmitter {
   private replaceTurnState(
     threadId: string,
     turnId: string,
-    options: { immediate?: boolean; source?: Turn } = {},
+    options: { publish?: boolean; source?: Turn } = {},
   ): void {
     const key = turnKey(threadId, turnId);
     const cached = this.threads.get(threadId);
@@ -1362,27 +1377,105 @@ export class AppProjection extends EventEmitter {
     }
     this.turnStates.set(key, turn);
     this.replaceLatestTurn(threadId, turn);
-    if (options.immediate) {
-      this.publishTurnReplacement(threadId, turnId);
-      return;
-    }
-    if (this.turnReplacementTimers.has(key)) return;
-    const timer = setTimeout(() => {
-      if (this.turnReplacementTimers.get(key) !== timer) return;
-      this.turnReplacementTimers.delete(key);
-      this.publishTurnReplacement(threadId, turnId);
-    }, TURN_REPLACEMENT_DEBOUNCE_MS);
-    this.turnReplacementTimers.set(key, timer);
+    if (options.publish) this.publishTurnReplacement(threadId, turnId);
   }
 
   private publishTurnReplacement(threadId: string, turnId: string): void {
     const key = turnKey(threadId, turnId);
-    const timer = this.turnReplacementTimers.get(key);
-    if (timer) clearTimeout(timer);
-    this.turnReplacementTimers.delete(key);
     const turn = this.turnStates.get(key);
     if (!turn) return;
     this.publish({ type: "turn.replaced", threadId, turn: cloneView<TurnView>(turn) });
+    this.markLatestDetailCurrent(threadId);
+  }
+
+  private publishActivityUpsert(threadId: string, turnId: string, item: ActivityItem): void {
+    this.replaceTurnState(threadId, turnId);
+    this.publish({
+      type: "activity.upserted",
+      threadId,
+      turnId,
+      item: cloneView<ActivityItem>(item),
+    });
+    this.markLatestDetailCurrent(threadId);
+  }
+
+  private publishTurnProgress(threadId: string, turnId: string, progress: TurnProgress): void {
+    this.flushActivityDeltas(threadId, turnId);
+    this.replaceTurnState(threadId, turnId);
+    this.publish({
+      type: "turn.progressed",
+      threadId,
+      turnId,
+      progress: cloneView<TurnProgress>(progress),
+    });
+    this.markLatestDetailCurrent(threadId);
+  }
+
+  private queueActivityDelta(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    activityType: PendingActivityDelta["activityType"],
+    delta: string,
+  ): void {
+    if (!delta) return;
+    const key = turnKey(threadId, turnId);
+    let batch = this.pendingActivityDeltas.get(key);
+    if (!batch) {
+      batch = { threadId, turnId, items: new Map() };
+      this.pendingActivityDeltas.set(key, batch);
+    }
+    const previous = batch.items.get(itemId);
+    if (previous && previous.activityType !== activityType) {
+      this.flushActivityDeltas(threadId, turnId);
+      this.queueActivityDelta(threadId, turnId, itemId, activityType, delta);
+      return;
+    }
+    batch.items.set(itemId, {
+      itemId,
+      activityType,
+      delta: (previous?.delta ?? "") + delta,
+    });
+    if (this.activityDeltaTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      if (this.activityDeltaTimers.get(key) !== timer) return;
+      this.flushActivityDeltas(threadId, turnId);
+    }, LIVE_ACTIVITY_DELTA_FLUSH_MS);
+    timer.unref();
+    this.activityDeltaTimers.set(key, timer);
+  }
+
+  private flushActivityDeltas(threadId: string, turnId: string): void {
+    const key = turnKey(threadId, turnId);
+    const timer = this.activityDeltaTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.activityDeltaTimers.delete(key);
+    const batch = this.pendingActivityDeltas.get(key);
+    if (!batch) return;
+    this.pendingActivityDeltas.delete(key);
+    this.replaceTurnState(threadId, turnId);
+    for (const item of batch.items.values()) {
+      this.publish({
+        type: "activity.delta",
+        threadId,
+        turnId,
+        itemId: item.itemId,
+        activityType: item.activityType,
+        delta: item.delta,
+      });
+    }
+    this.markLatestDetailCurrent(threadId);
+  }
+
+  private discardActivityDeltas(threadId: string, turnId: string): void {
+    const key = turnKey(threadId, turnId);
+    const timer = this.activityDeltaTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.activityDeltaTimers.delete(key);
+    this.pendingActivityDeltas.delete(key);
+  }
+
+  private markLatestDetailCurrent(threadId: string): void {
     const detail = this.latestDetails.get(threadId);
     if (detail) this.latestDetails.set(threadId, { ...detail, version: this.version });
   }
@@ -1402,6 +1495,7 @@ export class AppProjection extends EventEmitter {
   }
 
   private clearTurnActivities(threadId: string, turnId: string): void {
+    this.discardActivityDeltas(threadId, turnId);
     const prefix = `${threadId}:${turnId}:`;
     for (const key of [...this.activity.keys()]) {
       if (key.startsWith(prefix)) this.activity.delete(key);
@@ -2092,6 +2186,7 @@ export class AppProjection extends EventEmitter {
         this.publish({ type: "skills.changed" });
         break;
       case "error": {
+        this.flushActivityDeltas(notification.params.threadId, notification.params.turnId);
         const item: ActivityItem = {
           type: "error",
           id: `${notification.params.turnId}-error-${Date.now()}`,
@@ -2102,9 +2197,7 @@ export class AppProjection extends EventEmitter {
           activityKey(notification.params.threadId, notification.params.turnId, item.id),
           item,
         );
-        this.replaceTurnState(notification.params.threadId, notification.params.turnId, {
-          immediate: true,
-        });
+        this.publishActivityUpsert(notification.params.threadId, notification.params.turnId, item);
         this.touchThreadActivity(notification.params.threadId);
         break;
       }
@@ -2197,6 +2290,7 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "turn/started": {
+        this.flushActivityDeltas(notification.params.threadId, notification.params.turn.id);
         this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
         const cached = this.threads.get(notification.params.threadId);
@@ -2216,12 +2310,13 @@ export class AppProjection extends EventEmitter {
           await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }
         this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
-          immediate: true,
+          publish: true,
           source: notification.params.turn,
         });
         break;
       }
       case "turn/completed": {
+        this.flushActivityDeltas(notification.params.threadId, notification.params.turn.id);
         await this.clearUserInputDraftsForTurn(
           notification.params.threadId,
           notification.params.turn.id,
@@ -2324,7 +2419,7 @@ export class AppProjection extends EventEmitter {
           }
           this.clearTurnActivities(notification.params.threadId, notification.params.turn.id);
           this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
-            immediate: true,
+            publish: true,
             source: notification.params.turn,
           });
           this.publishThread(notification.params.threadId);
@@ -2339,6 +2434,11 @@ export class AppProjection extends EventEmitter {
           steps: notification.params.plan,
         } satisfies TurnProgress;
         this.progress.set(key, progress);
+        this.publishTurnProgress(
+          notification.params.threadId,
+          notification.params.turnId,
+          progress,
+        );
         await this.upsertTimelineArtifact(
           notification.params.threadId,
           notification.params.turnId,
@@ -2364,7 +2464,11 @@ export class AppProjection extends EventEmitter {
           ...diffStats(notification.params.diff),
         } satisfies TurnProgress;
         this.progress.set(key, progress);
-        this.replaceTurnState(notification.params.threadId, notification.params.turnId);
+        this.publishTurnProgress(
+          notification.params.threadId,
+          notification.params.turnId,
+          progress,
+        );
         this.touchThreadActivity(notification.params.threadId);
         break;
       }
@@ -2372,6 +2476,7 @@ export class AppProjection extends EventEmitter {
       case "item/completed": {
         const sourceItem = notification.params.item;
         if (isInternalTeamContinuationItem(sourceItem)) break;
+        this.flushActivityDeltas(notification.params.threadId, notification.params.turnId);
         this.captureSubagentTitles(sourceItem);
         if (
           notification.method === "item/completed" &&
@@ -2431,9 +2536,7 @@ export class AppProjection extends EventEmitter {
           }
         }
         this.activity.set(key, item);
-        this.replaceTurnState(notification.params.threadId, notification.params.turnId, {
-          immediate: true,
-        });
+        this.publishActivityUpsert(notification.params.threadId, notification.params.turnId, item);
         this.touchThreadActivity(notification.params.threadId, eventTimestamp);
         break;
       }
@@ -2475,7 +2578,13 @@ export class AppProjection extends EventEmitter {
                 exitCode: null,
               };
         this.activity.set(key, item);
-        this.replaceTurnState(notification.params.threadId, notification.params.turnId);
+        this.queueActivityDelta(
+          notification.params.threadId,
+          notification.params.turnId,
+          notification.params.itemId,
+          "command",
+          notification.params.delta,
+        );
         this.touchThreadActivity(notification.params.threadId);
         break;
       }
@@ -2517,10 +2626,12 @@ export class AppProjection extends EventEmitter {
     for (const key of [...this.turnStates.keys()]) {
       if (key.startsWith(`${threadId}:`)) this.turnStates.delete(key);
     }
-    for (const [key, timer] of [...this.turnReplacementTimers.entries()]) {
-      if (!key.startsWith(`${threadId}:`)) continue;
-      clearTimeout(timer);
-      this.turnReplacementTimers.delete(key);
+    for (const [key, batch] of [...this.pendingActivityDeltas.entries()]) {
+      if (batch.threadId !== threadId) continue;
+      const timer = this.activityDeltaTimers.get(key);
+      if (timer) clearTimeout(timer);
+      this.activityDeltaTimers.delete(key);
+      this.pendingActivityDeltas.delete(key);
     }
     for (const key of [...this.activity.keys()]) {
       if (key.startsWith(`${threadId}:`)) this.activity.delete(key);
@@ -2624,7 +2735,7 @@ export class AppProjection extends EventEmitter {
       phase: previous && "phase" in previous ? previous.phase : null,
     };
     this.activity.set(key, item);
-    this.replaceTurnState(threadId, turnId);
+    this.queueActivityDelta(threadId, turnId, itemId, type, delta);
   }
 
   private touchThreadActivity(
