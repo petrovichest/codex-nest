@@ -1,11 +1,17 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ActivityItem, ServerEvent, ThreadGoal, TurnView } from "@codexnest/protocol";
+import type {
+  ActivityItem,
+  AttentionRequest,
+  ServerEvent,
+  ThreadGoal,
+  TurnView,
+} from "@codexnest/protocol";
 
 import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
@@ -71,7 +77,7 @@ class FakeBridge extends EventEmitter {
         nextCursor: null,
       };
     }
-    if (method === "thread/turns/list" && this.active && params.itemsView === "summary") {
+    if (method === "thread/turns/list" && this.active) {
       return {
         data: liveThread().turns,
         nextCursor: null,
@@ -108,6 +114,297 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("keeps quiz replies in dialogue order when the agent outruns draft persistence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-quiz-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const message = (id: string, text: string) => ({
+      type: "agentMessage" as const,
+      id,
+      text,
+      phase: "commentary" as const,
+      memoryCitation: null,
+    });
+    const canonical = {
+      ...testTurn("live", "inProgress"),
+      itemsView: "full" as const,
+      items: [message("before", "Уточню восстановление")],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      return { data: [canonical], nextCursor: null };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(
+      thread("one", "/work", 10, { type: "active", activeFlags: [] }, [structuredClone(canonical)]),
+    );
+    await projection.readThread("one");
+    const request: Extract<AttentionRequest, { kind: "userInput" }> = {
+      id: "quiz",
+      kind: "userInput",
+      threadId: "one",
+      turnId: "live",
+      itemId: "call_quiz",
+      createdAt: 11_000,
+      autoResolutionMs: null,
+      draft: null,
+      questions: [
+        {
+          id: "choice",
+          header: "Восстановление",
+          question: "Как исправлять?",
+          options: null,
+          isOther: true,
+          isSecret: false,
+        },
+      ],
+    };
+    await projection.updateUserInputDraft(request, {
+      answers: { choice: ["Что случилось?"] },
+      currentQuestionId: "choice",
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(20_000);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalUpdate = store.update.bind(store);
+    const update = vi.spyOn(store, "update").mockImplementationOnce(async (fn) => {
+      await gate;
+      return originalUpdate(fn);
+    });
+    try {
+      const recording = projection.recordAttentionResponse(request, {
+        kind: "userInput",
+        answers: { choice: ["Что случилось?"] },
+      });
+      now.mockReturnValue(21_000);
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: {
+          threadId: "one",
+          turnId: "live",
+          item: message("reply", "Не Titan целиком"),
+          completedAtMs: 21_000,
+        },
+      } satisfies ServerNotification);
+      canonical.items.push(message("reply", "Не Titan целиком"));
+      now.mockReturnValue(30_000);
+      release();
+      await recording;
+      expect(store.snapshot().threadMeta.one?.timelineArtifacts?.live?.[0]).toMatchObject({
+        timestamp: 20_000,
+        afterItemId: "before",
+      });
+      const expected = ["before", "call_quiz-response", "reply"];
+      expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual(
+        expected,
+      );
+      expect(
+        (await projection.readThread("one", { refresh: true })).turns[0]?.items.map(
+          (item) => item.id,
+        ),
+      ).toEqual(expected);
+      await store.flushed();
+      const reloadedStore = new StateStore(store.path);
+      await reloadedStore.load();
+      const reloaded = new AppProjection(
+        bridge as unknown as CodexBridge,
+        reloadedStore,
+        new AttentionManager(),
+      );
+      expect((await reloaded.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual(
+        expected,
+      );
+      await reloadedStore.flushed();
+    } finally {
+      release();
+      update.mockRestore();
+      now.mockRestore();
+    }
+  });
+
+  it("restores legacy quiz anchors while loading all dialogue and keeping technical output lazy", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-quiz-history-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const path = join(directory, "rollout.jsonl");
+    const records: object[] = [{ type: "turn_context", payload: { turn_id: "live" } }];
+    const canonical = {
+      ...testTurn("live", "inProgress"),
+      itemsView: "full" as const,
+      items: [] as Thread["turns"][number]["items"],
+    };
+    const artifacts: Extract<ActivityItem, { type: "userInputResponse" }>[] = [];
+    const expected: string[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      const id = `message-${index}`;
+      const callId = `call_${index}`;
+      canonical.items.push({
+        type: "agentMessage",
+        id,
+        text: `Пояснение ${index}`,
+        phase: "commentary",
+        memoryCitation: null,
+      });
+      records.push({ type: "response_item", payload: { type: "message", id, role: "assistant" } });
+      records.push({
+        type: "response_item",
+        timestamp: new Date(20_000 + index * 1_000).toISOString(),
+        payload: { type: "function_call_output", call_id: callId },
+      });
+      artifacts.push({
+        type: "userInputResponse",
+        id: `${callId}-response`,
+        status: "completed",
+        entries: [{ header: "Уточнение", question: "Как?", answers: [`Вопрос ${index}`] }],
+        timestamp: 50_000,
+        afterItemId: callId,
+      });
+      expected.push(id, `${callId}-response`);
+    }
+    canonical.items.push({
+      type: "agentMessage",
+      id: "last-reply",
+      text: "Не Titan целиком",
+      phase: "commentary",
+      memoryCitation: null,
+    });
+    expected.push("last-reply");
+    canonical.items.push({
+      type: "commandExecution",
+      id: "command",
+      command: "diagnostic",
+      source: "agent",
+      cwd: "/work",
+      status: "completed",
+      commandActions: [],
+      aggregatedOutput: "large output".repeat(10_000),
+      exitCode: 0,
+      durationMs: 1,
+      processId: null,
+    });
+    await writeFile(path, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        timelineArtifacts: { live: artifacts },
+      };
+    });
+    const bridge = new FakeBridge();
+    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
+      expect(params.itemsView).toBe("full");
+      return { data: [canonical], nextCursor: null };
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread({
+      ...thread("one", "/work", 10, { type: "active", activeFlags: [] }, [
+        structuredClone(canonical),
+      ]),
+      path,
+    });
+    const detail = await projection.readThread("one");
+    expect(detail.turns[0]?.items.map((item) => item.id)).toEqual(expected);
+    expect(detail.turns[0]?.itemsLoaded).toBe(false);
+    expect(JSON.stringify(detail)).not.toContain("large output");
+    expect(bridge.request).toHaveBeenCalledTimes(1);
+    const full = await projection.readTurnItems("one", "live");
+    expect(full.items.map((item) => item.id)).toEqual([...expected, "command"]);
+    expect(full.items.at(-1)).toMatchObject({
+      type: "command",
+      output: expect.stringContaining("large output"),
+    });
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: {
+          type: "agentMessage",
+          id: "next",
+          text: "Продолжаю",
+          phase: "commentary",
+          memoryCitation: null,
+        },
+        completedAtMs: 60_000,
+      },
+    } satisfies ServerNotification);
+    expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
+      ...expected,
+      "next",
+    ]);
+    // Recovery only adjusts the rendered view; persisted answers and the rollout remain intact.
+    expect(store.snapshot().threadMeta.one?.timelineArtifacts?.live).toEqual(artifacts);
+    await store.flushed();
+  });
+
+  it("keeps commentary before a final answer omitted from the earlier live items", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-terminal-dialogue-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        item: {
+          type: "agentMessage",
+          id: "explanation",
+          text: "Причина найдена",
+          phase: "commentary",
+          memoryCitation: null,
+        },
+        completedAtMs: 11_000,
+      },
+    } satisfies ServerNotification);
+    const replacements: TurnView[] = [];
+    projection.on("event", (_sequence, event) => {
+      if (event.type === "turn.replaced") replacements.push(event.turn);
+    });
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "one",
+        turn: {
+          ...testTurn("live", "completed"),
+          items: [
+            {
+              type: "agentMessage",
+              id: "final",
+              text: "Готово",
+              phase: "final_answer",
+              memoryCitation: null,
+            },
+          ],
+        },
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    expect(replacements[0]?.items.map((item) => item.id)).toEqual(["explanation", "final"]);
+    await store.flushed();
+  });
+
   it("prunes by last user or agent activity instead of creation time", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -1993,7 +2290,7 @@ describe("AppProjection", () => {
         cursor: null,
         limit: 20,
         sortDirection: "desc",
-        itemsView: "summary",
+        itemsView: "full",
       });
       return {
         data: [
@@ -2144,7 +2441,7 @@ describe("AppProjection", () => {
         cursor: null,
         limit: 20,
         sortDirection: "desc",
-        itemsView: "summary",
+        itemsView: "full",
       });
       return {
         data: [
@@ -3186,9 +3483,9 @@ describe("AppProjection", () => {
     expect(detail.turns[0]?.items.map((item) => item.id)).toEqual([
       "question-tool",
       checklistIds[0],
-      "question-tool-response",
       "progress-message",
       checklistIds[1],
+      "question-tool-response",
       "final-plan",
     ]);
     const reloadedStore = new StateStore(statePath);
@@ -3610,7 +3907,7 @@ describe("AppProjection", () => {
         cursor: "older",
         limit: 20,
         sortDirection: "desc",
-        itemsView: "summary",
+        itemsView: "full",
       }),
       30_000,
     );
@@ -4341,7 +4638,9 @@ describe("AppProjection", () => {
       params: { threadId: "one", turn: canonicalTurn() },
     } satisfies ServerNotification);
     await vi.waitFor(() => expect(projection.summary("one")?.state).toBe("interrupted"));
-    const liveItems = (await projection.readThread("one", { refresh: true })).turns[0]?.items ?? [];
+    const dialogue = (await projection.readThread("one", { refresh: true })).turns[0]?.items ?? [];
+    expect(dialogue.map((item) => item.id)).toEqual(["commentary", "after-reasoning"]);
+    const liveItems = (await projection.readTurnItems("one", "live")).items;
     expect(liveItems.map((item) => item.id)).toEqual([
       "reasoning",
       "commentary",
@@ -4373,8 +4672,10 @@ describe("AppProjection", () => {
       reloadedStore,
       new AttentionManager(),
     );
-    const restoredItems =
+    const restoredDialogue =
       (await reloaded.readThread("one", { refresh: true })).turns[0]?.items ?? [];
+    expect(restoredDialogue.map((item) => item.id)).toEqual(["commentary", "after-reasoning"]);
+    const restoredItems = (await reloaded.readTurnItems("one", "live")).items;
     expect(restoredItems.map((item) => item.id)).toEqual([
       "reasoning",
       "commentary",
@@ -4511,7 +4812,7 @@ describe("AppProjection", () => {
         cursor: null,
         limit: 20,
         sortDirection: "desc",
-        itemsView: "summary",
+        itemsView: "full",
       },
       30_000,
     );

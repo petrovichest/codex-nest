@@ -627,6 +627,89 @@ describe("Activity", () => {
     expect(context.loadTurnItems).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the assistant explanation between a submitted quiz question and the next quiz", () => {
+    const context = mockThreadConnection(
+      threadApi(),
+      {
+        ...summary,
+        state: "needsAttention",
+        currentTurnId: "turn",
+      },
+      {
+        turns: [
+          {
+            id: "turn",
+            status: "inProgress",
+            startedAt: 1,
+            completedAt: null,
+            durationMs: null,
+            progress: progress(),
+            itemsLoaded: false,
+            items: [
+              {
+                type: "userInputResponse",
+                id: "response",
+                status: "completed",
+                afterItemId: "previous",
+                timestamp: 2,
+                entries: [
+                  {
+                    header: "Восстановление",
+                    question: "Как исправлять?",
+                    answers: ["У нас перестали идти котировки от Titan?"],
+                  },
+                ],
+              },
+              {
+                type: "agentMessage",
+                id: "explanation",
+                status: "completed",
+                text: "Не Titan целиком. Зависли две подписки STONK.",
+                images: [],
+                phase: "commentary",
+                timestamp: 3,
+              },
+            ],
+          },
+        ],
+        attention: [
+          {
+            id: "next-quiz",
+            kind: "userInput",
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "call_next",
+            createdAt: 4,
+            autoResolutionMs: null,
+            draft: null,
+            questions: [
+              {
+                id: "fix",
+                header: "Исправление",
+                question: "Фиксируем автоматическое восстановление?",
+                isOther: true,
+                isSecret: false,
+                options: null,
+              },
+            ],
+          },
+        ],
+      },
+    );
+    renderThread();
+    const question = screen.getByText("У нас перестали идти котировки от Titan?");
+    const explanation = screen.getByText("Не Titan целиком. Зависли две подписки STONK.");
+    const nextQuiz = screen.getByText("Фиксируем автоматическое восстановление?");
+    expect(explanation).toBeVisible();
+    expect(
+      question.compareDocumentPosition(explanation) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      explanation.compareDocumentPosition(nextQuiz) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(context.loadTurnItems).not.toHaveBeenCalled();
+  });
+
   it("keeps lazy-load retry inline", async () => {
     const context = mockThreadConnection(threadApi(), summary, {
       turns: [

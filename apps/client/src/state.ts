@@ -726,8 +726,85 @@ function applyTurnItems(
         return item;
     }
   });
-  turns[turnIndex] = { ...current, items: timestamped, itemsLoaded: true };
+  turns[turnIndex] = {
+    ...current,
+    items: mergeLoadedTurnItems(timestamped, current),
+    itemsLoaded: true,
+  };
   return { ...state, details: { ...state.details, [threadId]: { ...detail, turns } } };
+}
+
+function mergeLoadedTurnItems(
+  items: ActivityItem[],
+  current: ThreadDetail["turns"][number],
+): ActivityItem[] {
+  let merged = [...items];
+  const unmatched = new Set(items.map((item) => item.id));
+  const matches = new Map<string, string>();
+  // Match exact IDs first so identical, independently emitted messages stay separate.
+  for (const item of current.items) {
+    if (!unmatched.delete(item.id)) continue;
+    matches.set(item.id, item.id);
+  }
+  for (const item of current.items) {
+    if (matches.has(item.id)) continue;
+    const alias = items.find(
+      (candidate) => unmatched.has(candidate.id) && sameLoadedText(candidate, item),
+    );
+    if (!alias) continue;
+    matches.set(item.id, alias.id);
+    unmatched.delete(alias.id);
+  }
+  for (const [index, item] of current.items.entries()) {
+    const canonicalId = matches.get(item.id);
+    if (canonicalId) {
+      const target = merged.findIndex((candidate) => candidate.id === canonicalId);
+      merged[target] = {
+        ...fresherActivity(item, merged[target]!),
+        id: canonicalId,
+      } as ActivityItem;
+      if (canonicalId !== item.id) merged = remapArtifactAnchors(merged, item.id, canonicalId);
+    } else if (
+      current.status === "inProgress" ||
+      [
+        "userMessage",
+        "agentMessage",
+        "plan",
+        "userInputResponse",
+        "planChecklist",
+        "orchestrationNotice",
+      ].includes(item.type)
+    ) {
+      const nextId = current.items
+        .slice(index + 1)
+        .map((candidate) => matches.get(candidate.id))
+        .find(Boolean);
+      const next = nextId ? merged.findIndex((candidate) => candidate.id === nextId) : -1;
+      if (next >= 0) merged.splice(next, 0, item);
+      else merged = upsertActivity(merged, item);
+    }
+  }
+  for (const [previousId, canonicalId] of matches) {
+    if (previousId !== canonicalId) merged = remapArtifactAnchors(merged, previousId, canonicalId);
+  }
+  return merged;
+}
+
+function sameLoadedText(first: ActivityItem, second: ActivityItem): boolean {
+  if (!("text" in first) || !("text" in second)) return false;
+  const partial = first.status === "inProgress" || second.status === "inProgress";
+  const text =
+    partial &&
+    first.text &&
+    second.text &&
+    (first.text.startsWith(second.text) || second.text.startsWith(first.text))
+      ? first.text
+      : second.text;
+  return sameCompletedActivity(
+    { ...first, status: "completed" },
+    { ...second, text, status: "completed" },
+    false,
+  );
 }
 
 function applyTurnReplacement(

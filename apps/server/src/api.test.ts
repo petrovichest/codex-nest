@@ -3430,7 +3430,6 @@ describe("thread settings", () => {
     });
     const headers = { authorization: "Bearer correct" };
 
-    bridge.rejectFullTurnReads = true;
     const threadListsBeforeRefresh = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/list",
     ).length;
@@ -3471,7 +3470,7 @@ describe("thread settings", () => {
     );
     expect(
       bridge.request.mock.calls.findLast(([method]) => method === "thread/turns/list")?.[1],
-    ).toMatchObject({ threadId: "thread", itemsView: "summary" });
+    ).toMatchObject({ threadId: "thread", itemsView: "full" });
 
     const requestLogger = vi.spyOn(app.log, "child").mockReturnValue(app.log);
     const errorLog = vi.spyOn(app.log, "error");
@@ -7010,7 +7009,6 @@ class SettingsBridge extends EventEmitter {
   lastDeletedThreadPath: string | null = null;
   parentTurnStartEntered: (() => void) | null = null;
   parentTurnStartGate: Promise<void> | null = null;
-  rejectFullTurnReads = false;
   nextTurnListError: RpcError | null = null;
   missingRolloutThreadIds = new Set<string>();
   missingThreadIds = new Set<string>();
@@ -7212,9 +7210,6 @@ class SettingsBridge extends EventEmitter {
       return {};
     }
     if (method === "thread/turns/list") {
-      if (this.rejectFullTurnReads && params.itemsView === "full") {
-        throw new RpcError(-32_000, "Rollout changed while reading turns");
-      }
       if (this.nextTurnListError) {
         const error = this.nextTurnListError;
         this.nextTurnListError = null;

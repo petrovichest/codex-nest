@@ -51,6 +51,7 @@ import { RpcError } from "./codex/transport";
 import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
 import { isMissingThreadError, removeThreadState } from "./thread-state";
+import { recoverUserInputAnchors } from "./timeline-rollout";
 import type {
   CodexNestState,
   CodexNestStateView,
@@ -393,7 +394,7 @@ export class AppProjection extends EventEmitter {
     const detail: ThreadDetail = {
       version: this.version,
       summary: this.toSummary(cached),
-      turns,
+      turns: turns.map(conversationTurn),
       queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
       olderTurnsCursor: subagent
         ? null
@@ -414,7 +415,7 @@ export class AppProjection extends EventEmitter {
     return {
       version: this.version,
       summary: this.toSummary(cached),
-      turns: page.turns,
+      turns: page.turns.map(conversationTurn),
       queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
       olderTurnsCursor: page.nextCursor,
       draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
@@ -447,7 +448,7 @@ export class AppProjection extends EventEmitter {
     return {
       instanceId: this.instanceId,
       anchorTurnId,
-      turns: page.turns,
+      turns: page.turns.map(conversationTurn),
       olderTurnsCursor: page.nextCursor,
     };
   }
@@ -458,8 +459,6 @@ export class AppProjection extends EventEmitter {
     previousTurns: TurnView[],
     hasFreshPage: boolean,
   ): TurnView[] {
-    const state = this.store.view();
-    const artifacts = state.threadMeta[cached.thread.id]?.timelineArtifacts ?? {};
     const boundaryTurns = cached.thread.turns
       .slice(-2)
       .map((turn) =>
@@ -474,7 +473,7 @@ export class AppProjection extends EventEmitter {
                 projectedTurnItemIds(turn),
                 normalizeOutcome(turn.status),
               ),
-          cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
+          this.timelineArtifacts(cached.thread.id, turn.id),
           false,
           this.interruptedTextActivities(cached.thread.id, turn.id),
         ),
@@ -510,7 +509,7 @@ export class AppProjection extends EventEmitter {
       for (const turn of source) {
         const projected =
           this.turnStates.get(turnKey(cached.thread.id, turn.id)) ??
-          this.overlayLiveTurn(cached.thread.id, turn, artifacts);
+          this.overlayLiveTurn(cached.thread.id, turn);
         if (!turns.has(turn.id)) orderedIds.push(turn.id);
         const current = turns.get(turn.id);
         turns.set(turn.id, current ? mergeMaterializedTurn(current, projected) : projected);
@@ -529,11 +528,7 @@ export class AppProjection extends EventEmitter {
       .slice(-(THREAD_TURN_PAGE_SIZE + 2));
   }
 
-  private overlayLiveTurn(
-    threadId: string,
-    turn: TurnView,
-    artifacts: DeepReadonly<Record<string, TimelineArtifact[]>>,
-  ): TurnView {
+  private overlayLiveTurn(threadId: string, turn: TurnView): TurnView {
     const liveMerge = mergeLiveActivities(
       turn.items,
       turn.status === "inProgress"
@@ -554,7 +549,7 @@ export class AppProjection extends EventEmitter {
           liveMerge.items,
           this.interruptedTextActivities(threadId, turn.id),
         ),
-        cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
+        this.timelineArtifacts(threadId, turn.id),
         liveMerge.aliases,
       ),
     };
@@ -617,7 +612,7 @@ export class AppProjection extends EventEmitter {
           cursor,
           limit,
           sortDirection: direction,
-          itemsView: "summary",
+          itemsView: "full",
         },
         30_000,
       ),
@@ -628,8 +623,10 @@ export class AppProjection extends EventEmitter {
         `CodexNest thread history read slow (${durationMs}ms, ${response.data.length} turns)\n`,
       );
     }
-    const state = this.store.view();
-    const artifacts = state.threadMeta[id]?.timelineArtifacts ?? {};
+    const artifacts = Object.fromEntries(
+      response.data.map((turn) => [turn.id, this.timelineArtifacts(id, turn.id)]),
+    );
+    await recoverUserInputAnchors(this.rolloutPath(id), response.data, artifacts);
     const ordered = direction === "desc" ? response.data.slice().reverse() : response.data;
     const page: CachedTurnsPage = {
       threadId: id,
@@ -638,20 +635,22 @@ export class AppProjection extends EventEmitter {
       threadUpdatedAt,
       historyRevision,
       turns: ordered.map((turn) => {
-        const normalized = normalizeTurn(
-          turn,
-          this.progress.get(turnKey(id, turn.id)),
-          turn.status === "inProgress"
-            ? this.liveActivities(id, turn.id)
-            : this.terminalActivityOverlay(
-                id,
-                turn.id,
-                projectedTurnItemIds(turn),
-                normalizeOutcome(turn.status),
-              ),
-          cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
-          false,
-          this.interruptedTextActivities(id, turn.id),
+        const normalized = conversationTurn(
+          normalizeTurn(
+            turn,
+            this.progress.get(turnKey(id, turn.id)),
+            turn.status === "inProgress"
+              ? this.liveActivities(id, turn.id)
+              : this.terminalActivityOverlay(
+                  id,
+                  turn.id,
+                  projectedTurnItemIds(turn),
+                  normalizeOutcome(turn.status),
+                ),
+            cloneView<TimelineArtifact[]>(artifacts[turn.id] ?? []),
+            false,
+            this.interruptedTextActivities(id, turn.id),
+          ),
         );
         if (turn.status !== "inProgress") {
           this.clearTurnActivities(id, turn.id);
@@ -944,23 +943,20 @@ export class AppProjection extends EventEmitter {
       pages += 1;
       const turn = page.data.find((candidate) => candidate.id === turnId);
       if (turn) {
-        const artifacts = cloneView<TimelineArtifact[]>(
-          this.store.view().threadMeta[threadId]?.timelineArtifacts?.[turnId] ?? [],
-        );
+        const artifacts = { [turnId]: this.timelineArtifacts(threadId, turnId) };
+        await recoverUserInputAnchors(this.rolloutPath(threadId), [turn], artifacts);
         items = normalizeTurn(
           turn,
           this.progress.get(turnKey(threadId, turnId)),
           turn.status === "inProgress"
             ? this.liveActivities(threadId, turnId)
-            : turn.status === "interrupted"
-              ? this.terminalActivityOverlay(
-                  threadId,
-                  turnId,
-                  projectedTurnItemIds(turn),
-                  "interrupted",
-                )
-              : [],
-          artifacts,
+            : this.terminalActivityOverlay(
+                threadId,
+                turnId,
+                projectedTurnItemIds(turn),
+                normalizeOutcome(turn.status),
+              ),
+          artifacts[turnId],
           true,
           this.interruptedTextActivities(threadId, turnId),
         ).items;
@@ -1077,7 +1073,7 @@ export class AppProjection extends EventEmitter {
     ) {
       return;
     }
-    await this.clearUserInputDraft(request);
+    this.flushActivityDeltas(request.threadId, request.turnId);
     const item: TimelineArtifact = {
       type: "userInputResponse",
       id: `${request.itemId ?? request.id}-response`,
@@ -1088,8 +1084,9 @@ export class AppProjection extends EventEmitter {
         answers: response.answers[question.id] ?? [],
       })),
       timestamp: Date.now(),
-      afterItemId: request.itemId,
+      afterItemId: this.latestConversationActivityId(request.threadId, request.turnId),
     };
+    await this.clearUserInputDraft(request);
     await this.upsertTimelineArtifact(request.threadId, request.turnId, item);
   }
 
@@ -1241,6 +1238,41 @@ export class AppProjection extends EventEmitter {
     return latest;
   }
 
+  private latestConversationActivityId(threadId: string, turnId: string): string | null {
+    const items = this.turnStates.get(turnKey(threadId, turnId))?.items ?? [];
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (isConversationMessage(items[index]!)) return items[index]!.id;
+    }
+    return null;
+  }
+
+  private timelineArtifacts(threadId: string, turnId: string): TimelineArtifact[] {
+    const saved = this.store.view().threadMeta[threadId]?.timelineArtifacts?.[turnId] ?? [];
+    if (!saved.length) return [];
+    const artifacts = cloneView<TimelineArtifact[]>(saved);
+    if (!artifacts.some((item) => item.type === "userInputResponse")) return artifacts;
+    const previous =
+      this.turnStates.get(turnKey(threadId, turnId))?.items ??
+      this.latestDetails.get(threadId)?.turns.find((turn) => turn.id === turnId)?.items ??
+      [];
+    const ids = new Set(previous.map((item) => item.id));
+    return artifacts.map((artifact) => {
+      if (
+        artifact.type !== "userInputResponse" ||
+        !artifact.afterItemId ||
+        ids.has(artifact.afterItemId)
+      ) {
+        return artifact;
+      }
+      const restored = previous.find((item) => item.id === artifact.id);
+      return restored?.type === "userInputResponse" &&
+        restored.afterItemId &&
+        ids.has(restored.afterItemId)
+        ? { ...artifact, afterItemId: restored.afterItemId, timestamp: restored.timestamp }
+        : artifact;
+    });
+  }
+
   private liveActivities(threadId: string, turnId: string): ActivityItem[] {
     const prefix = `${threadId}:${turnId}:`;
     const items: ActivityItem[] = [];
@@ -1304,9 +1336,8 @@ export class AppProjection extends EventEmitter {
   ): ActivityItem[] {
     // Terminal notifications and summary history pages may omit inputs that were already accepted.
     // Retain missing user messages together with canonical timeline anchors so steering inputs keep
-    // their live position instead of being appended after the terminal response. Interrupted
-    // assistant text may be absent or empty in an interrupted canonical turn, so keep everything
-    // that was already visible as completed work.
+    // their live position instead of being appended after the terminal response. Keep dialogue
+    // omitted from terminal summaries, and all assistant text when a turn was interrupted.
     const retained: ActivityItem[] = [];
     const seen = new Set<string>();
     const append = (items: readonly ActivityItem[] | undefined) => {
@@ -1314,8 +1345,8 @@ export class AppProjection extends EventEmitter {
         if (seen.has(item.id)) continue;
         seen.add(item.id);
         if (
-          (item.type === "userMessage" && !existingIds.has(item.id)) ||
-          (item.type !== "userMessage" && existingIds.has(item.id)) ||
+          existingIds.has(item.id) ||
+          isConversationMessage(item) ||
           (outcome === "interrupted" && isAssistantTextActivity(item))
         ) {
           retained.push(item);
@@ -1338,7 +1369,6 @@ export class AppProjection extends EventEmitter {
     const key = turnKey(threadId, turnId);
     const cached = this.threads.get(threadId);
     const source = options.source ?? cached?.thread.turns.find((turn) => turn.id === turnId);
-    const artifacts = this.store.view().threadMeta[threadId]?.timelineArtifacts ?? {};
     let turn: TurnView;
     if (source) {
       turn = normalizeTurn(
@@ -1352,7 +1382,7 @@ export class AppProjection extends EventEmitter {
               projectedTurnItemIds(source),
               normalizeOutcome(source.status),
             ),
-        cloneView<TimelineArtifact[]>(artifacts[turnId] ?? []),
+        this.timelineArtifacts(threadId, turnId),
         source.itemsView === "full",
         this.interruptedTextActivities(threadId, turnId),
       );
@@ -1372,7 +1402,6 @@ export class AppProjection extends EventEmitter {
           items: [],
           itemsLoaded: false,
         },
-        artifacts,
       );
     }
     this.turnStates.set(key, turn);
@@ -1968,14 +1997,13 @@ export class AppProjection extends EventEmitter {
         const key = activityKey(thread.id, turn.id, item.id);
         if (!this.activity.has(key)) this.activity.set(key, item);
       }
-      const artifacts = this.store.view().threadMeta[thread.id]?.timelineArtifacts?.[turn.id] ?? [];
       this.turnStates.set(
         key,
         normalizeTurn(
           turn,
           this.progress.get(key),
           this.liveActivities(thread.id, turn.id),
-          cloneView<TimelineArtifact[]>(artifacts),
+          this.timelineArtifacts(thread.id, turn.id),
           turn.itemsView === "full",
         ),
       );
@@ -3389,6 +3417,20 @@ function normalizeTurn(
   };
 }
 
+function isConversationMessage(item: ActivityItem): boolean {
+  return item.type === "userMessage" || item.type === "agentMessage" || item.type === "plan";
+}
+
+function conversationTurn(turn: TurnView): TurnView {
+  return {
+    ...turn,
+    items: turn.items.filter(
+      (item) => !["reasoning", "command", "fileChange", "tool"].includes(item.type),
+    ),
+    itemsLoaded: false,
+  };
+}
+
 function mergeMaterializedTurn(current: TurnView, incoming: TurnView): TurnView {
   const items = [...current.items];
   const itemIndexes = new Map(items.map((item, index) => [item.id, index]));
@@ -3446,7 +3488,7 @@ function mergeLiveActivities(
   }
   for (const [itemIndex, item] of liveActivities.entries()) {
     const projectedItem =
-      turnStatus === "interrupted" && isAssistantTextActivity(item)
+      turnStatus !== "inProgress" && isAssistantTextActivity(item)
         ? { ...item, status: "completed" as const }
         : item;
     const canonicalId = canonicalMatchByLiveId.get(item.id);
@@ -3477,9 +3519,21 @@ function mergeLiveActivities(
           candidateId !== undefined &&
           result.some((existingItem) => existingItem.id === candidateId),
       );
+    const finalResponse =
+      turnStatus !== "inProgress" &&
+      (item.type === "userMessage" ||
+        (isAssistantTextActivity(item) && item.phase !== "final_answer"))
+        ? result.findIndex(
+            (candidate) =>
+              candidate.type === "plan" ||
+              (candidate.type === "agentMessage" && candidate.phase === "final_answer"),
+          )
+        : -1;
     const insertion = nextCanonicalId
       ? result.findIndex((candidate) => candidate.id === nextCanonicalId)
-      : result.length;
+      : finalResponse >= 0
+        ? finalResponse
+        : result.length;
     result.splice(insertion, 0, projectedItem);
   }
   return { items: result, aliases };

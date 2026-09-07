@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
+import type { ActivityItem, AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
 
 import { clientReducer, initialState, sortThreads } from "./state";
 import { forkOperationsFromSnapshot, type ForkOperationSummary } from "./forks";
@@ -38,6 +38,115 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("keeps newer quiz answers and streamed text when a delayed technical read arrives", () => {
+    const before: ActivityItem = {
+      type: "agentMessage",
+      id: "before",
+      text: "Уточню восстановление",
+      status: "completed",
+      phase: "commentary",
+      images: [],
+      timestamp: 10,
+    };
+    const response: ActivityItem = {
+      type: "userInputResponse",
+      id: "response",
+      status: "completed",
+      entries: [{ header: "Вопрос", question: "Как?", answers: ["Что случилось?"] }],
+      timestamp: 20,
+      afterItemId: "before",
+    };
+    const reply: ActivityItem = {
+      type: "agentMessage",
+      id: "reply",
+      text: "Не Titan целиком",
+      status: "inProgress",
+      phase: "commentary",
+      images: [],
+      timestamp: 21,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), status: "inProgress", itemsLoaded: false, items: [before] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    // The assistant can start streaming before the quiz response is persisted and published.
+    for (const [index, item] of [reply, response].entries()) {
+      state = clientReducer(state, {
+        type: "event",
+        version: { instanceId: "legacy", sequence: 5 + index },
+        event: { type: "activity.upserted", threadId: "one", turnId: "turn", item },
+      });
+    }
+    const expected = ["before", "response", "reply"];
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(expected);
+    state = clientReducer(state, {
+      type: "turn.items",
+      threadId: "one",
+      turnId: "turn",
+      items: [before, { ...reply, text: "Не Titan" }],
+    });
+    const loaded = state.details.one!.turns[0]!;
+    expect(loaded.itemsLoaded).toBe(true);
+    expect(loaded.items.map((item) => item.id)).toEqual(expected);
+    expect(loaded.items.at(-1)).toMatchObject({ text: "Не Titan целиком" });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: { summary: baseThread, turns: [loaded], queuedMessages: [], olderTurnsCursor: null },
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(expected);
+  });
+
+  it("remaps quiz anchors on full history loads without collapsing identical independent replies", () => {
+    const first: ActivityItem = {
+      type: "agentMessage",
+      id: "first",
+      status: "completed",
+      phase: "commentary",
+      text: "Да",
+      images: [],
+      timestamp: 10,
+    };
+    const second = { ...first, id: "stream-second", timestamp: 20 };
+    const response: ActivityItem = {
+      type: "userInputResponse",
+      id: "response",
+      status: "completed",
+      entries: [],
+      timestamp: 30,
+      afterItemId: second.id,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        turns: [{ ...turn("turn"), itemsLoaded: false, items: [first, second, response] }],
+        queuedMessages: [],
+        olderTurnsCursor: null,
+      },
+    });
+    state = clientReducer(state, {
+      type: "turn.items",
+      threadId: "one",
+      turnId: "turn",
+      items: [first, { ...second, id: "canonical-second" }],
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual([
+      "first",
+      "canonical-second",
+      "response",
+    ]);
+    expect(state.details.one?.turns[0]?.items.at(-1)).toMatchObject({
+      afterItemId: "canonical-second",
+    });
+  });
+
   it("clears unversioned projection data on the first backend snapshot", () => {
     const dirty = {
       ...initialState,
