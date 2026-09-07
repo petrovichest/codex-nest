@@ -3036,7 +3036,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", "Project not found");
     }
     const thread = await getOrCreateProjectThread(request.params.id);
-    return reply.code(201).send({ thread } satisfies CreateProjectThreadResponse);
+    const draft = cloneView<CreateProjectThreadResponse["draft"]>(
+      store.view().threadMeta[thread.id]?.draft ?? null,
+    );
+    return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
   });
 
   app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(

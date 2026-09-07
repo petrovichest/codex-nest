@@ -226,7 +226,13 @@ function latestRootUserMessage(detail: ThreadDetail | undefined): ActivityItem |
 }
 
 function normalizeNewSessionDraft(value: UpdateThreadDraftRequest): UpdateThreadDraftRequest {
-  return structuredClone(value);
+  return structuredClone({
+    input: value.input,
+    images: value.images,
+    ...(value.files ? { files: value.files } : {}),
+    goalMode: value.goalMode,
+    annotations: value.annotations,
+  });
 }
 
 export function initialSessionSettings(
@@ -539,6 +545,11 @@ export function ThreadPage({
   const preparationAliveRef = useRef(true);
   const preparationDiscardRef = useRef(false);
   const preparationDraftTouchedRef = useRef(false);
+  const preparationServerDraftRef = useRef<{
+    threadId: string;
+    draft: ThreadDraft | null;
+    revision: number | null;
+  } | null>(null);
   const preparationDraftTimerRef = useRef<number | null>(null);
   const preparationDraftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const [attachmentScope, setAttachmentScope] = useState(0);
@@ -1205,9 +1216,32 @@ export function ThreadPage({
           ? state.snapshot?.threads.find((candidate) => candidate.id === existingThreadId)
           : undefined;
         if (!thread) {
-          thread = existingThreadId
-            ? (await api.readThread(existingThreadId, { fresh: true })).summary
-            : (await api.createProjectThread(activeProject.id)).thread;
+          if (existingThreadId) {
+            thread = (await api.readThread(existingThreadId, { fresh: true })).summary;
+          } else {
+            const created = await api.createProjectThread(activeProject.id);
+            assertPreparationGeneration(generation);
+            thread = created.thread;
+            // The endpoint can reuse a session whose first message is still a draft.
+            const serverDraft = created.draft ?? null;
+            preparationServerDraftRef.current = {
+              threadId: thread.id,
+              draft: serverDraft,
+              revision: null,
+            };
+            const localDraft = await loadLocalDraft(api.settings, thread.id);
+            assertPreparationGeneration(generation);
+            if (!preparationDraftTouchedRef.current && !preparationClaimedForSubmitRef.current) {
+              const source =
+                localDraft && localDraft.updatedAt > (serverDraft?.updatedAt ?? 0)
+                  ? localDraft.value
+                  : serverDraft;
+              if (source) replacePreparationDraft(normalizeNewSessionDraft(source));
+              if (source === serverDraft) {
+                preparationServerDraftRef.current.revision = preparationRef.current.revision;
+              }
+            }
+          }
           assertPreparationGeneration(generation);
         }
         preparationRef.current = {
@@ -1348,7 +1382,16 @@ export function ThreadPage({
         (transferring.value.files?.length ?? 0) > 0 ||
         transferring.value.goalMode ||
         transferring.value.annotations.length > 0;
-      const saved = hasDraft ? await transferPreparationDraft(thread.id, transferring.value) : null;
+      const serverDraft =
+        preparationServerDraftRef.current?.threadId === thread.id
+          ? preparationServerDraftRef.current
+          : null;
+      const saved =
+        serverDraft?.revision === transferring.revision
+          ? serverDraft.draft
+          : hasDraft || serverDraft?.draft || preparationDraftTouchedRef.current
+            ? await transferPreparationDraft(thread.id, transferring.value)
+            : null;
       assertPreparationGeneration(generation);
       if (
         preparationClaimedForSubmitRef.current ||
@@ -1726,6 +1769,8 @@ export function ThreadPage({
       if (stored && !preparationDraftTouchedRef.current) {
         const next = { threadId, value };
         commitComposerDraft(next);
+        preparationDraftTouchedRef.current =
+          (stored.revision ?? 0) > 0 || composerDraftHasContent(value);
       }
       setNewSessionAdmitted(true);
       await enqueuePreparationSave(snapshotPreparation());

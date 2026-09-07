@@ -1240,6 +1240,7 @@ export type ForkOperationDetailResponse = ForkOperationResponse & {
 
 export type CreateProjectThreadResponse = {
   thread: ThreadSummary;
+  draft?: ThreadDraft | null;
 };
 
 export type RefreshThreadResponse = {

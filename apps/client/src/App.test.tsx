@@ -18,6 +18,7 @@ import { I18nProvider } from "./i18n";
 
 const connection = vi.hoisted(() => vi.fn());
 const manualNavigationIntent = vi.hoisted(() => vi.fn());
+const loadLocalDraft = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 const saveLocalDraft = vi.hoisted(() =>
   vi.fn(
     async (
@@ -47,6 +48,7 @@ const capacitor = vi.hoisted(() => ({
 vi.mock("./connection", () => ({ useConnection: connection }));
 vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  loadLocalDraft,
   saveLocalDraft,
 }));
 vi.mock("./push", () => ({
@@ -87,6 +89,7 @@ const baseThread: ThreadSummary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  loadLocalDraft.mockReset().mockResolvedValue(null);
   vi.stubGlobal(
     "matchMedia",
     vi
@@ -2627,6 +2630,145 @@ describe("App routing and navigation", () => {
     expect(screen.getByText("Введите сообщение или добавьте контекст.")).toBeInTheDocument();
     expect(screen.queryByLabelText("Действия с задачей")).not.toBeInTheDocument();
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
+  });
+
+  it("reopens independent first-message drafts through each project's new-session button and after remount", async () => {
+    const secondProject = testProject("second", "Второй");
+    const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
+    const serverDrafts = new Map<string, ThreadDraft>();
+    api.createProjectThread.mockImplementation(async (projectId: string) => ({
+      thread: { ...baseThread, id: `empty-${projectId}`, projectId, title: "Новая задача" },
+      draft: serverDrafts.get(`empty-${projectId}`) ?? null,
+    }));
+    api.updateThreadDraft.mockImplementation(async (id, value) => {
+      const draft = { ...value, updatedAt: Date.now() };
+      serverDrafts.set(id, draft);
+      return draft;
+    });
+    let view = renderApp("/threads/newer");
+    for (const projectName of ["Проект", "Второй"]) {
+      fireEvent.click(
+        screen.getByRole("button", { name: `Создать новую сессию в проекте ${projectName}` }),
+      );
+      await waitFor(() =>
+        expect(api.dispatch).toHaveBeenCalledWith({
+          type: "thread",
+          thread: expect.objectContaining({
+            id: projectName === "Проект" ? "empty-project" : "empty-second",
+          }),
+        }),
+      );
+      fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+        target: { value: `Первое сообщение: ${projectName}` },
+      });
+      fireEvent.click(screen.getByRole("link", { name: "Новая задача в истории" }));
+      await waitFor(() => expect(serverDrafts.size).toBe(projectName === "Проект" ? 1 : 2));
+    }
+
+    for (const projectName of ["Проект", "Второй"]) {
+      fireEvent.click(
+        screen.getByRole("button", { name: `Создать новую сессию в проекте ${projectName}` }),
+      );
+      expect(
+        await screen.findByDisplayValue(`Первое сообщение: ${projectName}`),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("link", { name: "Новая задача в истории" }));
+    }
+    expect(api.updateThreadDraft).toHaveBeenCalledTimes(2);
+
+    view.unmount();
+    view = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    expect(await screen.findByDisplayValue("Первое сообщение: Проект")).toBeInTheDocument();
+    expect(api.updateThreadDraft).toHaveBeenCalledTimes(2);
+    view.unmount();
+  });
+
+  it("restores the locally flushed first message when reopening before its server save completes", async () => {
+    const pendingSave = deferred<ThreadDraft>();
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread.mockResolvedValue({
+      thread: { ...baseThread, id: "created", title: "Новая задача" },
+      draft: null,
+    });
+    api.updateThreadDraft.mockReturnValueOnce(pendingSave.promise);
+    loadLocalDraft.mockImplementation(async (_settings, threadId: string) => {
+      const saved = saveLocalDraft.mock.calls.filter((call) => call[1] === threadId).at(-1);
+      return saved ? { threadId, value: saved[2], updatedAt: saved[3] } : null;
+    });
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Последние введённые символы" },
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Новая задача в истории" }));
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+
+    expect(await screen.findByDisplayValue("Последние введённые символы")).toBeInTheDocument();
+    pendingSave.resolve({
+      input: "Последние введённые символы",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: Date.now(),
+    });
+    await act(async () => Promise.resolve());
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+      "Последние введённые символы",
+    );
+  });
+
+  it("opens a blank new session after sending a restored first message", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.createProjectThread
+      .mockResolvedValueOnce({
+        thread: { ...baseThread, id: "created", title: "Новая задача" },
+        draft: {
+          input: "Дописанное сообщение",
+          images: [],
+          goalMode: false,
+          annotations: [],
+          updatedAt: 20,
+        },
+      })
+      .mockResolvedValue({
+        thread: { ...baseThread, id: "next-created", title: "Новая задача" },
+        draft: null,
+      });
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    expect(await screen.findByDisplayValue("Дописанное сообщение")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "created" }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(api.sendReliable).toHaveBeenCalledWith(
+        "created",
+        expect.objectContaining({ input: "Дописанное сообщение" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(""),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
+    await waitFor(() =>
+      expect(api.dispatch).toHaveBeenCalledWith({
+        type: "thread",
+        thread: expect.objectContaining({ id: "next-created" }),
+      }),
+    );
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+    expect(api.sendReliable).toHaveBeenCalledOnce();
   });
 
   it("keeps pending controls open and applies only a user-changed settings patch", async () => {

@@ -3691,6 +3691,7 @@ describe("thread settings", () => {
       ),
     );
     expect(emptyCreated.statusCode).toBe(201);
+    expect(emptyCreated.json().draft).toBeNull();
     expect(emptyReopened.json().thread.id).toBe(emptyCreated.json().thread.id);
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
       threadStartsBeforeEmptyThread + 1,
@@ -3776,6 +3777,18 @@ describe("thread settings", () => {
         })
       ).json().draft,
     ).toEqual(savedDraft.json());
+    const callsBeforeDraftReopen = bridge.request.mock.calls.length;
+    const draftReopened = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers,
+    });
+    expect(draftReopened.statusCode).toBe(201);
+    expect(draftReopened.json().thread.id).toBe("created");
+    expect(draftReopened.json().draft).toEqual(savedDraft.json());
+    expect(bridge.request.mock.calls.slice(callsBeforeDraftReopen)).toEqual([
+      ["thread/metadata/update", { threadId: "created", gitInfo: { sha: null } }],
+    ]);
     bridge.missingRolloutThreadIds.add("created");
     const teamResumeStart = bridge.request.mock.calls.length;
     const emptyTeam = await app.inject({
@@ -3871,6 +3884,7 @@ describe("thread settings", () => {
       headers,
     });
     expect(inherited.statusCode).toBe(201);
+    expect(inherited.json().draft).toBeNull();
     expect(inherited.json().thread.settings).toEqual({
       collaborationMode: "plan",
       reasoningEffort: "high",
