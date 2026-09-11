@@ -296,6 +296,7 @@ export type QueuedMessage = {
   goal?: boolean;
   createdAt: number;
   status: "queued" | "dispatching";
+  deliveryError?: { message: string; retryable: boolean };
 };
 
 export type TurnPlanStep = {
@@ -543,6 +544,7 @@ export type ThreadDetail = {
   queuedMessages: QueuedMessage[];
   olderTurnsCursor: string | null;
   draft?: ThreadDraft | null;
+  historyError?: { message: string; retryable: boolean };
   /** @deprecated Present only when serving the previous release's incremental client. */
   syncPoint?: ThreadSyncPoint | null;
 };

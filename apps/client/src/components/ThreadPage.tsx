@@ -62,6 +62,7 @@ import {
   loadNewSessionDraft,
   saveLocalDraft,
   saveNewSessionDraft,
+  type NewSessionSubmission,
 } from "../offline-store";
 import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
@@ -135,13 +136,18 @@ type NewSessionPreparation = {
   threadId: string | null;
   thread: ThreadSummary | null;
   revision: number;
+  submission?: NewSessionSubmission;
 };
 
 type EarlySubmission = {
+  id: string;
+  intent: ComposerSubmitIntent;
+  input: string;
   attachmentScope: number;
   claimedRevision: number;
   draft: UpdateThreadDraftRequest;
   editRevision: number;
+  staged?: boolean;
 };
 
 type PreparationDraftTransfer = {
@@ -167,6 +173,7 @@ export type QueueAction = {
 
 export type QueuedMessageView = QueuedMessage & {
   confirmed: boolean;
+  serverAccepted?: boolean;
 };
 
 type SubmittedMessageIdentity = {
@@ -494,6 +501,8 @@ export function ThreadPage({
     loadOlderDetail,
     loadTurnItems,
     sendReliable,
+    retryReliableMessage = async () => undefined,
+    forgetReliableMessage = async () => undefined,
     queueVoiceRecording,
     pendingVoiceRecordingThreadIds = [],
     pendingVoiceRecordingErrors = {},
@@ -552,6 +561,9 @@ export function ThreadPage({
   } | null>(null);
   const preparationDraftTimerRef = useRef<number | null>(null);
   const preparationDraftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const preparationHydrationRef = useRef<Promise<void> | null>(null);
+  const preparationSendRetryRef = useRef<number | null>(null);
+  const preparationSendAttemptsRef = useRef(0);
   const [attachmentScope, setAttachmentScope] = useState(0);
   const attachmentScopeRef = useRef(attachmentScope);
   const pendingAttachmentScopesRef = useRef(new Set<number>());
@@ -568,6 +580,9 @@ export function ThreadPage({
   const planAcceptanceInFlightRef = useRef(false);
   const composerEditRevisionRef = useRef(0);
   const createdInWorkspaceRef = useRef<string | null>(null);
+  const skipInitialCreatedDetailRef = useRef<string | null>(null);
+  const [detailLoadError, setDetailLoadError] = useState<string | null>(null);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] =
     useState<OptimisticMessage | null>(null);
   const detail = state.details?.[threadId];
@@ -1018,17 +1033,31 @@ export function ThreadPage({
 
   function snapshotPreparation(): NewSessionPreparation {
     const current = preparationRef.current;
-    const claimedDraft = earlySubmissionRef.current?.draft;
+    const claimed = earlySubmissionRef.current;
+    const claimedDraft = claimed?.draft;
     return {
       ...current,
       value: structuredClone(
-        claimedDraft
-          ? composerDraftHasContent(current.value)
-            ? mergeComposerDrafts(claimedDraft, current.value)
-            : claimedDraft
-          : current.value,
+        claimed?.staged
+          ? composerEditRevisionRef.current === claimed.editRevision
+            ? emptyComposerDraft()
+            : current.value
+          : claimedDraft
+            ? composerDraftHasContent(current.value)
+              ? mergeComposerDrafts(claimedDraft, current.value)
+              : claimedDraft
+            : current.value,
       ),
       settings: structuredClone(current.settings),
+      submission: earlySubmissionRef.current
+        ? structuredClone({
+            id: earlySubmissionRef.current.id,
+            intent: earlySubmissionRef.current.intent,
+            input: earlySubmissionRef.current.input,
+            draft: earlySubmissionRef.current.draft,
+            staged: earlySubmissionRef.current.staged,
+          })
+        : current.submission,
     };
   }
 
@@ -1052,7 +1081,7 @@ export function ThreadPage({
     attachmentWaitersRef.current.clear();
   }
 
-  function enqueuePreparationSave(snapshot: NewSessionPreparation): Promise<void> {
+  function enqueuePreparationSave(snapshot: NewSessionPreparation): Promise<boolean> {
     const request = preparationDraftSaveChainRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -1062,10 +1091,12 @@ export function ThreadPage({
           thread: snapshot.thread,
           revision: snapshot.revision,
           settings: snapshot.settings,
+          ...(snapshot.submission ? { submission: snapshot.submission } : {}),
         });
         if (!saved && preparationAliveRef.current) setStorageWarning(true);
+        return saved;
       });
-    preparationDraftSaveChainRef.current = request;
+    preparationDraftSaveChainRef.current = request.then(() => undefined);
     return request;
   }
 
@@ -1077,7 +1108,7 @@ export function ThreadPage({
     if (!preparationRef.current.active || !newSessionAdmitted || preparationDiscardRef.current) {
       return preparationDraftSaveChainRef.current;
     }
-    return enqueuePreparationSave(snapshotPreparation());
+    return enqueuePreparationSave(snapshotPreparation()).then(() => undefined);
   }
 
   function schedulePreparationDraftSave(): void {
@@ -1206,6 +1237,8 @@ export function ThreadPage({
     generation: number,
   ): Promise<ThreadSummary> {
     assertPreparationGeneration(generation);
+    await preparationHydrationRef.current;
+    assertPreparationGeneration(generation);
     const prepared = preparationRef.current.thread;
     if (prepared) return prepared;
     if (!creationPromiseRef.current) {
@@ -1322,6 +1355,7 @@ export function ThreadPage({
     };
     activeThreadIdRef.current = targetThreadId;
     createdInWorkspaceRef.current = targetThreadId;
+    skipInitialCreatedDetailRef.current = state.network === "connected" ? targetThreadId : null;
     draftTouchedThreadsRef.current.add(targetThreadId);
     hydratedDraftSourcesRef.current.set(targetThreadId, draft);
     const value = composerDraftRef.current.value;
@@ -1722,7 +1756,7 @@ export function ThreadPage({
     }
     let active = true;
     const generation = preparationGenerationRef.current;
-    void (async () => {
+    const hydration = (async () => {
       const stored = await loadNewSessionDraft(api.settings, newSessionProject.id);
       if (!active || !preparationGenerationActive(generation)) return;
       if (!stored && !initialNewSessionRef.current.admitted) {
@@ -1765,6 +1799,7 @@ export function ThreadPage({
         threadId: storedThreadId,
         thread: stored?.thread?.id === storedThreadId ? stored.thread : null,
         revision: Math.max(current.revision, stored?.revision ?? 0),
+        submission: current.submission ?? stored?.submission,
       };
       if (stored && !preparationDraftTouchedRef.current) {
         const next = { threadId, value };
@@ -1772,10 +1807,25 @@ export function ThreadPage({
         preparationDraftTouchedRef.current =
           (stored.revision ?? 0) > 0 || composerDraftHasContent(value);
       }
+      if (stored?.submission?.staged) {
+        setPendingOptimisticMessage({
+          id: stored.submission.id,
+          threadId: storedThreadId ?? "",
+          text: stored.submission.input,
+          images: stored.submission.draft.images.map((image) => image.url),
+          files: stored.submission.draft.files ?? [],
+          createdAt: stored.updatedAt,
+          destination: "queue",
+          turnId: null,
+          deliveryError: stored.submission.deliveryError,
+        });
+      }
       setNewSessionAdmitted(true);
       await enqueuePreparationSave(snapshotPreparation());
       if (active && preparationGenerationActive(generation)) setNewSessionHydrated(true);
     })();
+    preparationHydrationRef.current = hydration;
+    void hydration.catch(() => undefined);
     return () => {
       active = false;
     };
@@ -1791,14 +1841,22 @@ export function ThreadPage({
       !newSessionHydrated ||
       !newSessionAdmitted ||
       !newSessionProject ||
+      preparationClaimedForSubmitRef.current ||
+      preparationSendRetryRef.current !== null ||
       preparationOperationRef.current
     ) {
       return;
     }
+    if (preparationRef.current.submission?.deliveryError?.retryable === false) return;
     setPreparationWorking(true);
     setError(null);
     const generation = preparationGenerationRef.current;
-    const operation = finishNewSessionPreparation(newSessionProject, generation)
+    const pendingSubmission = preparationRef.current.submission;
+    const operation = (
+      pendingSubmission && !preparationClaimedForSubmitRef.current
+        ? submitPreparingSession(newSessionProject, pendingSubmission.intent)
+        : finishNewSessionPreparation(newSessionProject, generation)
+    )
       .catch(async (caught: unknown) => {
         if (caught === PREPARATION_SUPERSEDED) return;
         if (
@@ -1844,6 +1902,8 @@ export function ThreadPage({
         void flushComposerDraftEvent();
       }
       invalidatePreparation();
+      if (preparationSendRetryRef.current !== null)
+        window.clearTimeout(preparationSendRetryRef.current);
       if (preparationDiscardRef.current && preparationDraftTimerRef.current !== null) {
         window.clearTimeout(preparationDraftTimerRef.current);
       }
@@ -1919,10 +1979,9 @@ export function ThreadPage({
   }, [flushComposerDraftEvent, threadId]);
 
   useEffect(() => {
-    if (isSubagent) return;
-    if (!detail) return;
+    if (isSubagent || !threadId || preparationRef.current.active) return;
     if (draftTouchedThreadsRef.current.has(threadId)) return;
-    const detailDraft = detail.draft ?? null;
+    const detailDraft = detail?.draft ?? null;
     const localAnnotations = loadPendingAnnotations(threadId);
     const serverSource = detailDraft
       ? {
@@ -1944,7 +2003,7 @@ export function ThreadPage({
       };
     };
     savedDraftUpdatedAtRef.current.set(threadId, detailDraft?.updatedAt ?? null);
-    if (hydratedDraftSourcesRef.current.get(threadId) !== detailDraft) {
+    if (detail && hydratedDraftSourcesRef.current.get(threadId) !== detailDraft) {
       hydratedDraftSourcesRef.current.set(threadId, detailDraft);
       replaceComposerDraft(
         mergeLegacyAnnotations(serverSource),
@@ -2024,31 +2083,42 @@ export function ThreadPage({
 
   useEffect(() => {
     setThreadMissing(false);
-    if (
-      !threadId ||
-      !appActive ||
-      state.network !== "connected" ||
-      !state.snapshot?.instanceId ||
-      createdInWorkspaceRef.current === threadId
-    ) {
+    setDetailLoadError(null);
+    if (!threadId || !appActive || state.network !== "connected" || !state.snapshot?.instanceId) {
+      return;
+    }
+    if (skipInitialCreatedDetailRef.current === threadId) {
+      skipInitialCreatedDetailRef.current = null;
       return;
     }
     let cancelled = false;
     let retryTimer: number | undefined;
     let attempt = 0;
+    const retry = () => {
+      const delay =
+        DETAIL_RETRY_DELAYS_MS[Math.min(attempt, DETAIL_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
+      attempt += 1;
+      retryTimer = window.setTimeout(load, delay);
+    };
     const load = () => {
-      void refreshDetail(threadId, { force: true }).catch((caught: unknown) => {
-        if (cancelled) return;
-        if (caught instanceof ApiClientError && caught.status === 404) {
-          setThreadMissing(true);
-          return;
-        }
-        if (!isRetryableApiError(caught)) return;
-        const delay =
-          DETAIL_RETRY_DELAYS_MS[Math.min(attempt, DETAIL_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
-        attempt += 1;
-        retryTimer = window.setTimeout(load, delay);
-      });
+      void refreshDetail(threadId, { force: true })
+        .then((loaded) => {
+          if (cancelled) return;
+          setDetailLoadError(loaded?.historyError?.message ?? null);
+          if (loaded?.historyError?.retryable) retry();
+        })
+        .catch((caught: unknown) => {
+          if (cancelled) return;
+          setDetailLoadError(
+            caught instanceof Error ? caught.message : t("Не удалось загрузить историю сессии"),
+          );
+          if (caught instanceof ApiClientError && caught.status === 404) {
+            setThreadMissing(true);
+            return;
+          }
+          if (!isRetryableApiError(caught)) return;
+          retry();
+        });
     };
     load();
     return () => {
@@ -2063,6 +2133,7 @@ export function ThreadPage({
     state.snapshot?.instanceId,
     streamRecoveryEpoch,
     threadId,
+    detailRetry,
   ]);
 
   useEffect(() => {
@@ -2333,8 +2404,8 @@ export function ThreadPage({
   ): Promise<boolean> {
     let savedLocally = false;
     try {
-      await saveLocalDraft(api.settings, targetThreadId, value, Date.now());
-      savedLocally = true;
+      savedLocally =
+        (await saveLocalDraft(api.settings, targetThreadId, value, Date.now())) !== null;
     } catch {
       // The debounced server persistence below will keep retrying.
     }
@@ -2439,6 +2510,7 @@ export function ThreadPage({
       if (composerEditRevisionRef.current === submittedEditRevision) {
         replaceComposerDraft(emptyComposerDraft(), false);
       }
+      setBusy(false);
     };
     setBusy(true);
     setError(null);
@@ -2457,6 +2529,7 @@ export function ThreadPage({
           clientMessageId,
         },
         commitDelivery,
+        { draft: submittedDraft },
       );
       commitDelivery();
       releaseSubmittedMessageClaim(messageClaimKey);
@@ -2524,12 +2597,13 @@ export function ThreadPage({
       setError(t("Это сообщение уже отправлено"));
       return;
     }
-    const submittedDraft = structuredClone(preparationRef.current.value);
-    const submittedInput = formatAnnotatedMessage(
-      submittedDraft.input,
-      submittedDraft.annotations,
-      language,
+    const recoveredSubmission = preparationRef.current.submission;
+    const submittedDraft = structuredClone(
+      recoveredSubmission?.draft ?? preparationRef.current.value,
     );
+    const submittedInput =
+      recoveredSubmission?.input ??
+      formatAnnotatedMessage(submittedDraft.input, submittedDraft.annotations, language);
     if (
       (!submittedInput.trim() &&
         !submittedDraft.images.length &&
@@ -2539,7 +2613,7 @@ export function ThreadPage({
     ) {
       return;
     }
-    const clientMessageId = createClientMessageId();
+    const clientMessageId = recoveredSubmission?.id ?? createClientMessageId();
     let messageClaimKey = claimSubmittedMessage(
       {
         text: submittedInput,
@@ -2550,7 +2624,10 @@ export function ThreadPage({
       clientMessageId,
     );
     if (!messageClaimKey) return;
-    const preparationFlush = flushComposerDraftEvent();
+    if (preparationSendRetryRef.current !== null) {
+      window.clearTimeout(preparationSendRetryRef.current);
+      preparationSendRetryRef.current = null;
+    }
     earlySubmitRef.current = true;
     preparationClaimedForSubmitRef.current = true;
     preparationDraftTransferGenerationRef.current += 1;
@@ -2561,26 +2638,67 @@ export function ThreadPage({
     attachmentScopeRef.current += 1;
     setAttachmentScope(attachmentScopeRef.current);
     earlySubmissionRef.current = {
+      id: clientMessageId,
+      intent,
+      input: submittedInput,
       attachmentScope: submittedAttachmentScope,
       claimedRevision: preparationRef.current.revision,
       draft: submittedDraft,
-      editRevision: composerEditRevisionRef.current,
+      editRevision:
+        recoveredSubmission &&
+        JSON.stringify(submittedDraft) !== JSON.stringify(preparationRef.current.value)
+          ? -1
+          : composerEditRevisionRef.current,
+      staged: recoveredSubmission?.staged,
     };
+    preparationRef.current.submission = {
+      id: clientMessageId,
+      intent,
+      input: submittedInput,
+      draft: submittedDraft,
+    };
+    // Persist the submission identity before any asynchronous creation or navigation.
+    const preparationFlush = flushComposerDraftEvent();
 
     let activatedThreadId: string | null = null;
     let accepted = false;
     let deliveryCommitted = false;
+    let stagedInPreparation = recoveredSubmission?.staged === true;
     try {
       await preparationFlush;
       await waitForPendingAttachments(submittedAttachmentScope);
       assertPreparationGeneration(generation);
       const submission = earlySubmissionRef.current;
       const completeDraft = structuredClone(submission?.draft ?? submittedDraft);
-      const completeInput = formatAnnotatedMessage(
-        completeDraft.input,
-        completeDraft.annotations,
-        language,
-      );
+      const completeInput = submittedInput;
+      preparationRef.current.submission = {
+        id: clientMessageId,
+        intent,
+        input: completeInput,
+        draft: completeDraft,
+      };
+      if (submission) submission.staged = true;
+      const staged = await enqueuePreparationSave(snapshotPreparation());
+      assertPreparationGeneration(generation);
+      if (staged) {
+        stagedInPreparation = true;
+        preparationRef.current.submission.staged = true;
+        setPendingOptimisticMessage({
+          id: clientMessageId,
+          threadId: preparationRef.current.threadId ?? "",
+          text: completeInput,
+          images: completeDraft.images.map((image) => image.url),
+          files: completeDraft.files ?? [],
+          createdAt: Date.now(),
+          destination: "queue",
+          turnId: null,
+        });
+        if (submission && composerEditRevisionRef.current === submission.editRevision) {
+          const value = emptyComposerDraft();
+          preparationRef.current.value = value;
+          commitComposerDraft({ threadId, value });
+        }
+      } else if (submission) submission.staged = stagedInPreparation;
       const completeIdentity: SubmittedMessageIdentity = {
         text: completeInput,
         images: completeDraft.images.map((image) => image.url),
@@ -2605,12 +2723,16 @@ export function ThreadPage({
         turnId: null,
       };
       assertPreparationGeneration(generation);
-      if (!activateCreatedThread(thread, null, generation)) throw PREPARATION_SUPERSEDED;
-      activatedThreadId = thread.id;
       const commitDelivery = () => {
         if (deliveryCommitted) return;
         deliveryCommitted = true;
+        if (!preparationGenerationActive(generation)) return;
+        // The URL handoff is safe only once either the outbox or the server owns the message.
+        if (!activateCreatedThread(thread, null, generation)) return;
+        activatedThreadId = thread.id;
         dispatch({ type: "optimistic.add", message: optimisticMessage });
+        setPendingOptimisticMessage(null);
+        setBusy(false);
         const claimed = earlySubmissionRef.current;
         if (
           claimed &&
@@ -2620,6 +2742,10 @@ export function ThreadPage({
           replaceComposerDraft(emptyComposerDraft(), false);
         }
       };
+      // Include edits made while creation/settings were pending in the atomic
+      // preparation -> outbox transfer, before the URL changes to the real thread.
+      await flushPreparation();
+      assertPreparationGeneration(generation);
       const delivery = await sendReliable(
         thread.id,
         {
@@ -2632,10 +2758,14 @@ export function ThreadPage({
           clientMessageId,
         },
         commitDelivery,
+        { draft: completeDraft, projectId: activeProject.id },
       );
       commitDelivery();
       accepted = true;
+      preparationSendAttemptsRef.current = 0;
+      delete preparationRef.current.submission;
       releaseSubmittedMessageClaim(messageClaimKey);
+      if (!preparationAliveRef.current || preparationGenerationRef.current !== generation) return;
       if (intent === "immediate" && delivery === "delivered") {
         try {
           await api.sendQueuedNow(thread.id, clientMessageId);
@@ -2700,7 +2830,7 @@ export function ThreadPage({
           messageId: clientMessageId,
         });
       }
-      setPendingOptimisticMessage(null);
+      if (!stagedInPreparation) setPendingOptimisticMessage(null);
       const submission = earlySubmissionRef.current;
       const submitted = submission?.draft ?? submittedDraft;
       const hasNewerDraft =
@@ -2713,6 +2843,34 @@ export function ThreadPage({
         : hasNewerDraft
           ? mergeComposerDrafts(submitted, current)
           : submitted;
+      const retryable = isRetryableApiError(caught);
+      if (!retryable && !stagedInPreparation) delete preparationRef.current.submission;
+      else if (submission) {
+        preparationRef.current.submission = {
+          id: clientMessageId,
+          intent,
+          input: submittedInput,
+          draft: structuredClone(submission.draft),
+          staged: stagedInPreparation,
+          deliveryError: {
+            message: retryable
+              ? t("Нет связи — повторим отправку")
+              : caught instanceof Error
+                ? caught.message
+                : t("Не удалось отправить сообщение"),
+            retryable,
+          },
+        };
+      }
+      if (stagedInPreparation)
+        setPendingOptimisticMessage((message) =>
+          message
+            ? {
+                ...message,
+                deliveryError: preparationRef.current.submission?.deliveryError,
+              }
+            : null,
+        );
       earlySubmissionRef.current = null;
       earlySubmitRef.current = false;
       if (!activatedThreadId) preparationClaimedForSubmitRef.current = false;
@@ -2724,6 +2882,17 @@ export function ThreadPage({
         if (savedLocally) await deletePreparationPersistence(activeProject.id);
       } else {
         replacePreparationDraft(restore);
+        await flushPreparation();
+        if (retryable && preparationGenerationActive(generation)) {
+          const attempt = preparationSendAttemptsRef.current++;
+          const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+          preparationSendRetryRef.current = window.setTimeout(() => {
+            preparationSendRetryRef.current = null;
+            if (preparationGenerationActive(generation)) {
+              setPreparationRetry((value) => value + 1);
+            }
+          }, delay);
+        }
       }
       if (!targetThreadId) creationPromiseRef.current = null;
       setError(
@@ -2862,6 +3031,7 @@ export function ThreadPage({
     setError(null);
     try {
       await api.deleteQueued(threadId, messageId);
+      await forgetReliableMessage(threadId, messageId);
       return true;
     } catch (caught) {
       setError(
@@ -3061,14 +3231,39 @@ export function ThreadPage({
   if (!summary && !preparationRef.current.active && !preparationRef.current.thread)
     return (
       <div className="center-state">
-        {threadMissing ? (
-          <h2>{t("Задача не найдена")}</h2>
+        {threadMissing || detailLoadError ? (
+          <>
+            <h2>
+              {threadMissing ? t("Задача не найдена") : t("Не удалось загрузить историю сессии")}
+            </h2>
+            <button type="button" onClick={() => setDetailRetry((value) => value + 1)}>
+              {t("Повторить загрузку истории")}
+            </button>
+          </>
         ) : (
           <>
             <div className="spinner" />
             <p>{t("Получаем состояние Codex…")}</p>
           </>
         )}
+        {optimisticMessages.map((message) => (
+          <article className="message userMessage" key={message.id}>
+            <p>{message.text}</p>
+            {message.deliveryError && (
+              <p role="status">
+                {localizeKnownServerText(language, message.deliveryError.message)}
+              </p>
+            )}
+            <MessageImages images={message.images} />
+            <MessageFiles files={message.files ?? []} />
+            <button type="button" onClick={() => void copyText(message.text)}>
+              {t("Скопировать сообщение")}
+            </button>
+          </article>
+        ))}
+        {input && <textarea aria-label={t("Сообщение для Codex")} value={input} readOnly />}
+        <MessageImages images={images.map((image) => image.url)} />
+        <MessageFiles files={files} />
       </div>
     );
 
@@ -3391,9 +3586,41 @@ export function ThreadPage({
                   onDownload={async () => undefined}
                   onOpenArtifact={openLinkedArtifact}
                 />
+                <div className="outgoing-delivery-status" role="status">
+                  {pendingOptimisticMessage.deliveryError
+                    ? pendingOptimisticMessage.deliveryError.retryable
+                      ? t("Нет связи — повторим отправку")
+                      : t("Не отправлено")
+                    : t("Отправляется…")}
+                  {pendingOptimisticMessage.deliveryError?.retryable === false && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (preparationRef.current.submission)
+                          delete preparationRef.current.submission.deliveryError;
+                        setPreparationRetry((value) => value + 1);
+                      }}
+                    >
+                      {t("Повторить отправку")}
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
               <>
+                {(detailLoadError || detail?.historyError) && (
+                  <div className="center-state compact" role="status">
+                    <p>
+                      {localizeKnownServerText(
+                        language,
+                        detailLoadError ?? detail?.historyError?.message ?? null,
+                      )}
+                    </p>
+                    <button type="button" onClick={() => setDetailRetry((value) => value + 1)}>
+                      {t("Повторить загрузку истории")}
+                    </button>
+                  </div>
+                )}
                 {loadingOlder && (
                   <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
                     <span className="spinner small" />
@@ -3405,6 +3632,7 @@ export function ThreadPage({
                   </button>
                 )}
                 {!detail &&
+                  !detailLoadError &&
                   optimisticTurnMessages.length === 0 &&
                   createdInWorkspaceRef.current !== threadId && (
                     <div className="center-state compact">
@@ -3567,6 +3795,15 @@ export function ThreadPage({
                   )}
               </>
             )}
+            <QueuedMessages
+              messages={queuedMessages}
+              action={queueAction}
+              inTimeline
+              onRetry={(messageId) => retryReliableMessage(threadId, messageId)}
+              onSendNow={sendQueuedNow}
+              onUpdate={updateQueued}
+              onDelete={deleteQueued}
+            />
           </section>
         </div>
         {isSubagent ? (
@@ -3608,7 +3845,7 @@ export function ThreadPage({
             onSendQueuedNow={
               queuedShortcutMessage ? () => void sendQueuedNow(queuedShortcutMessage.id) : undefined
             }
-            busy={busy}
+            busy={busy || (preparationRef.current.active && pendingOptimisticMessage !== null)}
             running={
               Boolean(workspaceSummary.currentTurnId) ||
               (workspaceSummary.settings.collaborationMode === "team" &&
@@ -3734,13 +3971,6 @@ export function ThreadPage({
                 <ArrowDownIcon />
               </button>
             )}
-            <QueuedMessages
-              messages={queuedMessages}
-              action={queueAction}
-              onSendNow={sendQueuedNow}
-              onUpdate={updateQueued}
-              onDelete={deleteQueued}
-            />
           </Composer>
         )}
       </div>
@@ -3942,11 +4172,13 @@ function mergeOptimisticQueue(
         text: message.text,
         ...(message.images.length ? { images: message.images } : {}),
         ...(message.files?.length ? { files: message.files } : {}),
+        ...(message.deliveryError ? { deliveryError: message.deliveryError } : {}),
         createdAt: message.createdAt,
         status: "queued" as const,
         confirmed: false,
+        serverAccepted: message.serverAccepted,
       })),
-  ];
+  ].sort((left, right) => left.createdAt - right.createdAt);
 }
 
 function createClientMessageId(): string {
@@ -5170,6 +5402,8 @@ export function QueuedMessages({
   onSendNow,
   onUpdate,
   onDelete,
+  inTimeline = false,
+  onRetry,
 }: {
   messages: QueuedMessageView[];
   action: QueueAction | null;
@@ -5177,8 +5411,10 @@ export function QueuedMessages({
   onSendNow(messageId: string): Promise<boolean>;
   onUpdate(messageId: string, value: string): Promise<boolean>;
   onDelete(messageId: string): Promise<boolean>;
+  inTimeline?: boolean;
+  onRetry?(messageId: string): Promise<void>;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [editor, setEditor] = useState<{ messageId: string; value: string } | null>(null);
 
   useEffect(() => {
@@ -5195,14 +5431,19 @@ export function QueuedMessages({
 
   if (!messages.length) return null;
   return (
-    <section className="queued-messages" aria-label={t("Очередь сообщений")}>
-      <header className="queued-messages-header">
-        <span>{t("Очередь сообщений")}</span>
-        <span className="queued-messages-count">
-          <span aria-hidden="true">·</span>
-          {messages.length}
-        </span>
-      </header>
+    <section
+      className={inTimeline ? "outgoing-messages" : "queued-messages"}
+      aria-label={t("Очередь сообщений")}
+    >
+      {!inTimeline && (
+        <header className="queued-messages-header">
+          <span>{t("Очередь сообщений")}</span>
+          <span className="queued-messages-count">
+            <span aria-hidden="true">·</span>
+            {messages.length}
+          </span>
+        </header>
+      )}
       <div className="queued-messages-list">
         {messages.map((message, index) => {
           const editing = editor?.messageId === message.id;
@@ -5213,24 +5454,47 @@ export function QueuedMessages({
           const canSave =
             Boolean(editValue.trim() || message.images?.length) &&
             editValue.trim() !== message.text;
-          const status = !message.confirmed
-            ? t("Добавляется…")
-            : action?.messageId === message.id && action.kind === "delete"
-              ? t("Удаляем…")
-              : action?.messageId === message.id && action.kind === "update"
-                ? t("Сохраняем…")
-                : message.status === "dispatching" ||
-                    (action?.messageId === message.id && action.kind === "send")
-                  ? t("Отправляется…")
-                  : t("В очереди");
+          const status = message.deliveryError
+            ? localizeKnownServerText(language, message.deliveryError.message)
+            : !message.confirmed
+              ? t("Добавляется…")
+              : action?.messageId === message.id && action.kind === "delete"
+                ? t("Удаляем…")
+                : action?.messageId === message.id && action.kind === "update"
+                  ? t("Сохраняем…")
+                  : message.status === "dispatching" ||
+                      (action?.messageId === message.id && action.kind === "send")
+                    ? t("Отправляется…")
+                    : t("В очереди");
           return (
-            <article className="queued-message" data-message-id={message.id} key={message.id}>
-              <span className="queued-message-order" aria-hidden="true">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-              <div className="queued-message-content">
+            <article
+              className={`queued-message${inTimeline ? " message userMessage" : ""}`}
+              data-message-id={message.id}
+              key={message.id}
+            >
+              {!inTimeline && (
+                <span className="queued-message-order" aria-hidden="true">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+              )}
+              <div className={`queued-message-content${inTimeline ? " message-body" : ""}`}>
                 <div className="queued-message-heading">
-                  <span className="queued-message-status">{status}</span>
+                  {inTimeline && (
+                    <span className="outgoing-delivery-status" role="status">
+                      {message.confirmed || message.serverAccepted
+                        ? t("Отправлено")
+                        : message.deliveryError
+                          ? message.deliveryError.retryable
+                            ? t("Нет связи — повторим отправку")
+                            : t("Не отправлено")
+                          : t("Отправляется…")}
+                    </span>
+                  )}
+                  {(!inTimeline ||
+                    message.confirmed ||
+                    message.deliveryError?.retryable === false) && (
+                    <span className="queued-message-status">{status}</span>
+                  )}
                 </div>
                 {editing ? (
                   <div className="queued-message-editor">
@@ -5274,6 +5538,30 @@ export function QueuedMessages({
                   </>
                 )}
                 <div className="queued-message-actions">
+                  {(message.deliveryError || !message.confirmed) && message.text && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Скопировать сообщение")}
+                      title={t("Скопировать сообщение")}
+                      onClick={() => void copyText(message.text)}
+                    >
+                      <CopyIcon />
+                    </button>
+                  )}
+                  {onRetry &&
+                    !message.confirmed &&
+                    !message.serverAccepted &&
+                    message.deliveryError && (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={t("Повторить отправку")}
+                        onClick={() => void onRetry(message.id)}
+                      >
+                        <RefreshIcon />
+                      </button>
+                    )}
                   {!editing && (
                     <button
                       type="button"

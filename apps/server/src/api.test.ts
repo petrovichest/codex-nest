@@ -318,7 +318,7 @@ describe("HTTP authentication", () => {
     await lifecycle.close();
   });
 
-  it("recovers orphaned startup state to ready instead of failed", async () => {
+  it("recovers to ready while preserving accepted messages for missing sessions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-startup-recovery-test-"));
     directories.push(directory);
     const store = new StateStore(join(directory, "state.json"));
@@ -364,10 +364,10 @@ describe("HTTP authentication", () => {
       }
       if (method === "thread/loaded/list") return { data: [], nextCursor: null };
       if (method === "thread/turns/list" && params.threadId === "orphan-thread") {
-        throw new RpcError(-32_600, "thread not loaded");
+        throw new RpcError(-32_600, "no rollout found for thread id orphan-thread");
       }
-      if (method === "thread/read" && params.threadId === "queued-thread") {
-        throw new RpcError(-32_600, "thread not loaded");
+      if (method === "thread/turns/list" && params.threadId === "queued-thread") {
+        throw new RpcError(-32_600, "no rollout found for thread id queued-thread");
       }
       if (method === "model/list") return { data: [], nextCursor: null };
       if (method === "thread/turns/list") {
@@ -404,8 +404,10 @@ describe("HTTP authentication", () => {
     await projection.sync();
     await vi.waitFor(() => expect(lifecycle.state).toBe("ready"));
     expect(store.snapshot().threadMeta["orphan-thread"]).toBeUndefined();
-    expect(store.snapshot().threadMeta["queued-thread"]).toBeUndefined();
-    expect(store.snapshot().messageQueues?.["queued-thread"]).toBeUndefined();
+    expect(store.snapshot().threadMeta["queued-thread"]).toBeDefined();
+    expect(store.snapshot().messageQueues?.["queued-thread"]).toMatchObject([
+      { id: "queued-message", text: "Recover me", deliveryError: { retryable: false } },
+    ]);
     await app.close();
     await lifecycle.close();
   });
@@ -7515,6 +7517,161 @@ async function createForkHarness() {
     threadTitles,
   };
 }
+
+describe("reliable first messages", () => {
+  it("resumes an unloaded new session only after rejection and retries the same message id", async () => {
+    const { app, bridge, headers, store } = await createForkHarness();
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+      });
+      expect(created.statusCode).toBe(201);
+      const id = created.json().thread.id as string;
+      const original = bridge.request.getMockImplementation()!;
+      let unloaded = true;
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (method === "turn/start" && params.threadId === id && unloaded) {
+          unloaded = false;
+          throw new RpcError(-32600, "thread not loaded");
+        }
+        return original(method, params);
+      });
+      const body = { input: "Первое после перезапуска", clientMessageId: "first-id" };
+      const accepted = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${id}/queue`,
+        headers,
+        payload: body,
+      });
+      expect(accepted.statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.snapshot().messageReceipts?.[body.clientMessageId]?.turnId).toBeDefined(),
+      );
+      const starts = bridge.request.mock.calls.filter(
+        ([method, params]) => method === "turn/start" && params?.threadId === id,
+      );
+      expect(starts).toHaveLength(2);
+      expect(
+        starts.every(([, params]) => params?.clientUserMessageId === body.clientMessageId),
+      ).toBe(true);
+      expect(
+        bridge.request.mock.calls.filter(
+          ([method, params]) => method === "thread/resume" && params?.threadId === id,
+        ),
+      ).toHaveLength(1);
+      expect(bridge.threadTurns.get(id)).toHaveLength(1);
+      await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${id}/queue`,
+        headers,
+        payload: body,
+      });
+      expect(bridge.threadTurns.get(id)).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("restores the first turn from paginated history when its start response and events were lost", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness();
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+      });
+      const id = created.json().thread.id as string;
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (method === "turn/start" && params.threadId === id) {
+          await original(method, params);
+          throw new Error("Response lost after acceptance");
+        }
+        if (method === "thread/turns/list" && params.threadId === id && !params.cursor) {
+          return { data: [], nextCursor: "accepted-page", backwardsCursor: null };
+        }
+        return original(method, params);
+      });
+      const payload = { input: "Принято без ответа", clientMessageId: "lost-response-id" };
+      const accepted = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${id}/queue`,
+        headers,
+        payload,
+      });
+      expect(accepted.statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.snapshot().messageReceipts?.[payload.clientMessageId]?.turnId).toBeDefined(),
+      );
+      expect(projection.isUnmaterialized(id)).toBe(false);
+      const detail = await projection.readThread(id);
+      expect(detail.turns.flatMap((turn) => turn.items)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "userMessage", text: payload.input }),
+        ]),
+      );
+      expect(bridge.threadTurns.get(id)).toHaveLength(1);
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        1,
+      );
+      expect(bridge.request).toHaveBeenCalledWith(
+        "thread/turns/list",
+        expect.objectContaining({ threadId: id, cursor: "accepted-page", itemsView: "full" }),
+        30_000,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("serves preserved messages and attachments even when session history has disappeared", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness();
+    try {
+      const upload = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/attachments?name=notes.txt&mediaType=text%2Fplain",
+        headers: { ...headers, "content-type": "application/octet-stream" },
+        payload: Buffer.from("Keep this file"),
+      });
+      expect(upload.statusCode).toBe(201);
+      const file = upload.json();
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (
+          ["thread/resume", "thread/turns/list"].includes(method) &&
+          params.threadId === "thread"
+        ) {
+          throw new RpcError(-32600, "no rollout found for thread id thread");
+        }
+        return original(method, params);
+      });
+      const accepted = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: { input: "Сохранить при сбое", files: [file], clientMessageId: "keep-id" },
+      });
+      expect(accepted.statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.snapshot().messageQueues?.thread?.[0]?.deliveryError?.retryable).toBe(false),
+      );
+      await projection.removeOrphanedThread("thread");
+      expect(projection.summary("thread")).toBeDefined();
+      await projection.invalidateHistory("thread");
+      const detail = await app.inject({ url: "/api/v1/threads/thread", headers });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json()).toMatchObject({
+        historyError: { retryable: false },
+        queuedMessages: [{ id: "keep-id", text: "Сохранить при сбое", files: [file] }],
+      });
+      await expect(readFile(file.path, "utf8")).resolves.toBe("Keep this file");
+    } finally {
+      await app.close();
+    }
+  });
+});
 
 describe("file attachments", () => {
   it("uploads, persists, dispatches, and downloads a file attachment", async () => {

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { StateStore } from "./state/store";
-import { removeThreadState } from "./thread-state";
+import { isMissingThreadError, isThreadNotLoadedError, removeThreadState } from "./thread-state";
+import { RpcError } from "./codex/transport";
 
 const directories: string[] = [];
 
@@ -16,6 +17,50 @@ afterEach(async () =>
 );
 
 describe("removeThreadState", () => {
+  it("distinguishes an unloaded thread from missing durable history", () => {
+    const unloaded = new RpcError(-32600, "thread not loaded");
+    const missing = new RpcError(-32600, "no rollout found for thread id thread");
+    expect(isThreadNotLoadedError(unloaded)).toBe(true);
+    expect(isMissingThreadError(unloaded)).toBe(false);
+    expect(isThreadNotLoadedError(missing)).toBe(false);
+    expect(isMissingThreadError(missing)).toBe(true);
+  });
+
+  it("protects queued messages and drafts from automatic cleanup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-thread-state-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.thread = { pinned: false, lastReadUpdatedAt: 0 };
+      state.messageQueues = {
+        thread: [
+          {
+            id: "message",
+            threadId: "thread",
+            text: "Keep me",
+            createdAt: 1,
+            status: "dispatching",
+          },
+        ],
+      };
+    });
+    await expect(removeThreadState(store, "thread", true)).resolves.toBe(false);
+    expect(store.snapshot().messageQueues?.thread).toHaveLength(1);
+    await store.update((state) => {
+      delete state.messageQueues?.thread;
+      state.threadMeta.thread!.draft = {
+        input: "Draft",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      };
+    });
+    await expect(removeThreadState(store, "thread", true)).resolves.toBe(false);
+    expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Draft");
+  });
+
   it("removes stale managed-team references along with a deleted session", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-thread-state-test-"));
     directories.push(directory);

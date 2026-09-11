@@ -300,14 +300,14 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-attention", "light", DESKTOP_VIEWPORT);
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
     await expect(queue).toBeVisible();
-    await expect(queue.locator(".queued-messages-count")).toHaveText("·1");
+    await expect(queue.getByText("Отправлено", { exact: true })).toBeVisible();
     expect(
       await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
       "desktop queue fits without horizontal scrolling",
     ).toBe(true);
     await expect(page).toHaveScreenshot("09-desktop-light-queue.png", { fullPage: true });
     if (browserName === "chromium") {
-      await expectA11yClean(page, "desktop message queue", ".queued-messages");
+      await expectA11yClean(page, "desktop message queue", ".outgoing-messages");
     }
   });
 
@@ -353,8 +353,8 @@ test.describe("CodexNest redesign visual contract", () => {
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
     await expect(queue).toBeVisible();
-    await expect(queue.locator(".queued-messages-count")).toHaveText("·1");
-    await expect(queue.locator(".queued-message-order")).toHaveText("01");
+    await expect(queue.getByText("Отправлено", { exact: true })).toBeVisible();
+    await expect(queue.locator(".queued-message-order")).toHaveCount(0);
     expect(
       await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
       "mobile queue fits without horizontal scrolling",

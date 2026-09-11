@@ -2008,6 +2008,10 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
       (Array.isArray(value.images) && value.images.length > 0) ||
       (Array.isArray(value.files) && value.files.length > 0)) &&
     typeof value.createdAt === "number" &&
+    (value.deliveryError === undefined ||
+      (isRecord(value.deliveryError) &&
+        typeof value.deliveryError.message === "string" &&
+        typeof value.deliveryError.retryable === "boolean")) &&
     ["queued", "dispatching"].includes(String(value.status))
   );
 }

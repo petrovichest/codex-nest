@@ -3,7 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { QueuedMessage, ThreadFileAttachment } from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
-import { isMissingThreadError, removeThreadState } from "./thread-state";
+import { RpcError } from "./codex/transport";
+import { isMissingThreadError, isThreadNotLoadedError } from "./thread-state";
 
 export interface MessageQueueDelivery {
   paused(): boolean;
@@ -22,14 +23,12 @@ export class MessageQueueValidationError extends Error {}
 
 export class MessageQueue {
   private readonly locks = new Map<string, Promise<unknown>>();
+  private readonly retries = new Map<string, { attempt: number; timer?: NodeJS.Timeout }>();
   private suspended = false;
 
   constructor(
     private readonly store: StateStore,
     private readonly delivery: MessageQueueDelivery,
-    private readonly options: {
-      onMissingThreadCleanup?: (threadId: string) => Promise<void> | void;
-    } = {},
   ) {}
 
   list(threadId: string): QueuedMessage[] {
@@ -80,8 +79,8 @@ export class MessageQueue {
           state.messageQueues![threadId] = queue.filter((candidate) => candidate.id !== messageId);
           if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
         }
-        const meta = state.threadMeta[threadId];
-        if (meta) delete meta.draft;
+        // This is only an acknowledgement replay. The draft may already belong
+        // to the user's next message, so do not clear it again.
         if (
           options.completeVoiceTranscriptionId &&
           state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
@@ -90,13 +89,24 @@ export class MessageQueue {
         }
         return;
       }
+      if (!state.threadMeta[threadId]) {
+        throw new MessageQueueNotFoundError("Thread not found");
+      }
       state.messageQueues ??= {};
       const queue = (state.messageQueues[threadId] ??= []);
       const existing = queue.find((candidate) => candidate.id === messageId);
       if (existing) {
+        if (
+          messageContentHash(
+            existing.text,
+            existing.images ?? [],
+            existing.files ?? [],
+            !!existing.goal,
+          ) !== contentHash
+        ) {
+          throw new MessageQueueConflictError("Message id has already been used");
+        }
         stored = existing;
-        const meta = state.threadMeta[threadId];
-        if (meta) delete meta.draft;
         if (
           options.completeVoiceTranscriptionId &&
           state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
@@ -134,6 +144,13 @@ export class MessageQueue {
         const receipt = this.store.view().messageReceipts?.[messageId];
         if (receipt?.threadId === threadId && receipt.turnId) return receipt.turnId;
         throw new MessageQueueNotFoundError("Queued message not found");
+      }
+      if (message.status === "dispatching") {
+        if (!(await this.reconcile(threadId, message))) {
+          throw new MessageQueueConflictError("Delivery is still being confirmed");
+        }
+        const receipt = this.store.view().messageReceipts?.[messageId];
+        if (receipt?.turnId) return receipt.turnId;
       }
       return this.dispatch(threadId, message, true);
     });
@@ -181,68 +198,73 @@ export class MessageQueue {
       if (this.delivery.paused()) return;
       if (this.delivery.currentTurnId(threadId)) return;
       const message = this.list(threadId)[0];
-      if (!message || message.status !== "queued") return;
+      if (!message || message.status !== "queued" || message.deliveryError?.retryable === false)
+        return;
+      if (this.retries.get(threadId)?.timer) return;
       await this.dispatch(threadId, message, false);
     });
   }
 
   async recover(): Promise<void> {
-    const queues = this.store.view().messageQueues ?? {};
-    for (const [threadId, messages] of Object.entries(queues)) {
-      const orphaned = await this.withLock(threadId, async () => {
-        for (const message of messages.filter((candidate) => candidate.status === "dispatching")) {
-          let deliveredTurnId: string | null;
-          try {
-            deliveredTurnId = await this.delivery.deliveredTurnId(threadId, message.id);
-          } catch (error) {
-            if (!isMissingThreadError(error)) throw error;
-            await this.cleanupMissingThread(threadId);
-            return true;
-          }
-          await this.store.update((state) => {
-            const queue = state.messageQueues?.[threadId] ?? [];
-            state.messageQueues![threadId] = deliveredTurnId
-              ? queue.filter((candidate) => candidate.id !== message.id)
-              : queue.map((candidate) =>
-                  candidate.id === message.id ? { ...candidate, status: "queued" } : candidate,
-                );
-            if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
-            if (deliveredTurnId) {
-              state.messageReceipts ??= {};
-              state.messageReceipts[message.id] = {
-                threadId,
-                turnId: deliveredTurnId,
-                contentHash: messageContentHash(
-                  message.text,
-                  message.images ?? [],
-                  message.files ?? [],
-                  !!message.goal,
-                ),
-                createdAt: Date.now(),
-              };
-            }
-          });
-        }
-        this.publish(threadId);
-        return false;
-      });
-      if (orphaned) continue;
-      await this.drain(threadId).catch(() => undefined);
+    await Promise.all(
+      Object.keys(this.store.view().messageQueues ?? {}).map((id) => this.recoverThread(id)),
+    );
+  }
+
+  private async recoverThread(threadId: string): Promise<void> {
+    await this.withLock(threadId, async () => {
+      for (const message of this.list(threadId)) {
+        if (message.status !== "dispatching" || message.deliveryError?.retryable === false)
+          continue;
+        if (!(await this.reconcile(threadId, message))) break;
+      }
+    });
+    await this.drain(threadId).catch(() => undefined);
+  }
+
+  private async reconcile(threadId: string, message: QueuedMessage): Promise<boolean> {
+    try {
+      const receipt = this.store.view().messageReceipts?.[message.id];
+      const turnId = receipt?.turnId ?? (await this.delivery.deliveredTurnId(threadId, message.id));
+      if (turnId) await this.remove(threadId, message.id, turnId, message);
+      else await this.setStatus(threadId, message.id, "queued");
+      return true;
+    } catch (error) {
+      await this.recordFailure(threadId, message.id, "dispatching", error);
+      return false;
     }
   }
 
   async resume(): Promise<void> {
     this.suspended = false;
     const threadIds = Object.keys(this.store.view().messageQueues ?? {});
-    await Promise.all(threadIds.map((threadId) => this.drain(threadId).catch(() => undefined)));
+    await Promise.all(
+      threadIds.map(async (threadId) => {
+        if (
+          this.list(threadId).some(
+            (message) =>
+              message.status === "dispatching" && message.deliveryError?.retryable !== false,
+          )
+        ) {
+          this.scheduleRetry(threadId);
+        } else {
+          await this.drain(threadId).catch(() => undefined);
+        }
+      }),
+    );
   }
 
   async pause(): Promise<void> {
     this.suspended = true;
+    for (const retry of this.retries.values()) {
+      if (retry.timer) clearTimeout(retry.timer);
+      retry.timer = undefined;
+    }
     await Promise.all([...this.locks.values()].map((pending) => pending.catch(() => undefined)));
   }
 
   async removeThread(threadId: string): Promise<void> {
+    this.clearRetry(threadId);
     if (!this.store.view().messageQueues?.[threadId]) return;
     await this.store.update((state) => {
       if (state.messageQueues) delete state.messageQueues[threadId];
@@ -265,8 +287,8 @@ export class MessageQueue {
         ? await this.delivery.steer(threadId, activeTurnId, message)
         : await this.delivery.start(threadId, message);
     } catch (error) {
-      if (isMissingThreadError(error)) {
-        await this.cleanupMissingThread(threadId);
+      if (isMissingThreadError(error) || isThreadNotLoadedError(error)) {
+        await this.recordFailure(threadId, message.id, "queued", error);
         throw error;
       }
       try {
@@ -276,14 +298,11 @@ export class MessageQueue {
           return deliveredTurnId;
         }
       } catch (deliveryError) {
-        if (isMissingThreadError(deliveryError)) {
-          await this.cleanupMissingThread(threadId);
-          throw error;
-        }
         // Keep an ambiguous delivery parked until a later recovery can reconcile it.
+        await this.recordFailure(threadId, message.id, "dispatching", deliveryError);
         throw error;
       }
-      await this.setStatus(threadId, message.id, "queued").catch(() => undefined);
+      await this.recordFailure(threadId, message.id, "queued", error);
       throw error;
     }
     await this.remove(threadId, message.id, turnId, message);
@@ -294,6 +313,7 @@ export class MessageQueue {
     threadId: string,
     messageId: string,
     status: QueuedMessage["status"],
+    deliveryError?: QueuedMessage["deliveryError"],
   ): Promise<void> {
     await this.store.update((state) => {
       const queue = state.messageQueues?.[threadId];
@@ -301,7 +321,7 @@ export class MessageQueue {
         throw new MessageQueueNotFoundError("Queued message not found");
       }
       state.messageQueues![threadId] = queue.map((message) =>
-        message.id === messageId ? { ...message, status } : message,
+        message.id === messageId ? { ...message, status, deliveryError } : message,
       );
     });
     this.publish(threadId);
@@ -332,6 +352,7 @@ export class MessageQueue {
         };
       }
     });
+    this.clearRetry(threadId);
     this.publish(threadId);
   }
 
@@ -339,9 +360,50 @@ export class MessageQueue {
     this.delivery.publish(threadId, this.list(threadId));
   }
 
-  private async cleanupMissingThread(threadId: string): Promise<void> {
-    await Promise.resolve(this.options.onMissingThreadCleanup?.(threadId)).catch(() => undefined);
-    await removeThreadState(this.store, threadId);
+  private async recordFailure(
+    threadId: string,
+    messageId: string,
+    status: QueuedMessage["status"],
+    error: unknown,
+  ): Promise<void> {
+    const missing = isMissingThreadError(error);
+    const retryable =
+      !missing &&
+      !(
+        error instanceof RpcError &&
+        [-32600, -32602].includes(error.code) &&
+        !isThreadNotLoadedError(error)
+      );
+    await this.setStatus(threadId, messageId, status, {
+      message: missing
+        ? "Сессия недоступна. Сообщение сохранено."
+        : status === "dispatching"
+          ? "Проверяем, было ли сообщение отправлено."
+          : retryable
+            ? "Ожидаем восстановления связи. Сообщение сохранено."
+            : "Не удалось отправить сообщение. Оно сохранено.",
+      retryable,
+    });
+    if (retryable) this.scheduleRetry(threadId);
+  }
+
+  private scheduleRetry(threadId: string): void {
+    if (this.suspended || this.retries.get(threadId)?.timer) return;
+    const attempt = (this.retries.get(threadId)?.attempt ?? 0) + 1;
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt - 1, 5));
+    const timer = setTimeout(() => {
+      const retry = this.retries.get(threadId);
+      if (retry) retry.timer = undefined;
+      void this.recoverThread(threadId).catch(() => this.scheduleRetry(threadId));
+    }, delay);
+    timer.unref();
+    this.retries.set(threadId, { attempt, timer });
+  }
+
+  private clearRetry(threadId: string): void {
+    const retry = this.retries.get(threadId);
+    if (retry?.timer) clearTimeout(retry.timer);
+    this.retries.delete(threadId);
   }
 
   private withLock<T>(threadId: string, task: () => Promise<T>): Promise<T> {

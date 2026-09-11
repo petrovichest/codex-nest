@@ -36,6 +36,7 @@ import {
   loadCachedThread,
   connectionCacheKey,
   deleteCachedThread,
+  acknowledgeOutboxMessage,
   deleteOutboxMessage,
   deletePendingVoiceRecording,
   confirmLocalDraft,
@@ -48,6 +49,7 @@ import {
   saveCachedThread,
   saveLocalDraft,
   type OutboxMessage,
+  type MessageDraftSource,
   type PendingVoiceRecording,
 } from "./offline-store";
 import { clientReducer, initialState, type ClientAction, type ClientState } from "./state";
@@ -97,7 +99,10 @@ interface ConnectionContextValue {
     threadId: string,
     body: QueueMessageRequest & { clientMessageId: string },
     onCommitted?: () => void,
+    source?: MessageDraftSource,
   ): Promise<"delivered" | "pending">;
+  retryReliableMessage(threadId: string, messageId: string): Promise<void>;
+  forgetReliableMessage(threadId: string, messageId: string): Promise<void>;
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
   pendingVoiceRecordingThreadIds: readonly string[];
   pendingVoiceRecordingErrors: Readonly<Record<string, string>>;
@@ -145,8 +150,20 @@ export function ConnectionProvider({
   const detailPersistTimers = useRef(new Map<string, number>());
   const persistenceConnectionKey = useRef(connectionCacheKey(settings));
   const foregroundRefresh = useRef<Promise<void> | null>(null);
-  const outboxDrain = useRef<Promise<void> | null>(null);
-  const outboxRetryTimer = useRef<number | undefined>(undefined);
+  const reliableMessages = useRef(
+    new Map<
+      string,
+      {
+        message: OutboxMessage;
+        staged: Promise<boolean>;
+        commit?: () => void;
+        failure?: unknown;
+      }
+    >(),
+  );
+  const outboxLocks = useRef(new Map<string, Promise<void>>());
+  const outboxRetryTimers = useRef(new Map<string, number>());
+  const lastMessageTime = useRef(0);
   const recoveredVoiceRecordingIds = useRef(new Set<string>());
   const pendingVoiceRecordings = useRef(
     new Map<string, Pick<PendingVoiceRecording, "threadId" | "lastError">>(),
@@ -228,6 +245,15 @@ export function ConnectionProvider({
               createdAt: message.createdAt,
               destination: "queue",
               turnId: null,
+              serverAccepted: message.accepted === true,
+              ...(message.lastError
+                ? {
+                    deliveryError: {
+                      message: message.lastError,
+                      retryable: message.retryable !== false,
+                    },
+                  }
+                : {}),
             },
           });
         }
@@ -263,7 +289,20 @@ export function ConnectionProvider({
       const timer = window.setTimeout(() => {
         if (detailPersistTimers.current.get(threadId) !== timer) return;
         detailPersistTimers.current.delete(threadId);
-        void saveCachedThread(settings, detail);
+        void saveCachedThread(settings, detail).then((saved) => {
+          if (!saved) return;
+          for (const turn of detail.turns) {
+            for (const item of turn.items) {
+              const record = reliableMessages.current.get(item.id);
+              if (
+                item.type === "userMessage" &&
+                record?.message.accepted &&
+                record.message.connectionKey === connectionKey
+              )
+                reliableMessages.current.delete(item.id);
+            }
+          }
+        });
       }, 750);
       detailPersistTimers.current.set(threadId, timer);
     }
@@ -550,56 +589,146 @@ export function ConnectionProvider({
     [api],
   );
 
-  const scheduleOutboxRetry = useCallback((attempt: number, drain: () => void) => {
-    if (outboxRetryTimer.current !== undefined) return;
-    const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
-    const base = delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)] ?? 30_000;
-    const wait = Math.round(base * (0.8 + Math.random() * 0.4));
-    outboxRetryTimer.current = window.setTimeout(() => {
-      outboxRetryTimer.current = undefined;
-      drain();
-    }, wait);
-  }, []);
+  const scheduleOutboxRetry = useCallback(
+    (threadId: string, attempt: number, drain: () => void) => {
+      if (outboxRetryTimers.current.has(threadId)) return;
+      const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+      const base = delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)] ?? 30_000;
+      const wait = Math.min(30_000, Math.round(base * (0.8 + Math.random() * 0.4)));
+      const timer = window.setTimeout(() => {
+        outboxRetryTimers.current.delete(threadId);
+        drain();
+      }, wait);
+      outboxRetryTimers.current.set(threadId, timer);
+    },
+    [],
+  );
 
-  const drainReliableOutbox = useCallback((): Promise<void> => {
-    if (outboxDrain.current) return outboxDrain.current;
-    const request = (async () => {
-      const messages = await listOutboxMessages(settings);
-      for (const message of messages) {
-        try {
-          await api.enqueue(message.threadId, {
-            input: message.input,
-            ...(message.images.length ? { images: message.images } : {}),
-            ...(message.files?.length ? { files: message.files } : {}),
-            ...(message.goal ? { goal: true } : {}),
-            clientMessageId: message.id,
-          });
-          await deleteOutboxMessage(message.id);
-        } catch (error) {
-          const next: OutboxMessage = {
-            ...message,
-            attempts: message.attempts + 1,
-            lastError: error instanceof Error ? error.message : "Delivery failed",
-          };
-          await putOutboxMessage(next);
-          if (isRetryableApiError(error)) {
-            scheduleOutboxRetry(next.attempts, () => void drainReliableOutbox());
-            break;
-          }
+  const drainReliableOutbox = useCallback(
+    async (onlyThreadId?: string): Promise<void> => {
+      const diskMessages = await listOutboxMessages(settings);
+      for (const message of diskMessages) {
+        if (!reliableMessages.current.has(message.id)) {
+          reliableMessages.current.set(message.id, { message, staged: Promise.resolve(true) });
         }
+        lastMessageTime.current = Math.max(lastMessageTime.current, message.createdAt);
       }
-    })().finally(() => {
-      if (outboxDrain.current === request) outboxDrain.current = null;
-    });
-    outboxDrain.current = request;
-    return request;
-  }, [api, scheduleOutboxRetry, settings]);
+      const threadIds = new Set(
+        [...reliableMessages.current.values()]
+          .filter(
+            ({ message }) =>
+              message.connectionKey === connectionCacheKey(settings) &&
+              (!onlyThreadId || message.threadId === onlyThreadId),
+          )
+          .map(({ message }) => message.threadId),
+      );
+      await Promise.all(
+        [...threadIds].map((threadId) => {
+          const previous = outboxLocks.current.get(threadId) ?? Promise.resolve();
+          const operation = previous
+            .catch(() => undefined)
+            .then(async () => {
+              if (outboxRetryTimers.current.has(threadId)) return;
+              const records = [...reliableMessages.current.values()]
+                .filter(
+                  ({ message }) =>
+                    message.threadId === threadId &&
+                    message.connectionKey === connectionCacheKey(settings),
+                )
+                .sort((a, b) => a.message.createdAt - b.message.createdAt);
+              for (const record of records) {
+                const message = record.message;
+                if (
+                  reliableMessages.current.get(message.id) !== record ||
+                  message.accepted ||
+                  message.retryable === false
+                )
+                  continue;
+                await record.staged;
+                try {
+                  await api.enqueue(threadId, {
+                    input: message.input,
+                    ...(message.images.length ? { images: message.images } : {}),
+                    ...(message.files?.length ? { files: message.files } : {}),
+                    ...(message.goal ? { goal: true } : {}),
+                    clientMessageId: message.id,
+                  });
+                  record.message = {
+                    ...message,
+                    accepted: true,
+                    lastError: null,
+                    retryable: undefined,
+                  };
+                  record.failure = undefined;
+                  record.commit?.();
+                  dispatch({
+                    type: "optimistic.add",
+                    message: {
+                      id: message.id,
+                      threadId,
+                      text: message.input,
+                      images: message.images,
+                      files: message.files ?? [],
+                      createdAt: message.createdAt,
+                      destination: "queue",
+                      turnId: null,
+                      serverAccepted: true,
+                    },
+                  });
+                  await acknowledgeOutboxMessage(record.message);
+                } catch (error) {
+                  record.failure = error;
+                  const retryable = isRetryableApiError(error);
+                  record.message = {
+                    ...message,
+                    attempts: message.attempts + 1,
+                    retryable,
+                    lastError: retryable
+                      ? "Нет связи — повторим отправку"
+                      : error instanceof Error
+                        ? error.message
+                        : "Не удалось отправить сообщение",
+                  };
+                  const saved = await putOutboxMessage(record.message);
+                  if (saved) {
+                    record.staged = Promise.resolve(true);
+                    record.commit?.();
+                  }
+                  dispatch({
+                    type: "optimistic.error",
+                    threadId,
+                    messageId: message.id,
+                    error: { message: record.message.lastError!, retryable },
+                  });
+                  if (retryable) {
+                    scheduleOutboxRetry(
+                      threadId,
+                      record.message.attempts,
+                      () => void drainReliableOutbox(threadId),
+                    );
+                    break;
+                  }
+                }
+              }
+            })
+            .finally(() => {
+              if (outboxLocks.current.get(threadId) === operation)
+                outboxLocks.current.delete(threadId);
+            });
+          outboxLocks.current.set(threadId, operation);
+          return operation;
+        }),
+      );
+    },
+    [api, scheduleOutboxRetry, settings],
+  );
 
   const sendReliable = useCallback(
     async (
       threadId: string,
       body: QueueMessageRequest & { clientMessageId: string },
       onCommitted?: () => void,
+      source?: MessageDraftSource,
     ): Promise<"delivered" | "pending"> => {
       const message: OutboxMessage = {
         id: body.clientMessageId,
@@ -609,7 +738,7 @@ export function ConnectionProvider({
         images: body.images ?? [],
         files: body.files ?? [],
         goal: body.goal ?? false,
-        createdAt: Date.now(),
+        createdAt: (lastMessageTime.current = Math.max(Date.now(), lastMessageTime.current + 1)),
         attempts: 0,
         lastError: null,
       };
@@ -619,31 +748,45 @@ export function ConnectionProvider({
         committed = true;
         onCommitted?.();
       };
-      const persisted = await putOutboxMessage(message);
+      const record = {
+        message,
+        staged: putOutboxMessage(message, source),
+        commit,
+        failure: undefined as unknown,
+      };
+      reliableMessages.current.set(message.id, record);
+      const persisted = await record.staged;
       if (persisted) commit();
-      try {
-        await api.enqueue(threadId, body);
-        commit();
-        await deleteOutboxMessage(message.id);
-        return "delivered";
-      } catch (error) {
-        if (!isRetryableApiError(error)) {
-          await deleteOutboxMessage(message.id);
-          throw error;
-        }
-        const retryPersisted = await putOutboxMessage({
-          ...message,
-          attempts: 1,
-          lastError: error instanceof Error ? error.message : "Delivery failed",
-        });
-        if (!retryPersisted) throw error;
-        commit();
-        scheduleOutboxRetry(1, () => void drainReliableOutbox());
-        return "pending";
+      await drainReliableOutbox(threadId);
+      if (record.message.accepted) return "delivered";
+      if (!(await record.staged)) {
+        reliableMessages.current.delete(message.id);
+        throw record.failure ?? new Error("Не удалось сохранить сообщение");
       }
+      return "pending";
     },
-    [api, drainReliableOutbox, scheduleOutboxRetry, settings],
+    [drainReliableOutbox, settings],
   );
+
+  const retryReliableMessage = useCallback(
+    async (threadId: string, messageId: string) => {
+      const record = reliableMessages.current.get(messageId);
+      if (!record || record.message.threadId !== threadId || record.message.accepted) return;
+      window.clearTimeout(outboxRetryTimers.current.get(threadId));
+      outboxRetryTimers.current.delete(threadId);
+      record.message = { ...record.message, retryable: undefined, lastError: null };
+      await putOutboxMessage(record.message);
+      dispatch({ type: "optimistic.error", threadId, messageId, error: undefined });
+      await drainReliableOutbox(threadId);
+    },
+    [drainReliableOutbox],
+  );
+
+  const forgetReliableMessage = useCallback(async (threadId: string, messageId: string) => {
+    reliableMessages.current.delete(messageId);
+    await deleteOutboxMessage(messageId);
+    dispatch({ type: "optimistic.remove", threadId, messageId });
+  }, []);
 
   const publishPendingVoiceRecordingThreads = useCallback(() => {
     const threadIds = new Set<string>();
@@ -957,6 +1100,8 @@ export function ConnectionProvider({
 
   useEffect(() => {
     const wake = () => {
+      for (const timer of outboxRetryTimers.current.values()) window.clearTimeout(timer);
+      outboxRetryTimers.current.clear();
       void drainReliableOutbox();
       void drainRecoveredVoiceRecordings();
     };
@@ -964,10 +1109,8 @@ export function ConnectionProvider({
     void drainReliableOutbox();
     return () => {
       window.removeEventListener("online", wake);
-      if (outboxRetryTimer.current !== undefined) {
-        window.clearTimeout(outboxRetryTimer.current);
-        outboxRetryTimer.current = undefined;
-      }
+      for (const timer of outboxRetryTimers.current.values()) window.clearTimeout(timer);
+      outboxRetryTimers.current.clear();
       if (voiceRecoveryRetryTimer.current !== undefined) {
         window.clearTimeout(voiceRecoveryRetryTimer.current);
         voiceRecoveryRetryTimer.current = undefined;
@@ -1188,6 +1331,8 @@ export function ConnectionProvider({
       loadOlderDetail,
       loadTurnItems,
       sendReliable,
+      retryReliableMessage,
+      forgetReliableMessage,
       queueVoiceRecording,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,
@@ -1209,6 +1354,8 @@ export function ConnectionProvider({
       loadOlderDetail,
       loadTurnItems,
       sendReliable,
+      retryReliableMessage,
+      forgetReliableMessage,
       queueVoiceRecording,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,

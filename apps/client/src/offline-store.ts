@@ -57,7 +57,18 @@ export type LocalNewSessionDraft = {
   thread?: ThreadSummary | null;
   revision?: number;
   settings?: SessionSettings;
+  submission?: NewSessionSubmission;
   updatedAt: number;
+};
+
+export type NewSessionSubmission = {
+  id: string;
+  intent: "queue" | "immediate";
+  input: string;
+  draft: UpdateThreadDraftRequest;
+  /** The submitted draft has been separated from the next composer draft. */
+  staged?: boolean;
+  deliveryError?: { message: string; retryable: boolean };
 };
 
 export type OutboxMessage = {
@@ -71,7 +82,11 @@ export type OutboxMessage = {
   createdAt: number;
   attempts: number;
   lastError: string | null;
+  retryable?: boolean;
+  accepted?: boolean;
 };
+
+export type MessageDraftSource = { draft: UpdateThreadDraftRequest; projectId?: string };
 
 export type PendingVoiceRecording = {
   id: string;
@@ -131,10 +146,10 @@ export async function loadCachedThread(
 export async function saveCachedThread(
   settings: ConnectionSettings,
   detail: ThreadDetail,
-): Promise<void> {
+): Promise<boolean> {
   const connectionKey = connectionCacheKey(settings);
   const serialized = JSON.stringify(detail);
-  await writeValue(THREAD_STORE, {
+  const cached = {
     key: scopedKey(connectionKey, detail.summary.id),
     connectionKey,
     threadId: detail.summary.id,
@@ -142,8 +157,28 @@ export async function saveCachedThread(
     accessedAt: Date.now(),
     bytes: new Blob([serialized]).size,
     formatVersion: 2,
-  } satisfies CachedThread);
+  } satisfies CachedThread;
+  const confirmed = cachedUserMessageIds(detail);
+  const saved = await writeTransaction([THREAD_STORE, OUTBOX_STORE], (transaction) => {
+    transaction.objectStore(THREAD_STORE).put(cached);
+    const outbox = transaction.objectStore(OUTBOX_STORE);
+    const cursor = outbox.openCursor();
+    cursor.onsuccess = () => {
+      const entry = cursor.result;
+      if (!entry) return;
+      const message = entry.value as OutboxMessage;
+      if (
+        message.connectionKey === connectionKey &&
+        message.threadId === detail.summary.id &&
+        message.accepted &&
+        confirmed.has(message.id)
+      )
+        entry.delete();
+      entry.continue();
+    };
+  });
   void cleanupThreadCache();
+  return saved;
 }
 
 function lightweightCachedDetail(detail: ThreadDetail): ThreadDetail {
@@ -182,7 +217,7 @@ export async function saveLocalDraft(
   threadId: string,
   value: UpdateThreadDraftRequest,
   updatedAt = Date.now(),
-): Promise<LocalDraft> {
+): Promise<LocalDraft | null> {
   const draft: LocalDraft = {
     key: scopedKey(connectionCacheKey(settings), threadId),
     connectionKey: connectionCacheKey(settings),
@@ -190,8 +225,7 @@ export async function saveLocalDraft(
     value,
     updatedAt,
   };
-  await writeValue(DRAFT_STORE, draft);
-  return draft;
+  return (await writeValue(DRAFT_STORE, draft)) ? draft : null;
 }
 
 export async function deleteLocalDraft(
@@ -221,6 +255,7 @@ export async function saveNewSessionDraft(
     thread: ThreadSummary | null;
     revision: number;
     settings?: SessionSettings;
+    submission?: NewSessionSubmission;
   },
   updatedAt = Date.now(),
 ): Promise<boolean> {
@@ -276,8 +311,84 @@ export async function confirmLocalDraft(
   await deleteValue(DRAFT_STORE, current.key);
 }
 
-export async function putOutboxMessage(message: OutboxMessage): Promise<boolean> {
-  return writeValue(OUTBOX_STORE, message);
+export async function putOutboxMessage(
+  message: OutboxMessage,
+  source?: MessageDraftSource,
+): Promise<boolean> {
+  return writeTransaction([OUTBOX_STORE, DRAFT_STORE], (transaction) => {
+    transaction.objectStore(OUTBOX_STORE).put(message);
+    if (!source) return;
+    const drafts = transaction.objectStore(DRAFT_STORE);
+    const key = source.projectId
+      ? newSessionDraftKey(message.connectionKey, source.projectId)
+      : scopedKey(message.connectionKey, message.threadId);
+    const request = drafts.get(key);
+    request.onsuccess = () => {
+      const current = request.result as LocalDraft | LocalNewSessionDraft | undefined;
+      if (!current) return;
+      if (source.projectId) {
+        const preparation = current as LocalNewSessionDraft;
+        if (preparation.submission?.id !== message.id) return;
+        // The URL can switch to this thread immediately after this transaction. Keep
+        // the next composer draft at that URL, even if the HTTP acknowledgement is lost.
+        if (preparation.submission.staged) {
+          const targetKey = scopedKey(message.connectionKey, message.threadId);
+          const target = drafts.get(targetKey);
+          target.onsuccess = () => {
+            const existing = target.result as LocalDraft | undefined;
+            if (existing && existing.updatedAt > preparation.updatedAt) return;
+            drafts.put({
+              key: targetKey,
+              connectionKey: message.connectionKey,
+              threadId: message.threadId,
+              value: preparation.value,
+              updatedAt: Math.max(Date.now(), preparation.updatedAt),
+            } satisfies LocalDraft);
+          };
+        }
+        delete preparation.submission;
+        drafts.put(preparation);
+      } else if (
+        JSON.stringify(normalizeDraft(current.value)) ===
+        JSON.stringify(normalizeDraft(source.draft))
+      ) {
+        drafts.delete(key);
+      }
+    };
+  });
+}
+
+function normalizeDraft(draft: UpdateThreadDraftRequest) {
+  return {
+    input: draft.input,
+    images: draft.images,
+    files: draft.files ?? [],
+    annotations: draft.annotations,
+    goalMode: draft.goalMode,
+  };
+}
+
+function cachedUserMessageIds(detail: ThreadDetail): Set<string> {
+  return new Set(
+    detail.turns.flatMap((turn) =>
+      turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
+    ),
+  );
+}
+
+/** Keep an accepted fallback until the canonical message is safely in the history cache. */
+export async function acknowledgeOutboxMessage(message: OutboxMessage): Promise<boolean> {
+  return writeTransaction([THREAD_STORE, OUTBOX_STORE], (transaction) => {
+    const outbox = transaction.objectStore(OUTBOX_STORE);
+    const request = transaction
+      .objectStore(THREAD_STORE)
+      .get(scopedKey(message.connectionKey, message.threadId));
+    request.onsuccess = () => {
+      const cached = request.result as CachedThread | undefined;
+      if (cached && cachedUserMessageIds(cached.detail).has(message.id)) outbox.delete(message.id);
+      else outbox.put({ ...message, accepted: true, lastError: null, retryable: undefined });
+    };
+  });
 }
 
 export async function listOutboxMessages(settings: ConnectionSettings): Promise<OutboxMessage[]> {
@@ -401,15 +512,29 @@ async function readAll<T>(storeName: string): Promise<T[]> {
 }
 
 async function writeValue(storeName: string, value: object): Promise<boolean> {
+  return writeTransaction([storeName], (transaction) => {
+    transaction.objectStore(storeName).put(value);
+  });
+}
+
+async function writeTransaction(
+  stores: string[],
+  write: (transaction: IDBTransaction) => void,
+): Promise<boolean> {
   const database = await openDatabase();
   if (!database) return false;
   try {
     await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(storeName, "readwrite");
-      transaction.objectStore(storeName).put(value);
+      const transaction = database.transaction(stores, "readwrite");
       transaction.addEventListener("complete", () => resolve());
       transaction.addEventListener("abort", () => reject(transaction.error));
       transaction.addEventListener("error", () => reject(transaction.error));
+      try {
+        write(transaction);
+      } catch (error) {
+        transaction.abort();
+        reject(error);
+      }
     });
     return true;
   } catch {

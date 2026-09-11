@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
-import type { LocalDraft } from "../offline-store";
+import type { LocalDraft, LocalNewSessionDraft } from "../offline-store";
 import { NewSession } from "./NewSession";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -70,6 +70,144 @@ afterEach(() => {
 });
 
 describe("NewSession", () => {
+  it("persists a fast Enter and moves it into the timeline before creation completes", async () => {
+    const hydration = deferred<null>();
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    drafts.load.mockReturnValue(hydration.promise);
+    const createProjectThread = vi.fn().mockReturnValue(creation.promise);
+    let commit: (() => void) | undefined;
+    const sendReliable = vi.fn((_id, _body, onCommitted) => {
+      commit = onCommitted;
+      return delivery.promise;
+    });
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Быстрое первое сообщение" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() =>
+      expect(drafts.save).toHaveBeenCalledWith(
+        connectionSettings,
+        project.id,
+        expect.anything(),
+        expect.objectContaining({
+          submission: expect.objectContaining({
+            id: expect.any(String),
+            input: "Быстрое первое сообщение",
+          }),
+        }),
+      ),
+    );
+    expect(createProjectThread).not.toHaveBeenCalled();
+    hydration.resolve(null);
+    await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
+    expect(textbox).toHaveValue("");
+    expect(screen.getByText("Быстрое первое сообщение")).toBeInTheDocument();
+    expect(screen.getByText("Отправляется…")).toBeInTheDocument();
+    creation.resolve({ thread });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(textbox).toHaveValue("");
+    expect(screen.queryByText("Созданная сессия")).not.toBeInTheDocument();
+    act(() => commit!());
+    expect(textbox).toHaveValue("");
+    expect(screen.getByText("Созданная сессия")).toBeInTheDocument();
+    delivery.resolve("delivered");
+    await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
+  });
+
+  it("continues a persisted first submission with its original id after reopening", async () => {
+    const draft = { input: "Сохранённая отправка", images: [], goalMode: false, annotations: [] };
+    drafts.load.mockResolvedValue({
+      projectId: project.id,
+      value: draft,
+      threadId: thread.id,
+      thread,
+      phase: "transferring",
+      revision: 1,
+      submission: { id: "persisted-id", intent: "queue", input: draft.input, draft },
+    });
+    const createProjectThread = vi.fn();
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    renderNewSession();
+    await waitFor(() =>
+      expect(sendReliable).toHaveBeenCalledWith(
+        thread.id,
+        expect.objectContaining({ clientMessageId: "persisted-id", input: draft.input }),
+        expect.any(Function),
+        expect.objectContaining({ projectId: project.id }),
+      ),
+    );
+    expect(createProjectThread).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+  });
+
+  it("automatically retries creation without losing the first submission identity", async () => {
+    const createProjectThread = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiClientError("app_server_unavailable", "Временно недоступно", 503),
+      )
+      .mockResolvedValue({ thread });
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Повтори после сбоя" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() =>
+      expect(screen.getByText("Нет связи — повторим отправку")).toBeInTheDocument(),
+    );
+    const firstSubmission = drafts.save.mock.calls.find((call) => call[3]?.submission)?.[3]
+      .submission;
+    expect(firstSubmission?.id).toEqual(expect.any(String));
+    expect(textbox).toHaveValue("");
+    expect(screen.getByText("Повтори после сбоя")).toBeInTheDocument();
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce(), { timeout: 2500 });
+    expect(sendReliable.mock.calls[0]?.[1].clientMessageId).toBe(firstSubmission.id);
+    expect(createProjectThread).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers an Enter across a page reload while session creation is still pending", async () => {
+    let stored: LocalNewSessionDraft | null = null;
+    drafts.load.mockImplementation(async () => stored);
+    drafts.save.mockImplementation(async (_settings, projectId, value, preparation) => {
+      stored = structuredClone({
+        key: "new",
+        connectionKey: "test",
+        projectId,
+        value,
+        ...preparation,
+        updatedAt: 1,
+      });
+      return true;
+    });
+    const firstCreation = deferred<{ thread: ThreadSummary }>();
+    const createProjectThread = vi
+      .fn()
+      .mockReturnValueOnce(firstCreation.promise)
+      .mockResolvedValue({ thread });
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    const view = renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Пережить перезагрузку" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
+    const messageId = stored!.submission!.id;
+    view.unmount();
+    renderNewSession();
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(sendReliable.mock.calls[0]?.[1]).toMatchObject({
+      input: "Пережить перезагрузку",
+      clientMessageId: messageId,
+    });
+    await act(async () => firstCreation.resolve({ thread }));
+    expect(sendReliable).toHaveBeenCalledOnce();
+  });
+
   it("carries immediate submission through session creation", async () => {
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     const sendQueuedNow = vi.fn().mockResolvedValue({ turnId: "turn" });
@@ -90,6 +228,92 @@ describe("NewSession", () => {
     const clientMessageId = sendReliable.mock.calls[0]?.[1].clientMessageId;
     expect(clientMessageId).toEqual(expect.any(String));
     expect(sendQueuedNow).toHaveBeenCalledWith(thread.id, clientMessageId);
+  });
+
+  it("keeps the first message in the editor if local persistence fails until server acceptance", async () => {
+    drafts.save.mockResolvedValue(false);
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    const sendReliable = vi.fn().mockReturnValue(delivery.promise);
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread: vi.fn().mockReturnValue(creation.promise),
+        sendReliable,
+      }),
+    );
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Не очищать без копии" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() => expect(drafts.save).toHaveBeenCalled());
+    expect(textbox).toHaveValue("Не очищать без копии");
+    creation.resolve({ thread });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(textbox).toHaveValue("Не очищать без копии");
+    await act(async () => delivery.resolve("delivered"));
+    expect(textbox).toHaveValue("");
+  });
+
+  it("keeps the next draft separate while the first message waits for session creation", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const delivery = deferred<"delivered">();
+    const sendReliable = vi.fn((_id, _body, commit) => {
+      commit();
+      return delivery.promise;
+    });
+    connection.mockReturnValue(
+      mockConnection({
+        createProjectThread: vi.fn().mockReturnValue(creation.promise),
+        sendReliable,
+      }),
+    );
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Первое" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() => expect(textbox).toHaveValue(""));
+    fireEvent.change(textbox, { target: { value: "Следующее" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(sendReliable).not.toHaveBeenCalled();
+    expect(screen.getByText("Первое")).toBeInTheDocument();
+    creation.resolve({ thread });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(sendReliable.mock.calls[0]?.[1].input).toBe("Первое");
+    expect(textbox).toHaveValue("Следующее");
+    expect(drafts.save).toHaveBeenCalledWith(
+      connectionSettings,
+      project.id,
+      expect.objectContaining({ input: "Следующее" }),
+      expect.objectContaining({
+        submission: expect.objectContaining({ input: "Первое", staged: true }),
+      }),
+    );
+    await act(async () => delivery.resolve("delivered"));
+    expect(textbox).toHaveValue("Следующее");
+  });
+
+  it("retains a permanently rejected first submission for explicit retry", async () => {
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const createProjectThread = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiClientError("invalid", "Cannot create", 400))
+      .mockReturnValue(creation.promise);
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    renderNewSession();
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Повторить вручную" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(await screen.findByText("Не отправлено")).toBeInTheDocument();
+    expect(screen.getByText("Повторить вручную")).toBeInTheDocument();
+    expect(textbox).toHaveValue("");
+    const id = drafts.save.mock.calls.find((call) => call[3]?.submission)?.[3].submission.id;
+    expect(createProjectThread).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить отправку" }));
+    await waitFor(() => expect(createProjectThread).toHaveBeenCalledTimes(2));
+    creation.resolve({ thread });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(sendReliable.mock.calls[0]?.[1].clientMessageId).toBe(id);
   });
 
   it("opens immediately for the selected project and transfers the draft to the created thread", async () => {
@@ -640,8 +864,9 @@ describe("NewSession", () => {
 
     fireEvent.click(screen.getByRole("link", { name: "Открыть проект снова" }));
 
-    expect(await screen.findByDisplayValue("Сохрани после ухода")).toBeInTheDocument();
-    expect(screen.getByAltText("saved.png")).toBeInTheDocument();
+    expect(await screen.findByText("Сохрани после ухода")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+    expect(view.container.querySelector('img[src^="data:image/png"]')).not.toBeNull();
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeInTheDocument();
     expect(createProjectThread).toHaveBeenCalledTimes(2);
     expect(sendReliable).not.toHaveBeenCalled();

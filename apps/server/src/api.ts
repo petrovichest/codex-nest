@@ -166,7 +166,7 @@ import type {
   TeamToolOperationState,
 } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
-import { isMissingThreadError } from "./thread-state";
+import { isMissingThreadError, isThreadNotLoadedError } from "./thread-state";
 import {
   computeTeamWorkspaceDelta,
   createTeamWorkspace,
@@ -604,7 +604,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     let turnId: string;
     try {
-      if (!projection.isUnmaterialized(threadId)) {
+      const resume = async () => {
         await bridge.request<ThreadResumeResponse>(
           "thread/resume",
           {
@@ -623,7 +623,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           },
           30_000,
         );
-      }
+      };
+      if (!projection.isUnmaterialized(threadId)) await resume();
       const startParams = {
         threadId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
@@ -640,7 +641,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
         ),
       };
-      const started = await bridge.request<unknown>("turn/start", startParams);
+      let started: unknown;
+      try {
+        started = await bridge.request<unknown>("turn/start", startParams);
+      } catch (error) {
+        // A durable empty session can be unloaded by a daemon restart. Only this
+        // explicit rejection is safe to retry without first reconciling delivery.
+        if (!isThreadNotLoadedError(error)) throw error;
+        await resume();
+        started = await bridge.request<unknown>("turn/start", startParams);
+      }
       const turn = parseTurnStart(started);
       turnId = turn.turn.id;
     } catch (error) {
@@ -754,7 +764,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         }
       }
       const detail = await projection.readThread(candidate.thread.id);
-      if (detail.turns.length === 0 && detail.queuedMessages.length === 0) {
+      if (!detail.historyError && detail.turns.length === 0 && detail.queuedMessages.length === 0) {
         await projection.markUnmaterialized(candidate.thread.id);
         return projection.summary(candidate.thread.id) ?? candidate.thread;
       }
@@ -1095,46 +1105,59 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ? withKeyLock(teamParentLocks, threadId, run)
       : run();
   };
-  const queue = new MessageQueue(
-    store,
-    {
-      paused: () => codexManager?.maintenanceActive ?? false,
-      currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
-      shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
-      start: (threadId, message) =>
-        startTurn(
-          threadId,
-          message.text,
-          message.images ?? [],
-          message.files ?? [],
-          message.id,
-          message.goal ?? false,
-        ).then((result) => result.turnId),
-      steer: (threadId, turnId, message) =>
-        steerTurn(
-          threadId,
-          turnId,
-          message.text,
-          message.images ?? [],
-          message.files ?? [],
-          message.id,
-        ),
-      deliveredTurnId: async (threadId, messageId) => {
-        const result = parseThreadRead(
-          await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
+  const queue = new MessageQueue(store, {
+    paused: () => codexManager?.maintenanceActive ?? false,
+    currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
+    shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
+    start: (threadId, message) =>
+      startTurn(
+        threadId,
+        message.text,
+        message.images ?? [],
+        message.files ?? [],
+        message.id,
+        message.goal ?? false,
+      ).then((result) => result.turnId),
+    steer: (threadId, turnId, message) =>
+      steerTurn(
+        threadId,
+        turnId,
+        message.text,
+        message.images ?? [],
+        message.files ?? [],
+        message.id,
+      ),
+    deliveredTurnId: async (threadId, messageId) => {
+      // This is an error/recovery path. Paginate so an older delivered message
+      // cannot be mistaken for an unsent one after a reconnect.
+      let cursor: string | null = null;
+      do {
+        const page = parseTurnsList(
+          await bridge.request<unknown>(
+            "thread/turns/list",
+            {
+              threadId,
+              cursor,
+              limit: 100,
+              sortDirection: "desc",
+              itemsView: "full",
+            },
+            30_000,
+          ),
         );
-        return (
-          result.thread.turns.find((turn) =>
-            turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
-          )?.id ?? null
+        const delivered = page.data.find((turn) =>
+          turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
         );
-      },
-      publish: (threadId, messages) => projection.publishQueue(threadId, messages),
+        if (delivered) {
+          await projection.restoreDeliveredTurn(threadId, delivered);
+          return delivered.id;
+        }
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+      return null;
     },
-    {
-      onMissingThreadCleanup: (threadId) => projection.removeOrphanedThread(threadId),
-    },
-  );
+    publish: (threadId, messages) => projection.publishQueue(threadId, messages),
+  });
   const forkOperationLocks = new Map<string, Promise<unknown>>();
   const forkOperationRuns = new Set<Promise<unknown>>();
   const forkOperationTimers = new Map<string, NodeJS.Timeout>();
@@ -3057,6 +3080,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             : null;
         return await projection.readThread(request.params.id, cursor ?? {});
       } catch (error) {
+        if (isMissingThreadError(error)) {
+          return apiError(reply, 404, "not_found", "Session history is unavailable");
+        }
         if (error instanceof ThreadViewUnavailableError) {
           return apiError(
             reply,

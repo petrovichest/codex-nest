@@ -11,8 +11,11 @@ import { RpcError } from "./codex/transport";
 import { StateStore } from "./state/store";
 
 const directories: string[] = [];
+const queues: MessageQueue[] = [];
 
 afterEach(async () => {
+  await Promise.all(queues.splice(0).map((queue) => queue.pause()));
+  vi.useRealTimers();
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -68,7 +71,9 @@ describe("MessageQueue", () => {
     const message = await queue.enqueue("thread", "Не потерять");
 
     await expect(queue.sendNow("thread", message.id)).rejects.toThrow("offline");
-    expect(queue.list("thread")).toEqual([{ ...message, status: "queued" }]);
+    expect(queue.list("thread")).toMatchObject([
+      { ...message, status: "queued", deliveryError: { retryable: true } },
+    ]);
   });
 
   it("reconciles a delivery whose response was lost instead of sending it again", async () => {
@@ -86,7 +91,7 @@ describe("MessageQueue", () => {
     expect(delivery.steer).toHaveBeenCalledOnce();
   });
 
-  it("drops orphaned dispatching work when the daemon reports a missing thread", async () => {
+  it("preserves accepted work when the daemon reports an unloaded thread", async () => {
     const { queue, delivery, store } = await setup("active");
     const message = queued("missing", "Исчезнувшее сообщение", "dispatching");
     await store.update((state) => {
@@ -100,9 +105,11 @@ describe("MessageQueue", () => {
 
     await expect(queue.recover()).resolves.toBeUndefined();
 
-    expect(queue.list("thread")).toEqual([]);
-    expect(store.snapshot().threadMeta.thread).toBeUndefined();
-    expect(store.snapshot().messageQueues?.thread).toBeUndefined();
+    expect(queue.list("thread")).toMatchObject([
+      { ...message, deliveryError: { retryable: true } },
+    ]);
+    expect(store.snapshot().threadMeta.thread).toBeDefined();
+    expect(store.snapshot().messageQueues?.thread).toHaveLength(1);
   });
 
   it("parks an ambiguous delivery while reconciliation is unavailable", async () => {
@@ -112,9 +119,66 @@ describe("MessageQueue", () => {
     const message = await queue.enqueue("thread", "Не отправлять повторно вслепую");
 
     await expect(queue.sendNow("thread", message.id)).rejects.toThrow("response lost");
-    expect(queue.list("thread")).toEqual([{ ...message, status: "dispatching" }]);
+    expect(queue.list("thread")).toMatchObject([
+      { ...message, status: "dispatching", deliveryError: { retryable: true } },
+    ]);
     await queue.drain("thread");
     expect(delivery.steer).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a missing session's message durable and stops automatic retries", async () => {
+    const { queue, delivery, store, setCurrentTurn } = await setup("active");
+    const message = await queue.enqueue("thread", "Не удалять", ["data:image/png;base64,aW1hZ2U="]);
+    await queue.drain("thread");
+    delivery.start.mockRejectedValue(new RpcError(-32600, "no rollout found for thread id thread"));
+    setCurrentTurn(null);
+    await expect(queue.drain("thread")).rejects.toThrow("no rollout found");
+    await queue.drain("thread");
+    await queue.recover();
+    expect(delivery.start).toHaveBeenCalledOnce();
+    expect(queue.list("thread")).toMatchObject([
+      { ...message, deliveryError: { retryable: false } },
+    ]);
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    expect(reopened.snapshot().messageQueues?.thread).toMatchObject([
+      { id: message.id, text: message.text, images: message.images },
+    ]);
+  });
+
+  it("retries a temporary rejection with backoff and the original message id", async () => {
+    const { queue, delivery, setCurrentTurn } = await setup("active");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const message = await queue.enqueue("thread", "Повтори сам", [], "stable-id");
+    await queue.drain("thread");
+    delivery.start.mockRejectedValueOnce(new RpcError(-32600, "thread not loaded"));
+    setCurrentTurn(null);
+    await expect(queue.drain("thread")).rejects.toThrow("thread not loaded");
+    await queue.drain("thread");
+    expect(delivery.start).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(queue.list("thread")).toEqual([]));
+    expect(delivery.start).toHaveBeenCalledTimes(2);
+    expect(delivery.start.mock.calls[1]).toMatchObject([
+      "thread",
+      { id: message.id, text: message.text },
+    ]);
+  });
+
+  it("reconciles an ambiguous delivery before any automatic resend", async () => {
+    const { queue, delivery, setCurrentTurn } = await setup("active");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const message = await queue.enqueue("thread", "Ответ потерян");
+    await queue.drain("thread");
+    delivery.start.mockRejectedValueOnce(new Error("response lost"));
+    delivery.deliveredTurnId.mockRejectedValueOnce(new Error("offline"));
+    setCurrentTurn(null);
+    await expect(queue.drain("thread")).rejects.toThrow("response lost");
+    delivery.deliveredTurnId.mockResolvedValueOnce("already-delivered");
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(queue.list("thread")).toEqual([]));
+    expect(delivery.start).toHaveBeenCalledOnce();
+    await expect(queue.sendNow("thread", message.id)).resolves.toBe("already-delivered");
   });
 
   it("persists image-only messages without changing queue delivery", async () => {
@@ -128,12 +192,26 @@ describe("MessageQueue", () => {
   });
 
   it("deduplicates retries with the same client message id", async () => {
-    const { queue } = await setup("active");
+    const { queue, store } = await setup("active");
 
     const first = await queue.enqueue("thread", "Один раз", [], "client-message");
+    await store.update((state) => {
+      state.threadMeta.thread!.draft = {
+        input: "Следующий черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 2,
+      };
+    });
     const retry = await queue.enqueue("thread", "Один раз", [], "client-message");
 
     expect(retry).toEqual(first);
+    expect(queue.list("thread")).toEqual([first]);
+    expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Следующий черновик");
+    await expect(queue.enqueue("thread", "Другой текст", [], "client-message")).rejects.toThrow(
+      "Message id has already been used",
+    );
     expect(queue.list("thread")).toEqual([first]);
   });
 
@@ -144,11 +222,21 @@ describe("MessageQueue", () => {
     await vi.waitFor(() =>
       expect(store.snapshot().messageReceipts?.["client-message"]).toBeDefined(),
     );
+    await store.update((state) => {
+      state.threadMeta.thread!.draft = {
+        input: "Следующий черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 2,
+      };
+    });
     const retry = await queue.enqueue("thread", "Один раз", [], "client-message");
 
     expect(retry).toMatchObject({ id: "client-message", status: "dispatching" });
     expect(delivery.start).toHaveBeenCalledOnce();
     expect(queue.list("thread")).toEqual([]);
+    expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Следующий черновик");
     await expect(queue.enqueue("thread", "Другой текст", [], "client-message")).rejects.toThrow(
       "Message id has already been used",
     );
@@ -282,13 +370,16 @@ async function setup(initialTurn: string | null) {
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
   await store.load();
+  await store.update((state) => {
+    state.threadMeta.thread = { pinned: false, lastReadUpdatedAt: 0 };
+  });
   let currentTurn = initialTurn;
   let paused = false;
   const delivery = {
     paused: vi.fn(() => paused),
     currentTurnId: vi.fn(() => currentTurn),
     shouldSteerQueuedMessage: vi.fn(() => false),
-    start: vi.fn(async () => {
+    start: vi.fn<(threadId: string, message: QueuedMessage) => Promise<string>>(async () => {
       currentTurn = "started";
       return "started";
     }),
@@ -296,11 +387,13 @@ async function setup(initialTurn: string | null) {
       currentTurn = "steered";
       return "steered";
     }),
-    deliveredTurnId: vi.fn(async () => null),
+    deliveredTurnId: vi.fn(async (): Promise<string | null> => null),
     publish: vi.fn(),
   };
+  const queue = new MessageQueue(store, delivery);
+  queues.push(queue);
   return {
-    queue: new MessageQueue(store, delivery),
+    queue,
     store,
     delivery,
     setCurrentTurn(value: string | null) {

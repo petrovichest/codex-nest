@@ -7,6 +7,7 @@ import type {
   ActivityItem,
   AttentionRequest,
   ModelOption,
+  QueuedMessage,
   ThreadDetail,
   ThreadDraft,
   ThreadSummary,
@@ -23,6 +24,7 @@ import type { OptimisticMessage } from "../state";
 import { Activity, ThreadPage, formatMessageTime, initialSessionSettings } from "./ThreadPage";
 
 const connection = vi.hoisted(() => vi.fn());
+const loadLocalDraft = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 const openDownloadUrl = vi.hoisted(() => vi.fn());
 const deleteLocalDraft = vi.hoisted(() =>
   vi.fn<(settings: unknown, threadId: string) => Promise<void>>(() => Promise.resolve()),
@@ -47,6 +49,7 @@ vi.mock("../offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteLocalDraft,
   saveLocalDraft,
+  loadLocalDraft,
 }));
 
 const summary: ThreadSummary = {
@@ -71,6 +74,7 @@ const summary: ThreadSummary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  loadLocalDraft.mockReset().mockResolvedValue(null);
   localStorage.clear();
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
 });
@@ -2871,6 +2875,71 @@ describe("Activity", () => {
     expect(screen.getByText("Тестовая задача")).toBeInTheDocument();
   });
 
+  it("restores a local draft and offers retry when history cannot be loaded", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    Reflect.deleteProperty(context.state.details, "thread");
+    context.refreshDetail.mockRejectedValue(
+      new ApiClientError("not_found", "Session history is unavailable", 404),
+    );
+    loadLocalDraft.mockResolvedValue({
+      value: { input: "Черновик без истории", images: [], annotations: [], goalMode: false },
+      updatedAt: 2,
+    });
+    renderThread();
+    expect(await screen.findByDisplayValue("Черновик без истории")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Повторить загрузку истории" }),
+    ).toBeInTheDocument();
+    context.refreshDetail.mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Повторить загрузку истории" }));
+    await waitFor(() => expect(context.refreshDetail).toHaveBeenCalledTimes(2));
+    expect(screen.getByDisplayValue("Черновик без истории")).toBeInTheDocument();
+  });
+
+  it("shows a preserved failed message with a copy action instead of only a sending spinner", () => {
+    mockThreadConnection(threadApi(), summary, {
+      queuedMessages: [
+        {
+          id: "failed",
+          threadId: "thread",
+          text: "Принятое сообщение",
+          createdAt: 1,
+          status: "dispatching",
+          deliveryError: { message: "Сессия недоступна. Сообщение сохранено.", retryable: false },
+        },
+      ],
+    });
+    renderThread();
+    expect(screen.getByText("Принятое сообщение")).toBeInTheDocument();
+    expect(screen.getByText("Сессия недоступна. Сообщение сохранено.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Скопировать сообщение" })).toBeEnabled();
+  });
+
+  it("shows a local draft even when the missing session has no summary", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    context.state.snapshot.threads = [];
+    Reflect.deleteProperty(context.state.details, "thread");
+    context.refreshDetail.mockRejectedValue(
+      new ApiClientError("not_found", "Session history is unavailable", 404),
+    );
+    loadLocalDraft.mockResolvedValue({
+      value: {
+        input: "Доступен для копирования",
+        images: [{ id: "draft-image", url: "data:image/png;base64,aW1hZ2U=" }],
+        annotations: [],
+        goalMode: false,
+      },
+      updatedAt: 2,
+    });
+    renderThread();
+    expect(await screen.findByDisplayValue("Доступен для копирования")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveAttribute("readonly");
+    expect(document.querySelector('img[src="data:image/png;base64,aW1hZ2U="]')).not.toBeNull();
+    expect(
+      await screen.findByRole("button", { name: "Повторить загрузку истории" }),
+    ).toBeInTheDocument();
+  });
+
   it("refreshes Git changes when the active turn diff changes", async () => {
     const api = threadApi();
     api.readGitChanges
@@ -3837,7 +3906,7 @@ describe("Activity", () => {
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
   });
 
-  it("docks queued messages above the composer and supports queue actions", async () => {
+  it("shows outgoing messages in the timeline and supports queue actions", async () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
     mockThreadConnection(api, running, {
@@ -3861,8 +3930,8 @@ describe("Activity", () => {
     renderThread();
 
     const queue = screen.getByRole("region", { name: "Очередь сообщений" });
-    expect(queue.closest("form")).toHaveClass("composer");
-    expect(queue.closest(".timeline")).toBeNull();
+    expect(queue.closest("form")).toBeNull();
+    expect(queue.closest(".timeline")).not.toBeNull();
     expect(
       Array.from(queue.querySelectorAll("[data-message-id]")).map((node) =>
         node.getAttribute("data-message-id"),
@@ -3870,8 +3939,9 @@ describe("Activity", () => {
     ).toEqual(["queued", "second"]);
     expect(
       Array.from(queue.querySelectorAll(".queued-message-order")).map((node) => node.textContent),
-    ).toEqual(["01", "02"]);
-    expect(queue.querySelector(".queued-messages-count")).toHaveTextContent("·2");
+    ).toEqual([]);
+    expect(queue.querySelector(".queued-messages-count")).toBeNull();
+    expect(screen.getAllByText("Отправлено")).toHaveLength(2);
     expect(screen.getAllByText("В очереди")).toHaveLength(2);
     fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
     fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {
@@ -3918,7 +3988,7 @@ describe("Activity", () => {
     ];
     renderThread();
 
-    expect(screen.getByText("Добавляется…")).toBeInTheDocument();
+    expect(screen.getByText("Отправляется…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Изменить сообщение в очереди" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Удалить сообщение из очереди" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
@@ -5339,14 +5409,7 @@ function mockThreadConnection(
       items: Array<Parameters<typeof Activity>[0]["item"]>;
       itemsLoaded?: boolean;
     }>;
-    queuedMessages: Array<{
-      id: string;
-      threadId: string;
-      text: string;
-      images?: string[];
-      createdAt: number;
-      status: "queued" | "dispatching";
-    }>;
+    queuedMessages: QueuedMessage[];
     olderTurnsCursor: string | null;
     draft: ThreadDetail["draft"];
     attention: AttentionRequest[];

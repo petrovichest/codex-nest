@@ -34,6 +34,7 @@ const putOutboxMessage = vi.hoisted(() =>
 const deleteOutboxMessage = vi.hoisted(() =>
   vi.fn<(id: string) => Promise<void>>(() => Promise.resolve()),
 );
+const acknowledgeOutboxMessage = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 
 vi.mock("@capacitor/core", () => ({
   Capacitor: { isNativePlatform: () => capacitor.native },
@@ -54,6 +55,7 @@ vi.mock("./offline-store", async (importOriginal) => ({
   listOutboxMessages,
   putOutboxMessage,
   deleteOutboxMessage,
+  acknowledgeOutboxMessage,
 }));
 
 const summary: ThreadSummary = {
@@ -99,6 +101,7 @@ describe("ConnectionProvider", () => {
     putOutboxMessage.mockResolvedValue(true);
     deleteOutboxMessage.mockReset();
     deleteOutboxMessage.mockResolvedValue();
+    acknowledgeOutboxMessage.mockReset().mockResolvedValue(true);
     FakeWebSocket.instances = [];
   });
 
@@ -185,7 +188,15 @@ describe("ConnectionProvider", () => {
     );
     await expect(delivery).resolves.toBe("delivered");
     expect(committed).toHaveBeenCalledOnce();
-    expect(deleteOutboxMessage).toHaveBeenCalledWith("message");
+    expect(acknowledgeOutboxMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "message", accepted: true }),
+    );
+    expect(deleteOutboxMessage).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(controls!.state.optimisticMessages.thread).toEqual([
+        expect.objectContaining({ id: "message", serverAccepted: true }),
+      ]),
+    );
     view.unmount();
   });
 
@@ -227,6 +238,139 @@ describe("ConnectionProvider", () => {
     );
     await expect(delivery).resolves.toBe("delivered");
     expect(committed).toHaveBeenCalledOnce();
+    view.unmount();
+  });
+
+  it("serializes each thread without blocking delivery in another thread", async () => {
+    const firstResponse = deferred<Response>();
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url, options: RequestInit) => {
+        const body = JSON.parse(options.body as string) as { clientMessageId: string };
+        calls.push(body.clientMessageId);
+        return body.clientMessageId === "a1"
+          ? firstResponse.promise
+          : Promise.resolve(new Response("{}", { status: 202 }));
+      }),
+    );
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+    const first = controls!.sendReliable("a", { input: "First", clientMessageId: "a1" });
+    await waitFor(() => expect(calls).toEqual(["a1"]));
+    const second = controls!.sendReliable("a", { input: "Second", clientMessageId: "a2" });
+    const independent = controls!.sendReliable("b", {
+      input: "Independent",
+      clientMessageId: "b1",
+    });
+    await act(async () => {
+      await independent;
+    });
+    expect(calls).toEqual(["a1", "b1"]);
+    await act(async () => {
+      firstResponse.resolve(new Response("{}", { status: 202 }));
+      await Promise.all([first, second]);
+    });
+    expect(calls).toEqual(["a1", "b1", "a2"]);
+    expect(acknowledgeOutboxMessage).toHaveBeenCalledTimes(3);
+    view.unmount();
+  });
+
+  it("keeps a rejected message visible and retries its original id only on request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "invalid", message: "Rejected" } }), {
+          status: 400,
+        }),
+      )
+      .mockResolvedValueOnce(new Response("{}", { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+    const body = { input: "Keep me", clientMessageId: "rejected" };
+    await act(async () => {
+      expect(
+        await controls!.sendReliable("thread", body, () =>
+          controls!.dispatch({
+            type: "optimistic.add",
+            message: {
+              id: body.clientMessageId,
+              threadId: "thread",
+              text: body.input,
+              images: [],
+              createdAt: 1,
+              destination: "queue",
+              turnId: null,
+            },
+          }),
+        ),
+      ).toBe("pending");
+    });
+    expect(controls!.state.optimisticMessages.thread).toEqual([
+      expect.objectContaining({
+        id: "rejected",
+        deliveryError: { message: "Rejected", retryable: false },
+      }),
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await flushPromises();
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await act(async () => {
+      await controls!.retryReliableMessage("thread", "rejected");
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body))).toEqual([body, body]);
+    expect(controls!.state.optimisticMessages.thread?.[0]).toMatchObject({ serverAccepted: true });
+    view.unmount();
+  });
+
+  it("does not resend an accepted fallback after a reload without history", async () => {
+    const { connectionCacheKey } = await import("./offline-store");
+    const settings = { baseUrl: "https://codexnest.example", token: "token" };
+    listOutboxMessages.mockResolvedValue([
+      {
+        id: "accepted",
+        connectionKey: connectionCacheKey(settings),
+        threadId: "thread",
+        input: "Safe fallback",
+        images: [],
+        goal: false,
+        createdAt: 1,
+        attempts: 0,
+        lastError: null,
+        accepted: true,
+      },
+    ]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={settings}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+    await waitFor(() =>
+      expect(controls!.state.optimisticMessages.thread?.[0]).toMatchObject({
+        id: "accepted",
+        text: "Safe fallback",
+        serverAccepted: true,
+      }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
     view.unmount();
   });
 

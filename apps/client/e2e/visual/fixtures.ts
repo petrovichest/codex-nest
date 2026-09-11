@@ -446,6 +446,7 @@ const codexStatus: CodexManagementStatus = {
 };
 
 export type VisualFixtureOptions = {
+  snapshot?: AppSnapshot;
   connected?: boolean;
   finishableSidebar?: boolean;
   forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
@@ -463,11 +464,12 @@ export async function installVisualFixture(
     forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
+    snapshot: suppliedSnapshot,
     theme,
     voiceFailure = false,
   }: VisualFixtureOptions,
 ): Promise<void> {
-  const baseSnapshot = forkLineage ? forkSnapshot : snapshot;
+  const baseSnapshot = suppliedSnapshot ?? (forkLineage ? forkSnapshot : snapshot);
   const sidebarSnapshot: AppSnapshot = finishableSidebar
     ? {
         ...baseSnapshot,

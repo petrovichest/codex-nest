@@ -3900,6 +3900,35 @@ button.message-file:hover:not(:disabled) {
   background: var(--surface);
 }
 
+.outgoing-messages .queued-messages-list {
+  gap: var(--space-3);
+  overflow: visible;
+}
+
+.outgoing-messages .queued-message {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0;
+  border: 0;
+}
+
+.outgoing-messages .queued-message-heading {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.outgoing-delivery-status {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.optimistic-turn > .outgoing-delivery-status {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: calc(-1 * var(--space-2));
+}
+
 .queued-messages-header,
 .queued-message-heading,
 .queued-message-actions,

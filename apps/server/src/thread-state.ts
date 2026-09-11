@@ -2,14 +2,35 @@ import { RpcError } from "./codex/transport";
 import type { StateStore } from "./state/store";
 
 const MISSING_THREAD_ERROR =
-  /thread not loaded|missing thread|not found|unknown thread|does not exist/i;
+  /missing thread|not found|unknown thread|does not exist|no rollout found for thread id/i;
+
+export function isThreadNotLoadedError(error: unknown): boolean {
+  return error instanceof RpcError && /thread not loaded/i.test(error.message);
+}
 
 export function isMissingThreadError(error: unknown): boolean {
   return error instanceof RpcError && MISSING_THREAD_ERROR.test(error.message);
 }
 
-export async function removeThreadState(store: StateStore, threadId: string): Promise<void> {
+export async function removeThreadState(
+  store: StateStore,
+  threadId: string,
+  preservePending = false,
+): Promise<boolean> {
+  let removed = false;
   await store.update((state) => {
+    const draft = state.threadMeta[threadId]?.draft;
+    if (
+      preservePending &&
+      (state.messageQueues?.[threadId]?.length ||
+        draft?.input ||
+        draft?.images.length ||
+        draft?.files?.length ||
+        draft?.annotations.length ||
+        state.voiceTranscriptions?.[threadId])
+    )
+      return;
+    removed = true;
     delete state.threadMeta[threadId];
 
     for (const meta of Object.values(state.threadMeta)) {
@@ -42,4 +63,5 @@ export async function removeThreadState(store: StateStore, threadId: string): Pr
       if (operation.threadId === threadId) delete state.teamToolOperations![operationId];
     }
   });
+  return removed;
 }

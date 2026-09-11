@@ -38,6 +38,44 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("keeps cached messages and the history cursor when a partial history read fails", () => {
+    const original: ThreadDetail = {
+      summary: baseThread,
+      turns: [
+        {
+          ...turn("turn"),
+          items: [
+            {
+              type: "userMessage",
+              id: "accepted",
+              text: "Не терять",
+              images: [],
+              status: "completed",
+              timestamp: 1,
+              phase: null,
+            },
+          ],
+        },
+      ],
+      queuedMessages: [],
+      olderTurnsCursor: "older",
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, { type: "detail", detail: original });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        ...original,
+        turns: [],
+        olderTurnsCursor: null,
+        historyError: { message: "Unavailable", retryable: true },
+      },
+    });
+    expect(state.details.one?.turns).toEqual(original.turns);
+    expect(state.details.one?.olderTurnsCursor).toBe("older");
+    expect(state.details.one?.historyError?.retryable).toBe(true);
+  });
+
   it("keeps newer quiz answers and streamed text when a delayed technical read arrives", () => {
     const before: ActivityItem = {
       type: "agentMessage",

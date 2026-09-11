@@ -1769,51 +1769,56 @@ describe("AppProjection", () => {
     }
   });
 
-  it("drops orphaned cached state when thread history is missing during sync", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
-    directories.push(directory);
-    const store = new StateStore(join(directory, "state.json"));
-    await store.load();
-    await store.update((state) => {
-      state.threadMeta.one = {
-        pinned: false,
-        lastReadUpdatedAt: 0,
-      };
-      state.messageQueues = {
-        one: [
-          {
-            id: "queued",
-            threadId: "one",
-            text: "Очередь",
-            createdAt: 1,
-            status: "dispatching",
-          },
-        ],
-      };
-    });
-    const bridge = new FakeBridge();
-    const baseRequest = bridge.request.getMockImplementation()!;
-    bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
-      if (method === "thread/loaded/list") {
-        return { data: [], nextCursor: null };
-      }
-      if (method === "thread/turns/list" && params.threadId === "one") {
-        throw new RpcError(-32_600, "thread not loaded");
-      }
-      return baseRequest(method, params);
-    });
-    const projection = new AppProjection(
-      bridge as unknown as CodexBridge,
-      store,
-      new AttentionManager(),
-    );
+  it.each(["thread not loaded", "no rollout found for thread id one"])(
+    "preserves pending messages during sync when history returns %s",
+    async (historyError) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      await store.update((state) => {
+        state.threadMeta.one = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+        };
+        state.messageQueues = {
+          one: [
+            {
+              id: "queued",
+              threadId: "one",
+              text: "Очередь",
+              createdAt: 1,
+              status: "dispatching",
+            },
+          ],
+        };
+      });
+      const bridge = new FakeBridge();
+      const baseRequest = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+        if (method === "thread/loaded/list") {
+          return { data: [], nextCursor: null };
+        }
+        if (method === "thread/turns/list" && params.threadId === "one") {
+          throw new RpcError(-32_600, historyError);
+        }
+        return baseRequest(method, params);
+      });
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+      );
 
-    await expect(projection.sync()).resolves.toBeUndefined();
+      await expect(projection.sync()).resolves.toBeUndefined();
 
-    expect(projection.summary("one")).toBeUndefined();
-    expect(store.snapshot().threadMeta.one).toBeUndefined();
-    expect(store.snapshot().messageQueues?.one).toBeUndefined();
-  });
+      expect(projection.summary("one")).toMatchObject({ queuedMessageCount: 1 });
+      expect(store.snapshot().threadMeta.one).toBeDefined();
+      expect(store.snapshot().messageQueues?.one).toEqual([
+        expect.objectContaining({ id: "queued", text: "Очередь", status: "dispatching" }),
+      ]);
+    },
+  );
 
   it("resumes only loaded listed sessions whose status is notLoaded", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));

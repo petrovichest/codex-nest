@@ -624,6 +624,20 @@ const ENGLISH: Record<string, string> = {
   Далее: "Next",
   "Не удалось сохранить черновик. Повторим при следующем изменении.":
     "Could not save the draft. We’ll retry on the next change.",
+  "Сессия недоступна. Сообщение сохранено.": "The session is unavailable. Your message is saved.",
+  "Проверяем, было ли сообщение отправлено.": "Checking whether your message was delivered.",
+  "Ожидаем восстановления связи. Сообщение сохранено.":
+    "Waiting to reconnect. Your message is saved.",
+  "Не удалось отправить сообщение. Оно сохранено.": "Could not send your message. It is saved.",
+  "Не удалось загрузить историю сессии": "Could not load the session history",
+  "Не удалось загрузить историю сессии. Сохранённые сообщения доступны ниже.":
+    "Could not load the session history. Saved messages are available below.",
+  "Повторить загрузку истории": "Retry loading history",
+  "Скопировать сообщение": "Copy message",
+  Отправлено: "Sent",
+  "Не отправлено": "Not sent",
+  "Нет связи — повторим отправку": "Offline — we’ll retry sending",
+  "Повторить отправку": "Retry sending",
   "Автовыбор через {{seconds}} сек.": "Automatic selection in {{seconds}} sec.",
   "Время автовыбора истекло": "Automatic selection time expired",
   "Действие во внешнем сервисе": "Action in an external service",
@@ -902,6 +916,7 @@ export function localizeKnownServerText(
       : "No speech was detected. Check your microphone and record again.";
   }
   if (language === "ru") {
+    if (value === "Session history is unavailable") return "История сессии недоступна";
     if (value === "The draft changed before voice upload") {
       return "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.";
     }

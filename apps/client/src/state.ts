@@ -53,6 +53,8 @@ export type OptimisticMessage = {
   createdAt: number;
   destination: "turn" | "queue";
   turnId: string | null;
+  deliveryError?: QueuedMessage["deliveryError"];
+  serverAccepted?: boolean;
 };
 
 export type ClientAction =
@@ -84,6 +86,12 @@ export type ClientAction =
   | { type: "voice.accepted"; job: VoiceTranscriptionJob }
   | { type: "optimistic.add"; message: OptimisticMessage }
   | { type: "optimistic.accept"; threadId: string; messageId: string; turnId: string }
+  | {
+      type: "optimistic.error";
+      threadId: string;
+      messageId: string;
+      error: QueuedMessage["deliveryError"];
+    }
   | { type: "optimistic.remove"; threadId: string; messageId: string }
   | {
       type: "userInputDraft.edit";
@@ -271,6 +279,11 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return updateOptimisticMessage(state, action.threadId, action.messageId, (message) => ({
         ...message,
         turnId: action.turnId,
+      }));
+    case "optimistic.error":
+      return updateOptimisticMessage(state, action.threadId, action.messageId, (message) => ({
+        ...message,
+        deliveryError: action.error,
       }));
     case "optimistic.remove":
       return removeOptimisticMessage(state, action.threadId, action.messageId);
@@ -592,6 +605,17 @@ function applyDetail(state: ClientState, detail: ThreadDetail, resetHistory = fa
     current.version.sequence > version.sequence
   ) {
     return state;
+  }
+  if (detail.historyError && current) {
+    const incoming = new Map(detail.turns.map((turn) => [turn.id, turn]));
+    detail = {
+      ...detail,
+      turns: [
+        ...current.turns.map((turn) => incoming.get(turn.id) ?? turn),
+        ...detail.turns.filter((turn) => !current.turns.some((known) => known.id === turn.id)),
+      ],
+      olderTurnsCursor: current.olderTurnsCursor,
+    };
   }
   const subagent = detail.summary.relation.kind === "subagent";
   const preserveHistory = !resetHistory && !subagent && current && state.expandedHistory[threadId];

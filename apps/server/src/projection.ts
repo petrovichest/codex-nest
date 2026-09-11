@@ -50,7 +50,7 @@ import {
 import { RpcError } from "./codex/transport";
 import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
-import { isMissingThreadError, removeThreadState } from "./thread-state";
+import { isMissingThreadError, isThreadNotLoadedError, removeThreadState } from "./thread-state";
 import { recoverUserInputAnchors } from "./timeline-rollout";
 import type {
   CodexNestState,
@@ -360,15 +360,26 @@ export class AppProjection extends EventEmitter {
     if (cached.currentTurnId) boundaryIds.add(cached.currentTurnId);
     const previousIds = new Set(previous?.turns.map((turn) => turn.id) ?? []);
     const needsCanonicalPage =
-      !previous || options.refresh || [...boundaryIds].some((turnId) => !previousIds.has(turnId));
+      !previous ||
+      previous.historyError !== undefined ||
+      options.refresh ||
+      [...boundaryIds].some((turnId) => !previousIds.has(turnId));
     let page: CachedTurnsPage | undefined;
+    let historyError: ThreadDetail["historyError"];
     if (needsCanonicalPage) {
       try {
         page = await this.readTurnsPage(id, null, "desc", !subagent && !options.refresh);
         await this.restoreActiveTurnFromPage(cached, page.turns);
       } catch (error) {
-        if (!(error instanceof RpcError) || isMissingThreadError(error)) throw error;
-        if (options.refresh || !previous) {
+        const pending = this.store.view();
+        if (pending.messageQueues?.[id]?.length || pending.threadMeta[id]?.draft) {
+          historyError = {
+            message: "Не удалось загрузить историю сессии. Сохранённые сообщения доступны ниже.",
+            retryable: !isMissingThreadError(error),
+          };
+        } else if (!(error instanceof RpcError) || isMissingThreadError(error)) {
+          throw error;
+        } else if (options.refresh || !previous) {
           throw new ThreadViewUnavailableError("Thread view is temporarily unavailable");
         }
       }
@@ -400,6 +411,7 @@ export class AppProjection extends EventEmitter {
         ? null
         : (page?.nextCursor ?? consistentPrevious?.olderTurnsCursor ?? null),
       draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
+      ...(historyError ? { historyError } : {}),
     };
     this.latestDetails.set(id, cloneView(detail));
     return detail;
@@ -998,6 +1010,23 @@ export class AppProjection extends EventEmitter {
       delete meta.draft;
       state.threadMeta[threadId] = meta;
     });
+  }
+
+  async restoreDeliveredTurn(threadId: string, turn: Turn): Promise<void> {
+    const cached = this.threads.get(threadId);
+    if (!cached) return;
+    if (this.isUnmaterialized(threadId)) await this.markMaterialized(threadId);
+    const index = cached.thread.turns.findIndex((candidate) => candidate.id === turn.id);
+    const existing = cached.thread.turns[index];
+    // A completion notification may have arrived while history was being read.
+    const source = existing && existing.status !== "inProgress" ? existing : turn;
+    if (index < 0) cached.thread.turns.push(source);
+    else cached.thread.turns[index] = source;
+    if (source.status === "inProgress" && !cached.currentTurnId) {
+      await this.setCurrentTurn(threadId, source.id);
+    }
+    this.replaceTurnState(threadId, source.id, { source, publish: true });
+    await this.saveSessionSnapshot(threadId, true);
   }
 
   async setCurrentTurn(threadId: string, turnId: string): Promise<void> {
@@ -2173,6 +2202,7 @@ export class AppProjection extends EventEmitter {
           await this.removeOrphanedThread(cached.thread.id);
           continue;
         }
+        if (isThreadNotLoadedError(error)) continue;
         throw error;
       }
       const latestTurn = page.data[0];
@@ -2629,13 +2659,14 @@ export class AppProjection extends EventEmitter {
 
   async removeOrphanedThread(threadId: string): Promise<void> {
     if (this.removedThreads.has(threadId) && !this.threads.has(threadId)) return;
+    // Automatic cleanup must never discard a draft or an accepted delivery, nor its files.
+    if (!(await removeThreadState(this.store, threadId, true))) return;
     this.removedThreads.add(threadId);
     await Promise.resolve(this.missingThreadCleanup?.(threadId)).catch((error: unknown) => {
       this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
     });
     this.bumpHistoryRevision(threadId);
     this.forgetThread(threadId);
-    await removeThreadState(this.store, threadId);
     await this.historyCache.invalidateThread(threadId).catch(() => undefined);
     this.publish({ type: "thread.removed", threadId });
   }
