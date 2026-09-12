@@ -8,6 +8,8 @@ import {
   parseThreadLoadedList,
   parseThreadRead,
   parseThreadResume,
+  parseThreadSearch,
+  parseThreadOccurrences,
   ProtocolShapeError,
 } from "./guards";
 
@@ -46,6 +48,14 @@ describe("app-server response guards", () => {
 
   it("accepts a resumed thread without depending on unrelated response fields", () => {
     expect(parseThreadResume({ thread, futureResumeField: true }).thread.id).toBe("thread-1");
+    expect(() => parseThreadRead({ thread: { ...thread, canAcceptDirectInput: "false" } })).toThrow(
+      ProtocolShapeError,
+    );
+    expect(
+      parseThreadRead({
+        thread: { ...thread, canAcceptDirectInput: null, model: "model", reasoningEffort: null },
+      }).thread.model,
+    ).toBe("model");
   });
 
   it("rejects malformed pagination envelopes", () => {
@@ -132,6 +142,9 @@ describe("app-server response guards", () => {
         rateLimitResetCredits: null,
       }),
     ).toEqual({
+      ordinaryUsageAllowed: null,
+      spendControlReached: null,
+      rateLimitReachedType: null,
       primary: { usedPercent: 35, windowDurationMins: 300, resetsAt: 1_785_258_183_000 },
       secondary: {
         usedPercent: 45,
@@ -162,5 +175,65 @@ describe("app-server response guards", () => {
         },
       }),
     ).toThrow("Invalid app-server response shape for account/rateLimits/read");
+  });
+
+  it("keeps explicit usage restrictions separate from a reset quota window", () => {
+    expect(
+      parseAccountRateLimits({
+        ordinaryUsageAllowed: false,
+        rateLimits: { primary: null, secondary: null, spendControlReached: false },
+        rateLimitsByLimitId: {
+          codex: {
+            primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1 },
+            secondary: null,
+            spendControlReached: true,
+            rateLimitReachedType: "future_reason",
+          },
+        },
+      }),
+    ).toMatchObject({
+      ordinaryUsageAllowed: false,
+      spendControlReached: true,
+      rateLimitReachedType: "future_reason",
+    });
+    expect(
+      parseAccountRateLimits({ rateLimits: { primary: null, secondary: null } }),
+    ).toMatchObject({
+      ordinaryUsageAllowed: null,
+      spendControlReached: null,
+      rateLimitReachedType: null,
+    });
+  });
+
+  it("validates native search pages and UTF-16 occurrence offsets", () => {
+    expect(
+      parseThreadSearch({ data: [{ thread, snippet: "match" }], nextCursor: "next" }).data[0]
+        ?.thread.id,
+    ).toBe(thread.id);
+    const occurrence = {
+      turnId: "turn",
+      itemId: "item",
+      snippet: "😀привет",
+      snippetMatchRange: { start: 2, end: 8 },
+      turnCursor: "cursor",
+    };
+    expect(parseThreadOccurrences({ data: [occurrence], nextCursor: null }).data).toEqual([
+      occurrence,
+    ]);
+    expect(() => parseThreadSearch({ data: [thread], nextCursor: null })).toThrow(
+      ProtocolShapeError,
+    );
+    for (const range of [
+      { start: -1, end: 3 },
+      { start: 3, end: 2 },
+      { start: 0, end: 99 },
+    ]) {
+      expect(() =>
+        parseThreadOccurrences({
+          data: [{ ...occurrence, snippetMatchRange: range }],
+          nextCursor: null,
+        }),
+      ).toThrow(ProtocolShapeError);
+    }
   });
 });

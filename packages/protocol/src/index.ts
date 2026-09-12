@@ -101,6 +101,9 @@ export type CodexRateLimitWindow = {
 export type CodexRateLimitsResponse = {
   primary: CodexRateLimitWindow | null;
   secondary: CodexRateLimitWindow | null;
+  ordinaryUsageAllowed?: boolean | null;
+  spendControlReached?: boolean | null;
+  rateLimitReachedType?: string | null;
 };
 
 export type SkillScope = "user" | "repo" | "system" | "admin";
@@ -271,7 +274,30 @@ export type ThreadSummary = {
   browserStatus: BrowserThreadStatus;
   settings: SessionSettings;
   relation: ThreadRelation;
+  canAcceptDirectInput?: boolean | null;
+  /** Current configured settings reported by Codex, not per-turn execution telemetry. */
+  codexSettings?: { model: string | null; reasoningEffort: string | null };
 };
+
+export type ThreadSearchPage = {
+  data: Array<{ thread: ThreadSummary; snippet: string }>;
+  nextCursor: string | null;
+};
+
+export type ThreadSearchOccurrence = {
+  turnId: string;
+  itemId: string;
+  snippet: string;
+  snippetMatchRange: { start: number; end: number };
+  turnCursor: string;
+};
+
+export type ThreadOccurrencesPage = {
+  data: ThreadSearchOccurrence[];
+  nextCursor: string | null;
+};
+
+export type ThreadSearchTurn = { instanceId: string; turn: TurnView };
 
 export function isActiveFeedEligible(thread: ThreadSummary): boolean {
   return (
@@ -287,6 +313,19 @@ export function isActiveFeedEligible(thread: ThreadSummary): boolean {
   );
 }
 
+export type AsyncQuestionReference = { turnId: string; itemId: string };
+
+export type AsyncUserInputQuestion = { title: string; options: string[] | null };
+
+/** Independent of Codex's live/history item ID aliases. */
+export function asyncQuestionReplyMessageId(
+  threadId: string,
+  turnId: string,
+  questionKey: string,
+): string {
+  return `async-answer:${threadId}:${turnId}:${questionKey}`;
+}
+
 export type QueuedMessage = {
   id: string;
   threadId: string;
@@ -297,6 +336,7 @@ export type QueuedMessage = {
   createdAt: number;
   status: "queued" | "dispatching";
   deliveryError?: { message: string; retryable: boolean };
+  replyToAsyncQuestion?: AsyncQuestionReference;
 };
 
 export type TurnPlanStep = {
@@ -359,6 +399,10 @@ export type ActivityItem =
       files?: ActivityFileAttachment[];
       timestamp: number | null;
       phase: "commentary" | "final_answer" | null;
+      delivery?: "async" | null;
+      questions?: AsyncUserInputQuestion[] | null;
+      /** Stable across live/history item renumbering, scoped to the source turn. */
+      questionKey?: string;
     }
   | {
       type: "command";
@@ -701,6 +745,7 @@ export type AttentionRequest =
   | (AttentionBase & {
       kind: "userInput";
       questions: UserInputQuestion[];
+      isBlocking?: boolean;
       autoResolutionMs: number | null;
       /** Present on server snapshots/events; optional for backward-compatible fixtures/clients. */
       draft?: UserInputDraft | null;
@@ -1269,6 +1314,7 @@ export type QueueMessageRequest = {
   files?: ThreadFileAttachment[];
   goal?: boolean;
   clientMessageId?: string;
+  replyToAsyncQuestion?: AsyncQuestionReference;
 };
 
 export type UpdateQueuedMessageRequest = {

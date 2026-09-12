@@ -10,6 +10,32 @@ const connection = vi.hoisted(() => vi.fn());
 vi.mock("../connection", () => ({ useConnection: connection }));
 
 describe("AttentionPanel", () => {
+  it.each([undefined, true, false])(
+    "keeps countdowns only for blocking requests (%s)",
+    (isBlocking) => {
+      connection.mockReturnValue({ api: { respond: vi.fn() } });
+      render(
+        <AttentionPanel
+          requests={[
+            {
+              ...multiQuestionRequest(),
+              isBlocking,
+              createdAt: Date.now(),
+              autoResolutionMs: 60_000,
+            },
+          ]}
+        />,
+      );
+      if (isBlocking === false) {
+        expect(screen.queryByText(/Автовыбор через/)).not.toBeInTheDocument();
+        expect(screen.getByText("Можно ответить, пока Codex работает")).toBeInTheDocument();
+      } else {
+        expect(screen.getByText(/Автовыбор через/)).toBeInTheDocument();
+        expect(screen.getByText("Требуется внимание")).toBeInTheDocument();
+      }
+    },
+  );
+
   it("responds to approvals through the existing API", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
     connection.mockReturnValue({ api: { respond } });

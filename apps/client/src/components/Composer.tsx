@@ -112,6 +112,8 @@ export function Composer({
   onSubmit,
   onSendQueuedNow,
   busy,
+  inputUnavailable = false,
+  codexSettings,
   running = false,
   settings,
   onSettingsChange,
@@ -164,6 +166,8 @@ export function Composer({
   onSubmit(intent: ComposerSubmitIntent): void;
   onSendQueuedNow?(): void;
   busy: boolean;
+  inputUnavailable?: boolean;
+  codexSettings?: { model: string | null; reasoningEffort: string | null };
   running?: boolean;
   settings: SessionSettings;
   onSettingsChange(value: UpdateThreadSettingsRequest): void;
@@ -323,12 +327,14 @@ export function Composer({
     [activeSkillToken?.query, language, skills.catalog?.skills],
   );
   const canSubmit =
+    !inputUnavailable &&
     hasContent &&
     (!goalMode || Boolean(draftInput.trim())) &&
     !busy &&
     !speechBusy &&
     (!creating || Boolean(projectId));
-  const canSendQueuedNow = !hasContent && !busy && !speechBusy && Boolean(onSendQueuedNow);
+  const canSendQueuedNow =
+    !inputUnavailable && !hasContent && !busy && !speechBusy && Boolean(onSendQueuedNow);
   const planToggleEligible =
     !running &&
     !busy &&
@@ -1394,6 +1400,22 @@ export function Composer({
               onGoalUpdate={onGoalUpdate}
               onGoalClear={onGoalClear}
             />
+            {codexSettings &&
+              ((codexSettings.model !== null && codexSettings.model !== settings.model) ||
+                (codexSettings.reasoningEffort !== null &&
+                  codexSettings.reasoningEffort !== settings.reasoningEffort)) && (
+                <span
+                  className="composer-hint codex-settings-hint"
+                  title={t(
+                    "Настройки, сообщённые Codex; не модель конкретного ответа. Ваш выбор применится при следующей отправке.",
+                  )}
+                >
+                  {t("В Codex: {{model}} · {{effort}}", {
+                    model: codexSettings.model ?? t("Не сообщено"),
+                    effort: codexSettings.reasoningEffort ?? t("Не сообщено"),
+                  })}
+                </span>
+              )}
             {running && (
               <span className="composer-hint">{t("Сообщение будет добавлено в очередь")}</span>
             )}

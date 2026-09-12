@@ -32,6 +32,8 @@ import type { ConnectionSettings } from "./storage";
 import { copyText } from "./clipboard";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { Dialog } from "./components/Dialog";
+import { RateLimitsDialog } from "./components/RateLimitsDialog";
+import { ThreadSearchDialog } from "./components/ThreadSearchDialog";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -46,6 +48,7 @@ import {
   MoreIcon,
   NewTaskIcon,
   PlusIcon,
+  SearchIcon,
   SlidersIcon,
   TrashIcon,
 } from "./components/Icons";
@@ -731,6 +734,21 @@ function Sidebar({
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
+  const [rateLimitsOpen, setRateLimitsOpen] = useState(false);
+  const [rateLimitsUpdatedAt, setRateLimitsUpdatedAt] = useState<number | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const rateLimitsGeneration = useRef(0);
+  useEffect(() => {
+    rateLimitsGeneration.current++;
+    setRateLimits(null);
+    setRateLimitsError(false);
+    setRateLimitsLoading(false);
+    setRateLimitsUpdatedAt(null);
+    setRateLimitsOpen(false);
+    return () => {
+      rateLimitsGeneration.current++;
+    };
+  }, [api, state.snapshot?.instanceId]);
   if (activeFeedRunningOrderRef.current.serverBaseUrl !== serverBaseUrl) {
     activeFeedRunningOrderRef.current = { serverBaseUrl, byParent: new Map() };
   }
@@ -1280,15 +1298,18 @@ function Sidebar({
 
   async function refreshRateLimits() {
     if (rateLimitsLoading) return;
+    const generation = ++rateLimitsGeneration.current;
     setRateLimitsLoading(true);
     setRateLimitsError(false);
     try {
-      setRateLimits(await api.readCodexRateLimits());
+      const limits = await api.readCodexRateLimits();
+      if (generation !== rateLimitsGeneration.current) return;
+      setRateLimits(limits);
+      setRateLimitsUpdatedAt(Date.now());
     } catch {
-      setRateLimits(null);
-      setRateLimitsError(true);
+      if (generation === rateLimitsGeneration.current) setRateLimitsError(true);
     } finally {
-      setRateLimitsLoading(false);
+      if (generation === rateLimitsGeneration.current) setRateLimitsLoading(false);
     }
   }
 
@@ -1355,10 +1376,17 @@ function Sidebar({
           aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
           className="sidebar-control-action codex-limits"
           disabled={rateLimitsLoading}
-          onClick={() => void refreshRateLimits()}
+          onClick={() => {
+            setRateLimitsOpen(true);
+            void refreshRateLimits();
+          }}
         >
           {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
           <span>{rateLimitsText}</span>
+        </button>
+        <button className="sidebar-control-action" onClick={() => setSearchOpen(true)}>
+          <SearchIcon />
+          {t("Поиск по диалогам")}
         </button>
         <button className="sidebar-control-action" onClick={onNewProject}>
           <PlusIcon />
@@ -1678,6 +1706,21 @@ function Sidebar({
           </div>
         )}
       </nav>
+      <ThreadSearchDialog
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onNavigate={onClose}
+      />
+      {rateLimitsOpen && (
+        <RateLimitsDialog
+          limits={rateLimits}
+          loading={rateLimitsLoading}
+          error={rateLimitsError}
+          updatedAt={rateLimitsUpdatedAt}
+          onRefresh={() => void refreshRateLimits()}
+          onClose={() => setRateLimitsOpen(false)}
+        />
+      )}
     </aside>
   );
 }

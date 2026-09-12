@@ -107,6 +107,19 @@ export function SessionInspector({
             <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
               {project?.displayName ?? t("Без проекта")}
             </InspectorRow>
+            <InspectorRow technical icon={<ServerIcon />} label={t("Модель в Codex")}>
+              {summary.codexSettings?.model ?? t("Не сообщено")}
+            </InspectorRow>
+            <InspectorRow technical icon={<ServerIcon />} label={t("Усилие в Codex")}>
+              {summary.codexSettings?.reasoningEffort ?? t("Не сообщено")}
+            </InspectorRow>
+            <InspectorRow icon={<ServerIcon />} label={t("Приём сообщений")}>
+              {summary.canAcceptDirectInput == null
+                ? t("Не сообщено")
+                : summary.canAcceptDirectInput
+                  ? t("Доступен")
+                  : t("Временно недоступен")}
+            </InspectorRow>
             <InspectorRow technical icon={<GitBranchIcon />} label="Git changes">
               <GitChangesValue value={gitChanges} />
             </InspectorRow>

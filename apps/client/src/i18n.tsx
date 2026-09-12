@@ -22,6 +22,68 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  "Поиск недоступен в этой версии Codex или для этой истории.":
+    "Search is unavailable in this Codex version or for this history.",
+  "Поиск по диалогам": "Search conversations",
+  "Сообщения и названия во всех проектах, включая архив":
+    "Messages and titles across all projects, including archives",
+  "Текст для поиска": "Search text",
+  "Что вы помните из диалога?": "What do you remember from the conversation?",
+  Найти: "Search",
+  "К результатам": "Back to results",
+  "Открыть диалог": "Open conversation",
+  "Совпадение найдено в названии или фрагмент больше недоступен. Можно открыть диалог.":
+    "The title matched, or the excerpt is no longer available. You can open the conversation.",
+  "Ищем…": "Searching…",
+  "Не в архиве": "Not archived",
+  "Совпадений нет": "No matches",
+  "Введите фразу и нажмите «Найти». Поиск не включает технические журналы инструментов.":
+    "Enter a phrase and select Search. Technical tool logs are not searched.",
+  "Не удалось выполнить поиск": "Search failed",
+  "Фрагмент из истории": "Excerpt from history",
+  "К текущему диалогу": "Back to current conversation",
+  "Сервер перезапущен. Повторите поиск, чтобы открыть фрагмент.":
+    "The server restarted. Search again to open the excerpt.",
+  "Не удалось загрузить фрагмент": "Could not load the excerpt",
+  "История изменилась. Повторите поиск.": "History changed. Search again.",
+  "Найденное сообщение больше недоступно. Можно вернуться к текущему диалогу.":
+    "The matching message is no longer available. You can return to the current conversation.",
+  "Не сообщено": "Not reported",
+  "Не удалось обновить. Ниже — последние полученные данные, они могут устареть.":
+    "Refresh failed. The last successful data is shown below and may be outdated.",
+  "Не удалось получить лимиты": "Could not fetch limits",
+  "Основное окно": "Primary window",
+  "Дополнительное окно": "Secondary window",
+  Осталось: "Remaining",
+  Длительность: "Duration",
+  "Сброс окна": "Window reset",
+  "Обычное использование разрешено": "Ordinary usage allowed",
+  "Порог расходов достигнут": "Spend control reached",
+  "Причина ограничения": "Limit reason",
+  "Процент и время сброса не гарантируют доступность. Codex сообщает ограничения отдельно.":
+    "Percentage and reset time do not guarantee availability. Codex reports restrictions separately.",
+  "Получено: {{date}}": "Fetched: {{date}}",
+  "Модель в Codex": "Model in Codex",
+  "Усилие в Codex": "Reasoning effort in Codex",
+  "Приём сообщений": "Direct input",
+  Доступен: "Available",
+  "Временно недоступен": "Temporarily unavailable",
+  "Codex временно не принимает сообщения": "Codex is temporarily not accepting messages",
+  "Codex временно не принимает сообщения. Черновик и очередь сохранены.":
+    "Codex is temporarily not accepting messages. Your draft and queue are preserved.",
+  "Codex пока не принимает сообщения в эту сессию. Черновик и очередь сохранены.":
+    "Codex is not currently accepting messages in this session. Your draft and queue are preserved.",
+  "Проверить снова": "Check again",
+  "Настройки, сообщённые Codex; не модель конкретного ответа. Ваш выбор применится при следующей отправке.":
+    "Settings reported by Codex, not the model used for a specific answer. Your selection applies on the next send.",
+  "В Codex: {{model}} · {{effort}}": "In Codex: {{model}} · {{effort}}",
+  "Вопросы Codex": "Codex questions",
+  "Можно ответить, пока Codex работает": "You can reply while Codex works",
+  "Ответ доставлен Codex": "Reply delivered to Codex",
+  "Ответ принят сервером — передаём Codex": "Reply accepted by the server — sending to Codex",
+  "Ответ сохранён на устройстве — ожидает отправки": "Reply saved on this device — waiting to send",
+  "Не удалось отправить ответ": "Could not send the reply",
+  Ответить: "Reply",
   "Не удалось загрузить конфигурацию": "Failed to load configuration",
   "Браузер не выдал разрешение. Попробуйте ещё раз.":
     "The browser did not grant permission. Try again.",
@@ -916,6 +978,8 @@ export function localizeKnownServerText(
       : "No speech was detected. Check your microphone and record again.";
   }
   if (language === "ru") {
+    if (value === "Search result changed; search again")
+      return "История изменилась. Повторите поиск.";
     if (value === "Session history is unavailable") return "История сессии недоступна";
     if (value === "The draft changed before voice upload") {
       return "Черновик изменился; сохранённая запись не была потеряна. Повторите восстановление.";

@@ -1,5 +1,6 @@
 import type {
   AppSnapshot,
+  AsyncQuestionReference,
   SessionSettings,
   ThreadDetail,
   ThreadDraft,
@@ -84,6 +85,7 @@ export type OutboxMessage = {
   lastError: string | null;
   retryable?: boolean;
   accepted?: boolean;
+  replyToAsyncQuestion?: AsyncQuestionReference;
 };
 
 export type MessageDraftSource = { draft: UpdateThreadDraftRequest; projectId?: string };

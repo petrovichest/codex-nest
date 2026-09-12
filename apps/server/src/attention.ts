@@ -148,6 +148,7 @@ function normalizeAttention(id: string, request: ServerRequest): AttentionReques
         itemId: request.params.itemId,
         createdAt,
         autoResolutionMs: request.params.autoResolutionMs,
+        isBlocking: request.params.isBlocking ?? true,
         draft: null,
         questions: request.params.questions.map((question) => ({
           id: question.id,
@@ -163,6 +164,18 @@ function normalizeAttention(id: string, request: ServerRequest): AttentionReques
         })),
       };
     case "mcpServer/elicitation/request":
+      if (request.params.mode === "openai/userVerification") {
+        return {
+          id,
+          kind: "unsupported",
+          threadId: request.params.threadId,
+          turnId: request.params.turnId,
+          itemId: null,
+          createdAt,
+          method: request.method,
+          message: "Эта версия Codex запросила действие, которое CodexNest пока не поддерживает.",
+        };
+      }
       return {
         id,
         kind: "elicitation",

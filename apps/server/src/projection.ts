@@ -25,6 +25,9 @@ import type {
   ThreadOutcome,
   ThreadState,
   ThreadSummary,
+  ThreadSearchPage,
+  ThreadOccurrencesPage,
+  ThreadSearchTurn,
   TurnItemsResponse,
   TurnProgress,
   TurnView,
@@ -45,6 +48,8 @@ import {
   parseThreadLoadedList,
   parseThreadRead,
   parseThreadResume,
+  parseThreadSearch,
+  parseThreadOccurrences,
   parseTurnsList,
 } from "./codex/guards";
 import { RpcError } from "./codex/transport";
@@ -89,6 +94,8 @@ interface PendingTurnActivityDeltas {
 export class ThreadDraftConflictError extends Error {}
 export class ThreadViewUnavailableError extends Error {}
 export class ThreadHistoryConflictError extends Error {}
+export class ThreadSearchUnavailableError extends Error {}
+export class ThreadSearchNotFoundError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
 const LIVE_ACTIVITY_DELTA_FLUSH_MS = 50;
@@ -143,6 +150,7 @@ export class AppProjection extends EventEmitter {
     }
     bridge.on("state", (state) => {
       if (state !== "ready") {
+        for (const cached of this.threads.values()) cached.thread.canAcceptDirectInput = null;
         if (this.loadedRecoveryTimer) clearTimeout(this.loadedRecoveryTimer);
         this.loadedRecoveryTimer = undefined;
         this.loadedRecoveryAttempt = 0;
@@ -293,6 +301,131 @@ export class AppProjection extends EventEmitter {
 
   rolloutPath(id: string): string | null {
     return this.threads.get(id)?.thread.path ?? null;
+  }
+
+  async searchThreads(
+    searchTerm: string,
+    archived: boolean,
+    cursor: string | null,
+  ): Promise<ThreadSearchPage> {
+    const page = parseThreadSearch(
+      await this.searchRequest("thread/search", {
+        searchTerm,
+        archived,
+        cursor,
+        limit: 20,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+      }),
+    );
+    return {
+      data: page.data
+        .filter(({ thread }) => this.isSearchVisible(thread))
+        .map(({ thread, snippet }) => ({
+          thread: this.toSummary({ thread, archived, currentTurnId: activeTurnId(thread) }),
+          snippet,
+        })),
+      nextCursor: page.nextCursor,
+    };
+  }
+
+  async searchOccurrences(
+    threadId: string,
+    searchTerm: string,
+    cursor: string | null,
+  ): Promise<ThreadOccurrencesPage> {
+    await this.requireSearchThread(threadId);
+    return parseThreadOccurrences(
+      await this.searchRequest("thread/searchOccurrences", {
+        threadId,
+        searchTerm,
+        cursor,
+        limit: 20,
+      }),
+    );
+  }
+
+  async readSearchTurn(
+    threadId: string,
+    turnId: string,
+    cursor: string,
+  ): Promise<ThreadSearchTurn> {
+    await this.requireSearchThread(threadId);
+    let page;
+    try {
+      page = parseTurnsList(
+        await this.searchRequest("thread/turns/list", {
+          threadId,
+          cursor,
+          limit: 1,
+          sortDirection: "asc",
+          itemsView: "full",
+        }),
+      );
+    } catch (error) {
+      if (error instanceof RpcError)
+        throw new ThreadHistoryConflictError("Search result changed; search again");
+      throw error;
+    }
+    const turn = page.data[0];
+    if (!turn || turn.id !== turnId)
+      throw new ThreadHistoryConflictError("Search result changed; search again");
+    return {
+      instanceId: this.instanceId,
+      turn: conversationTurn(
+        normalizeTurn(
+          turn,
+          this.progress.get(turnKey(threadId, turnId)),
+          [],
+          this.timelineArtifacts(threadId, turnId),
+        ),
+      ),
+    };
+  }
+
+  private async searchRequest(method: string, params: unknown): Promise<unknown> {
+    try {
+      return await this.bridge.request<unknown>(method, params, 30_000);
+    } catch (error) {
+      if (
+        error instanceof RpcError &&
+        (error.code === -32601 ||
+          /unknown variant|not supported|unsupported|not implemented|requires.*paginated/i.test(
+            error.message,
+          ))
+      )
+        throw new ThreadSearchUnavailableError(
+          "Поиск недоступен в этой версии Codex или для этой истории.",
+        );
+      throw error;
+    }
+  }
+
+  private isSearchVisible(thread: Thread): boolean {
+    const state = this.store.view();
+    return (
+      !this.removedThreads.has(thread.id) &&
+      !this.hiddenThreads.has(thread.id) &&
+      !thread.ephemeral &&
+      thread.parentThreadId == null &&
+      !state.threadMeta[thread.id]?.managedParent &&
+      !this.isInternalPendingForkThread(thread, state) &&
+      this.isCwdVisible(thread.cwd, state)
+    );
+  }
+
+  private async requireSearchThread(threadId: string): Promise<void> {
+    try {
+      const thread =
+        this.threads.get(threadId)?.thread ??
+        parseThreadRead(await this.bridge.request("thread/read", { threadId, includeTurns: false }))
+          .thread;
+      if (!this.isSearchVisible(thread)) throw new ThreadSearchNotFoundError("Thread not found");
+    } catch (error) {
+      if (isMissingThreadError(error)) throw new ThreadSearchNotFoundError("Thread not found");
+      throw error;
+    }
   }
 
   publishForkOperation(operationId: string): void {
@@ -2272,6 +2405,8 @@ export class AppProjection extends EventEmitter {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
           cached.thread.status = notification.params.status;
+          if (notification.params.status.type === "notLoaded")
+            cached.thread.canAcceptDirectInput = null;
           if (notification.params.status.type === "systemError") {
             cached.currentTurnId = null;
             cached.liveOutcome = "failed";
@@ -2342,6 +2477,7 @@ export class AppProjection extends EventEmitter {
         if (cached) {
           cached.currentTurnId = null;
           cached.thread.status = { type: "notLoaded" };
+          cached.thread.canAcceptDirectInput = null;
           await this.saveSessionSnapshot(notification.params.threadId, true);
           this.publishThread(notification.params.threadId);
         }
@@ -2792,6 +2928,13 @@ export class AppProjection extends EventEmitter {
           ? previous.timestamp
           : (this.progress.get(turnKey(threadId, turnId))?.startedAt ?? Date.now()),
       phase: previous && "phase" in previous ? previous.phase : null,
+      ...(previous && "questions" in previous
+        ? {
+            questions: previous.questions,
+            delivery: previous.delivery,
+            questionKey: previous.questionKey,
+          }
+        : {}),
     };
     this.activity.set(key, item);
     this.queueActivityDelta(threadId, turnId, itemId, type, delta);
@@ -2861,6 +3004,11 @@ export class AppProjection extends EventEmitter {
       browserStatus: this.browserStatusProvider(cached.thread.id),
       settings: sessionSettings(meta.settings),
       relation: threadRelation(cached.thread, meta),
+      canAcceptDirectInput: cached.thread.canAcceptDirectInput ?? null,
+      codexSettings: {
+        model: cached.thread.model ?? null,
+        reasoningEffort: cached.thread.reasoningEffort ?? null,
+      },
     };
   }
 
@@ -2872,7 +3020,12 @@ export class AppProjection extends EventEmitter {
     if (
       this.attention
         .list()
-        .some((item) => item.threadId === cached.thread.id && item.kind !== "unsupported")
+        .some(
+          (item) =>
+            item.threadId === cached.thread.id &&
+            item.kind !== "unsupported" &&
+            (item.kind !== "userInput" || item.isBlocking !== false),
+        )
     ) {
       return "needsAttention";
     }
@@ -3154,6 +3307,15 @@ function cachedThreadFromSessionSnapshot(
     thread: {
       id,
       extra: null,
+      environments: null,
+      section: null,
+      sectionEnteredAt: null,
+      projectId: null,
+      model: null,
+      reasoningEffort: null,
+      originator: null,
+      canAcceptDirectInput: null,
+      daybreakEnabled: null,
       sessionId: snapshot.sessionId,
       forkedFromId: snapshot.forkedFromId ?? null,
       parentThreadId: null,
@@ -3738,6 +3900,15 @@ function normalizeActivity(
         images: [],
         timestamp,
         phase: item.phase,
+        ...(item.delivery ? { delivery: item.delivery } : {}),
+        ...(item.questions?.length
+          ? {
+              questions: item.questions,
+              questionKey: createHash("sha256")
+                .update(JSON.stringify(item.questions))
+                .digest("hex"),
+            }
+          : {}),
       };
     case "plan":
       return {
@@ -3887,6 +4058,8 @@ function sameRenderedActivity(
   const compatiblePhase =
     first.phase === second.phase || first.phase === null || second.phase === null;
   if (!compatiblePhase) return false;
+  if (first.questionKey && second.questionKey && first.questionKey !== second.questionKey)
+    return false;
   if (first.text === second.text) return true;
   return (
     allowPrefix &&

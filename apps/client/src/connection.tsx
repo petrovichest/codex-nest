@@ -652,6 +652,9 @@ export function ConnectionProvider({
                     ...(message.files?.length ? { files: message.files } : {}),
                     ...(message.goal ? { goal: true } : {}),
                     clientMessageId: message.id,
+                    ...(message.replyToAsyncQuestion
+                      ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
+                      : {}),
                   });
                   record.message = {
                     ...message,
@@ -738,6 +741,7 @@ export function ConnectionProvider({
         images: body.images ?? [],
         files: body.files ?? [],
         goal: body.goal ?? false,
+        ...(body.replyToAsyncQuestion ? { replyToAsyncQuestion: body.replyToAsyncQuestion } : {}),
         createdAt: (lastMessageTime.current = Math.max(Date.now(), lastMessageTime.current + 1)),
         attempts: 0,
         lastError: null,

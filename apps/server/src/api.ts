@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type {
   ApiErrorCode,
+  AsyncQuestionReference,
   AppUpdateStatus,
   ForceRestartAccepted,
   CreateForkOperationRequest,
@@ -133,6 +134,8 @@ import {
 import {
   ThreadDraftConflictError,
   ThreadHistoryConflictError,
+  ThreadSearchUnavailableError,
+  ThreadSearchNotFoundError,
   ThreadViewUnavailableError,
   publicForkOperation,
   type AppProjection,
@@ -148,6 +151,7 @@ import {
   MessageQueueConflictError,
   MessageQueueNotFoundError,
   MessageQueuePausedError,
+  MessageQueueInputUnavailableError,
   MessageQueueValidationError,
   messageContentHash,
 } from "./message-queue";
@@ -554,6 +558,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
     assertWritableThread(summary);
     const validatedFiles = await attachments.validate(threadId, files);
+    assertDirectInput(summary);
     if (summary.settings.collaborationMode === "team") {
       const automaticContinuation =
         !clientMessageId && !input.trim() && !images.length && !validatedFiles.length;
@@ -605,24 +610,27 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     let turnId: string;
     try {
       const resume = async () => {
-        await bridge.request<ThreadResumeResponse>(
+        const currentSummary = summary!;
+        const resumed = await bridge.request<ThreadResumeResponse>(
           "thread/resume",
           {
             threadId,
-            cwd: summary.cwd,
+            cwd: currentSummary.cwd,
             excludeTurns: true,
-            ...threadSettings(summary.settings),
+            ...threadSettings(currentSummary.settings),
             ...(store.view().threadMeta[threadId]?.sessionArtifactsVersion === 1
               ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
               : {}),
             ...runtimeConfigOverride(
               browserExtension,
               threadId,
-              summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {},
+              currentSummary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {},
             ),
           },
           30_000,
         );
+        summary = projection.upsertThread(resumed.thread, currentSummary.archived);
+        assertDirectInput(summary);
       };
       if (!projection.isUnmaterialized(threadId)) await resume();
       const startParams = {
@@ -960,6 +968,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     for (const request of attention.list()) {
       if (
         request.kind === "userInput" &&
+        request.isBlocking !== false &&
         request.threadId === threadId &&
         request.turnId === turnId
       ) {
@@ -976,10 +985,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     images: string[],
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
+    replyToAsyncQuestion?: AsyncQuestionReference,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
     const summary = projection.summary(threadId);
     if (!summary) throw new MessageQueueNotFoundError("Thread not found");
+    assertDirectInput(summary);
     const validatedFiles = await attachments.validate(threadId, files);
     const structuredInput = skillAwareMessageInput(
       skillsByCwd.get(summary.cwd),
@@ -989,7 +1000,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       false,
     );
     const hasRecognizedSkills = structuredInput.some((item) => item.type === "skill");
-    const userInput = pendingUserInput(threadId, turnId);
+    const userInput = replyToAsyncQuestion ? undefined : pendingUserInput(threadId, turnId);
     if (userInput && !hasRecognizedSkills) {
       const firstQuestion = userInput.questions[0];
       const response: AttentionResponse = {
@@ -1099,14 +1110,25 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     images: string[],
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
+    replyToAsyncQuestion?: AsyncQuestionReference,
   ): Promise<string> => {
-    const run = () => steerTurnUnlocked(threadId, turnId, input, images, files, clientMessageId);
+    const run = () =>
+      steerTurnUnlocked(
+        threadId,
+        turnId,
+        input,
+        images,
+        files,
+        clientMessageId,
+        replyToAsyncQuestion,
+      );
     return projection.summary(threadId)?.settings.collaborationMode === "team"
       ? withKeyLock(teamParentLocks, threadId, run)
       : run();
   };
   const queue = new MessageQueue(store, {
     paused: () => codexManager?.maintenanceActive ?? false,
+    acceptsInput: (threadId) => projection.summary(threadId)?.canAcceptDirectInput !== false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
     shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
     start: (threadId, message) =>
@@ -1126,6 +1148,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.images ?? [],
         message.files ?? [],
         message.id,
+        message.replyToAsyncQuestion,
       ),
     deliveredTurnId: async (threadId, messageId) => {
       // This is an error/recovery path. Paginate so an older delivered message
@@ -2326,9 +2349,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   projection.on("event", (_sequence, event) => {
     if (event.type === "resync.required") {
       void runRecovery().catch(() => undefined);
-    } else if (event.type === "thread.upserted" && !event.thread.currentTurnId) {
+    } else if (event.type === "thread.upserted") {
       void queue.drain(event.thread.id).catch(() => undefined);
-      if (event.thread.relation.kind === "session") {
+      if (!event.thread.currentTurnId && event.thread.relation.kind === "session") {
         if (hasClaimedTeamContinuation(store, event.thread.id)) {
           void runRecovery().catch(() => undefined);
         } else {
@@ -3064,6 +3087,35 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     );
     return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
   });
+
+  app.get<{ Querystring: { q?: string; archived?: string; cursor?: string } }>(
+    "/api/v1/threads/search",
+    async (request) => {
+      const { q, cursor } = validateSearchQuery(request.query);
+      if (
+        request.query.archived !== undefined &&
+        request.query.archived !== "true" &&
+        request.query.archived !== "false"
+      )
+        throw new ProjectValidationError("archived must be true or false");
+      return projection.searchThreads(q, request.query.archived === "true", cursor);
+    },
+  );
+  app.get<{ Params: { id: string }; Querystring: { q?: string; cursor?: string } }>(
+    "/api/v1/threads/:id/search",
+    async (request) => {
+      const { q, cursor } = validateSearchQuery(request.query);
+      return projection.searchOccurrences(request.params.id, q, cursor);
+    },
+  );
+  app.get<{ Params: { id: string; turnId: string }; Querystring: { cursor?: string } }>(
+    "/api/v1/threads/:id/turns/:turnId",
+    async (request) => {
+      const cursor = validateSearchCursor(request.query.cursor);
+      if (!cursor) throw new ProjectValidationError("A history cursor is required");
+      return projection.readSearchTurn(request.params.id, request.params.turnId, cursor);
+    },
+  );
 
   app.get<{ Params: { id: string }; Querystring: { cursor?: string } }>(
     "/api/v1/threads/:id",
@@ -4001,7 +4053,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.input,
         body.images,
         body.clientMessageId,
-        { goal: body.goal, files },
+        { goal: body.goal, files, replyToAsyncQuestion: body.replyToAsyncQuestion },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
@@ -4231,6 +4283,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof MessageQueueValidationError)
       return apiError(reply, 400, "validation_failed", error.message);
+    if (error instanceof ThreadSearchUnavailableError)
+      return apiError(reply, 503, "app_server_unavailable", error.message);
+    if (error instanceof ThreadSearchNotFoundError)
+      return apiError(reply, 404, "not_found", error.message);
+    if (error instanceof ThreadHistoryConflictError)
+      return apiError(reply, 409, "history_changed", error.message);
     if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof VoiceTranscriptionDraftConflictError) {
@@ -7270,6 +7328,26 @@ function assertWritableThread(summary: ThreadSummary): void {
   }
 }
 
+function assertDirectInput(summary: ThreadSummary): void {
+  if (summary.canAcceptDirectInput === false) throw new MessageQueueInputUnavailableError();
+}
+
+function validateSearchCursor(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !value || value.length > 16_384)
+    throw new ProjectValidationError("Invalid search cursor");
+  return value;
+}
+
+function validateSearchQuery(value: { q?: string; cursor?: string }): {
+  q: string;
+  cursor: string | null;
+} {
+  if (typeof value.q !== "string" || !value.q.trim() || value.q.length > 500)
+    throw new ProjectValidationError("Search text must contain 1 to 500 characters");
+  return { q: value.q.trim(), cursor: validateSearchCursor(value.cursor) };
+}
+
 function compact(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
 }
@@ -7495,11 +7573,15 @@ function validateQueueMessageBody(value: unknown): {
   files: ThreadFileAttachment[];
   goal: boolean;
   clientMessageId?: string;
+  replyToAsyncQuestion?: AsyncQuestionReference;
 } {
   const body = requireRecord<QueueMessageRequest>(value);
   if (
     Object.keys(body).some(
-      (key) => !["input", "images", "files", "goal", "clientMessageId"].includes(key),
+      (key) =>
+        !["input", "images", "files", "goal", "clientMessageId", "replyToAsyncQuestion"].includes(
+          key,
+        ),
     )
   ) {
     throw new ProjectValidationError("Unknown queue field");
@@ -7520,12 +7602,31 @@ function validateQueueMessageBody(value: unknown): {
   if (body.clientMessageId !== undefined && clientMessageId === null) {
     throw new ProjectValidationError("clientMessageId must not be empty");
   }
+  let replyToAsyncQuestion: AsyncQuestionReference | undefined;
+  if (body.replyToAsyncQuestion !== undefined) {
+    const reference = requireRecord<AsyncQuestionReference>(body.replyToAsyncQuestion);
+    if (
+      Object.keys(reference).some((key) => key !== "turnId" && key !== "itemId") ||
+      !optionalClientMessageId(reference.turnId) ||
+      typeof reference.itemId !== "string" ||
+      !reference.itemId.trim() ||
+      reference.itemId.length > 500 ||
+      !clientMessageId ||
+      body.goal ||
+      images.length ||
+      files.length
+    ) {
+      throw new ProjectValidationError("Invalid async question reply");
+    }
+    replyToAsyncQuestion = { turnId: reference.turnId, itemId: reference.itemId };
+  }
   return {
     input: body.input,
     images,
     files,
     goal: body.goal ?? false,
     ...(clientMessageId ? { clientMessageId } : {}),
+    ...(replyToAsyncQuestion ? { replyToAsyncQuestion } : {}),
   };
 }
 

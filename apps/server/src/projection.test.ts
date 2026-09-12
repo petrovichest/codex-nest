@@ -114,6 +114,207 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("reports configured Codex settings separately and clears stale input denial on unload", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-input-metadata-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread({
+      ...thread("one", "/work", 5),
+      canAcceptDirectInput: false,
+      model: "native",
+      reasoningEffort: "high",
+    });
+    await projection.setSettings("one", { model: "chosen", reasoningEffort: "low" });
+    expect(projection.summary("one")).toMatchObject({
+      canAcceptDirectInput: false,
+      codexSettings: { model: "native", reasoningEffort: "high" },
+      settings: { model: "chosen", reasoningEffort: "low" },
+    });
+    bridge.emit("notification", {
+      method: "thread/status/changed",
+      params: { threadId: "one", status: { type: "notLoaded" } },
+    });
+    expect(projection.summary("one")?.canAcceptDirectInput).toBeNull();
+    projection.upsertThread({ ...thread("one", "/work", 5), canAcceptDirectInput: false });
+    bridge.emit("state", "disconnected");
+    expect(projection.summary("one")?.canAcceptDirectInput).toBeNull();
+  });
+
+  it("searches unloaded roots without expanding the snapshot and isolates targeted turn history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.dismissedProjectPaths = ["/dismissed"];
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 5));
+    const occurrence = {
+      turnId: "old",
+      itemId: "answer",
+      snippet: "😀needle",
+      snippetMatchRange: { start: 2, end: 8 },
+      turnCursor: "target-cursor",
+    };
+    const oldTurn = {
+      ...testTurn("old", "completed"),
+      itemsView: "full" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "answer",
+          text: "needle",
+          phase: "final_answer" as const,
+          memoryCitation: null,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/search")
+        return {
+          data: [
+            thread("outside", "/work", 6),
+            { ...thread("child", "/work", 5), parentThreadId: "one" },
+            { ...thread("internal", "/work", 5), threadSource: "codexnest-fork-temp:abc" },
+            thread("dismissed", "/dismissed", 5),
+          ].map((thread) => ({ thread, snippet: "needle" })),
+          nextCursor: "next",
+        };
+      if (method === "thread/read") return { thread: thread("outside", "/work", 6) };
+      if (method === "thread/searchOccurrences") return { data: [occurrence], nextCursor: null };
+      if (method === "thread/turns/list")
+        return { data: [oldTurn], nextCursor: "older", backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    expect(
+      (await projection.searchThreads("needle", true, "page")).data.map((entry) => entry.thread.id),
+    ).toEqual(["outside"]);
+    expect(bridge.request).toHaveBeenCalledExactlyOnceWith(
+      "thread/search",
+      expect.objectContaining({ searchTerm: "needle", archived: true, cursor: "page", limit: 20 }),
+      30_000,
+    );
+    expect(projection.summary("outside")).toBeUndefined();
+    expect(await projection.searchOccurrences("outside", "needle", null)).toMatchObject({
+      data: [occurrence],
+    });
+    const result = await projection.readSearchTurn("outside", "old", "target-cursor");
+    expect(result.turn.items).toEqual([expect.objectContaining({ id: "answer", text: "needle" })]);
+    expect(bridge.request).toHaveBeenLastCalledWith(
+      "thread/turns/list",
+      {
+        threadId: "outside",
+        cursor: "target-cursor",
+        limit: 1,
+        sortDirection: "asc",
+        itemsView: "full",
+      },
+      30_000,
+    );
+    expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["one"]);
+    await expect(projection.readSearchTurn("outside", "gone", "target-cursor")).rejects.toThrow(
+      "Search result changed",
+    );
+    bridge.request.mockRejectedValueOnce(new RpcError(-32601, "method not found"));
+    await expect(projection.searchThreads("needle", false, null)).rejects.toThrow(
+      "Поиск недоступен",
+    );
+  });
+  it("preserves async questions through streaming, item renumbering, and history reload", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-async-question-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const question = {
+      type: "agentMessage" as const,
+      id: "live-question",
+      text: "",
+      phase: "commentary" as const,
+      memoryCitation: null,
+      delivery: "async" as const,
+      questions: [{ title: "Как проверить?", options: ["Быстро", "Подробно"] }],
+    };
+    const canonical = { ...testTurn("live", "inProgress"), items: [question] };
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/turns/list")
+        return { data: [canonical], nextCursor: null, backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(
+      thread("one", "/work", 10, { type: "active", activeFlags: [] }, [
+        { ...canonical, items: [] },
+      ]),
+    );
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    bridge.emit("notification", {
+      method: "item/started",
+      params: { threadId: "one", turnId: "live", item: question, startedAtMs: 10000 },
+    });
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "activity.upserted",
+          item: expect.objectContaining({
+            delivery: "async",
+            questions: question.questions,
+            questionKey: expect.any(String),
+          }),
+        }),
+      ),
+    );
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: { threadId: "one", turnId: "live", itemId: question.id, delta: "Уточнение" },
+    });
+    const live = (await projection.readThread("one")).turns[0]!.items.find(
+      (item) => item.type === "agentMessage",
+    )!;
+    expect(live).toMatchObject({ questions: question.questions, delivery: "async" });
+    question.text = "Уточнение";
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: { threadId: "one", turnId: "live", item: { ...question }, completedAtMs: 11000 },
+    });
+    canonical.items = [{ ...question, id: "item-17" }];
+    await store.flushed();
+    const reloaded = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    reloaded.upsertThread(
+      thread("one", "/work", 11, { type: "active", activeFlags: [] }, [canonical]),
+    );
+    const restored = (await reloaded.readThread("one", { refresh: true })).turns[0]!.items.find(
+      (item) => item.type === "agentMessage",
+    );
+    expect(restored).toMatchObject({
+      questions: question.questions,
+      delivery: "async",
+      questionKey: "questionKey" in live ? live.questionKey : undefined,
+    });
+  });
+
   it("keeps quiz replies in dialogue order when the agent outruns draft persistence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-quiz-test-"));
     directories.push(directory);
@@ -3028,49 +3229,53 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 
-  it("restores a lost active turn from a user-input request and keeps it running after the answer", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
-    directories.push(directory);
-    const store = new StateStore(join(directory, "state.json"));
-    await store.load();
-    const attention = new AttentionManager();
-    const projection = new AppProjection(
-      new FakeBridge() as unknown as CodexBridge,
-      store,
-      attention,
-    );
-    projection.upsertThread(thread("one", "/work", 10, { type: "active", activeFlags: [] }, []));
+  it.each([true, false, undefined])(
+    "restores a turn with isBlocking=%s and keeps it running after the answer",
+    async (isBlocking) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      const attention = new AttentionManager();
+      const projection = new AppProjection(
+        new FakeBridge() as unknown as CodexBridge,
+        store,
+        attention,
+      );
+      projection.upsertThread(thread("one", "/work", 10, { type: "active", activeFlags: [] }, []));
 
-    const request = attention.receive(
-      {
-        method: "item/tool/requestUserInput",
-        id: 7,
-        params: {
-          threadId: "one",
-          turnId: "question-turn",
-          itemId: "question",
-          autoResolutionMs: null,
-          questions: [],
-        },
-      } as ServerRequest,
-      {
-        respond: vi.fn(),
-        respondError: vi.fn(),
-      } as unknown as JsonlTransport,
-    );
-    expect(projection.summary("one")).toMatchObject({
-      state: "needsAttention",
-      currentTurnId: "question-turn",
-      unread: false,
-    });
+      const request = attention.receive(
+        {
+          method: "item/tool/requestUserInput",
+          id: 7,
+          params: {
+            threadId: "one",
+            turnId: "question-turn",
+            itemId: "question",
+            autoResolutionMs: null,
+            ...(isBlocking === undefined ? {} : { isBlocking }),
+            questions: [],
+          },
+        } as ServerRequest,
+        {
+          respond: vi.fn(),
+          respondError: vi.fn(),
+        } as unknown as JsonlTransport,
+      );
+      expect(projection.summary("one")).toMatchObject({
+        state: isBlocking === false ? "running" : "needsAttention",
+        currentTurnId: "question-turn",
+        unread: false,
+      });
 
-    attention.resolve(request.id, { kind: "userInput", answers: {} });
-    expect(projection.summary("one")).toMatchObject({
-      state: "running",
-      currentTurnId: "question-turn",
-      unread: false,
-    });
-  });
+      attention.resolve(request.id, { kind: "userInput", answers: {} });
+      expect(projection.summary("one")).toMatchObject({
+        state: "running",
+        currentTurnId: "question-turn",
+        unread: false,
+      });
+    },
+  );
 
   it("persists, enriches, reattaches, fingerprints, and cleans up user-input drafts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));

@@ -91,7 +91,9 @@ function AttentionCard({
     <article className="attention-card">
       <div className="attention-heading">
         <AlertIcon />
-        {t("Требуется внимание")}
+        {request.kind === "userInput" && request.isBlocking === false
+          ? t("Можно ответить, пока Codex работает")
+          : t("Требуется внимание")}
       </div>
       {request.kind === "commandApproval" && (
         <>
@@ -621,7 +623,7 @@ function UserInputForm({
       }}
     >
       <h3>{t("Codex просит уточнение")}</h3>
-      {request.autoResolutionMs !== null && (
+      {request.isBlocking !== false && request.autoResolutionMs != null && (
         <Countdown deadline={request.createdAt + request.autoResolutionMs} />
       )}
       {question && (

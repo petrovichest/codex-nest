@@ -114,6 +114,34 @@ beforeEach(() => {
 });
 
 describe("Composer", () => {
+  it("keeps the draft editable but disables send until direct input becomes available", () => {
+    const onSubmit = vi.fn();
+    const props = {
+      input: "Черновик",
+      onInput: vi.fn(),
+      images: [],
+      onImagesChange: vi.fn(),
+      onSubmit,
+      busy: false,
+      settings: { collaborationMode: "default" as const, model: "chosen", reasoningEffort: "low" },
+      onSettingsChange: vi.fn(),
+      models,
+      error: null,
+      codexSettings: { model: "native", reasoningEffort: "high" },
+    };
+    const view = render(<Composer {...props} inputUnavailable />);
+    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(textbox).toBeEnabled();
+    fireEvent.change(textbox, { target: { value: "Исправленный черновик" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    expect(screen.getByText("В Codex: native · high")).toBeInTheDocument();
+    view.rerender(<Composer {...props} inputUnavailable={false} />);
+    expect(textbox).toHaveValue("Исправленный черновик");
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
   it("opens filtered skill suggestions for a dollar token and inserts with Enter", async () => {
     const api = connection().api;
     const onInput = vi.fn();

@@ -4,6 +4,8 @@ import { configDefaults } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
+  // Rich copy loads this lazily; prebundle it so the first copy cannot trigger a dev reload.
+  optimizeDeps: { include: ["react-dom/server"] },
   server: {
     host: "127.0.0.1",
     port: 5173,

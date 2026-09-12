@@ -12,6 +12,29 @@ function fakeTransport() {
 }
 
 describe("AttentionManager", () => {
+  it.each([true, false, undefined])(
+    "preserves isBlocking=%s with a legacy blocking default",
+    (isBlocking) => {
+      const manager = new AttentionManager();
+      const request = manager.receive(
+        {
+          method: "item/tool/requestUserInput",
+          id: 99,
+          params: {
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "q",
+            questions: [],
+            autoResolutionMs: null,
+            ...(isBlocking === undefined ? {} : { isBlocking }),
+          },
+        } as ServerRequest,
+        fakeTransport(),
+      );
+      expect(request).toMatchObject({ kind: "userInput", isBlocking: isBlocking ?? true });
+    },
+  );
+
   it("maps canonical approval and lets the first client win", () => {
     const manager = new AttentionManager();
     const transport = fakeTransport();

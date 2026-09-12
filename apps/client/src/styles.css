@@ -6355,3 +6355,213 @@ button.message-file:hover:not(:disabled) {
     box-shadow: inset 0 0 0 1px var(--color-danger);
   }
 }
+.async-question-card {
+  margin-block: 16px;
+  padding: 16px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.async-question-card form,
+.async-question-card fieldset {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.async-question-card fieldset {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+}
+
+.async-question-card legend {
+  margin-bottom: 10px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.async-question-card textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
+.async-question-card button {
+  justify-self: start;
+}
+
+.async-question-saved {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.async-question-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+/* Search and quota details share the existing dialog and neutral surface system. */
+.thread-search-dialog {
+  width: min(820px, calc(100vw - 32px));
+  max-height: min(820px, calc(100dvh - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.thread-search-form {
+  display: flex;
+  gap: 8px;
+}
+
+.thread-search-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.thread-search-results {
+  min-height: 160px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.thread-search-results section + section {
+  margin-top: 28px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.thread-search-result {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
+}
+
+.search-snippet {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.search-snippet mark {
+  color: var(--warning-text);
+  background: var(--warning);
+}
+
+.search-context {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.search-result-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.search-section-heading,
+.search-history-banner,
+.input-availability-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.search-history-banner,
+.input-availability-notice {
+  padding: 12px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  font-size: 13px;
+}
+
+.search-history-banner {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin-bottom: 24px;
+}
+
+.search-history-banner p {
+  margin: 4px 0 0;
+}
+
+.search-history-match {
+  border-left: 3px solid var(--accent);
+  padding-left: 14px;
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+}
+
+.codex-settings-hint {
+  max-width: 280px;
+  overflow-wrap: anywhere;
+}
+
+.rate-limits-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+}
+
+.rate-limit-windows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+
+.rate-limit-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rate-limit-facts dt {
+  color: var(--muted);
+}
+.rate-limit-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .thread-search-backdrop {
+    padding: var(--app-safe-area-top) var(--app-safe-area-right) var(--app-safe-area-bottom)
+      var(--app-safe-area-left);
+  }
+  .thread-search-dialog {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    border-radius: 0;
+  }
+  .thread-search-results {
+    flex: 1;
+  }
+  .rate-limit-windows {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}

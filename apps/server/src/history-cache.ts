@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 
 import type { TurnView } from "@codexnest/protocol";
 
-const CACHE_SCHEMA_VERSION = 4;
+const CACHE_SCHEMA_VERSION = 5;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const CLEANUP_INTERVAL_MS = 60_000;
 

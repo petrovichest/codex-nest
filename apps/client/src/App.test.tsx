@@ -277,6 +277,7 @@ describe("App routing and navigation", () => {
       "Подключено",
       "Настройки",
       "Лимиты Codex",
+      "Поиск по диалогам",
       "Добавить проект",
     ]);
     expect(controls?.nextElementSibling).toBe(modeSwitch);

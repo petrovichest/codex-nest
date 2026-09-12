@@ -1,3 +1,26 @@
+export async function copyMarkdown(text: string): Promise<void> {
+  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+    try {
+      // Start the write in the user gesture; load the renderer only when copying.
+      const html = import("./markdown-clipboard").then(
+        ({ renderMarkdownHtml }) => new Blob([renderMarkdownHtml(text)], { type: "text/html" }),
+      );
+      // Some implementations reject write() before consuming the promised HTML.
+      void html.catch(() => undefined);
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": html,
+        }),
+      ]);
+      return;
+    } catch {
+      // Restricted WebViews and browsers without rich clipboard support.
+    }
+  }
+  await copyText(text);
+}
+
 export async function copyText(text: string): Promise<void> {
   try {
     if (navigator.clipboard?.writeText) {

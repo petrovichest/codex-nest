@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { QueuedMessage } from "@codexnest/protocol";
 
-import { MessageQueue } from "./message-queue";
+import { MessageQueue, MessageQueueInputUnavailableError } from "./message-queue";
 import { RpcError } from "./codex/transport";
 import { StateStore } from "./state/store";
 
@@ -22,6 +22,149 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("parks accepted messages without delivery RPCs while direct input is unavailable", async () => {
+    const { queue, store, delivery } = await setup(null);
+    delivery.acceptsInput.mockReturnValue(false);
+    await queue.enqueue("thread", "Сохранить", [], "held");
+    await queue.drain("thread");
+    expect(queue.list("thread")).toEqual([
+      expect.objectContaining({ id: "held", status: "queued" }),
+    ]);
+    expect(delivery.start).not.toHaveBeenCalled();
+    expect(delivery.deliveredTurnId).not.toHaveBeenCalled();
+    await expect(queue.sendNow("thread", "held")).rejects.toBeInstanceOf(
+      MessageQueueInputUnavailableError,
+    );
+    await queue.update("thread", "held", "Исправлено");
+    expect(queue.list("thread")[0]?.text).toBe("Исправлено");
+    delivery.acceptsInput.mockReturnValue(true);
+    await queue.drain("thread");
+    expect(delivery.start).toHaveBeenCalledOnce();
+    expect(store.view().messageReceipts?.held?.turnId).toBe("started");
+  });
+
+  it("restores queued status when a resume discovers unavailable input", async () => {
+    const { queue, delivery } = await setup("active");
+    await queue.enqueue("thread", "Ответ", [], "held");
+    delivery.steer.mockRejectedValueOnce(new MessageQueueInputUnavailableError());
+    await expect(queue.sendNow("thread", "held")).rejects.toBeInstanceOf(
+      MessageQueueInputUnavailableError,
+    );
+    expect(queue.list("thread")[0]).toMatchObject({ status: "queued" });
+    expect(delivery.deliveredTurnId).not.toHaveBeenCalled();
+  });
+  it("delivers an async reply during a turn without consuming the draft or ordinary queue", async () => {
+    const { queue, store, delivery } = await setup("active");
+    const ordinary = await queue.enqueue("thread", "Позже", [], "ordinary");
+    const draft = {
+      input: "Основной черновик",
+      images: [],
+      annotations: [],
+      goalMode: false,
+      updatedAt: 1,
+    };
+    await store.update((state) => {
+      state.threadMeta.thread!.draft = draft;
+    });
+    const reference = { turnId: "active", itemId: "question" };
+    await queue.enqueue("thread", "Как?\nБыстро", [], "answer", {
+      replyToAsyncQuestion: reference,
+    });
+    await vi.waitFor(() =>
+      expect(store.snapshot().messageReceipts?.answer?.turnId).toBe("steered"),
+    );
+    expect(delivery.steer).toHaveBeenCalledWith(
+      "thread",
+      "active",
+      expect.objectContaining({
+        id: "answer",
+        replyToAsyncQuestion: reference,
+      }),
+    );
+    expect(delivery.deliveredTurnId).not.toHaveBeenCalled();
+    expect(queue.list("thread")).toEqual([ordinary]);
+    expect(store.snapshot().threadMeta.thread?.draft).toEqual(draft);
+    await queue.enqueue("thread", "Как?\nБыстро", [], "answer", {
+      replyToAsyncQuestion: reference,
+    });
+    await queue.drain("thread");
+    expect(delivery.steer).toHaveBeenCalledOnce();
+    expect(store.snapshot().threadMeta.thread?.draft).toEqual(draft);
+  });
+
+  it("restores async reply metadata and steers it after a restart", async () => {
+    const { queue, store, delivery } = await setup("active");
+    await store.update((state) => {
+      state.messageQueues = {
+        thread: [
+          queued("ordinary", "Позже", "queued"),
+          {
+            ...queued("answer", "Сейчас", "queued"),
+            replyToAsyncQuestion: { turnId: "active", itemId: "q" },
+          },
+        ],
+      };
+    });
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    expect(reopened.view().messageQueues?.thread?.[1]?.replyToAsyncQuestion).toEqual({
+      turnId: "active",
+      itemId: "q",
+    });
+    const recovered = new MessageQueue(reopened, delivery);
+    queues.push(recovered);
+    await recovered.recover();
+    expect(delivery.steer).toHaveBeenCalledOnce();
+    expect(recovered.list("thread").map((message) => message.id)).toEqual(["ordinary"]);
+    await queue.pause();
+  });
+
+  it("starts a follow-up for a late async reply", async () => {
+    const { queue, store, delivery } = await setup(null);
+    await queue.enqueue("thread", "Поздний ответ", [], "late", {
+      replyToAsyncQuestion: { turnId: "finished", itemId: "q" },
+    });
+    await vi.waitFor(() => expect(store.snapshot().messageReceipts?.late?.turnId).toBe("started"));
+    expect(delivery.start).toHaveBeenCalledOnce();
+    expect(delivery.steer).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    "retries when the active turn ends (notification first: %s)",
+    async (notificationFirst) => {
+      const { queue, store, delivery, setCurrentTurn } = await setup("active");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      delivery.steer.mockImplementationOnce(async () => {
+        if (notificationFirst) setCurrentTurn(null);
+        throw new RpcError(-32600, "no active turn");
+      });
+      await queue.enqueue("thread", "Ответ на вопрос", [], "race", {
+        replyToAsyncQuestion: { turnId: "active", itemId: "q" },
+      });
+      await vi.waitFor(() => expect(queue.list("thread")[0]?.deliveryError?.retryable).toBe(true));
+      setCurrentTurn(null);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() =>
+        expect(store.snapshot().messageReceipts?.race?.turnId).toBe("started"),
+      );
+      expect(delivery.steer).toHaveBeenCalledOnce();
+      expect(delivery.deliveredTurnId).toHaveBeenCalledOnce();
+      expect(delivery.start).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("reconciles an uncertain async reply without replaying it", async () => {
+    const { queue, store, delivery } = await setup("active");
+    delivery.steer.mockRejectedValueOnce(new Error("lost reply"));
+    delivery.deliveredTurnId.mockResolvedValueOnce("active");
+    await queue.enqueue("thread", "Один ответ", [], "once", {
+      replyToAsyncQuestion: { turnId: "active", itemId: "q" },
+    });
+    await vi.waitFor(() => expect(store.snapshot().messageReceipts?.once?.turnId).toBe("active"));
+    await queue.recover();
+    expect(delivery.steer).toHaveBeenCalledOnce();
+  });
+
   it("persists FIFO messages and starts one after the active turn completes", async () => {
     const { queue, delivery, setCurrentTurn } = await setup("active");
     const first = await queue.enqueue("thread", "Первое");
@@ -376,6 +519,7 @@ async function setup(initialTurn: string | null) {
   let currentTurn = initialTurn;
   let paused = false;
   const delivery = {
+    acceptsInput: vi.fn(() => true),
     paused: vi.fn(() => paused),
     currentTurnId: vi.fn(() => currentTurn),
     shouldSteerQueuedMessage: vi.fn(() => false),

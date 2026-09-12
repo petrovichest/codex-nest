@@ -200,7 +200,9 @@ export interface TeamToolOperationState {
   childThreadSource?: string;
   response?: {
     contentItems: Array<
-      { type: "inputText"; text: string } | { type: "inputImage"; imageUrl: string }
+      | { type: "inputText"; text: string }
+      | { type: "inputImage"; imageUrl: string }
+      | { type: "inputAudio"; audioUrl: string }
     >;
     success: boolean;
   };
@@ -1871,7 +1873,8 @@ function isTeamToolOperation(value: unknown): value is TeamToolOperationState {
       (item) =>
         isRecord(item) &&
         ((item.type === "inputText" && typeof item.text === "string") ||
-          (item.type === "inputImage" && typeof item.imageUrl === "string")),
+          (item.type === "inputImage" && typeof item.imageUrl === "string") ||
+          (item.type === "inputAudio" && typeof item.audioUrl === "string")),
     )
   );
 }
@@ -2004,6 +2007,10 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     (value.files === undefined ||
       (Array.isArray(value.files) && value.files.every(isStoredFileAttachment))) &&
     (value.goal === undefined || typeof value.goal === "boolean") &&
+    (value.replyToAsyncQuestion === undefined ||
+      (isRecord(value.replyToAsyncQuestion) &&
+        isBoundedString(value.replyToAsyncQuestion.turnId, 200) &&
+        isBoundedString(value.replyToAsyncQuestion.itemId, 500))) &&
     (Boolean(value.text.trim()) ||
       (Array.isArray(value.images) && value.images.length > 0) ||
       (Array.isArray(value.files) && value.files.length > 0)) &&

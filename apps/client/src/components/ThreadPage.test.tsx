@@ -131,6 +131,55 @@ describe("initialSessionSettings", () => {
 });
 
 describe("Activity", () => {
+  it("preserves an async form across item renumbering and separates repeated questions", async () => {
+    const question: ActivityItem = {
+      type: "agentMessage",
+      id: "live-question",
+      questionKey: "same-questions",
+      text: "",
+      questions: [{ title: "Как проверять?", options: ["Быстро", "Подробно"] }],
+      delivery: "async",
+      status: "completed",
+      images: [],
+      timestamp: 1,
+      phase: "commentary",
+    };
+    const turn = {
+      ...completedAgentTurn(),
+      items: [question, { ...question, id: "second-question" }],
+    };
+    const context = mockThreadConnection(threadApi(), summary, { turns: [turn] });
+    const view = renderThread();
+    const cards = screen.getAllByRole("region", { name: "Вопросы Codex" });
+    fireEvent.click(within(cards[0]!).getByRole("radio", { name: "Свой ответ" }));
+    fireEvent.change(within(cards[0]!).getByRole("textbox"), { target: { value: "Вручную" } });
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [
+        {
+          ...turn,
+          items: [
+            { ...question, id: "item-10" },
+            { ...question, id: "item-11" },
+          ],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+    const refreshed = screen.getAllByRole("region", { name: "Вопросы Codex" });
+    expect(within(refreshed[0]!).getByRole("textbox")).toHaveValue("Вручную");
+    fireEvent.click(within(refreshed[0]!).getByRole("button", { name: "Ответить" }));
+    fireEvent.click(within(refreshed[1]!).getByRole("button", { name: "Ответить" }));
+    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledTimes(2));
+    expect(context.sendReliable.mock.calls[0]?.[1]).toMatchObject({
+      input: "Как проверять?\nВручную",
+      replyToAsyncQuestion: { turnId: turn.id, itemId: "item-10" },
+    });
+    expect(context.sendReliable.mock.calls[0]?.[1].clientMessageId).not.toBe(
+      context.sendReliable.mock.calls[1]?.[1].clientMessageId,
+    );
+  });
+
   it("renders user and agent messages without legacy labels", () => {
     const { rerender } = render(
       <Activity

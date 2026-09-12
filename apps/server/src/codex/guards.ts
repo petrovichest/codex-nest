@@ -9,6 +9,8 @@ import type {
   ThreadLoadedListResponse,
   ThreadReadResponse,
   ThreadResumeResponse,
+  ThreadSearchResponse,
+  ThreadSearchOccurrencesResponse,
   ThreadTurnsListResponse,
   Turn,
   TurnStartResponse,
@@ -23,6 +25,9 @@ type RateLimitWindowView = {
 export type AccountRateLimitsView = {
   primary: RateLimitWindowView | null;
   secondary: RateLimitWindowView | null;
+  ordinaryUsageAllowed?: boolean | null;
+  spendControlReached?: boolean | null;
+  rateLimitReachedType?: string | null;
 };
 
 export class ProtocolShapeError extends Error {
@@ -56,6 +61,46 @@ export function parseTurnsList(value: unknown): ThreadTurnsListResponse {
   const page = pageShape(value, "thread/turns/list");
   if (!page.data.every(isTurn)) throw new ProtocolShapeError("thread/turns/list data");
   return page as unknown as ThreadTurnsListResponse;
+}
+
+export function parseThreadSearch(value: unknown): ThreadSearchResponse {
+  const page = pageShape(value, "thread/search");
+  if (
+    !page.data.every(
+      (entry) => isRecord(entry) && isThread(entry.thread) && typeof entry.snippet === "string",
+    )
+  )
+    throw new ProtocolShapeError("thread/search data");
+  return page as unknown as ThreadSearchResponse;
+}
+
+export function parseThreadOccurrences(value: unknown): ThreadSearchOccurrencesResponse {
+  const page = pageShape(value, "thread/searchOccurrences");
+  if (
+    !page.data.every((entry) => {
+      if (
+        !isRecord(entry) ||
+        typeof entry.turnId !== "string" ||
+        typeof entry.itemId !== "string" ||
+        typeof entry.snippet !== "string" ||
+        typeof entry.turnCursor !== "string" ||
+        !isRecord(entry.snippetMatchRange)
+      )
+        return false;
+      const { start, end } = entry.snippetMatchRange;
+      return (
+        typeof start === "number" &&
+        typeof end === "number" &&
+        Number.isInteger(start) &&
+        Number.isInteger(end) &&
+        start >= 0 &&
+        end >= start &&
+        end <= entry.snippet.length
+      );
+    })
+  )
+    throw new ProtocolShapeError("thread/searchOccurrences data");
+  return page as unknown as ThreadSearchOccurrencesResponse;
 }
 
 export function parseThreadRead(value: unknown): ThreadReadResponse {
@@ -123,6 +168,12 @@ export function parseAccountRateLimits(value: unknown): AccountRateLimitsView {
   return {
     primary: rateLimitWindow(snapshot.primary),
     secondary: rateLimitWindow(snapshot.secondary),
+    ordinaryUsageAllowed:
+      typeof typed.ordinaryUsageAllowed === "boolean" ? typed.ordinaryUsageAllowed : null,
+    spendControlReached:
+      typeof snapshot.spendControlReached === "boolean" ? snapshot.spendControlReached : null,
+    rateLimitReachedType:
+      typeof snapshot.rateLimitReachedType === "string" ? snapshot.rateLimitReachedType : null,
   };
 }
 
@@ -153,6 +204,9 @@ function isThread(value: unknown): value is Thread {
     typeof value.cwd === "string" &&
     typeof value.createdAt === "number" &&
     typeof value.updatedAt === "number" &&
+    (value.canAcceptDirectInput == null || typeof value.canAcceptDirectInput === "boolean") &&
+    (value.model == null || typeof value.model === "string") &&
+    (value.reasoningEffort == null || typeof value.reasoningEffort === "string") &&
     (value.name === null || typeof value.name === "string") &&
     isThreadStatus(value.status) &&
     Array.isArray(value.turns) &&

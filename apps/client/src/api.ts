@@ -31,6 +31,9 @@ import type {
   ThreadFileAttachment,
   ThreadHistoryPage,
   ThreadSummary,
+  ThreadSearchPage,
+  ThreadOccurrencesPage,
+  ThreadSearchTurn,
   TurnItemsResponse,
   TranscriptionConfigResponse,
   TranscriptionResponse,
@@ -72,6 +75,29 @@ export class ApiClient {
 
   summary(): Promise<SummaryResponse> {
     return this.request("/api/v1/summary");
+  }
+
+  searchThreads(query: string, archived: boolean, cursor?: string): Promise<ThreadSearchPage> {
+    const params = new URLSearchParams({ q: query, archived: String(archived) });
+    if (cursor) params.set("cursor", cursor);
+    return this.request(`/api/v1/threads/search?${params}`);
+  }
+
+  searchOccurrences(
+    threadId: string,
+    query: string,
+    cursor?: string,
+  ): Promise<ThreadOccurrencesPage> {
+    const params = new URLSearchParams({ q: query });
+    if (cursor) params.set("cursor", cursor);
+    return this.request(`/api/v1/threads/${encodeURIComponent(threadId)}/search?${params}`);
+  }
+
+  readSearchTurn(threadId: string, turnId: string, cursor: string): Promise<ThreadSearchTurn> {
+    const params = new URLSearchParams({ cursor });
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}?${params}`,
+    );
   }
 
   readAppSettings(): Promise<AppUpdateStatus> {

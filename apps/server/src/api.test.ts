@@ -3386,6 +3386,78 @@ describe("task defaults", () => {
 });
 
 describe("thread settings", () => {
+  it("blocks direct delivery, not draft editing, when Codex refuses input", async () => {
+    const { app, bridge, projection, store, headers } = await createForkHarness();
+    projection.upsertThread({ ...testThread(), canAcceptDirectInput: false });
+    bridge.request.mockClear();
+    const send = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "hello" },
+    });
+    expect(send.statusCode).toBe(409);
+    expect(send.json().error.message).toContain("не принимает");
+    expect(
+      bridge.request.mock.calls.some(
+        ([method]) => method === "turn/start" || method === "thread/resume",
+      ),
+    ).toBe(false);
+    const draft = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: { input: "saved", images: [], annotations: [], goalMode: false },
+    });
+    expect(draft.statusCode).toBe(200);
+    expect(store.view().threadMeta.thread?.draft?.input).toBe("saved");
+    projection.upsertThread({ ...testThread(), canAcceptDirectInput: null });
+    bridge.request.mockResolvedValueOnce({
+      thread: { ...testThread(), canAcceptDirectInput: false },
+    });
+    const resumedSend = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input: "after resume" },
+    });
+    expect(resumedSend.statusCode).toBe(409);
+    expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    expect(store.view().threadMeta.thread?.draft?.input).toBe("saved");
+    await app.close();
+  });
+
+  it("validates native search requests and returns compatibility failures explicitly", async () => {
+    const { app, bridge, headers } = await createForkHarness();
+    bridge.request.mockClear();
+    for (const url of [
+      "/api/v1/threads/search?q=",
+      "/api/v1/threads/search?q=x&archived=wrong",
+      "/api/v1/threads/thread/search?q=x&cursor=",
+      "/api/v1/threads/thread/turns/turn",
+    ]) {
+      expect((await app.inject({ url, headers })).statusCode).toBe(400);
+    }
+    expect(bridge.request).not.toHaveBeenCalled();
+    bridge.request.mockResolvedValueOnce({
+      data: [{ thread: testThread("outside"), snippet: "text" }],
+      nextCursor: "next",
+    });
+    const response = await app.inject({
+      url: "/api/v1/threads/search?q=text&archived=true",
+      headers,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: [{ thread: { id: "outside", archived: true }, snippet: "text" }],
+      nextCursor: "next",
+    });
+    bridge.request.mockRejectedValueOnce(new RpcError(-32601, "not found"));
+    expect((await app.inject({ url: "/api/v1/threads/search?q=text", headers })).statusCode).toBe(
+      503,
+    );
+    await app.close();
+  });
   it("persists settings on the server and maps plan mode into turn/start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-api-test-"));
     directories.push(directory);
@@ -4002,6 +4074,43 @@ describe("thread settings", () => {
       } as ServerRequest,
       userInputTransport as unknown as JsonlTransport,
     );
+    const asyncDraft = {
+      input: "Не отправлять черновик",
+      images: [],
+      annotations: [],
+      goalMode: false,
+      updatedAt: 1,
+    };
+    await store.update((state) => {
+      state.threadMeta.thread!.draft = asyncDraft;
+    });
+    const asyncResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers,
+      payload: {
+        input: "Отдельный вопрос\nОтвет",
+        clientMessageId: "async-reply",
+        replyToAsyncQuestion: { turnId: "turn", itemId: "async-question" },
+      },
+    });
+    expect(asyncResponse.statusCode).toBe(202);
+    expect(asyncResponse.json().replyToAsyncQuestion).toEqual({
+      turnId: "turn",
+      itemId: "async-question",
+    });
+    await vi.waitFor(() =>
+      expect(store.snapshot().messageReceipts?.["async-reply"]?.turnId).toBeDefined(),
+    );
+    expect(userInputTransport.respond).not.toHaveBeenCalled();
+    expect(attention.get(userInputRequest.id)).toBeDefined();
+    expect(store.snapshot().threadMeta.thread?.draft).toEqual(asyncDraft);
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "turn/steer").at(-1)?.[1],
+    ).toMatchObject({
+      clientUserMessageId: "async-reply",
+      input: [expect.objectContaining({ text: "Отдельный вопрос\nОтвет" })],
+    });
     const steersBeforeUserInput = bridge.request.mock.calls.filter(
       ([method]) => method === "turn/steer",
     ).length;
@@ -4651,6 +4760,9 @@ describe("thread settings", () => {
     const rateLimits = await app.inject({ url: "/api/v1/codex/rate-limits", headers });
     expect(rateLimits.statusCode).toBe(200);
     expect(rateLimits.json()).toEqual({
+      ordinaryUsageAllowed: null,
+      spendControlReached: null,
+      rateLimitReachedType: null,
       primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_785_258_183_000 },
       secondary: {
         usedPercent: 40,
@@ -7188,7 +7300,10 @@ class SettingsBridge extends EventEmitter {
         this.failBrowserResumeOnce = false;
         throw new Error("browser resume failed");
       }
-      return {};
+      return {
+        thread:
+          this.managedThreads.find((thread) => thread.id === threadId) ?? testThread(threadId),
+      };
     }
     if (method === "thread/unsubscribe") return {};
     if (method === "thread/metadata/update") {

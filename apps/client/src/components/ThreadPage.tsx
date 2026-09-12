@@ -48,7 +48,7 @@ import {
   resolveAnnotationRange,
   savePendingAnnotations,
 } from "../annotations";
-import { copyText } from "../clipboard";
+import { copyMarkdown, copyText } from "../clipboard";
 import { useConnection } from "../connection";
 import { ApiClientError, isRetryableApiError } from "../api";
 import { openDownloadUrl } from "../downloads";
@@ -68,6 +68,8 @@ import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
 import { threadStatusClasses } from "../thread-status";
 import { AttentionPanel } from "./AttentionPanel";
+import { AsyncQuestionCard } from "./AsyncQuestionCard";
+import { searchTargetFromState, type SearchTarget } from "./ThreadSearchDialog";
 import { ArtifactViewer, type ArtifactLoadResult } from "./ArtifactViewer";
 import {
   Composer,
@@ -586,6 +588,10 @@ export function ThreadPage({
   const [pendingOptimisticMessage, setPendingOptimisticMessage] =
     useState<OptimisticMessage | null>(null);
   const detail = state.details?.[threadId];
+  const searchTarget = useMemo(
+    () => searchTargetFromState(location.state, threadId),
+    [location.state, threadId],
+  );
   const summary = reconcileVisibleThreadSummary(
     state.snapshot?.threads.find((thread) => thread.id === threadId),
     detail,
@@ -595,6 +601,7 @@ export function ThreadPage({
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
   const isSubagent = parentThreadId !== null;
+  const inputUnavailable = summary?.canAcceptDirectInput === false;
   const parentSummary = parentThreadId
     ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
     : undefined;
@@ -1665,6 +1672,15 @@ export function ThreadPage({
     const uploadMode =
       context?.mode ??
       resolveVoiceTranscriptionMode(voiceModeRef.current, currentTurnIdRef.current);
+    if (
+      uploadMode !== "draft" &&
+      (
+        state.snapshot?.threads.find((thread) => thread.id === targetThreadId) ??
+        state.details[targetThreadId]?.summary
+      )?.canAcceptDirectInput === false
+    ) {
+      throw new Error(t("Codex временно не принимает сообщения"));
+    }
     setVoiceUploads((current) => ({
       ...current,
       [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
@@ -2164,34 +2180,42 @@ export function ThreadPage({
   }, [detail?.turns, loadTurnItems, summary, threadId]);
 
   function pauseTailFollowing() {
+    if (searchTarget) return;
     if (!followsTail.current) return;
     followsTail.current = false;
     setShowScrollToBottom(true);
   }
 
   useLayoutEffect(() => {
+    if (searchTarget) return;
     if (initialScrollThread.current === threadId) return;
     followsTail.current = true;
     setShowScrollToBottom(false);
     if (!detail) return;
     initialScrollThread.current = threadId;
     scrollToEnd(scrollRef.current);
-  }, [detail, threadId]);
+  }, [detail, searchTarget, threadId]);
 
   useLayoutEffect(() => {
     const anchor = olderScrollAnchor.current;
     const node = scrollRef.current;
+    if (searchTarget) {
+      olderScrollAnchor.current = null;
+      return;
+    }
     if (!anchor || anchor.threadId !== threadId || !node) return;
     node.scrollTop = anchor.scrollTop + (node.scrollHeight - anchor.scrollHeight);
     olderScrollAnchor.current = null;
-  }, [detail, threadId]);
+  }, [detail, searchTarget, threadId]);
 
   useLayoutEffect(() => {
+    if (searchTarget) return;
     if (!detail || initialScrollThread.current !== threadId || !followsTail.current) return;
     scrollToEnd(scrollRef.current);
-  }, [attention, autoVoiceProgressKey, detail, threadId]);
+  }, [attention, autoVoiceProgressKey, detail, searchTarget, threadId]);
 
   useLayoutEffect(() => {
+    if (searchTarget) return;
     const messageId = scrollTargetMessageId.current;
     const node = scrollRef.current;
     if (!messageId || !node) return;
@@ -2207,12 +2231,12 @@ export function ThreadPage({
       scrollToEnd(node, "smooth");
     }
     scrollTargetMessageId.current = null;
-  }, [detail, optimisticMessages, threadId]);
+  }, [detail, optimisticMessages, searchTarget, threadId]);
 
   const loadOlder = useCallback(async () => {
     const cursor = detail?.olderTurnsCursor;
     const node = scrollRef.current;
-    if (isSubagent || !cursor || !node || loadingOlder) return;
+    if (searchTarget || isSubagent || !cursor || !node || loadingOlder) return;
     olderScrollAnchor.current = {
       threadId,
       scrollHeight: node.scrollHeight,
@@ -2228,7 +2252,7 @@ export function ThreadPage({
     } finally {
       setLoadingOlder(false);
     }
-  }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, threadId]);
+  }, [detail?.olderTurnsCursor, isSubagent, loadOlderDetail, loadingOlder, searchTarget, threadId]);
 
   const loadSessionArtifacts = useCallback(async () => {
     const run = ++artifactRequestRun.current;
@@ -2460,6 +2484,7 @@ export function ThreadPage({
   }
 
   async function submit(intent: ComposerSubmitIntent) {
+    if (inputUnavailable) return;
     if (preparationRef.current.active && newSessionProject) {
       await submitPreparingSession(newSessionProject, intent);
       return;
@@ -2991,6 +3016,7 @@ export function ThreadPage({
   }
 
   async function sendQueuedNow(messageId: string): Promise<boolean> {
+    if (inputUnavailable) return false;
     setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
@@ -3549,6 +3575,7 @@ export function ThreadPage({
             scrollTouchOrigin.current = null;
           }}
           onScroll={(event) => {
+            if (searchTarget) return;
             const node = event.currentTarget;
             const distanceFromTail = node.scrollHeight - node.scrollTop - node.clientHeight;
             followsTail.current = followsTail.current
@@ -3559,251 +3586,282 @@ export function ThreadPage({
           }}
         >
           <section className="timeline" aria-live="polite">
-            {forkOperationsFromSnapshot(state.snapshot).some(
-              (operation) =>
-                operation.status === "ready" &&
-                operation.mode === "compressed" &&
-                operation.targetThreadId === threadId,
-            ) && (
-              <div className="compressed-origin-notice" role="note">
-                <GitBranchIcon />
-                <span>{t("Контекст перенесён в сжатом виде из исходной ветки.")}</span>
-              </div>
-            )}
-            {showEmptySessionHero ? (
-              <div className="new-session-empty">
-                <span className="new-session-glyph">
-                  <NewTaskIcon />
-                </span>
-                <h2>{t("Что поручим Codex?")}</h2>
-                <p>{t("Введите сообщение или добавьте контекст.")}</p>
-              </div>
-            ) : pendingOptimisticMessage ? (
-              <div className="turn optimistic-turn">
-                <Activity
-                  item={optimisticActivity(pendingOptimisticMessage)}
-                  cwd={project?.path ?? workspaceSummary.cwd}
-                  onDownload={async () => undefined}
-                  onOpenArtifact={openLinkedArtifact}
-                />
-                <div className="outgoing-delivery-status" role="status">
-                  {pendingOptimisticMessage.deliveryError
-                    ? pendingOptimisticMessage.deliveryError.retryable
-                      ? t("Нет связи — повторим отправку")
-                      : t("Не отправлено")
-                    : t("Отправляется…")}
-                  {pendingOptimisticMessage.deliveryError?.retryable === false && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (preparationRef.current.submission)
-                          delete preparationRef.current.submission.deliveryError;
-                        setPreparationRetry((value) => value + 1);
-                      }}
-                    >
-                      {t("Повторить отправку")}
-                    </button>
-                  )}
-                </div>
-              </div>
+            {searchTarget ? (
+              <SearchHistoryView
+                target={searchTarget}
+                cwd={summary?.cwd}
+                onReturn={() => {
+                  initialScrollThread.current = null;
+                  olderScrollAnchor.current = null;
+                  scrollTargetMessageId.current = null;
+                  navigate(location.pathname, { replace: true, state: null });
+                }}
+              />
             ) : (
               <>
-                {(detailLoadError || detail?.historyError) && (
-                  <div className="center-state compact" role="status">
-                    <p>
-                      {localizeKnownServerText(
-                        language,
-                        detailLoadError ?? detail?.historyError?.message ?? null,
+                {forkOperationsFromSnapshot(state.snapshot).some(
+                  (operation) =>
+                    operation.status === "ready" &&
+                    operation.mode === "compressed" &&
+                    operation.targetThreadId === threadId,
+                ) && (
+                  <div className="compressed-origin-notice" role="note">
+                    <GitBranchIcon />
+                    <span>{t("Контекст перенесён в сжатом виде из исходной ветки.")}</span>
+                  </div>
+                )}
+                {showEmptySessionHero ? (
+                  <div className="new-session-empty">
+                    <span className="new-session-glyph">
+                      <NewTaskIcon />
+                    </span>
+                    <h2>{t("Что поручим Codex?")}</h2>
+                    <p>{t("Введите сообщение или добавьте контекст.")}</p>
+                  </div>
+                ) : pendingOptimisticMessage ? (
+                  <div className="turn optimistic-turn">
+                    <Activity
+                      item={optimisticActivity(pendingOptimisticMessage)}
+                      cwd={project?.path ?? workspaceSummary.cwd}
+                      onDownload={async () => undefined}
+                      onOpenArtifact={openLinkedArtifact}
+                    />
+                    <div className="outgoing-delivery-status" role="status">
+                      {pendingOptimisticMessage.deliveryError
+                        ? pendingOptimisticMessage.deliveryError.retryable
+                          ? t("Нет связи — повторим отправку")
+                          : t("Не отправлено")
+                        : t("Отправляется…")}
+                      {pendingOptimisticMessage.deliveryError?.retryable === false && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (preparationRef.current.submission)
+                              delete preparationRef.current.submission.deliveryError;
+                            setPreparationRetry((value) => value + 1);
+                          }}
+                        >
+                          {t("Повторить отправку")}
+                        </button>
                       )}
-                    </p>
-                    <button type="button" onClick={() => setDetailRetry((value) => value + 1)}>
-                      {t("Повторить загрузку истории")}
-                    </button>
-                  </div>
-                )}
-                {loadingOlder && (
-                  <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
-                    <span className="spinner small" />
-                  </div>
-                )}
-                {olderError && (
-                  <button className="history-retry" type="button" onClick={() => void loadOlder()}>
-                    {t("Повторить загрузку старых сообщений")}
-                  </button>
-                )}
-                {!detail &&
-                  !detailLoadError &&
-                  optimisticTurnMessages.length === 0 &&
-                  createdInWorkspaceRef.current !== threadId && (
-                    <div className="center-state compact">
-                      <div className="spinner" />
                     </div>
-                  )}
-                {detail?.turns.map((turn) => {
-                  const entries = groupedTurnActivities.get(turn.id)!;
-                  const technicalItems = technicalTurnActivities.get(turn.id)!;
-                  const forkTarget = completedTurnForkActions.get(turn.id);
-                  const turnOptimisticMessages = optimisticTurnMessages.filter(
-                    (message) =>
-                      message.turnId === turn.id ||
-                      (!message.turnId && workspaceSummary.currentTurnId === turn.id),
-                  );
-                  const active = workspaceSummary.currentTurnId === turn.id;
-                  return (
-                    <div className="turn" key={turn.id}>
-                      {turnOptimisticMessages.map((message) => (
+                  </div>
+                ) : (
+                  <>
+                    {(detailLoadError || detail?.historyError) && (
+                      <div className="center-state compact" role="status">
+                        <p>
+                          {localizeKnownServerText(
+                            language,
+                            detailLoadError ?? detail?.historyError?.message ?? null,
+                          )}
+                        </p>
+                        <button type="button" onClick={() => setDetailRetry((value) => value + 1)}>
+                          {t("Повторить загрузку истории")}
+                        </button>
+                      </div>
+                    )}
+                    {loadingOlder && (
+                      <div className="history-loader" aria-label={t("Загружаем старые сообщения")}>
+                        <span className="spinner small" />
+                      </div>
+                    )}
+                    {olderError && (
+                      <button
+                        className="history-retry"
+                        type="button"
+                        onClick={() => void loadOlder()}
+                      >
+                        {t("Повторить загрузку старых сообщений")}
+                      </button>
+                    )}
+                    {!detail &&
+                      !detailLoadError &&
+                      optimisticTurnMessages.length === 0 &&
+                      createdInWorkspaceRef.current !== threadId && (
+                        <div className="center-state compact">
+                          <div className="spinner" />
+                        </div>
+                      )}
+                    {detail?.turns.map((turn) => {
+                      const entries = groupedTurnActivities.get(turn.id)!;
+                      const technicalItems = technicalTurnActivities.get(turn.id)!;
+                      const forkTarget = completedTurnForkActions.get(turn.id);
+                      const turnOptimisticMessages = optimisticTurnMessages.filter(
+                        (message) =>
+                          message.turnId === turn.id ||
+                          (!message.turnId && workspaceSummary.currentTurnId === turn.id),
+                      );
+                      const active = workspaceSummary.currentTurnId === turn.id;
+                      return (
+                        <div className="turn" key={turn.id}>
+                          {turnOptimisticMessages.map((message) => (
+                            <Activity
+                              item={optimisticActivity(message)}
+                              cwd={workspaceSummary.cwd}
+                              onDownload={downloadFile}
+                              onOpenArtifact={openLinkedArtifact}
+                              key={message.id}
+                            />
+                          ))}
+                          {entries.map((entry) =>
+                            Array.isArray(entry) ? (
+                              <MemoizedActivityGroup
+                                items={entry}
+                                cwd={workspaceSummary.cwd}
+                                onDownload={downloadFile}
+                                onOpenArtifact={openLinkedArtifact}
+                                key={entry.map((item) => item.id).join(":")}
+                              />
+                            ) : (
+                              <div
+                                key={
+                                  "questionKey" in entry
+                                    ? (entry.questionKey ?? entry.id)
+                                    : entry.id
+                                }
+                              >
+                                <MemoizedActivity
+                                  item={entry}
+                                  threadId={threadId}
+                                  turnId={turn.id}
+                                  readOnly={isSubagent}
+                                  cwd={workspaceSummary.cwd}
+                                  onDownload={downloadFile}
+                                  onOpenArtifact={openLinkedArtifact}
+                                  onLoadImage={loadLocalImage}
+                                  forkAction={
+                                    entry.id === forkTarget?.responseId
+                                      ? forkTarget.action
+                                      : undefined
+                                  }
+                                  annotations={annotations}
+                                  annotationEnabled={
+                                    !isSubagent && !busy && entry.id === latestAnnotatableId
+                                  }
+                                  annotationBusy={busy}
+                                  onCreateAnnotation={createAnnotationEvent}
+                                  onUpdateAnnotation={updateAnnotationEvent}
+                                  onDeleteAnnotation={deleteAnnotationEvent}
+                                />
+                                {!isSubagent && entry.id === latestPlanId && (
+                                  <div className="implement-plan-actions">
+                                    <button
+                                      className="implement-plan"
+                                      disabled={busy || latestPlanHasAnnotations}
+                                      title={
+                                        latestPlanHasAnnotations
+                                          ? t("Сначала отправьте или удалите аннотации к плану")
+                                          : undefined
+                                      }
+                                      type="button"
+                                      onClick={() => void implementPlan("default")}
+                                    >
+                                      {t("Да, реализуй этот план")}
+                                    </button>
+                                    <button
+                                      className="implement-plan goal"
+                                      disabled={busy || latestPlanHasAnnotations}
+                                      title={
+                                        latestPlanHasAnnotations
+                                          ? t("Сначала отправьте или удалите аннотации к плану")
+                                          : undefined
+                                      }
+                                      type="button"
+                                      onClick={() => void implementPlan("goal")}
+                                    >
+                                      <TargetIcon />
+                                      {t("Запустить в режиме цели")}
+                                    </button>
+                                    <button
+                                      className="implement-plan orchestrator"
+                                      disabled={busy || latestPlanHasAnnotations}
+                                      title={
+                                        latestPlanHasAnnotations
+                                          ? t("Сначала отправьте или удалите аннотации к плану")
+                                          : undefined
+                                      }
+                                      type="button"
+                                      onClick={() => void implementPlan("team")}
+                                    >
+                                      <TeamIcon />
+                                      {t("Запустить в режиме оркестратора")}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ),
+                          )}
+                          <TurnActivityDisclosure
+                            turn={turn}
+                            active={active}
+                            items={technicalItems}
+                            loaded={turn.itemsLoaded !== false}
+                            interactive={!isSubagent}
+                            onLoad={() => loadTurnItems(threadId, turn.id)}
+                            cwd={workspaceSummary.cwd}
+                            onDownload={downloadFile}
+                            onOpenArtifact={openLinkedArtifact}
+                          />
+                        </div>
+                      );
+                    })}
+                    {workspaceSummary.currentTurnId &&
+                      !detail?.turns.some((turn) => turn.id === workspaceSummary.currentTurnId) && (
+                        <div className="turn active-turn-placeholder">
+                          <TurnActivityStatus progress={activeProgress} active />
+                        </div>
+                      )}
+                    {detachedOptimisticMessages(
+                      optimisticTurnMessages,
+                      detail?.turns ?? [],
+                      workspaceSummary.currentTurnId,
+                    ).map((message) => (
+                      <div className="turn optimistic-turn" key={`optimistic:${message.id}`}>
                         <Activity
                           item={optimisticActivity(message)}
                           cwd={workspaceSummary.cwd}
                           onDownload={downloadFile}
                           onOpenArtifact={openLinkedArtifact}
-                          key={message.id}
                         />
-                      ))}
-                      {entries.map((entry) =>
-                        Array.isArray(entry) ? (
-                          <MemoizedActivityGroup
-                            items={entry}
-                            cwd={workspaceSummary.cwd}
-                            onDownload={downloadFile}
-                            onOpenArtifact={openLinkedArtifact}
-                            key={entry.map((item) => item.id).join(":")}
-                          />
-                        ) : (
-                          <div key={entry.id}>
-                            <MemoizedActivity
-                              item={entry}
-                              cwd={workspaceSummary.cwd}
-                              onDownload={downloadFile}
-                              onOpenArtifact={openLinkedArtifact}
-                              onLoadImage={loadLocalImage}
-                              forkAction={
-                                entry.id === forkTarget?.responseId ? forkTarget.action : undefined
-                              }
-                              annotations={annotations}
-                              annotationEnabled={
-                                !isSubagent && !busy && entry.id === latestAnnotatableId
-                              }
-                              annotationBusy={busy}
-                              onCreateAnnotation={createAnnotationEvent}
-                              onUpdateAnnotation={updateAnnotationEvent}
-                              onDeleteAnnotation={deleteAnnotationEvent}
-                            />
-                            {!isSubagent && entry.id === latestPlanId && (
-                              <div className="implement-plan-actions">
-                                <button
-                                  className="implement-plan"
-                                  disabled={busy || latestPlanHasAnnotations}
-                                  title={
-                                    latestPlanHasAnnotations
-                                      ? t("Сначала отправьте или удалите аннотации к плану")
-                                      : undefined
-                                  }
-                                  type="button"
-                                  onClick={() => void implementPlan("default")}
-                                >
-                                  {t("Да, реализуй этот план")}
-                                </button>
-                                <button
-                                  className="implement-plan goal"
-                                  disabled={busy || latestPlanHasAnnotations}
-                                  title={
-                                    latestPlanHasAnnotations
-                                      ? t("Сначала отправьте или удалите аннотации к плану")
-                                      : undefined
-                                  }
-                                  type="button"
-                                  onClick={() => void implementPlan("goal")}
-                                >
-                                  <TargetIcon />
-                                  {t("Запустить в режиме цели")}
-                                </button>
-                                <button
-                                  className="implement-plan orchestrator"
-                                  disabled={busy || latestPlanHasAnnotations}
-                                  title={
-                                    latestPlanHasAnnotations
-                                      ? t("Сначала отправьте или удалите аннотации к плану")
-                                      : undefined
-                                  }
-                                  type="button"
-                                  onClick={() => void implementPlan("team")}
-                                >
-                                  <TeamIcon />
-                                  {t("Запустить в режиме оркестратора")}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ),
-                      )}
-                      <TurnActivityDisclosure
-                        turn={turn}
-                        active={active}
-                        items={technicalItems}
-                        loaded={turn.itemsLoaded !== false}
-                        interactive={!isSubagent}
-                        onLoad={() => loadTurnItems(threadId, turn.id)}
-                        cwd={workspaceSummary.cwd}
-                        onDownload={downloadFile}
-                        onOpenArtifact={openLinkedArtifact}
-                      />
-                    </div>
-                  );
-                })}
-                {workspaceSummary.currentTurnId &&
-                  !detail?.turns.some((turn) => turn.id === workspaceSummary.currentTurnId) && (
-                    <div className="turn active-turn-placeholder">
-                      <TurnActivityStatus progress={activeProgress} active />
-                    </div>
-                  )}
-                {detachedOptimisticMessages(
-                  optimisticTurnMessages,
-                  detail?.turns ?? [],
-                  workspaceSummary.currentTurnId,
-                ).map((message) => (
-                  <div className="turn optimistic-turn" key={`optimistic:${message.id}`}>
-                    <Activity
-                      item={optimisticActivity(message)}
-                      cwd={workspaceSummary.cwd}
-                      onDownload={downloadFile}
-                      onOpenArtifact={openLinkedArtifact}
+                      </div>
+                    ))}
+                    {!isSubagent && autoVoiceProgress && (
+                      <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+                    )}
+                    <AttentionPanel
+                      requests={attention}
+                      transcriptionConfig={transcriptionConfig}
+                      transcriptionProvider={transcriptionProvider}
+                      onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
                     />
-                  </div>
-                ))}
-                {!isSubagent && autoVoiceProgress && (
-                  <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+                    {!isSubagent &&
+                      !activeVoiceJob &&
+                      !voiceUpload &&
+                      ["completed", "failed", "interrupted"].includes(workspaceSummary.state) &&
+                      workspaceSummary.unread && (
+                        <button
+                          className="finish-thread-action"
+                          disabled={finishing}
+                          onClick={() => void finishThread()}
+                        >
+                          {finishing ? t("Заканчиваем…") : t("Закончить")}
+                        </button>
+                      )}
+                  </>
                 )}
-                <AttentionPanel
-                  requests={attention}
-                  transcriptionConfig={transcriptionConfig}
-                  transcriptionProvider={transcriptionProvider}
-                  onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
+                <QueuedMessages
+                  messages={queuedMessages}
+                  canSendNow={!inputUnavailable}
+                  action={queueAction}
+                  inTimeline
+                  onRetry={(messageId) => retryReliableMessage(threadId, messageId)}
+                  onSendNow={sendQueuedNow}
+                  onUpdate={updateQueued}
+                  onDelete={deleteQueued}
                 />
-                {!isSubagent &&
-                  !activeVoiceJob &&
-                  !voiceUpload &&
-                  ["completed", "failed", "interrupted"].includes(workspaceSummary.state) &&
-                  workspaceSummary.unread && (
-                    <button
-                      className="finish-thread-action"
-                      disabled={finishing}
-                      onClick={() => void finishThread()}
-                    >
-                      {finishing ? t("Заканчиваем…") : t("Закончить")}
-                    </button>
-                  )}
               </>
             )}
-            <QueuedMessages
-              messages={queuedMessages}
-              action={queueAction}
-              inTimeline
-              onRetry={(messageId) => retryReliableMessage(threadId, messageId)}
-              onSendNow={sendQueuedNow}
-              onUpdate={updateQueued}
-              onDelete={deleteQueued}
-            />
           </section>
         </div>
         {isSubagent ? (
@@ -3820,6 +3878,8 @@ export function ThreadPage({
           </div>
         ) : (
           <Composer
+            inputUnavailable={inputUnavailable}
+            codexSettings={workspaceSummary.codexSettings}
             autoFocus={
               preparationRef.current.active ||
               (location.state as { focusComposer?: unknown } | null)?.focusComposer === true
@@ -3880,7 +3940,9 @@ export function ThreadPage({
             voiceMode={voiceMode}
             onVoiceModeChange={setVoiceMode}
             voiceUploadPending={Boolean(voiceUpload)}
-            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
+            voiceInputLocked={
+              Boolean(activeVoiceJob || voiceUpload) || (inputUnavailable && voiceMode === "send")
+            }
             onCancelVoiceTranscription={
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
@@ -3916,6 +3978,20 @@ export function ThreadPage({
             error={error ?? pendingVoiceRecordingError}
             hasSupplementalContent={annotations.length > 0}
           >
+            {inputUnavailable && (
+              <div className="input-availability-notice" role="status">
+                <span>
+                  {t("Codex временно не принимает сообщения. Черновик и очередь сохранены.")}
+                </span>
+                <button
+                  type="button"
+                  disabled={refreshing}
+                  onClick={() => void forceRefreshSession()}
+                >
+                  {refreshing ? t("Обновляем…") : t("Проверить снова")}
+                </button>
+              </div>
+            )}
             {hasPendingVoiceRecording && backgroundVoiceContext && (
               <button
                 className="new-session-retry"
@@ -3958,7 +4034,7 @@ export function ThreadPage({
                 {t("Создать новую Team-сессию")}
               </button>
             )}
-            {showScrollToBottom && (
+            {showScrollToBottom && !searchTarget && (
               <button
                 type="button"
                 className="scroll-to-bottom"
@@ -4534,8 +4610,118 @@ function DownloadLink({
   );
 }
 
+export function SearchHistoryView({
+  target,
+  cwd,
+  onReturn,
+}: {
+  target: SearchTarget;
+  cwd?: string;
+  onReturn(): void;
+}) {
+  const { api, state } = useConnection();
+  const { language, t } = useI18n();
+  const [turn, setTurn] = useState<TurnView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const highlight = useRef<HTMLDivElement>(null);
+  const instanceId = state.snapshot?.instanceId;
+  const { threadId, occurrence } = target;
+  useEffect(() => {
+    let active = true;
+    setTurn(null);
+    setError(null);
+    if (target.instanceId && instanceId && target.instanceId !== instanceId) {
+      setError(t("Сервер перезапущен. Повторите поиск, чтобы открыть фрагмент."));
+      return;
+    }
+    void api
+      .readSearchTurn(threadId, occurrence.turnId, occurrence.turnCursor)
+      .then((response) => {
+        if (!active) return;
+        if (instanceId && response.instanceId !== instanceId) {
+          setError(t("Сервер перезапущен. Повторите поиск, чтобы открыть фрагмент."));
+        } else {
+          setTurn(response.turn);
+        }
+      })
+      .catch((caught: unknown) => {
+        if (active)
+          setError(
+            caught instanceof Error
+              ? localizeKnownServerText(language, caught.message)
+              : t("Не удалось загрузить фрагмент"),
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    api,
+    instanceId,
+    language,
+    occurrence.turnId,
+    occurrence.turnCursor,
+    retry,
+    t,
+    target.instanceId,
+    threadId,
+  ]);
+  useLayoutEffect(() => {
+    highlight.current?.scrollIntoView?.({ block: "center" });
+  }, [turn, occurrence.itemId]);
+  const messages =
+    turn?.items.filter(
+      (item) => item.type === "userMessage" || item.type === "agentMessage" || item.type === "plan",
+    ) ?? [];
+  return (
+    <div className="search-history-view">
+      <div className="search-history-banner" role="note">
+        <div>
+          <strong>{t("Фрагмент из истории")}</strong>
+          <p className="search-context">{target.query}</p>
+        </div>
+        <button type="button" onClick={onReturn}>
+          {t("К текущему диалогу")}
+        </button>
+      </div>
+      {error ? (
+        <div role="alert">
+          <p>{error}</p>
+          <button type="button" onClick={() => setRetry((value) => value + 1)}>
+            {t("Повторить")}
+          </button>
+        </div>
+      ) : !turn ? (
+        <p role="status">{t("Загрузка…")}</p>
+      ) : (
+        <>
+          {!messages.some((item) => item.id === occurrence.itemId) && (
+            <p role="status">
+              {t("Найденное сообщение больше недоступно. Можно вернуться к текущему диалогу.")}
+            </p>
+          )}
+          {messages.map((item) => (
+            <div
+              key={item.id}
+              ref={item.id === occurrence.itemId ? highlight : undefined}
+              className={item.id === occurrence.itemId ? "search-history-match" : undefined}
+              data-search-item-id={item.id}
+            >
+              <Activity item={item} cwd={cwd} readOnly />
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function Activity({
   item,
+  threadId,
+  turnId,
+  readOnly = true,
   cwd,
   onDownload,
   onOpenArtifact,
@@ -4549,6 +4735,9 @@ export function Activity({
   onDeleteAnnotation,
 }: {
   item: ActivityItem;
+  threadId?: string;
+  turnId?: string;
+  readOnly?: boolean;
   cwd?: string;
   onDownload?(path: string): Promise<void>;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
@@ -4601,9 +4790,23 @@ export function Activity({
           {(item.files?.length ?? 0) > 0 && (
             <MessageFiles files={item.files ?? []} onDownload={onDownload} />
           )}
+          {item.type === "agentMessage" &&
+            !!item.questions?.length &&
+            (threadId && turnId ? (
+              <AsyncQuestionCard
+                item={item}
+                threadId={threadId}
+                turnId={turnId}
+                readOnly={readOnly}
+                key={`${threadId}:${turnId}:${item.questionKey ?? item.id}`}
+              />
+            ) : (
+              item.questions.map((question, index) => <p key={index}>{question.title}</p>)
+            ))}
         </div>
         <MessageFooter
           text={item.text}
+          markdown={item.type === "agentMessage"}
           timestamp={item.timestamp}
           forkAction={item.type === "agentMessage" ? forkAction : undefined}
         />
@@ -4645,7 +4848,12 @@ export function Activity({
             onDelete={onDeleteAnnotation}
           />
         </div>
-        <MessageFooter text={item.text} timestamp={item.timestamp} forkAction={forkAction} />
+        <MessageFooter
+          text={item.text}
+          timestamp={item.timestamp}
+          forkAction={forkAction}
+          markdown
+        />
       </article>
     );
   }
@@ -5557,6 +5765,7 @@ export function QueuedMessages({
                         type="button"
                         className="icon-button"
                         aria-label={t("Повторить отправку")}
+                        disabled={!canSendNow}
                         onClick={() => void onRetry(message.id)}
                       >
                         <RefreshIcon />
@@ -5687,10 +5896,12 @@ function MessageFooter({
   text,
   timestamp,
   forkAction,
+  markdown = false,
 }: {
   text: string;
   timestamp: number | null;
   forkAction?: { disabled: boolean; onFork(opener?: HTMLElement): void };
+  markdown?: boolean;
 }) {
   const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -5706,7 +5917,7 @@ function MessageFooter({
 
   async function copy() {
     try {
-      await copyText(text);
+      await (markdown ? copyMarkdown(text) : copyText(text));
       setCopyState("copied");
     } catch {
       setCopyState("failed");
@@ -5864,6 +6075,7 @@ function formatDuration(durationMs: number, language: UiLanguage = "ru"): string
 
 function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityItem[]> {
   const result: Array<ActivityItem | ActivityItem[]> = [];
+  const questionOccurrences = new Map<string, number>();
   let group: ActivityItem[] = [];
   const flush = () => {
     if (group.length) result.push(group);
@@ -5875,7 +6087,17 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
       group.push(item);
     } else {
       flush();
-      result.push(item);
+      if (item.type === "agentMessage" && item.questionKey) {
+        // Repeated identical question sets are independent, while live/history
+        // ID aliases must keep the same form state and reply identity.
+        const occurrence = questionOccurrences.get(item.questionKey) ?? 0;
+        questionOccurrences.set(item.questionKey, occurrence + 1);
+        result.push(
+          occurrence ? { ...item, questionKey: `${item.questionKey}:${occurrence}` } : item,
+        );
+      } else {
+        result.push(item);
+      }
     }
   }
   flush();
@@ -5933,7 +6155,9 @@ function reconcileVisibleThreadSummary(
 
 function hasVisibleActivity(item: ActivityItem): boolean {
   if ("text" in item)
-    return Boolean(item.text.trim() || item.images.length || (item.files?.length ?? 0));
+    return Boolean(
+      item.text.trim() || item.images.length || (item.files?.length ?? 0) || item.questions?.length,
+    );
   return true;
 }
 

@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { QueuedMessage, ThreadFileAttachment } from "@codexnest/protocol";
+import type {
+  AsyncQuestionReference,
+  QueuedMessage,
+  ThreadFileAttachment,
+} from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
 import { RpcError } from "./codex/transport";
@@ -8,6 +12,7 @@ import { isMissingThreadError, isThreadNotLoadedError } from "./thread-state";
 
 export interface MessageQueueDelivery {
   paused(): boolean;
+  acceptsInput?(threadId: string): boolean;
   currentTurnId(threadId: string): string | null;
   shouldSteerQueuedMessage(threadId: string, turnId: string): boolean;
   start(threadId: string, message: QueuedMessage): Promise<string>;
@@ -18,6 +23,11 @@ export interface MessageQueueDelivery {
 
 export class MessageQueueNotFoundError extends Error {}
 export class MessageQueuePausedError extends Error {}
+export class MessageQueueInputUnavailableError extends MessageQueuePausedError {
+  constructor() {
+    super("Codex пока не принимает сообщения в эту сессию. Черновик и очередь сохранены.");
+  }
+}
 export class MessageQueueConflictError extends Error {}
 export class MessageQueueValidationError extends Error {}
 
@@ -48,6 +58,7 @@ export class MessageQueue {
       goal?: boolean;
       files?: ThreadFileAttachment[];
       completeVoiceTranscriptionId?: string;
+      replyToAsyncQuestion?: AsyncQuestionReference;
     } = {},
   ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
@@ -57,6 +68,9 @@ export class MessageQueue {
       ...(images.length ? { images } : {}),
       ...(options.files?.length ? { files: options.files } : {}),
       ...(options.goal ? { goal: true } : {}),
+      ...(options.replyToAsyncQuestion
+        ? { replyToAsyncQuestion: options.replyToAsyncQuestion }
+        : {}),
       createdAt: Date.now(),
       status: "queued",
     };
@@ -102,7 +116,9 @@ export class MessageQueue {
             existing.images ?? [],
             existing.files ?? [],
             !!existing.goal,
-          ) !== contentHash
+          ) !== contentHash ||
+          JSON.stringify(existing.replyToAsyncQuestion) !==
+            JSON.stringify(message.replyToAsyncQuestion)
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
@@ -117,7 +133,7 @@ export class MessageQueue {
       }
       queue.push(message);
       const meta = state.threadMeta[threadId];
-      if (meta) delete meta.draft;
+      if (meta && !message.replyToAsyncQuestion) delete meta.draft;
       if (
         options.completeVoiceTranscriptionId &&
         state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
@@ -127,7 +143,11 @@ export class MessageQueue {
     });
     this.publish(threadId);
     const activeTurnId = this.delivery.currentTurnId(threadId);
-    if (activeTurnId && this.delivery.shouldSteerQueuedMessage(threadId, activeTurnId)) {
+    if (
+      !stored.replyToAsyncQuestion &&
+      activeTurnId &&
+      this.delivery.shouldSteerQueuedMessage(threadId, activeTurnId)
+    ) {
       void this.sendNow(threadId, stored.id).catch(() => undefined);
     } else {
       void this.drain(threadId).catch(() => undefined);
@@ -195,13 +215,19 @@ export class MessageQueue {
 
   drain(threadId: string): Promise<void> {
     return this.withLock(threadId, async () => {
-      if (this.delivery.paused()) return;
-      if (this.delivery.currentTurnId(threadId)) return;
-      const message = this.list(threadId)[0];
+      if (this.delivery.paused() || this.delivery.acceptsInput?.(threadId) === false) return;
+      const messages = this.list(threadId);
+      // Reconcile uncertain sends before allowing another message past them.
+      if (messages.some((message) => message.status === "dispatching")) return;
+      const active = this.delivery.currentTurnId(threadId) !== null;
+      const message = active
+        ? messages.find((candidate) => candidate.replyToAsyncQuestion)
+        : messages[0];
       if (!message || message.status !== "queued" || message.deliveryError?.retryable === false)
         return;
       if (this.retries.get(threadId)?.timer) return;
-      await this.dispatch(threadId, message, false);
+      await this.dispatch(threadId, message, Boolean(message.replyToAsyncQuestion));
+      if (message.replyToAsyncQuestion) void this.drain(threadId).catch(() => undefined);
     });
   }
 
@@ -278,15 +304,23 @@ export class MessageQueue {
     allowSteer: boolean,
   ): Promise<string> {
     if (this.suspended) throw new MessageQueuePausedError("CodexNest is preparing to restart");
+    if (this.delivery.acceptsInput?.(threadId) === false)
+      throw new MessageQueueInputUnavailableError();
     const activeTurnId = this.delivery.currentTurnId(threadId);
     if (activeTurnId && !allowSteer) return activeTurnId;
     await this.setStatus(threadId, message.id, "dispatching");
     let turnId: string;
     try {
+      if (this.delivery.acceptsInput?.(threadId) === false)
+        throw new MessageQueueInputUnavailableError();
       turnId = activeTurnId
         ? await this.delivery.steer(threadId, activeTurnId, message)
         : await this.delivery.start(threadId, message);
     } catch (error) {
+      if (error instanceof MessageQueueInputUnavailableError) {
+        await this.setStatus(threadId, message.id, "queued");
+        return Promise.reject(error);
+      }
       if (isMissingThreadError(error) || isThreadNotLoadedError(error)) {
         await this.recordFailure(threadId, message.id, "queued", error);
         throw error;
@@ -300,6 +334,18 @@ export class MessageQueue {
       } catch (deliveryError) {
         // Keep an ambiguous delivery parked until a later recovery can reconcile it.
         await this.recordFailure(threadId, message.id, "dispatching", deliveryError);
+        throw error;
+      }
+      if (
+        message.replyToAsyncQuestion &&
+        activeTurnId &&
+        (activeTurnId !== this.delivery.currentTurnId(threadId) ||
+          (error instanceof RpcError && /no active turn|turn.*mismatch/i.test(error.message)))
+      ) {
+        // History confirmed that the reply was not delivered. Retry against the
+        // new current turn (or start a follow-up if the previous one completed),
+        // including when the completion notification follows the RPC error.
+        await this.recordFailure(threadId, message.id, "queued", new Error("Active turn changed"));
         throw error;
       }
       await this.recordFailure(threadId, message.id, "queued", error);
