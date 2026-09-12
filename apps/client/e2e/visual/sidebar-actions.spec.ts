@@ -53,14 +53,27 @@ for (const theme of ["light", "dark"] as const) {
       expectedLeft,
     );
     const before = await title.boundingBox();
+    const plainRow = roots.filter({ has: page.locator('a[href="/threads/session-active"]') });
+    const plainTitleBounds = await plainRow.locator(".thread-link-title").boundingBox();
+    const plainStatusBounds = await plainRow.locator(".status").boundingBox();
+    expect(
+      plainStatusBounds!.x - (plainTitleBounds!.x + plainTitleBounds!.width),
+    ).toBeLessThanOrEqual(16);
     const create = row.getByRole("button", { name: "Создать новую сессию в проекте CodexNest" });
     const pin = row.getByRole("button", { name: "Открепить сессию «Полировка мастерской»" });
     await expect(create).toHaveCSS("opacity", "0");
     await expect(pin).toHaveCSS("opacity", "1");
+    const restingPin = await pin.boundingBox();
+    expect(before!.x + before!.width).toBeLessThanOrEqual(restingPin!.x);
+    expect(restingPin!.x - (before!.x + before!.width)).toBeLessThanOrEqual(12);
     await create.focus();
     await expect(create).toHaveCSS("opacity", "1");
     await title.hover();
-    expect(await title.boundingBox()).toEqual(before);
+    const hovered = await title.boundingBox();
+    expect(hovered!.x).toBe(before!.x);
+    expect(hovered!.width).toBeLessThan(before!.width);
+    const createBounds = await create.boundingBox();
+    expect(hovered!.x + hovered!.width).toBeLessThanOrEqual(createBounds!.x);
     const statusBounds = await row.locator(".status").boundingBox();
     const actionBounds = await pin.boundingBox();
     expect(actionBounds!.x + actionBounds!.width).toBeLessThanOrEqual(statusBounds!.x);
@@ -69,6 +82,11 @@ for (const theme of ["light", "dark"] as const) {
     });
     expect((await new AxeBuilder({ page }).include(".sidebar").analyze()).violations).toEqual([]);
 
+    await create.evaluate((element) => (element as HTMLElement).blur());
+    await page.getByRole("button", { name: "Активные", exact: true }).hover();
+    expect(await title.boundingBox()).toEqual(before);
+
+    await title.hover();
     await pin.click();
     await expect(row).toHaveCount(0);
     await page.getByRole("button", { name: "Проекты", exact: true }).click();

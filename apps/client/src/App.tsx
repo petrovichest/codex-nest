@@ -2071,6 +2071,9 @@ function ThreadLink({
   }
 
   const actionCount = Number(Boolean(project)) + Number(canPin) + Number(canFinish);
+  const visibleActionCount =
+    Number(canPin && Boolean(thread.pinned || pinning || pinError)) +
+    Number(canFinish && Boolean(finishing || finishError));
   const actions = (
     <>
       {project && (
@@ -2130,6 +2133,7 @@ function ThreadLink({
         style={
           {
             "--thread-action-width": `${touchActions ? (actionCount ? 44 : 0) : actionCount * 32}px`,
+            "--thread-rest-action-width": `${touchActions ? (actionCount ? 44 : 0) : visibleActionCount * 32}px`,
           } as CSSProperties
         }
         onBlur={(event) => {

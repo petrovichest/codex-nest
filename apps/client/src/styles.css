@@ -448,6 +448,11 @@
 }
 
 .thread-branch-row > .thread-link.has-actions {
+  padding-right: calc(var(--thread-rest-action-width) + 16px);
+}
+
+.thread-branch-row:hover > .thread-link.has-actions,
+.thread-branch-row:focus-within > .thread-link.has-actions {
   padding-right: calc(var(--thread-action-width) + 16px);
 }
 
@@ -462,7 +467,6 @@
 
 .thread-row-actions {
   display: flex;
-  gap: 4px;
 }
 
 .thread-row-action {
@@ -499,6 +503,10 @@
 }
 
 .thread-row-actions > .thread-row-action {
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-width: 0;
   opacity: 0;
   pointer-events: none;
 }
@@ -508,6 +516,10 @@
 .thread-row-actions > .thread-row-action.pinned,
 .thread-row-actions > .thread-row-action.failed,
 .thread-row-actions > .thread-row-action[aria-busy="true"] {
+  width: 28px;
+  min-width: 28px;
+  margin-left: 4px;
+  border-width: 1px;
   opacity: 1;
   pointer-events: auto;
 }

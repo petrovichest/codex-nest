@@ -110,7 +110,17 @@ test.describe("CodexNest redesign visual contract", () => {
       const widthBeforeHover = await link.evaluate(
         (element) => element.getBoundingClientRect().width,
       );
+      const title = row.locator(".thread-link-title");
+      const titleBeforeHover = await title.boundingBox();
+      const restingPin = await row.locator(".thread-pin-action").boundingBox();
+      expect(restingPin!.x - (titleBeforeHover!.x + titleBeforeHover!.width)).toBeLessThanOrEqual(
+        12,
+      );
       await link.hover();
+      const hoveredTitle = await title.boundingBox();
+      expect(hoveredTitle!.width).toBeLessThan(titleBeforeHover!.width);
+      const createBounds = await row.locator(".thread-create-action").boundingBox();
+      expect(hoveredTitle!.x + hoveredTitle!.width).toBeLessThanOrEqual(createBounds!.x);
 
       const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
       await expect(finish).toBeVisible();
