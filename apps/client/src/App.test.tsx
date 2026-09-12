@@ -326,6 +326,205 @@ describe("App routing and navigation", () => {
     await waitFor(() => expect(localStorage.getItem("codexnest.sessionListMode")).toBe("projects"));
   });
 
+  it("keeps pinned read sessions above running sessions and removes them after unpinning", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const pinned = {
+      ...baseThread,
+      id: "pinned",
+      title: "Закрепленная",
+      pinned: true,
+      state: "completed" as const,
+      updatedAt: 1,
+    };
+    const running = { ...baseThread, state: "running" as const, updatedAt: 100 };
+    const archived = { ...pinned, id: "archived", title: "Архивная", archived: true };
+    mockConnection(snapshot([running, pinned, archived]));
+    const view = renderApp("/threads/newer");
+    const context = connection.mock.results.at(-1)!.value;
+    const titles = () =>
+      Array.from(
+        view.container.querySelectorAll(
+          ".active-session-list > .thread-branch > .thread-branch-row .thread-link-title",
+        ),
+      ).map((element) => element.textContent);
+
+    expect(titles()).toEqual(["Закрепленная", running.title]);
+    expect(screen.getByRole("button", { name: "Открепить сессию «Закрепленная»" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    context.state.snapshot = snapshot([running, { ...pinned, pinned: false }, archived]);
+    view.rerender(
+      <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
+        <App
+          settings={{ baseUrl: "https://pi.local", token: "secret" }}
+          onDisconnected={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+    expect(titles()).toEqual([running.title]);
+  });
+
+  it("shows every pinned project session before ordinary sessions without expanding history", () => {
+    const pinned = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
+      ...baseThread,
+      id: `pin-${index}`,
+      title: `Закрепленная ${index}`,
+      pinned: true,
+      updatedAt: 10 - index,
+    }));
+    const normal = { ...baseThread, updatedAt: 100 };
+    mockConnection(snapshot([normal, ...pinned]));
+    const view = renderApp("/threads/newer");
+    const sessions = view.container.querySelector(".project-sessions") as HTMLElement;
+    const titles = () =>
+      Array.from(sessions.querySelectorAll(".thread-link-title")).map(
+        (element) => element.textContent,
+      );
+
+    expect(titles()).toEqual(pinned.map((thread) => thread.title));
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать ещё 1" }));
+    expect(titles()).toEqual([...pinned.map((thread) => thread.title), normal.title]);
+    fireEvent.click(within(sessions).getByRole("button", { name: "Показать меньше" }));
+    expect(titles()).toEqual(pinned.map((thread) => thread.title));
+    fireEvent.click(screen.getByRole("button", { name: "Проект" }));
+    expect(sessions).not.toBeVisible();
+  });
+
+  it.each(["projects", "active"])(
+    "pins from a %s row, applies the response and allows retry after failure",
+    async (mode) => {
+      localStorage.setItem("codexnest.sessionListMode", mode);
+      const thread = { ...baseThread, state: "running" as const };
+      const api = mockConnection(snapshot([thread]));
+      const request = deferred<ThreadSummary>();
+      api.updateThread.mockReturnValueOnce(request.promise);
+      renderApp("/threads/newer");
+      const pin = screen.getByRole("button", { name: `Закрепить сессию «${thread.title}»` });
+
+      fireEvent.click(pin);
+      fireEvent.click(pin);
+      expect(pin).toBeDisabled();
+      expect(api.updateThread).toHaveBeenCalledTimes(1);
+      expect(api.updateThread).toHaveBeenCalledWith(thread.id, { pinned: true });
+      request.reject(new Error("Сервер недоступен"));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Сервер недоступен");
+      expect(pin).toBeEnabled();
+      const updated = { ...thread, pinned: true };
+      api.updateThread.mockResolvedValueOnce(updated);
+      fireEvent.click(pin);
+      await waitFor(() =>
+        expect(api.dispatch).toHaveBeenCalledWith({ type: "thread", thread: updated }),
+      );
+      expect(screen.queryByText("Сервер недоступен")).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: thread.title })).toBeInTheDocument();
+      expect(manualNavigationIntent).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "creates from the clicked active row's project (child: %s)",
+    async (isChild) => {
+      localStorage.setItem("codexnest.sessionListMode", "active");
+      const secondProject = testProject("second", "Второй");
+      const source: ThreadSummary = {
+        ...baseThread,
+        id: "source",
+        title: "Источник",
+        state: "running",
+        projectId: secondProject.id,
+        relation: isChild
+          ? {
+              kind: "subagent",
+              sessionId: "child",
+              parentThreadId: baseThread.id,
+              nickname: null,
+              role: null,
+            }
+          : { kind: "session", sessionId: "source" },
+      };
+      const api = mockConnection(
+        snapshot([{ ...baseThread, state: "running" }, source], [defaultProject(), secondProject]),
+      );
+      api.createProjectThread.mockReturnValue(new Promise(() => undefined));
+      renderApp("/threads/newer");
+      const row = screen
+        .getByRole("link", { name: /Источник/ })
+        .closest(".thread-branch-row") as HTMLElement;
+      if (isChild)
+        expect(within(row).queryByRole("button", { name: /Закрепить/ })).not.toBeInTheDocument();
+      fireEvent.click(
+        within(row).getByRole("button", { name: "Создать новую сессию в проекте Второй" }),
+      );
+      expect(
+        await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
+      ).toBeInTheDocument();
+      await waitFor(() =>
+        expect(api.createProjectThread).toHaveBeenCalledExactlyOnceWith("second"),
+      );
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
+    },
+  );
+
+  it.each([null, "missing-project"])(
+    "does not offer active row creation without an existing project (%s)",
+    (projectId) => {
+      localStorage.setItem("codexnest.sessionListMode", "active");
+      mockConnection(snapshot([{ ...baseThread, projectId, state: "running" }]));
+      renderApp("/threads/newer");
+      expect(
+        screen.queryByRole("button", { name: /Создать новую сессию/ }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("opens touch actions without navigating and closes the menu with Escape or outside click", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    mockConnection(snapshot([{ ...baseThread, state: "running" }]));
+    mockMobileViewport();
+    renderApp("/threads/newer");
+    const trigger = screen.getByLabelText(`Действия с сессией «${baseThread.title}»`);
+    const menu = trigger.closest("details")!;
+    expect(menu).not.toHaveAttribute("open");
+    fireEvent.click(trigger);
+    expect(menu).toHaveAttribute("open");
+    expect(within(menu).getByRole("button", { name: /Создать новую сессию/ })).toBeVisible();
+    fireEvent.keyDown(within(menu).getByRole("button", { name: /Закрепить сессию/ }), {
+      key: "Escape",
+    });
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("heading", { name: baseThread.title }));
+    expect(menu).not.toHaveAttribute("open");
+    expect(manualNavigationIntent).not.toHaveBeenCalled();
+  });
+
+  it("requires a second touch menu click to finish and keeps the pinned session visible", async () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const thread = { ...baseThread, state: "completed" as const, unread: true, pinned: true };
+    const api = mockConnection(snapshot([thread]));
+    mockMobileViewport();
+    renderApp("/threads/newer");
+    const trigger = screen.getByLabelText(`Действия с сессией «${thread.title}»`);
+    const menu = trigger.closest("details")!;
+    fireEvent.click(trigger);
+    const finish = within(menu).getByRole("button", { name: `Закончить сессию «${thread.title}»` });
+    fireEvent.click(finish);
+    fireEvent.mouseLeave(menu.closest(".thread-branch-row")!);
+    expect(finish).toHaveAccessibleName(
+      `Нажмите ещё раз, чтобы закончить сессию «${thread.title}»`,
+    );
+    expect(api.markRead).not.toHaveBeenCalled();
+    fireEvent.click(finish);
+    expect(api.markRead).toHaveBeenCalledExactlyOnceWith(thread.id, {
+      observedUpdatedAt: thread.updatedAt,
+    });
+    await waitFor(() => expect(menu).not.toHaveAttribute("open"));
+    expect(screen.getByRole("link", { name: new RegExp(thread.title) })).toBeInTheDocument();
+    expect(api.updateThread).not.toHaveBeenCalled();
+  });
+
   it("renders a flat unlimited cross-project active feed in recency order", () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const secondProject = testProject("second-project", "Второй");

@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type TouchEvent as ReactTouchEvent,
@@ -47,6 +48,7 @@ import {
   GripVerticalIcon,
   MoreIcon,
   NewTaskIcon,
+  PinIcon,
   PlusIcon,
   SearchIcon,
   SlidersIcon,
@@ -88,6 +90,7 @@ const THREAD_TITLE_SCROLL_MIN_DURATION_MS = 1_500;
 const THREAD_TITLE_SCROLL_PX_PER_SECOND = 45;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
 const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
+const TOUCH_ACTIONS_QUERY = "(hover: none), (pointer: coarse)";
 
 type ListExpansion = number | "all";
 type SessionListMode = "projects" | "active";
@@ -737,6 +740,14 @@ function Sidebar({
   const [rateLimitsOpen, setRateLimitsOpen] = useState(false);
   const [rateLimitsUpdatedAt, setRateLimitsUpdatedAt] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [touchActions, setTouchActions] = useState(() => matchMedia(TOUCH_ACTIONS_QUERY).matches);
+  useEffect(() => {
+    const query = matchMedia(TOUCH_ACTIONS_QUERY);
+    const update = () => setTouchActions(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   const rateLimitsGeneration = useRef(0);
   useEffect(() => {
     rateLimitsGeneration.current++;
@@ -762,17 +773,20 @@ function Sidebar({
   );
   const childrenByParent = childThreadsByParent(allThreads);
   const roots = sortThreadBranchesByActivity(topLevelThreads(allThreads), childrenByParent);
-  const activeRoots = roots.filter((thread) => !thread.archived);
+  const activeRoots = pinnedThreadsFirst(roots.filter((thread) => !thread.archived));
   const archivedRoots = roots.filter((thread) => thread.archived);
   const groups = groupedThreads(snapshot?.projects ?? [], activeRoots);
   const orderedGroups = projectListDirection === "bottom-up" ? [...groups].reverse() : groups;
-  const activeFeedRoots = sortActiveFeedThreads(
-    activeRoots.filter(
-      (thread) => isActiveFeedEligible(thread) || pendingForkSourceIds.has(thread.id),
+  const activeFeedRoots = pinnedThreadsFirst(
+    sortActiveFeedThreads(
+      activeRoots.filter(
+        (thread) =>
+          thread.pinned || isActiveFeedEligible(thread) || pendingForkSourceIds.has(thread.id),
+      ),
+      childrenByParent,
+      null,
+      activeFeedRunningOrderRef.current.byParent,
     ),
-    childrenByParent,
-    null,
-    activeFeedRunningOrderRef.current.byParent,
   );
   const projectNames = new Map(
     (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
@@ -1330,6 +1344,7 @@ function Sidebar({
       </summary>
       {archivedRoots.map((thread) => (
         <ThreadBranch
+          touchActions={touchActions}
           branchHistoryExpansions={branchHistoryExpansions}
           thread={thread}
           childrenByParent={childrenByParent}
@@ -1433,6 +1448,8 @@ function Sidebar({
           <div className="active-session-list">
             {activeFeedRoots.map((thread) => (
               <ActiveThreadBranch
+                touchActions={touchActions}
+                onNewSession={openNewSession}
                 thread={thread}
                 childrenByParent={childrenByParent}
                 key={thread.id}
@@ -1455,11 +1472,15 @@ function Sidebar({
               const groupCollapsed = sidebarTree.collapsedProjectIds.has(key);
               const alwaysVisibleThreads = group.threads.filter(
                 (thread) =>
-                  hasAlwaysVisibleThreadStatus(thread) || pendingForkSourceIds.has(thread.id),
+                  thread.pinned ||
+                  hasAlwaysVisibleThreadStatus(thread) ||
+                  pendingForkSourceIds.has(thread.id),
               );
               const collapsibleThreads = group.threads.filter(
                 (thread) =>
-                  !hasAlwaysVisibleThreadStatus(thread) && !pendingForkSourceIds.has(thread.id),
+                  !thread.pinned &&
+                  !hasAlwaysVisibleThreadStatus(thread) &&
+                  !pendingForkSourceIds.has(thread.id),
               );
               const initialCollapsibleLimit = Math.max(
                 0,
@@ -1480,6 +1501,7 @@ function Sidebar({
               );
               const visible = group.threads.filter(
                 (thread) =>
+                  thread.pinned ||
                   hasAlwaysVisibleThreadStatus(thread) ||
                   pendingForkSourceIds.has(thread.id) ||
                   visibleCollapsibleIds.has(thread.id),
@@ -1652,6 +1674,7 @@ function Sidebar({
                 <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                   {visible.map((thread) => (
                     <ThreadBranch
+                      touchActions={touchActions}
                       branchHistoryExpansions={branchHistoryExpansions}
                       thread={thread}
                       childrenByParent={childrenByParent}
@@ -1726,12 +1749,14 @@ function Sidebar({
 }
 
 function ThreadBranch({
+  touchActions,
   thread,
   childrenByParent,
   branchHistoryExpansions,
   onNavigate,
   onToggleHistory,
 }: {
+  touchActions: boolean;
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
   branchHistoryExpansions: ReadonlyMap<string, ListExpansion>;
@@ -1757,7 +1782,7 @@ function ThreadBranch({
 
   return (
     <div className="thread-branch">
-      <ThreadLink thread={thread} onNavigate={onNavigate} />
+      <ThreadLink thread={thread} onNavigate={onNavigate} touchActions={touchActions} />
       {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
           {forkOperations.map((operation) => (
@@ -1770,6 +1795,7 @@ function ThreadBranch({
           ))}
           {visibleChildren.map((child) => (
             <ThreadBranch
+              touchActions={touchActions}
               branchHistoryExpansions={branchHistoryExpansions}
               thread={child}
               childrenByParent={childrenByParent}
@@ -1798,12 +1824,16 @@ function ThreadBranch({
 }
 
 function ActiveThreadBranch({
+  touchActions,
+  onNewSession,
   thread,
   childrenByParent,
   onNavigate,
   projectLabel,
   runningOrderByParent,
 }: {
+  touchActions: boolean;
+  onNewSession(projectId: string): void;
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
   onNavigate(): void;
@@ -1825,7 +1855,13 @@ function ActiveThreadBranch({
 
   return (
     <div className="thread-branch">
-      <ThreadLink thread={thread} onNavigate={onNavigate} secondaryLabel={projectLabel} />
+      <ThreadLink
+        thread={thread}
+        onNavigate={onNavigate}
+        secondaryLabel={projectLabel}
+        touchActions={touchActions}
+        onNewSession={onNewSession}
+      />
       {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
           {forkOperations.map((operation) => (
@@ -1838,6 +1874,8 @@ function ActiveThreadBranch({
           ))}
           {children.map((child) => (
             <ActiveThreadBranch
+              touchActions={touchActions}
+              onNewSession={onNewSession}
               thread={child}
               childrenByParent={childrenByParent}
               key={child.id}
@@ -1939,15 +1977,22 @@ function ThreadLink({
   thread,
   onNavigate,
   secondaryLabel,
+  touchActions,
+  onNewSession,
 }: {
   thread: ThreadSummary;
   onNavigate(): void;
   secondaryLabel?: string;
+  touchActions: boolean;
+  onNewSession?(projectId: string): void;
 }) {
-  const { api } = useConnection();
+  const { api, dispatch, state } = useConnection();
   const { language, t } = useI18n();
   const location = useLocation();
   const titleRef = useRef<HTMLSpanElement>(null);
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  const [pinning, setPinning] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
   const [finishConfirmationUpdatedAt, setFinishConfirmationUpdatedAt] = useState<number | null>(
     null,
   );
@@ -1960,6 +2005,13 @@ function ThreadLink({
       ? thread.relation.nickname?.trim() || thread.relation.role?.trim() || null
       : null;
   const displayTitle = agentName ? `${agentName} · ${title}` : title;
+  const canPin = thread.relation.kind === "session";
+  const project = onNewSession
+    ? state.snapshot?.projects.find((candidate) => candidate.id === thread.projectId)
+    : undefined;
+  const pinLabel = thread.pinned
+    ? t("Открепить сессию «{{title}}»", { title: displayTitle })
+    : t("Закрепить сессию «{{title}}»", { title: displayTitle });
   const canFinish =
     thread.relation.kind === "session" && thread.state === "completed" && thread.unread;
   const finishConfirmationArmed = finishConfirmationUpdatedAt === thread.updatedAt;
@@ -1975,7 +2027,27 @@ function ThreadLink({
     setFinishError(null);
   }
 
+  async function togglePin() {
+    if (pinning) return;
+    setPinning(true);
+    setPinError(null);
+    try {
+      const updated = await api.updateThread(thread.id, { pinned: !thread.pinned });
+      dispatch({ type: "thread", thread: updated });
+      menuRef.current?.removeAttribute("open");
+    } catch (caught) {
+      setPinError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось изменить закрепление сессии"),
+      );
+    } finally {
+      setPinning(false);
+    }
+  }
+
   async function finishThreadFromSidebar() {
+    if (finishing) return;
     setFinishError(null);
     if (!finishConfirmationArmed) {
       setFinishConfirmationUpdatedAt(thread.updatedAt);
@@ -1986,6 +2058,7 @@ function ThreadLink({
     setFinishing(true);
     try {
       await api.markRead(thread.id, { observedUpdatedAt: thread.updatedAt });
+      menuRef.current?.removeAttribute("open");
     } catch (caught) {
       setFinishError(
         caught instanceof Error
@@ -1997,85 +2070,178 @@ function ThreadLink({
     }
   }
 
-  return (
-    <div
-      className="thread-branch-row"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) resetFinishInteraction();
-      }}
-      onMouseLeave={resetFinishInteraction}
-    >
-      <span className="thread-branch-spacer" />
-      <NavLink
-        className={({ isActive }) =>
-          `thread-link${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
-        }
-        end
-        state={{ focusComposer: true }}
-        to={target}
-        onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
-        onClick={(event) => {
-          if (
-            location.pathname === target &&
-            !event.defaultPrevented &&
-            event.button === 0 &&
-            !event.metaKey &&
-            !event.altKey &&
-            !event.ctrlKey &&
-            !event.shiftKey
-          ) {
-            onNavigate();
-          }
-        }}
-      >
-        {secondaryLabel ? (
-          <span className="thread-link-copy">
-            <span className="thread-link-title" ref={titleRef}>
-              {displayTitle}
-            </span>
-            <span className="thread-link-project">{secondaryLabel}</span>
-          </span>
-        ) : (
-          <span className="thread-link-title" ref={titleRef}>
-            {displayTitle}
-          </span>
-        )}
-        {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
-          <span
-            aria-hidden="true"
-            className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
-            title={
-              thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
-            }
-          >
-            <BrowserIcon />
-          </span>
-        )}
-        <span className={threadStatusClasses(thread)} title={thread.state} />
-      </NavLink>
+  const actionCount = Number(Boolean(project)) + Number(canPin) + Number(canFinish);
+  const actions = (
+    <>
+      {project && (
+        <button
+          aria-label={t("Создать новую сессию в проекте {{project}}", {
+            project: project.displayName,
+          })}
+          className="thread-row-action thread-create-action"
+          onClick={() => {
+            menuRef.current?.removeAttribute("open");
+            onNewSession?.(project.id);
+          }}
+          title={t("Создать новую сессию в проекте {{project}}", { project: project.displayName })}
+          type="button"
+        >
+          <PlusIcon />
+          {touchActions && t("Новая сессия")}
+        </button>
+      )}
+      {canPin && (
+        <button
+          aria-busy={pinning}
+          aria-label={pinLabel}
+          aria-pressed={thread.pinned}
+          className={`thread-row-action thread-pin-action${thread.pinned ? " pinned" : ""}${pinError ? " failed" : ""}`}
+          disabled={pinning}
+          onClick={() => void togglePin()}
+          title={pinError ?? pinLabel}
+          type="button"
+        >
+          {pinning ? <span className="spinner small" /> : <PinIcon />}
+          {touchActions && (thread.pinned ? t("Открепить") : t("Закрепить"))}
+        </button>
+      )}
       {canFinish && (
         <button
           aria-busy={finishing}
           aria-label={finishLabel}
-          className={`thread-finish-action${finishConfirmationArmed ? " confirming" : ""}${finishError ? " failed" : ""}`}
+          className={`thread-row-action thread-finish-action${finishConfirmationArmed ? " confirming" : ""}${finishError ? " failed" : ""}`}
           disabled={finishing}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void finishThreadFromSidebar();
-          }}
+          onClick={() => void finishThreadFromSidebar()}
           title={finishError ?? finishLabel}
           type="button"
         >
           {finishing ? <span className="spinner small" /> : <CheckIcon />}
+          {touchActions &&
+            (finishConfirmationArmed ? t("Подтвердить завершение") : t("Закончить сессию"))}
         </button>
       )}
-      {finishError && (
-        <span className="sr-only" role="alert">
-          {finishError}
-        </span>
+    </>
+  );
+
+  return (
+    <>
+      <div
+        className="thread-branch-row"
+        style={
+          {
+            "--thread-action-width": `${touchActions ? (actionCount ? 44 : 0) : actionCount * 32}px`,
+          } as CSSProperties
+        }
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) resetFinishInteraction();
+        }}
+        onMouseLeave={() => {
+          if (!touchActions) resetFinishInteraction();
+        }}
+      >
+        <span className="thread-branch-spacer" />
+        <NavLink
+          className={({ isActive }) =>
+            `thread-link${actionCount ? " has-actions" : ""}${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
+          }
+          end
+          state={{ focusComposer: true }}
+          to={target}
+          onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
+          onClick={(event) => {
+            if (
+              location.pathname === target &&
+              !event.defaultPrevented &&
+              event.button === 0 &&
+              !event.metaKey &&
+              !event.altKey &&
+              !event.ctrlKey &&
+              !event.shiftKey
+            ) {
+              onNavigate();
+            }
+          }}
+        >
+          {secondaryLabel ? (
+            <span className="thread-link-copy">
+              <span className="thread-link-title" ref={titleRef}>
+                {displayTitle}
+              </span>
+              <span className="thread-link-project">{secondaryLabel}</span>
+            </span>
+          ) : (
+            <span className="thread-link-title" ref={titleRef}>
+              {displayTitle}
+            </span>
+          )}
+          {touchActions && thread.pinned && (
+            <span
+              className="thread-pinned-marker"
+              title={t("Сессия закреплена")}
+              aria-hidden="true"
+            >
+              <PinIcon />
+            </span>
+          )}
+          {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
+            <span
+              aria-hidden="true"
+              className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
+              title={
+                thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
+              }
+            >
+              <BrowserIcon />
+            </span>
+          )}
+          <span className={threadStatusClasses(thread)} title={thread.state} />
+        </NavLink>
+        {actionCount > 0 &&
+          (touchActions ? (
+            <details
+              className="thread-row-menu"
+              data-dismiss-on-outside-click
+              ref={menuRef}
+              onToggle={(event) => {
+                if (event.currentTarget.open) {
+                  event.currentTarget
+                    .querySelector(".thread-row-popover")
+                    ?.scrollIntoView?.({ block: "nearest" });
+                } else {
+                  resetFinishInteraction();
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.open = false;
+                event.currentTarget.querySelector("summary")?.focus();
+              }}
+            >
+              <summary
+                className="thread-more-action"
+                aria-label={t("Действия с сессией «{{title}}»", { title: displayTitle })}
+              >
+                <MoreIcon />
+              </summary>
+              <div className="thread-row-popover">{actions}</div>
+            </details>
+          ) : (
+            <div className="thread-row-actions">{actions}</div>
+          ))}
+        {finishError && (
+          <span className="sr-only" role="alert">
+            {finishError}
+          </span>
+        )}
+      </div>
+      {pinError && (
+        <div className="thread-action-error" role="alert">
+          {pinError}
+        </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -2101,6 +2267,13 @@ function prepareThreadTitleScroll(element: HTMLSpanElement | null): void {
 
 function topLevelThreads(threads: ThreadSummary[]): ThreadSummary[] {
   return threads.filter((thread) => thread.relation.kind === "session");
+}
+
+function pinnedThreadsFirst(threads: ThreadSummary[]): ThreadSummary[] {
+  return [
+    ...threads.filter((thread) => thread.pinned),
+    ...threads.filter((thread) => !thread.pinned),
+  ];
 }
 
 function isActiveChildFeedEligible(thread: ThreadSummary): boolean {

@@ -669,6 +669,7 @@ export function ThreadPage({
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [browserUpdating, setBrowserUpdating] = useState(false);
+  const [pinUpdating, setPinUpdating] = useState(false);
   const [queueAction, setQueueAction] = useState<QueueAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
@@ -3138,7 +3139,24 @@ export function ThreadPage({
     }
   }
 
-  const togglePin = () => void api.updateThread(threadId, { pinned: !summary!.pinned });
+  async function togglePin(menu: HTMLDetailsElement | null) {
+    if (pinUpdating || !summary) return;
+    setPinUpdating(true);
+    setError(null);
+    try {
+      const thread = await api.updateThread(threadId, { pinned: !summary.pinned });
+      dispatch({ type: "thread", thread });
+      menu?.removeAttribute("open");
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? (localizeKnownServerText(language, caught.message) ?? caught.message)
+          : t("Не удалось изменить закрепление сессии"),
+      );
+    } finally {
+      setPinUpdating(false);
+    }
+  }
   const toggleArchive = () => void api.archive(threadId, !summary!.archived);
 
   async function updateSettings(patch: UpdateThreadSettingsRequest) {
@@ -3519,7 +3537,12 @@ export function ThreadPage({
                       <MoreIcon />
                     </summary>
                     <div className="action-menu-popover">
-                      <button onClick={togglePin}>
+                      <button
+                        onClick={(event) => void togglePin(event.currentTarget.closest("details"))}
+                        disabled={pinUpdating}
+                        aria-busy={pinUpdating}
+                        aria-pressed={workspaceSummary.pinned}
+                      >
                         <PinIcon /> {workspaceSummary.pinned ? t("Открепить") : t("Закрепить")}
                       </button>
                       <button onClick={() => setRenaming(true)}>

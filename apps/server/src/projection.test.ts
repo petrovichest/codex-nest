@@ -114,6 +114,49 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("persists pin changes across reloads and publishes them without Codex RPCs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-pinning-test-"));
+    directories.push(directory);
+    const path = join(directory, "state.json");
+    const store = new StateStore(path);
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 5));
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const original = projection.summary("one")!;
+
+    await projection.setPinned("one", true);
+    expect(projection.summary("one")).toEqual({ ...original, pinned: true });
+    expect(events).toContainEqual({
+      type: "thread.upserted",
+      thread: { ...original, pinned: true },
+    });
+    await store.flushed();
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      reloaded,
+      new AttentionManager(),
+    );
+    restored.upsertThread(thread("one", "/work", 5));
+    expect(restored.summary("one")?.pinned).toBe(true);
+
+    await restored.setPinned("one", false);
+    expect(restored.summary("one")?.pinned).toBe(false);
+    await reloaded.flushed();
+    const unpinned = new StateStore(path);
+    await unpinned.load();
+    expect(unpinned.view().threadMeta.one?.pinned).toBe(false);
+    expect(bridge.request).not.toHaveBeenCalled();
+  });
+
   it("reports configured Codex settings separately and clears stale input denial on unload", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-input-metadata-test-"));
     directories.push(directory);

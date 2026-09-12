@@ -134,7 +134,7 @@ test.describe("CodexNest redesign visual contract", () => {
             element.getBoundingClientRect().right - action.getBoundingClientRect().right,
           );
         }),
-      ).toBe(4);
+      ).toBe(12);
       await expect(row).toHaveScreenshot("18-desktop-light-sidebar-finish.png");
 
       await finish.click();

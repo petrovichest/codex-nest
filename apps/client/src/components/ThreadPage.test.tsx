@@ -1518,6 +1518,25 @@ describe("Activity", () => {
     expect(screen.getByText("Готовый отчёт")).toBeInTheDocument();
   });
 
+  it("applies pin responses from the page menu and exposes recoverable errors", async () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary);
+    api.updateThread.mockRejectedValueOnce(new Error("Сервер недоступен"));
+    renderThread();
+    fireEvent.click(screen.getByLabelText("Действия с задачей"));
+    const pin = screen.getByRole("button", { name: "Закрепить" });
+    fireEvent.click(pin);
+    expect(await screen.findByText("Сервер недоступен")).toBeInTheDocument();
+    expect(pin).toBeEnabled();
+    const updated = { ...summary, pinned: true };
+    api.updateThread.mockResolvedValueOnce(updated);
+    fireEvent.click(pin);
+    await waitFor(() =>
+      expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: updated }),
+    );
+    expect(screen.queryByText("Сервер недоступен")).not.toBeInTheDocument();
+  });
+
   it("keeps send, pin, rename and archive actions wired to the existing API", async () => {
     const api = threadApi();
     mockThreadConnection(api, summary);
