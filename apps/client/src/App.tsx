@@ -96,6 +96,7 @@ type ThemeMode = "dark" | "light" | "system";
 
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
+  pinnedGroupCollapsed: boolean;
 };
 
 type ActiveFeedRunningOrder = {
@@ -543,6 +544,7 @@ function readLayoutPreferences(): {
 function emptySidebarTreeState(): SidebarTreeState {
   return {
     collapsedProjectIds: new Set(),
+    pinnedGroupCollapsed: false,
   };
 }
 
@@ -570,7 +572,9 @@ function readSidebarTreeState(serverBaseUrl: string): SidebarTreeState {
     const record = parsed as Record<string, unknown>;
     if (record.version !== 1) return emptySidebarTreeState();
     const collapsedProjectIds = readStringSet(record.collapsedProjectIds);
-    return collapsedProjectIds ? { collapsedProjectIds } : emptySidebarTreeState();
+    return collapsedProjectIds
+      ? { collapsedProjectIds, pinnedGroupCollapsed: record.pinnedGroupCollapsed === true }
+      : emptySidebarTreeState();
   } catch {
     return emptySidebarTreeState();
   }
@@ -588,6 +592,7 @@ function writeSidebarTreeState(serverBaseUrl: string, state: SidebarTreeState): 
       JSON.stringify({
         version: 1,
         collapsedProjectIds: [...state.collapsedProjectIds].sort(),
+        pinnedGroupCollapsed: state.pinnedGroupCollapsed,
       }),
     );
   } catch {
@@ -611,7 +616,7 @@ function pruneSidebarTreeState(state: SidebarTreeState, projectIds: Set<string>)
   const collapsedProjectIds = retainSidebarTreeEntries(state.collapsedProjectIds, projectIds);
   return collapsedProjectIds.size === state.collapsedProjectIds.size
     ? state
-    : { collapsedProjectIds };
+    : { ...state, collapsedProjectIds };
 }
 
 function retainSidebarTreeEntries(values: Set<string>, validIds: Set<string>): Set<string> {
@@ -778,6 +783,11 @@ function Sidebar({
       activeFeedRunningOrderRef.current.byParent,
     ),
   );
+  const pinnedFeedRoots = activeFeedRoots.filter((thread) => thread.pinned);
+  const unpinnedFeedRoots = activeFeedRoots.filter((thread) => !thread.pinned);
+  const pinnedGroupLabel = sidebarTree.pinnedGroupCollapsed
+    ? t("Показать закрепленные ({{count}})", { count: pinnedFeedRoots.length })
+    : t("Свернуть закрепленные ({{count}})", { count: pinnedFeedRoots.length });
   const projectNames = new Map(
     (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
   );
@@ -911,6 +921,22 @@ function Sidebar({
 
   function toggleBranchHistory(threadId: string, total: number) {
     setBranchHistoryExpansions((current) => toggleListExpansion(current, threadId, total, 0));
+  }
+
+  function renderActiveThread(thread: ThreadSummary) {
+    return (
+      <ActiveThreadBranch
+        onNewSession={openNewSession}
+        thread={thread}
+        childrenByParent={childrenByParent}
+        key={thread.id}
+        onNavigate={onClose}
+        runningOrderByParent={activeFeedRunningOrderRef.current.byParent}
+        projectLabel={
+          (thread.projectId ? projectNames.get(thread.projectId) : null) ?? t("Без проекта")
+        }
+      />
+    );
   }
 
   function showProjectNotice(
@@ -1412,6 +1438,26 @@ function Sidebar({
         >
           {t("Активные")}
         </button>
+        {sessionListMode === "active" && pinnedFeedRoots.length > 0 && (
+          <button
+            aria-controls="active-pinned-sessions"
+            aria-expanded={!sidebarTree.pinnedGroupCollapsed}
+            aria-label={pinnedGroupLabel}
+            className="pinned-group-toggle"
+            onClick={() =>
+              setSidebarTree((current) => ({
+                ...current,
+                pinnedGroupCollapsed: !current.pinnedGroupCollapsed,
+              }))
+            }
+            title={pinnedGroupLabel}
+            type="button"
+          >
+            {sidebarTree.pinnedGroupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+            <PinIcon />
+            <span aria-hidden="true">{pinnedFeedRoots.length}</span>
+          </button>
+        )}
       </div>
       <nav
         className={`thread-nav ${projectListDirection}`}
@@ -1435,19 +1481,16 @@ function Sidebar({
       >
         {sessionListMode === "active" ? (
           <div className="active-session-list">
-            {activeFeedRoots.map((thread) => (
-              <ActiveThreadBranch
-                onNewSession={openNewSession}
-                thread={thread}
-                childrenByParent={childrenByParent}
-                key={thread.id}
-                onNavigate={onClose}
-                runningOrderByParent={activeFeedRunningOrderRef.current.byParent}
-                projectLabel={
-                  (thread.projectId ? projectNames.get(thread.projectId) : null) ?? t("Без проекта")
-                }
-              />
-            ))}
+            {pinnedFeedRoots.length > 0 && (
+              <div
+                className="active-pinned-sessions"
+                hidden={sidebarTree.pinnedGroupCollapsed}
+                id="active-pinned-sessions"
+              >
+                {pinnedFeedRoots.map(renderActiveThread)}
+              </div>
+            )}
+            {unpinnedFeedRoots.map(renderActiveThread)}
             {!activeFeedRoots.length && (
               <div className="active-session-empty">{t("Нет активных сессий")}</div>
             )}

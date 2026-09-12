@@ -580,6 +580,8 @@ const ENGLISH: Record<string, string> = {
   "Закрепить сессию «{{title}}»": "Pin session “{{title}}”",
   "Открепить сессию «{{title}}»": "Unpin session “{{title}}”",
   "Сессия закреплена": "Session pinned",
+  "Показать закрепленные ({{count}})": "Show pinned sessions ({{count}})",
+  "Свернуть закрепленные ({{count}})": "Collapse pinned sessions ({{count}})",
   "Действия с сессией «{{title}}»": "Actions for session “{{title}}”",
   "Не удалось изменить закрепление сессии": "Failed to change session pinning",
   "Закончить сессию": "Finish session",

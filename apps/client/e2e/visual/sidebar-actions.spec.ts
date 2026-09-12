@@ -40,10 +40,46 @@ async function openSidebar(page: Page, theme: "light" | "dark") {
 for (const theme of ["light", "dark"] as const) {
   test(`desktop ${theme} active alignment, hover actions and pin persistence`, async ({ page }) => {
     await openSidebar(page, theme);
+    const switcher = page.locator(".session-list-mode");
+    const switcherBefore = await switcher.boundingBox();
+    const navBefore = await page.locator(".thread-nav").boundingBox();
     await page.getByRole("button", { name: "Активные", exact: true }).click();
-    const roots = page.locator(".active-session-list > .thread-branch > .thread-branch-row");
+    expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await page.locator(".thread-nav").boundingBox()).toEqual(navBefore);
+    const roots = page.locator(
+      ".active-session-list > .thread-branch > .thread-branch-row, .active-pinned-sessions > .thread-branch > .thread-branch-row",
+    );
     const row = roots.filter({ has: page.locator('a[href="/threads/session-main"]') });
     await expect(roots.first()).toContainText("Полировка мастерской");
+    const topRowBounds = await row.boundingBox();
+    expect(topRowBounds!.y).toBe(navBefore!.y + 8);
+    expect(topRowBounds!.height).toBe(42);
+    const collapse = page.locator(".pinned-group-toggle");
+    await expect(collapse).toHaveAccessibleName("Свернуть закрепленные (1)");
+    await collapse.focus();
+    await page.keyboard.press("Enter");
+    await expect(row).toBeHidden();
+    await expect(collapse).toHaveAttribute("aria-expanded", "false");
+    expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    const ordinary = page.locator('a[href="/threads/session-active"]');
+    expect((await ordinary.boundingBox())!.y).toBe(topRowBounds!.y);
+    await expect(page.locator(".sidebar")).toHaveScreenshot(
+      `sidebar-pinned-collapsed-${theme}.png`,
+      {
+        maxDiffPixelRatio: 0,
+      },
+    );
+    await page.keyboard.press("Tab");
+    await expect(ordinary).toBeFocused();
+    await page.getByRole("button", { name: "Проекты", exact: true }).click();
+    await expect(collapse).toHaveCount(0);
+    await page.getByRole("button", { name: "Активные", exact: true }).click();
+    await expect(collapse).toHaveAttribute("aria-expanded", "false");
+    await expect(row).toBeHidden();
+    await collapse.focus();
+    await page.keyboard.press("Space");
+    await expect(row).toBeVisible();
+    await expect(collapse).toHaveAttribute("aria-expanded", "true");
     const title = row.locator(".thread-link-title");
     const expectedLeft = await page
       .locator(".sidebar-control-action svg")
@@ -102,6 +138,8 @@ for (const theme of ["light", "dark"] as const) {
     await trigger.click();
     await pin.click();
     await expect(row).toHaveCount(0);
+    await expect(collapse).toHaveCount(0);
+    expect(await switcher.boundingBox()).toEqual(switcherBefore);
     await page.getByRole("button", { name: "Проекты", exact: true }).click();
     await page.getByLabel("Действия с сессией «Полировка мастерской»").focus();
     await page.getByLabel("Действия с сессией «Полировка мастерской»").click();
@@ -119,6 +157,32 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
+test("keeps the pinned toggle on one line in a narrow sidebar", async ({ page }) => {
+  await openSidebar(page, "light");
+  await page.locator(".sidebar").evaluate((element) => {
+    (element as HTMLElement).style.width = "240px";
+  });
+  const switcher = page.locator(".session-list-mode");
+  const before = await switcher.boundingBox();
+  await page.getByRole("button", { name: "Активные", exact: true }).click();
+  expect(await switcher.boundingBox()).toEqual(before);
+  expect(
+    await switcher.locator("button").evaluateAll((buttons) =>
+      buttons.every((button) => {
+        const bounds = button.getBoundingClientRect();
+        const parent = button.parentElement!.getBoundingClientRect();
+        return (
+          bounds.left >= parent.left &&
+          bounds.right <= parent.right &&
+          bounds.top >= parent.top &&
+          bounds.bottom <= parent.bottom &&
+          button.scrollWidth <= button.clientWidth
+        );
+      }),
+    ),
+  ).toBe(true);
+});
+
 test.describe("touch sidebar actions", () => {
   test.use({ hasTouch: true, viewport: PHONE_VIEWPORT });
 
@@ -127,7 +191,17 @@ test.describe("touch sidebar actions", () => {
   }) => {
     await openSidebar(page, "light");
     await page.getByRole("button", { name: "Открыть список задач" }).click();
+    const switcher = page.locator(".session-list-mode");
+    const switcherBefore = await switcher.boundingBox();
     await page.getByRole("button", { name: "Активные", exact: true }).click();
+    expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    const collapse = page.locator(".pinned-group-toggle");
+    expect((await collapse.boundingBox())!.height).toBeGreaterThanOrEqual(32);
+    await collapse.tap();
+    await expect(page.locator(".active-pinned-sessions")).toBeHidden();
+    expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    await collapse.tap();
+    await expect(page.locator(".active-pinned-sessions")).toBeVisible();
     const trigger = page.getByLabel("Действия с сессией «Полировка мастерской»");
     const menu = trigger.locator("..");
     await expect(menu.locator(".thread-row-popover")).toBeHidden();

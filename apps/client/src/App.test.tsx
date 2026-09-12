@@ -344,7 +344,7 @@ describe("App routing and navigation", () => {
     const titles = () =>
       Array.from(
         view.container.querySelectorAll(
-          ".active-session-list > .thread-branch > .thread-branch-row .thread-link-title",
+          ".active-session-list > .thread-branch > .thread-branch-row .thread-link-title, .active-pinned-sessions > .thread-branch > .thread-branch-row .thread-link-title",
         ),
       ).map((element) => element.textContent);
 
@@ -364,6 +364,161 @@ describe("App routing and navigation", () => {
       </MemoryRouter>,
     );
     expect(titles()).toEqual([running.title]);
+  });
+
+  it("collapses every pinned branch without hiding ordinary active sessions or navigating", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const pinned: ThreadSummary = {
+      ...baseThread,
+      id: "pinned",
+      title: "Закрепленная",
+      pinned: true,
+      state: "completed",
+    };
+    const running: ThreadSummary = {
+      ...pinned,
+      id: "pinned-running",
+      title: "Закрепленная в работе",
+      state: "running",
+    };
+    const child: ThreadSummary = {
+      ...baseThread,
+      id: "child",
+      title: "Дочерняя в работе",
+      state: "running",
+      relation: {
+        kind: "subagent",
+        sessionId: "child",
+        parentThreadId: running.id,
+        nickname: null,
+        role: null,
+      },
+    };
+    const ordinary: ThreadSummary = { ...baseThread, state: "running" };
+    const api = mockConnection(
+      snapshot([
+        ordinary,
+        pinned,
+        running,
+        child,
+        { ...pinned, id: "archived", title: "Архивная", archived: true },
+      ]),
+    );
+    renderApp("/threads/pinned-running");
+    const toggle = screen.getByRole("button", { name: "Свернуть закрепленные (2)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByRole("link", { name: /Закрепленная\s*Проект/ })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: /Дочерняя в работе/ })).toBeVisible();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAccessibleName("Показать закрепленные (2)");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("link", { name: /Закрепленная|Дочерняя/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: new RegExp(ordinary.title) })).toBeVisible();
+    expect(screen.getByRole("heading", { name: running.title })).toBeVisible();
+    expect(api.updateThread).not.toHaveBeenCalled();
+    expect(api.markRead).not.toHaveBeenCalled();
+    expect(manualNavigationIntent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
+    expect(screen.queryByRole("button", { name: /закрепленные/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: pinned.title })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Активные" }));
+    expect(screen.getByRole("button", { name: "Показать закрепленные (2)" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Показать закрепленные (2)" }));
+    expect(screen.getByRole("link", { name: /Дочерняя в работе/ })).toBeVisible();
+  });
+
+  it("keeps new pins collapsed, updates the count and removes the empty group after unpinning", () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const pinned: ThreadSummary = {
+      ...baseThread,
+      id: "pinned",
+      title: "Закрепленная",
+      pinned: true,
+      state: "completed",
+    };
+    const running: ThreadSummary = { ...baseThread, state: "running" };
+    mockConnection(snapshot([pinned, running]));
+    const view = renderApp("/threads/newer");
+    const context = connection.mock.results.at(-1)!.value;
+    const update = (threads: ThreadSummary[]) => {
+      context.state.snapshot = snapshot(threads);
+      view.rerender(
+        <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
+          <App
+            settings={{ baseUrl: "https://pi.local", token: "secret" }}
+            onDisconnected={() => undefined}
+          />
+        </MemoryRouter>,
+      );
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Свернуть закрепленные (1)" }));
+    update([pinned, { ...running, pinned: true }]);
+    expect(screen.getByRole("button", { name: "Показать закрепленные (2)" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByRole("link", { name: new RegExp(running.title) })).not.toBeInTheDocument();
+    expect(screen.queryByText("Нет активных сессий")).not.toBeInTheDocument();
+
+    update([{ ...pinned, pinned: false }, running]);
+    expect(screen.queryByRole("button", { name: /закрепленные/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: new RegExp(running.title) })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /Закрепленная/ })).not.toBeInTheDocument();
+    update([pinned, running]);
+    expect(screen.getByRole("button", { name: "Показать закрепленные (1)" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("restores pinned collapse per server and preserves it when stale projects are pruned", async () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const storageKey = "codexnest.sidebarTree.v1:https%3A%2F%2Fpi.local";
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        version: 1,
+        collapsedProjectIds: ["missing-project"],
+        pinnedGroupCollapsed: true,
+      }),
+    );
+    mockConnection(snapshot([{ ...baseThread, pinned: true }]));
+    const view = renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Показать закрепленные (1)" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
+        version: 1,
+        collapsedProjectIds: [],
+        pinnedGroupCollapsed: true,
+      }),
+    );
+    view.unmount();
+
+    const otherServer = renderApp("/threads/newer", () => undefined, "https://other.local");
+    expect(screen.getByRole("button", { name: "Свернуть закрепленные (1)" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    otherServer.unmount();
+    const restored = renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Показать закрепленные (1)" }));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(storageKey)!).pinnedGroupCollapsed).toBe(false),
+    );
+    restored.unmount();
+    renderApp("/threads/newer");
+    expect(screen.getByRole("button", { name: "Свернуть закрепленные (1)" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 
   it("shows every pinned project session before ordinary sessions without expanding history", () => {
@@ -2141,6 +2296,7 @@ describe("App routing and navigation", () => {
       expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
         version: 1,
         collapsedProjectIds: [],
+        pinnedGroupCollapsed: false,
       }),
     );
   });
@@ -2159,6 +2315,7 @@ describe("App routing and navigation", () => {
       JSON.stringify({
         version: 1,
         collapsedProjectIds: ["missing-project"],
+        pinnedGroupCollapsed: "true",
         expandedProjectListIds: ["missing-project"],
         openBranchIds: ["missing-thread"],
         expandedBranchListIds: ["missing-thread"],
@@ -2170,6 +2327,7 @@ describe("App routing and navigation", () => {
       expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual({
         version: 1,
         collapsedProjectIds: [],
+        pinnedGroupCollapsed: false,
       }),
     );
   });
