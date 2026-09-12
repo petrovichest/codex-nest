@@ -112,17 +112,20 @@ test.describe("CodexNest redesign visual contract", () => {
       );
       const title = row.locator(".thread-link-title");
       const titleBeforeHover = await title.boundingBox();
-      const restingPin = await row.locator(".thread-pin-action").boundingBox();
+      const restingPin = await row.locator(".thread-pinned-marker").boundingBox();
       expect(restingPin!.x - (titleBeforeHover!.x + titleBeforeHover!.width)).toBeLessThanOrEqual(
         12,
       );
       await link.hover();
       const hoveredTitle = await title.boundingBox();
       expect(hoveredTitle!.width).toBeLessThan(titleBeforeHover!.width);
-      const createBounds = await row.locator(".thread-create-action").boundingBox();
-      expect(hoveredTitle!.x + hoveredTitle!.width).toBeLessThanOrEqual(createBounds!.x);
+      const trigger = row.getByLabel("Действия с сессией «Полировка мастерской»");
+      const triggerBounds = await trigger.boundingBox();
+      expect(hoveredTitle!.x + hoveredTitle!.width).toBeLessThanOrEqual(triggerBounds!.x);
 
       const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
+      await expect(finish).toBeHidden();
+      await trigger.click();
       await expect(finish).toBeVisible();
       await expect(link).toHaveClass(/finishable/);
       const rowHoverBackground = await link.evaluate(
@@ -138,14 +141,16 @@ test.describe("CodexNest redesign visual contract", () => {
       await expect(link).toHaveCSS("background-color", rowHoverBackground);
       expect(
         await row.evaluate((element) => {
-          const action = element.querySelector<HTMLElement>(".thread-finish-action");
+          const action = element.querySelector<HTMLElement>(".thread-more-action");
           if (!action) return null;
           return Math.round(
             element.getBoundingClientRect().right - action.getBoundingClientRect().right,
           );
         }),
       ).toBe(12);
-      await expect(row).toHaveScreenshot("18-desktop-light-sidebar-finish.png");
+      await expect(row.locator(".thread-row-popover")).toHaveScreenshot(
+        "18-desktop-light-sidebar-finish.png",
+      );
 
       await finish.click();
       await expect(finish).toHaveAccessibleName(

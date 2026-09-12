@@ -349,6 +349,7 @@ describe("App routing and navigation", () => {
       ).map((element) => element.textContent);
 
     expect(titles()).toEqual(["Закрепленная", running.title]);
+    fireEvent.click(screen.getByLabelText("Действия с сессией «Закрепленная»"));
     expect(screen.getByRole("button", { name: "Открепить сессию «Закрепленная»" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -400,6 +401,7 @@ describe("App routing and navigation", () => {
       const request = deferred<ThreadSummary>();
       api.updateThread.mockReturnValueOnce(request.promise);
       renderApp("/threads/newer");
+      fireEvent.click(screen.getByLabelText(`Действия с сессией «${thread.title}»`));
       const pin = screen.getByRole("button", { name: `Закрепить сессию «${thread.title}»` });
 
       fireEvent.click(pin);
@@ -451,6 +453,7 @@ describe("App routing and navigation", () => {
       const row = screen
         .getByRole("link", { name: /Источник/ })
         .closest(".thread-branch-row") as HTMLElement;
+      fireEvent.click(within(row).getByLabelText("Действия с сессией «Источник»"));
       if (isChild)
         expect(within(row).queryByRole("button", { name: /Закрепить/ })).not.toBeInTheDocument();
       fireEvent.click(
@@ -472,33 +475,37 @@ describe("App routing and navigation", () => {
       localStorage.setItem("codexnest.sessionListMode", "active");
       mockConnection(snapshot([{ ...baseThread, projectId, state: "running" }]));
       renderApp("/threads/newer");
+      fireEvent.click(screen.getByLabelText(`Действия с сессией «${baseThread.title}»`));
       expect(
         screen.queryByRole("button", { name: /Создать новую сессию/ }),
       ).not.toBeInTheDocument();
     },
   );
 
-  it("opens touch actions without navigating and closes the menu with Escape or outside click", () => {
-    localStorage.setItem("codexnest.sessionListMode", "active");
-    mockConnection(snapshot([{ ...baseThread, state: "running" }]));
-    mockMobileViewport();
-    renderApp("/threads/newer");
-    const trigger = screen.getByLabelText(`Действия с сессией «${baseThread.title}»`);
-    const menu = trigger.closest("details")!;
-    expect(menu).not.toHaveAttribute("open");
-    fireEvent.click(trigger);
-    expect(menu).toHaveAttribute("open");
-    expect(within(menu).getByRole("button", { name: /Создать новую сессию/ })).toBeVisible();
-    fireEvent.keyDown(within(menu).getByRole("button", { name: /Закрепить сессию/ }), {
-      key: "Escape",
-    });
-    expect(menu).not.toHaveAttribute("open");
-    expect(trigger).toHaveFocus();
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("heading", { name: baseThread.title }));
-    expect(menu).not.toHaveAttribute("open");
-    expect(manualNavigationIntent).not.toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    "opens actions without navigating and closes with Escape or outside click (touch: %s)",
+    (touch) => {
+      localStorage.setItem("codexnest.sessionListMode", "active");
+      mockConnection(snapshot([{ ...baseThread, state: "running" }]));
+      if (touch) mockMobileViewport();
+      renderApp("/threads/newer");
+      const trigger = screen.getByLabelText(`Действия с сессией «${baseThread.title}»`);
+      const menu = trigger.closest("details")!;
+      expect(menu).not.toHaveAttribute("open");
+      fireEvent.click(trigger);
+      expect(menu).toHaveAttribute("open");
+      expect(within(menu).getByRole("button", { name: /Создать новую сессию/ })).toBeVisible();
+      fireEvent.keyDown(within(menu).getByRole("button", { name: /Закрепить сессию/ }), {
+        key: "Escape",
+      });
+      expect(menu).not.toHaveAttribute("open");
+      expect(trigger).toHaveFocus();
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole("heading", { name: baseThread.title }));
+      expect(menu).not.toHaveAttribute("open");
+      expect(manualNavigationIntent).not.toHaveBeenCalled();
+    },
+  );
 
   it("requires a second touch menu click to finish and keeps the pinned session visible", async () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
@@ -1275,6 +1282,7 @@ describe("App routing and navigation", () => {
     );
     renderApp("/threads/running");
 
+    fireEvent.click(screen.getByLabelText("Действия с сессией «Готовая сессия»"));
     const finish = screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" });
     expect(screen.getAllByRole("button", { name: /Закончить сессию/ })).toHaveLength(1);
     expect(finish.closest(".thread-branch-row")?.querySelector(".thread-link")).toHaveClass(
@@ -1297,14 +1305,11 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("link", { name: /Выполняется/ })).toHaveClass("active");
 
     resolveFinish?.();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" }),
-      ).toBeEnabled(),
-    );
+    await waitFor(() => expect(finish).toBeEnabled());
+    expect(finish.closest("details")).not.toHaveAttribute("open");
   });
 
-  it("shows the finish action in active mode and resets confirmation on leave or blur", () => {
+  it("keeps finish confirmation on mouse leave and resets it on menu close or blur", async () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const finishable = {
       ...baseThread,
@@ -1319,11 +1324,16 @@ describe("App routing and navigation", () => {
     );
     renderApp("/threads/running");
 
+    const trigger = screen.getByLabelText("Действия с сессией «Результат»");
+    fireEvent.click(trigger);
     const finish = screen.getByRole("button", { name: "Закончить сессию «Результат»" });
     fireEvent.click(finish);
     expect(finish).toHaveAccessibleName("Нажмите ещё раз, чтобы закончить сессию «Результат»");
     fireEvent.mouseLeave(finish.closest(".thread-branch-row")!);
-    expect(finish).toHaveAccessibleName("Закончить сессию «Результат»");
+    expect(finish).toHaveAccessibleName("Нажмите ещё раз, чтобы закончить сессию «Результат»");
+    fireEvent.click(trigger);
+    await waitFor(() => expect(finish).toHaveAccessibleName("Закончить сессию «Результат»"));
+    fireEvent.click(trigger);
 
     fireEvent.click(finish);
     fireEvent.blur(finish, { relatedTarget: document.body });
@@ -1348,6 +1358,7 @@ describe("App routing and navigation", () => {
     api.markRead.mockRejectedValue(new Error("Сеть недоступна"));
     renderApp("/threads/finishable");
 
+    fireEvent.click(screen.getByLabelText("Действия с сессией «Готовая сессия»"));
     const finish = screen.getByRole("button", { name: "Закончить сессию «Готовая сессия»" });
     fireEvent.click(finish);
     fireEvent.click(finish);

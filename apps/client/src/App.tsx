@@ -1,5 +1,4 @@
 import {
-  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type TouchEvent as ReactTouchEvent,
@@ -90,7 +89,6 @@ const THREAD_TITLE_SCROLL_MIN_DURATION_MS = 1_500;
 const THREAD_TITLE_SCROLL_PX_PER_SECOND = 45;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
 const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
-const TOUCH_ACTIONS_QUERY = "(hover: none), (pointer: coarse)";
 
 type ListExpansion = number | "all";
 type SessionListMode = "projects" | "active";
@@ -740,14 +738,6 @@ function Sidebar({
   const [rateLimitsOpen, setRateLimitsOpen] = useState(false);
   const [rateLimitsUpdatedAt, setRateLimitsUpdatedAt] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [touchActions, setTouchActions] = useState(() => matchMedia(TOUCH_ACTIONS_QUERY).matches);
-  useEffect(() => {
-    const query = matchMedia(TOUCH_ACTIONS_QUERY);
-    const update = () => setTouchActions(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
   const rateLimitsGeneration = useRef(0);
   useEffect(() => {
     rateLimitsGeneration.current++;
@@ -1344,7 +1334,6 @@ function Sidebar({
       </summary>
       {archivedRoots.map((thread) => (
         <ThreadBranch
-          touchActions={touchActions}
           branchHistoryExpansions={branchHistoryExpansions}
           thread={thread}
           childrenByParent={childrenByParent}
@@ -1448,7 +1437,6 @@ function Sidebar({
           <div className="active-session-list">
             {activeFeedRoots.map((thread) => (
               <ActiveThreadBranch
-                touchActions={touchActions}
                 onNewSession={openNewSession}
                 thread={thread}
                 childrenByParent={childrenByParent}
@@ -1674,7 +1662,6 @@ function Sidebar({
                 <div className="project-sessions" hidden={groupCollapsed} id={sessionsId}>
                   {visible.map((thread) => (
                     <ThreadBranch
-                      touchActions={touchActions}
                       branchHistoryExpansions={branchHistoryExpansions}
                       thread={thread}
                       childrenByParent={childrenByParent}
@@ -1749,14 +1736,12 @@ function Sidebar({
 }
 
 function ThreadBranch({
-  touchActions,
   thread,
   childrenByParent,
   branchHistoryExpansions,
   onNavigate,
   onToggleHistory,
 }: {
-  touchActions: boolean;
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
   branchHistoryExpansions: ReadonlyMap<string, ListExpansion>;
@@ -1782,7 +1767,7 @@ function ThreadBranch({
 
   return (
     <div className="thread-branch">
-      <ThreadLink thread={thread} onNavigate={onNavigate} touchActions={touchActions} />
+      <ThreadLink thread={thread} onNavigate={onNavigate} />
       {(children.length > 0 || forkOperations.length > 0) && (
         <div className="thread-branch-children">
           {forkOperations.map((operation) => (
@@ -1795,7 +1780,6 @@ function ThreadBranch({
           ))}
           {visibleChildren.map((child) => (
             <ThreadBranch
-              touchActions={touchActions}
               branchHistoryExpansions={branchHistoryExpansions}
               thread={child}
               childrenByParent={childrenByParent}
@@ -1824,7 +1808,6 @@ function ThreadBranch({
 }
 
 function ActiveThreadBranch({
-  touchActions,
   onNewSession,
   thread,
   childrenByParent,
@@ -1832,7 +1815,6 @@ function ActiveThreadBranch({
   projectLabel,
   runningOrderByParent,
 }: {
-  touchActions: boolean;
   onNewSession(projectId: string): void;
   thread: ThreadSummary;
   childrenByParent: Map<string, ThreadSummary[]>;
@@ -1859,7 +1841,6 @@ function ActiveThreadBranch({
         thread={thread}
         onNavigate={onNavigate}
         secondaryLabel={projectLabel}
-        touchActions={touchActions}
         onNewSession={onNewSession}
       />
       {(children.length > 0 || forkOperations.length > 0) && (
@@ -1874,7 +1855,6 @@ function ActiveThreadBranch({
           ))}
           {children.map((child) => (
             <ActiveThreadBranch
-              touchActions={touchActions}
               onNewSession={onNewSession}
               thread={child}
               childrenByParent={childrenByParent}
@@ -1977,13 +1957,11 @@ function ThreadLink({
   thread,
   onNavigate,
   secondaryLabel,
-  touchActions,
   onNewSession,
 }: {
   thread: ThreadSummary;
   onNavigate(): void;
   secondaryLabel?: string;
-  touchActions: boolean;
   onNewSession?(projectId: string): void;
 }) {
   const { api, dispatch, state } = useConnection();
@@ -2070,10 +2048,7 @@ function ThreadLink({
     }
   }
 
-  const actionCount = Number(Boolean(project)) + Number(canPin) + Number(canFinish);
-  const visibleActionCount =
-    Number(canPin && Boolean(thread.pinned || pinning || pinError)) +
-    Number(canFinish && Boolean(finishing || finishError));
+  const hasActions = Boolean(project) || canPin || canFinish;
   const actions = (
     <>
       {project && (
@@ -2090,7 +2065,7 @@ function ThreadLink({
           type="button"
         >
           <PlusIcon />
-          {touchActions && t("Новая сессия")}
+          {t("Новая сессия")}
         </button>
       )}
       {canPin && (
@@ -2105,7 +2080,7 @@ function ThreadLink({
           type="button"
         >
           {pinning ? <span className="spinner small" /> : <PinIcon />}
-          {touchActions && (thread.pinned ? t("Открепить") : t("Закрепить"))}
+          {thread.pinned ? t("Открепить") : t("Закрепить")}
         </button>
       )}
       {canFinish && (
@@ -2119,8 +2094,7 @@ function ThreadLink({
           type="button"
         >
           {finishing ? <span className="spinner small" /> : <CheckIcon />}
-          {touchActions &&
-            (finishConfirmationArmed ? t("Подтвердить завершение") : t("Закончить сессию"))}
+          {finishConfirmationArmed ? t("Подтвердить завершение") : t("Закончить сессию")}
         </button>
       )}
     </>
@@ -2130,23 +2104,14 @@ function ThreadLink({
     <>
       <div
         className="thread-branch-row"
-        style={
-          {
-            "--thread-action-width": `${touchActions ? (actionCount ? 44 : 0) : actionCount * 32}px`,
-            "--thread-rest-action-width": `${touchActions ? (actionCount ? 44 : 0) : visibleActionCount * 32}px`,
-          } as CSSProperties
-        }
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) resetFinishInteraction();
-        }}
-        onMouseLeave={() => {
-          if (!touchActions) resetFinishInteraction();
         }}
       >
         <span className="thread-branch-spacer" />
         <NavLink
           className={({ isActive }) =>
-            `thread-link${actionCount ? " has-actions" : ""}${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
+            `thread-link${hasActions ? " has-actions" : ""}${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
           }
           end
           state={{ focusComposer: true }}
@@ -2178,7 +2143,7 @@ function ThreadLink({
               {displayTitle}
             </span>
           )}
-          {touchActions && thread.pinned && (
+          {thread.pinned && (
             <span
               className="thread-pinned-marker"
               title={t("Сессия закреплена")}
@@ -2200,40 +2165,37 @@ function ThreadLink({
           )}
           <span className={threadStatusClasses(thread)} title={thread.state} />
         </NavLink>
-        {actionCount > 0 &&
-          (touchActions ? (
-            <details
-              className="thread-row-menu"
-              data-dismiss-on-outside-click
-              ref={menuRef}
-              onToggle={(event) => {
-                if (event.currentTarget.open) {
-                  event.currentTarget
-                    .querySelector(".thread-row-popover")
-                    ?.scrollIntoView?.({ block: "nearest" });
-                } else {
-                  resetFinishInteraction();
-                }
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                event.stopPropagation();
-                event.currentTarget.open = false;
-                event.currentTarget.querySelector("summary")?.focus();
-              }}
+        {hasActions && (
+          <details
+            className="thread-row-menu"
+            data-dismiss-on-outside-click
+            ref={menuRef}
+            onToggle={(event) => {
+              if (event.currentTarget.open) {
+                event.currentTarget
+                  .querySelector(".thread-row-popover")
+                  ?.scrollIntoView?.({ block: "nearest" });
+              } else {
+                resetFinishInteraction();
+              }
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.open = false;
+              event.currentTarget.querySelector("summary")?.focus();
+            }}
+          >
+            <summary
+              className="thread-more-action"
+              aria-label={t("Действия с сессией «{{title}}»", { title: displayTitle })}
             >
-              <summary
-                className="thread-more-action"
-                aria-label={t("Действия с сессией «{{title}}»", { title: displayTitle })}
-              >
-                <MoreIcon />
-              </summary>
-              <div className="thread-row-popover">{actions}</div>
-            </details>
-          ) : (
-            <div className="thread-row-actions">{actions}</div>
-          ))}
+              <MoreIcon />
+            </summary>
+            <div className="thread-row-popover">{actions}</div>
+          </details>
+        )}
         {finishError && (
           <span className="sr-only" role="alert">
             {finishError}
