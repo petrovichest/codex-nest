@@ -3579,6 +3579,7 @@ describe("Activity", () => {
       expect(api.updateGoal).toHaveBeenCalledWith("thread", { status: "paused" }),
     );
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Очистить" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Очистить" }));
     await waitFor(() => expect(api.clearGoal).toHaveBeenCalledWith("thread"));
   });
