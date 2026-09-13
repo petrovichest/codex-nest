@@ -34,6 +34,29 @@ jobs:
           grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-x64.tar.xz$" node-shasums.txt
           grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-arm64.tar.xz$" node-shasums.txt
 
+  codex-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        codex-version: [0.144.6, 0.154.0]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @codexnest/protocol
+      - name: Verify delivery with ordinary Codex
+        env:
+          CODEX_VERSION: ${{ matrix.codex-version }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/codex-compat" --no-save "@openai/codex@$CODEX_VERSION"
+          CODEXNEST_COMPAT_CODEX_BIN="$RUNNER_TEMP/codex-compat/node_modules/.bin/codex" \
+            npm run test -w @codexnest/server -- src/codex/durable.integration.test.ts
+
   installer-dry-run:
     runs-on: ubuntu-latest
     strategy:
@@ -101,7 +124,7 @@ jobs:
 
   rolling-release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/mvp'
-    needs: [verify, installer-dry-run, android-debug, extension-e2e]
+    needs: [verify, codex-compat, installer-dry-run, android-debug, extension-e2e]
     runs-on: ubuntu-latest
     concurrency:
       group: rolling-release
@@ -262,7 +285,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, installer-dry-run, android-debug, extension-e2e]
+    needs: [verify, codex-compat, installer-dry-run, android-debug, extension-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write

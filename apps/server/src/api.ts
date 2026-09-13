@@ -73,12 +73,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
-import {
-  DurableDelivery,
-  DeliveryContractError,
-  requireDeliveryReceipt,
-  requireDurableReceiver,
-} from "./durable-delivery";
+import { DurableDelivery, DeliveryContractError, requireDeliveryReceipt } from "./durable-delivery";
 import {
   AttachmentStore,
   AttachmentTooLargeError,
@@ -565,7 +560,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
-        if (receipt.status === "delivered" && receipt.deliveryVersion === 1 && receipt.turnId) {
+        if (receipt.status !== "prepared" && receipt.status !== "rejected" && receipt.turnId) {
           return { turnId: receipt.turnId };
         }
       }
@@ -791,13 +786,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const current = projectThreadCreations.get(key);
     if (current) return current;
     const request = (async () => {
-      requireDurableReceiver(bridge);
       const previous = store.view().threadCreations?.[clientCreationId];
       if (previous && previous.projectId !== projectId)
         throw new ProjectConflictError("Creation id has already been used");
       if (previous?.threadId) {
         const existing = projection.summary(previous.threadId);
-        if (existing) return existing;
+        if (existing) {
+          if (projection.isUnmaterialized(existing.id)) {
+            await bridge.request("thread/metadata/update", {
+              threadId: existing.id,
+              gitInfo: { sha: null },
+            });
+            await projection.markMaterialized(existing.id);
+          }
+          return existing;
+        }
       }
       codexManager?.assertTurnsAllowed();
       const project = store.view().projects.find((candidate) => candidate.id === projectId);
@@ -825,14 +828,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const prepared = store.view().threadCreations![clientCreationId]!;
       const response = await bridge.request<unknown>("thread/start", prepared.params);
       const started = parseThreadStart(response);
-      requireDeliveryReceipt(response, clientCreationId, started.thread.id);
+      if (bridge.deliveryVersion === 1)
+        requireDeliveryReceipt(response, clientCreationId, started.thread.id);
       projection.upsertThread(started.thread);
+      if (bridge.deliveryVersion !== 1) await projection.markUnmaterialized(started.thread.id);
       await store.update((state) => {
         state.threadCreations![clientCreationId]!.threadId = started.thread.id;
       });
       await markRootToolsAvailable(store, started.thread.id);
-      // The receiver persisted the empty thread before acknowledging creation.
-      // No metadata write or model turn is needed to materialize it.
+      if (bridge.deliveryVersion !== 1) {
+        await bridge.request("thread/metadata/update", {
+          threadId: started.thread.id,
+          gitInfo: { sha: null },
+        });
+        await projection.markMaterialized(started.thread.id);
+      }
+      // Both receivers now have a persisted empty thread before the first message.
       return projection.setSettings(started.thread.id, prepared.settings ?? settings);
     })().finally(() => {
       if (projectThreadCreations.get(key) === request) projectThreadCreations.delete(key);
@@ -1057,7 +1068,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         expectedTurnId: turnId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
         input: structuredInput,
-        ...(questionReply
+        ...(questionReply && bridge.deliveryVersion === 1
           ? {
               userInputResponse: {
                 itemId: questionReply.itemId,
@@ -1096,6 +1107,24 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
                 ),
                 "turn/steer",
                 params,
+                questionReply && bridge.deliveryVersion !== 1
+                  ? async () => {
+                      if (!userInput || userInput.itemId !== questionReply.itemId)
+                        throw new RpcError(
+                          -32602,
+                          "Вопрос больше не ожидает ответа. Сообщение сохранено.",
+                        );
+                      const response: AttentionResponse = {
+                        kind: "userInput",
+                        answers: questionReply.answers,
+                      };
+                      const resolved = attention.resolve(userInput.id, response);
+                      if (!resolved) throw new RpcError(-32602, "Вопрос больше не ожидает ответа.");
+                      await projection.recordAttentionResponse(resolved, response);
+                      if (!images.length && !validatedFiles.length) return { turnId };
+                      return bridge.request("turn/steer", params);
+                    }
+                  : undefined,
               )
             ).turnId!,
           }
@@ -1130,7 +1159,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         throw error;
       }
     }
-    if (questionReply && userInput && userInput.itemId === questionReply.itemId) {
+    if (
+      bridge.deliveryVersion === 1 &&
+      questionReply &&
+      userInput &&
+      userInput.itemId === questionReply.itemId
+    ) {
       await projection.recordAttentionResponse(userInput, {
         kind: "userInput",
         answers: questionReply.answers,
@@ -1188,7 +1222,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       : run();
   };
   const queue = new MessageQueue(store, {
-    requiresDurableReceipt: true,
+    get requiresDurableReceipt() {
+      return bridge.deliveryVersion === 1;
+    },
     paused: () => codexManager?.maintenanceActive ?? false,
     acceptsInput: (threadId) => projection.summary(threadId)?.canAcceptDirectInput !== false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
@@ -1216,7 +1252,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ),
     deliveredTurnId: async (threadId, messageId) => {
       const receipt = store.view().messageReceipts?.[messageId];
-      if (receipt?.threadId !== threadId || receipt.deliveryVersion !== 1) return null;
+      if (receipt?.threadId !== threadId) return null;
       let delivered;
       try {
         delivered = await durableDelivery.replay(messageId);
@@ -5031,7 +5067,6 @@ async function createManagedTeamTask(
   const creationId = `team-child:${parent.id}:${taskId}`;
   let child = recoveredThread;
   if (!child) {
-    requireDurableReceiver(bridge);
     await store.update((state) => {
       state.threadCreations ??= {};
       state.threadCreations[creationId] ??= {
@@ -5055,7 +5090,7 @@ async function createManagedTeamTask(
       store.view().threadCreations![creationId]!.params,
     );
     child = parseThreadStart(response).thread;
-    requireDeliveryReceipt(response, creationId, child.id);
+    if (bridge.deliveryVersion === 1) requireDeliveryReceipt(response, creationId, child.id);
     await store.update((state) => {
       state.threadCreations![creationId]!.threadId = child!.id;
     });
@@ -6786,7 +6821,7 @@ async function deliveredClientMessageTurnId(
 ): Promise<string | null> {
   const saved = store.view().messageReceipts?.[markerId];
   if (!saved) return null;
-  if (saved.threadId !== threadId || saved.deliveryVersion !== 1) {
+  if (saved.threadId !== threadId) {
     throw new DeliveryContractError("Доставка старой команды Team не подтверждена Codex.");
   }
   const sender = new DurableDelivery(store, bridge);

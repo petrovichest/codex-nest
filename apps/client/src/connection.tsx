@@ -297,7 +297,7 @@ export function ConnectionProvider({
               const record = reliableMessages.current.get(item.id);
               if (
                 item.type === "userMessage" &&
-                item.deliveryReceipt?.version === 1 &&
+                (item.deliveryReceipt?.version === 1 || item.deliveryReceipt?.version === 0) &&
                 item.deliveryReceipt.clientId === item.id &&
                 item.deliveryReceipt.threadId === threadId &&
                 item.deliveryReceipt.turnId === turn.id &&

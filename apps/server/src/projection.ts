@@ -3173,13 +3173,20 @@ export class AppProjection extends EventEmitter {
     if (item.type !== "userMessage") return item;
     const receipt = this.store.view().messageReceipts?.[item.id];
     if (
-      receipt?.deliveryVersion !== 1 ||
-      receipt.status !== "delivered" ||
+      receipt?.status !== "delivered" ||
       receipt.threadId !== threadId ||
       receipt.turnId !== turnId
     )
       return item;
-    return { ...item, deliveryReceipt: { version: 1, threadId, turnId, clientId: item.id } };
+    return {
+      ...item,
+      deliveryReceipt: {
+        version: receipt.deliveryVersion === 1 ? 1 : 0,
+        threadId,
+        turnId,
+        clientId: item.id,
+      },
+    };
   }
 
   private withDeliveryReceipts(threadId: string, turn: TurnView): TurnView {

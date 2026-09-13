@@ -398,7 +398,8 @@ export type OrchestrationNoticeAgent = {
 };
 
 export interface DeliveryReceipt {
-  version: 1;
+  /** 0: Nest persisted a standard RPC acknowledgement; 1: native durable acceptance. */
+  version: 0 | 1;
   clientId: string;
   threadId: string;
   turnId: string | null;

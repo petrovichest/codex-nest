@@ -1,8 +1,10 @@
 # CodexNest durable receiver
 
 This patch series pins the native receiver to the upstream revision in
-`upstream.json`. Nest requires `initialize.durableDeliveryVersion == 1` before
-submitting saved messages. An ordinary Codex update does not satisfy this contract.
+`upstream.json`. This optional receiver advertises `initialize.durableDeliveryVersion == 1`.
+Nest also supports ordinary Codex: it persists the standard RPC acknowledgement and
+reconciles ambiguous sends by message ID in history without blindly resending them.
+Only the patched receiver provides the stronger native persistence contract below.
 
 ## Build
 
@@ -21,7 +23,8 @@ selects a development build; release is the default.
 
 When deploying this change, set the Nest server's `CODEXNEST_CODEX_BIN` to the
 produced binary. Deploy Nest and its compatible receiver together: the sender
-keeps messages queued if the configured receiver lacks the required capability.
+keeps already prepared native commands queued if a replacement receiver lacks the
+required capability. New messages can use the ordinary protocol.
 
 The release tag's Cargo manifest uses 0.154.0 while its lockfile still identifies
 workspace packages as 0.0.0. The packaging patch normalizes those workspace entries;
@@ -60,6 +63,9 @@ external tools or hooks, or protect against loss of the underlying storage.
 
 The process tests use a temporary `CODEX_HOME`, a local mock model endpoint, and
 only their own child processes. They neither access accounts nor stop user sessions.
+
+To verify ordinary Codex delivery and lost-response recovery, set
+`CODEXNEST_COMPAT_CODEX_BIN` instead of `CODEXNEST_DURABLE_CODEX_BIN` in the command below.
 
 ```sh
 NODE_ENV=test CODEXNEST_DURABLE_CODEX_BIN=/absolute/path/to/codex \

@@ -99,7 +99,11 @@ export class MessageQueue {
         if (receipt.threadId !== threadId || receipt.contentHash !== contentHash) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
-        if (this.delivery.requiresDurableReceipt && receipt.deliveryVersion !== 1) {
+        if (
+          this.delivery.requiresDurableReceipt &&
+          receipt.deliveryVersion !== 1 &&
+          receipt.status !== "delivered"
+        ) {
           throw new DeliveryContractError("Доставка старого сообщения не подтверждена Codex.");
         }
         stored = { ...message, status: "dispatching" };
@@ -290,6 +294,16 @@ export class MessageQueue {
   private async recoverThread(threadId: string): Promise<void> {
     await this.withLock(threadId, async () => {
       for (const message of this.list(threadId)) {
+        // This regression rejected the command before contacting Codex. Only
+        // unblock those unsent messages; ambiguous attempts must be reconciled.
+        if (
+          message.status === "queued" &&
+          !this.store.view().messageReceipts?.[message.id] &&
+          message.deliveryError?.message ===
+            "Для надёжной отправки требуется совместимая сборка Codex. Сообщение сохранено."
+        ) {
+          await this.setStatus(threadId, message.id, "queued");
+        }
         if (message.status !== "dispatching" || message.deliveryError?.retryable === false)
           continue;
         if (!(await this.reconcile(threadId, message))) break;
@@ -300,12 +314,16 @@ export class MessageQueue {
 
   private async reconcile(threadId: string, message: QueuedMessage): Promise<boolean> {
     try {
-      if (this.delivery.requiresDurableReceipt && message.deliveryVersion !== 1) {
+      const receipt = this.store.view().messageReceipts?.[message.id];
+      if (
+        this.delivery.requiresDurableReceipt !== undefined &&
+        message.deliveryVersion !== 1 &&
+        !receipt
+      ) {
         throw new DeliveryContractError(
           "Старый Codex не подтвердил доставку. Автоматическая повторная отправка остановлена, чтобы избежать дубля.",
         );
       }
-      const receipt = this.store.view().messageReceipts?.[message.id];
       const turnId = receipt?.turnId ?? (await this.delivery.deliveredTurnId(threadId, message.id));
       if (turnId) await this.remove(threadId, message.id, turnId, message);
       else await this.setStatus(threadId, message.id, "queued");
@@ -449,8 +467,7 @@ export class MessageQueue {
         state.messageReceipts ??= {};
         if (
           this.delivery.requiresDurableReceipt &&
-          (state.messageReceipts[messageId]?.deliveryVersion !== 1 ||
-            state.messageReceipts[messageId]?.status !== "delivered")
+          state.messageReceipts[messageId]?.status !== "delivered"
         ) {
           throw new DeliveryContractError("Codex не подтвердил сохранение сообщения.");
         }

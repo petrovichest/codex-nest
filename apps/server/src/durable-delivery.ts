@@ -3,6 +3,8 @@ import type { AppServerState, DeliveryReceipt } from "@codexnest/protocol";
 import type { StateStore } from "./state/store";
 import { RpcError } from "./codex/transport";
 import { BridgeUnavailableError } from "./codex/bridge";
+import { parseTurnStart, parseTurnSteer, parseTurnsList } from "./codex/guards";
+import { isThreadNotLoadedError } from "./thread-state";
 
 export interface DeliveryBridge {
   readonly deliveryVersion?: number;
@@ -35,7 +37,13 @@ export class DurableDelivery {
     contentHash: string,
     method: string,
     params: Record<string, unknown>,
-  ): Promise<DeliveryReceipt> {
+    dispatch?: () => Promise<unknown>,
+  ): Promise<{ turnId: string | null }> {
+    const existing = this.store.view().messageReceipts?.[clientId];
+    // Never downgrade an in-flight native command: only that receiver can safely replay it.
+    if (existing ? existing.deliveryVersion !== 1 : this.bridge.deliveryVersion !== 1) {
+      return this.sendCompatible(threadId, clientId, contentHash, method, params, dispatch);
+    }
     requireDurableReceiver(this.bridge);
     await this.store.update((state) => {
       state.messageReceipts ??= {};
@@ -63,10 +71,108 @@ export class DurableDelivery {
     return this.replay(clientId);
   }
 
-  async replay(clientId: string): Promise<DeliveryReceipt> {
+  private async sendCompatible(
+    threadId: string,
+    clientId: string,
+    contentHash: string,
+    method: string,
+    params: Record<string, unknown>,
+    dispatch?: () => Promise<unknown>,
+  ): Promise<{ turnId: string | null }> {
+    if (this.bridge.ready === false)
+      throw new BridgeUnavailableError(this.bridge.state ?? "unavailable");
+    const existing = this.store.view().messageReceipts?.[clientId];
+    if (existing) {
+      if (existing.threadId !== threadId || existing.contentHash !== contentHash)
+        throw new DeliveryContractError("Идентификатор сообщения уже использован.");
+      return this.replay(clientId);
+    }
+    let prepared = false;
+    await this.store.update((state) => {
+      state.messageReceipts ??= {};
+      const current = state.messageReceipts[clientId];
+      if (current) {
+        if (current.threadId !== threadId || current.contentHash !== contentHash)
+          throw new DeliveryContractError("Идентификатор сообщения уже использован.");
+        return;
+      }
+      prepared = true;
+      state.messageReceipts[clientId] = {
+        threadId,
+        turnId: null,
+        contentHash,
+        createdAt: Date.now(),
+        status: "prepared",
+        request: { method, params: structuredClone(params) },
+      };
+    });
+    if (!prepared) return this.replay(clientId);
+    let result: unknown;
+    try {
+      result = await (dispatch ? dispatch() : this.bridge.request(method, params));
+    } catch (error) {
+      // An explicit protocol rejection did not accept the input. Transport failures
+      // remain prepared and are reconciled against history, never blindly replayed.
+      if (
+        error instanceof RpcError &&
+        ([-32600, -32601, -32602].includes(error.code) || isThreadNotLoadedError(error))
+      ) {
+        await this.store.update((state) => {
+          delete state.messageReceipts?.[clientId];
+        });
+      }
+      throw error;
+    }
+    const turnId =
+      method === "turn/start" ? parseTurnStart(result).turn.id : parseTurnSteer(result).turnId;
+    await this.acceptCompatible(clientId, turnId);
+    return { turnId };
+  }
+
+  private async acceptCompatible(clientId: string, turnId: string): Promise<void> {
+    await this.store.update((state) => {
+      const current = state.messageReceipts?.[clientId];
+      if (!current || current.status === "canceled")
+        throw new DeliveryContractError("Состояние доставки изменилось.");
+      current.status = "delivered";
+      current.turnId = turnId;
+      delete current.request;
+    });
+  }
+
+  async replay(clientId: string): Promise<DeliveryReceipt | { turnId: string | null }> {
     const saved = this.store.view().messageReceipts?.[clientId];
-    if (!saved || saved.deliveryVersion !== 1 || saved.status === "canceled") {
+    if (!saved || saved.status === "canceled") {
       throw new DeliveryContractError("Нет подтверждения доставки сообщения.");
+    }
+    if (saved.deliveryVersion !== 1) {
+      if (saved.turnId) return { turnId: saved.turnId };
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      do {
+        const page = parseTurnsList(
+          await this.bridge.request("thread/turns/list", {
+            threadId: saved.threadId,
+            cursor,
+            limit: 100,
+            sortDirection: "desc",
+            itemsView: "full",
+          }),
+        );
+        const delivered = page.data.find((turn) =>
+          turn.items.some((item) => item.type === "userMessage" && item.clientId === clientId),
+        );
+        if (delivered) {
+          await this.acceptCompatible(clientId, delivered.id);
+          return { turnId: delivered.id };
+        }
+        cursor = page.nextCursor;
+        if (cursor && seen.has(cursor)) break;
+        if (cursor) seen.add(cursor);
+      } while (cursor);
+      throw new Error(
+        "Codex пока не подтвердил доставку. Сообщение сохранено; проверяем историю без повторной отправки.",
+      );
     }
     if (saved.status === "delivered" && saved.turnId) {
       return { version: 1, clientId, threadId: saved.threadId, turnId: saved.turnId };

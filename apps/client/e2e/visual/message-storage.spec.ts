@@ -1,14 +1,21 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { ThreadDetail, UpdateThreadDraftRequest } from "@codexnest/protocol";
 import type * as OfflineStore from "../../src/offline-store";
 import { installVisualFixture, mainThread } from "./fixtures";
 
-test("outbox handoffs are atomic in real IndexedDB, including aborted transactions", async ({
-  page,
-}) => {
+for (const receiptVersion of [0, 1] as const) {
+  test(`outbox handoffs are atomic in real IndexedDB (receipt ${receiptVersion}), including aborted transactions`, async ({
+    page,
+  }) => {
+    await verifyOutboxHandoffs(page, receiptVersion);
+  });
+}
+
+async function verifyOutboxHandoffs(page: Page, receiptVersion: 0 | 1) {
   await installVisualFixture(page, { theme: "light" });
   await page.goto("/threads/session-main");
-  const result = await page.evaluate(async (summary) => {
+  const fixture = { summary: mainThread, receiptVersion };
+  const result = await page.evaluate(async ({ summary, receiptVersion }) => {
     const modulePath = "/src/offline-store.ts";
     const store = (await import(modulePath)) as typeof OfflineStore;
     const settings = { baseUrl: "https://storage-test.invalid", token: "test" };
@@ -99,7 +106,7 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
     const item = detail.turns[0]!.items[0]!;
     if (item.type === "userMessage")
       item.deliveryReceipt = {
-        version: 1,
+        version: receiptVersion,
         clientId: message.id,
         threadId: summary.id,
         turnId: "turn",
@@ -134,7 +141,7 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
       history,
       newer,
     };
-  }, mainThread);
+  }, fixture);
   expect(result.abortedTransfer).toBe(false);
   expect(result.draftAfterAbort?.value.input).toBe("Сохранить");
   expect(result.outboxAfterAbort).toEqual([]);
@@ -153,7 +160,7 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
   expect(result.afterLateAck).toEqual([]);
   expect(result.history?.turns[0]?.items[0]?.id).toBe("storage-message");
   expect(result.newer?.value.input).toBe("Следующий черновик");
-});
+}
 
 test("the preparation handoff preserves attachments and the next draft across reload", async ({
   page,

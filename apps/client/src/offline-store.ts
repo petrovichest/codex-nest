@@ -401,7 +401,7 @@ function cachedUserMessageIds(detail: ThreadDetail): Set<string> {
         .filter(
           (item) =>
             item.type === "userMessage" &&
-            item.deliveryReceipt?.version === 1 &&
+            (item.deliveryReceipt?.version === 1 || item.deliveryReceipt?.version === 0) &&
             item.deliveryReceipt.clientId === item.id &&
             item.deliveryReceipt.threadId === detail.summary.id &&
             item.deliveryReceipt.turnId === turn.id,

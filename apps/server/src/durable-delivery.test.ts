@@ -152,12 +152,78 @@ describe("DurableDelivery", () => {
     expect(request).toHaveBeenCalledOnce();
   });
 
-  it("does not send through a receiver without the durable contract", async () => {
-    const { store, bridge, request } = await setup();
-    const legacy = new DurableDelivery(store, { ...bridge, deliveryVersion: undefined });
-    await expect(legacy.send("thread", "message", hash, "turn/start", params)).rejects.toThrow(
-      "совместимая сборка",
+  it("sends through an ordinary receiver and replays its local acknowledgement without another RPC", async () => {
+    const { store, request } = await setup();
+    request.mockResolvedValue({
+      turn: { id: "turn", items: [], status: "inProgress", error: null },
+    } as never);
+    const legacy = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    await expect(legacy.send("thread", "message", hash, "turn/start", params)).resolves.toEqual({
+      turnId: "turn",
+    });
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    await expect(
+      new DurableDelivery(reopened, { request } as unknown as DeliveryBridge).replay("message"),
+    ).resolves.toEqual({ turnId: "turn" });
+    expect(reopened.view().messageReceipts?.message).toMatchObject({
+      status: "delivered",
+      turnId: "turn",
+    });
+    expect(reopened.view().messageReceipts?.message?.deliveryVersion).toBeUndefined();
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an ambiguous ordinary send across restart without resending when history is empty", async () => {
+    const { store, request } = await setup();
+    request.mockRejectedValueOnce(new Error("connection lost"));
+    const bridge = { request } as unknown as DeliveryBridge;
+    await expect(
+      new DurableDelivery(store, bridge).send("thread", "message", hash, "turn/start", params),
+    ).rejects.toThrow("connection lost");
+    request.mockResolvedValue({ data: [], nextCursor: null } as never);
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    await expect(
+      new DurableDelivery(reopened, bridge).send("thread", "message", hash, "turn/start", params),
+    ).rejects.toThrow("без повторной отправки");
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      "turn/start",
+      "thread/turns/list",
+    ]);
+    expect(reopened.view().messageReceipts?.message?.status).toBe("prepared");
+  });
+
+  it("does not dispatch concurrent ordinary retries twice", async () => {
+    const { store } = await setup();
+    const request = vi.fn(async (method: string) =>
+      method === "turn/start"
+        ? { turn: { id: "turn", items: [], status: "inProgress", error: null } }
+        : { data: [], nextCursor: null },
     );
-    expect(request).not.toHaveBeenCalled();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    const results = await Promise.allSettled([
+      sender.send("thread", "message", hash, "turn/start", params),
+      sender.send("thread", "message", hash, "turn/start", params),
+    ]);
+    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+    expect(store.view().messageReceipts?.message?.status).toBe("delivered");
+  });
+
+  it("never downgrades a prepared native command to the ordinary protocol", async () => {
+    const { store, request, sender } = await setup();
+    request.mockRejectedValueOnce(new Error("connection lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    await expect(
+      new DurableDelivery(store, { request } as unknown as DeliveryBridge).send(
+        "thread",
+        "message",
+        hash,
+        "turn/start",
+        params,
+      ),
+    ).rejects.toThrow("совместимая сборка");
+    expect(request).toHaveBeenCalledOnce();
   });
 });

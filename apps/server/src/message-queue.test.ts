@@ -22,6 +22,27 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("recovers messages blocked before dispatch by the incompatible-build regression", async () => {
+    const { queue, store, delivery } = await setup("active");
+    const image = "data:image/png;base64,aGVsbG8=";
+    await queue.enqueue("thread", "Saved text", [image], "blocked");
+    await store.update((state) => {
+      const message = state.messageQueues!.thread![0]!;
+      message.deliveryVersion = 1;
+      message.deliveryError = {
+        message: "Для надёжной отправки требуется совместимая сборка Codex. Сообщение сохранено.",
+        retryable: false,
+      };
+    });
+    delivery.currentTurnId.mockReturnValue(null);
+    await queue.recover();
+    expect(delivery.start).toHaveBeenCalledExactlyOnceWith(
+      "thread",
+      expect.objectContaining({ id: "blocked", text: "Saved text", images: [image] }),
+    );
+    expect(queue.list("thread")).toEqual([]);
+  });
+
   it("keeps cancellation across restart and rejects a delayed enqueue replay", async () => {
     const { queue, store, delivery } = await setup("active");
     await queue.enqueue("thread", "Canceled text", [], "canceled");

@@ -7,14 +7,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it as test, vi } from "vitest";
 
 import { JsonlTransport } from "./transport";
+import { DurableDelivery, type DeliveryBridge } from "../durable-delivery";
+import { StateStore } from "../state/store";
+import { messageContentHash } from "../message-queue";
 
 // Deliberately opt in: these tests kill only their own processes, with a fresh
 // CODEX_HOME and a local model provider. No user session or account is involved.
-const binary = process.env.CODEXNEST_DURABLE_CODEX_BIN;
-describe.skipIf(!binary)("real Codex durable delivery", () => {
+const nativeBinary = process.env.CODEXNEST_DURABLE_CODEX_BIN;
+const compatibleBinary = process.env.CODEXNEST_COMPAT_CODEX_BIN;
+const binary = nativeBinary ?? compatibleBinary;
+describe.skipIf(!binary)("real Codex delivery", () => {
   let directory: string;
   let server: Server;
   let providerUrl: string;
@@ -224,6 +229,76 @@ describe.skipIf(!binary)("real Codex durable delivery", () => {
       cleanup();
     }
   }
+
+  test.skipIf(!compatibleBinary)(
+    "delivers through ordinary Codex and reconciles a lost response after restart",
+    async () => {
+      const first = await connect();
+      expect(first.initialization).not.toMatchObject({ durableDeliveryVersion: 1 });
+      const { thread } = await start(first.rpc);
+      await first.rpc.request("thread/metadata/update", {
+        threadId: thread.id,
+        gitInfo: { sha: null },
+      });
+      const store = new StateStore(join(directory, "nest-state.json"));
+      await store.load();
+      const request = vi.fn((method: string, params: unknown) => first.rpc.request(method, params));
+      const sender = new DurableDelivery(store, { request } as DeliveryBridge);
+      const hash = messageContentHash("Reply ACK", [], [], false);
+      await complete(first.rpc, () =>
+        sender.send(
+          thread.id,
+          "ordinary-message",
+          hash,
+          "turn/start",
+          input(thread.id, "ordinary-message"),
+        ),
+      );
+      expect(store.view().messageReceipts?.["ordinary-message"]?.status).toBe("delivered");
+      expect(store.view().messageReceipts?.["ordinary-message"]?.deliveryVersion).toBeUndefined();
+      await sender.send(
+        thread.id,
+        "ordinary-message",
+        hash,
+        "turn/start",
+        input(thread.id, "ordinary-message"),
+      );
+      expect(request).toHaveBeenCalledOnce();
+      request.mockImplementationOnce(async (method, params) => {
+        await first.rpc.request(method, params);
+        throw new Error("lost RPC response");
+      });
+      await complete(first.rpc, async () => {
+        await expect(
+          sender.send(
+            thread.id,
+            "lost-message",
+            hash,
+            "turn/start",
+            input(thread.id, "lost-message"),
+          ),
+        ).rejects.toThrow("lost RPC response");
+      });
+      await kill(first.child);
+      const second = await connect();
+      await second.rpc.request("thread/resume", { threadId: thread.id, excludeTurns: true });
+      const reopened = new StateStore(store.path);
+      await reopened.load();
+      const recoveredRequest = vi.fn((method: string, params: unknown) =>
+        second.rpc.request(method, params),
+      );
+      await expect(
+        new DurableDelivery(reopened, { request: recoveredRequest } as DeliveryBridge).replay(
+          "lost-message",
+        ),
+      ).resolves.toMatchObject({ turnId: expect.any(String) });
+      expect(recoveredRequest.mock.calls.map(([method]) => method)).toEqual(["thread/turns/list"]);
+      expect(modelRequests).toBe(2);
+    },
+    90_000,
+  );
+
+  const it = test.skipIf(!nativeBinary);
 
   it("keeps a newly created empty thread after SIGKILL and replays its creation", async () => {
     const creationId = randomUUID();

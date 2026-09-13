@@ -7113,7 +7113,7 @@ function createAppManagerMock() {
 
 class SettingsBridge extends EventEmitter {
   state = "ready" as const;
-  deliveryVersion = 1;
+  deliveryVersion: number | undefined = 1;
   private nativeReceipts = new Map<string, { params: string; response: unknown }>();
   actualVersion = "0.144.6";
   permissionConfig: Record<string, unknown> = {
@@ -7189,6 +7189,7 @@ class SettingsBridge extends EventEmitter {
       const clientId =
         method === "thread/start" ? params.clientCreationId : params.clientUserMessageId;
       const keyed =
+        this.deliveryVersion === 1 &&
         typeof clientId === "string" &&
         ["thread/start", "turn/start", "turn/steer"].includes(method);
       const key = `${method}:${params.threadId ?? ""}:${clientId}`;
@@ -7622,7 +7623,7 @@ async function createSkillsHarness() {
   };
 }
 
-async function createForkHarness() {
+async function createForkHarness(deliveryVersion: number | undefined = 1) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-fork-api-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
@@ -7638,6 +7639,7 @@ async function createForkHarness() {
     });
   });
   const bridge = new SettingsBridge();
+  bridge.deliveryVersion = deliveryVersion || undefined;
   const attention = new AttentionManager();
   const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
   await projection.sync();
@@ -7683,12 +7685,143 @@ async function createForkHarness() {
     projection,
     store,
     threadTitles,
+    attention,
   };
 }
 
-describe("reliable first messages", () => {
+describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
+  it("creates a session once, persists it, and steers an active turn", async () => {
+    const { app, bridge, headers, store } = await createForkHarness(deliveryVersion);
+    try {
+      const request = {
+        method: "POST" as const,
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "same-creation" },
+      };
+      const first = await app.inject(request);
+      expect(first.statusCode).toBe(201);
+      const id = first.json().thread.id;
+      expect((await app.inject(request)).json().thread.id).toBe(id);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+      ).toHaveLength(1);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/metadata/update"),
+      ).toHaveLength(deliveryVersion === 1 ? 0 : 1);
+      const send = (clientMessageId: string) =>
+        app.inject({
+          method: "POST",
+          url: `/api/v1/threads/${id}/queue`,
+          headers,
+          payload: { input: clientMessageId, clientMessageId },
+        });
+      await send("first");
+      await vi.waitFor(() => expect(store.view().messageReceipts?.first?.turnId).toBeTruthy());
+      await send("steer");
+      const result = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${id}/queue/steer/send`,
+        headers,
+      });
+      expect(result.statusCode).toBe(200);
+      expect(store.view().messageReceipts?.steer?.turnId).toBe(
+        store.view().messageReceipts?.first?.turnId,
+      );
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
+        1,
+      );
+      const detail = (await app.inject({ url: `/api/v1/threads/${id}`, headers })).json();
+      expect(detail.turns.flatMap((turn: { items: unknown[] }) => turn.items)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "first",
+            deliveryReceipt: {
+              version: deliveryVersion,
+              clientId: "first",
+              threadId: id,
+              turnId: store.view().messageReceipts?.first?.turnId,
+            },
+          }),
+          expect.objectContaining({
+            id: "steer",
+            deliveryReceipt: {
+              version: deliveryVersion,
+              clientId: "steer",
+              threadId: id,
+              turnId: store.view().messageReceipts?.steer?.turnId,
+            },
+          }),
+        ]),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers a blocking question through the receiver's supported protocol", async () => {
+    const { app, bridge, headers, store, projection, attention } =
+      await createForkHarness(deliveryVersion);
+    try {
+      await projection.setCurrentTurn("thread", "turn");
+      const respond = vi.fn();
+      const pending = attention.receive(
+        {
+          method: "item/tool/requestUserInput",
+          id: 901,
+          params: {
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "question",
+            autoResolutionMs: null,
+            questions: [
+              {
+                id: "choice",
+                header: "Choice",
+                question: "Which?",
+                isOther: true,
+                isSecret: false,
+                options: null,
+              },
+            ],
+          },
+        } as ServerRequest,
+        { respond, respondError: vi.fn() } as unknown as JsonlTransport,
+      );
+      const request = {
+        method: "POST" as const,
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: {
+          input: "First",
+          clientMessageId: "answer",
+          replyToUserInput: { turnId: "turn", itemId: "question", answers: { choice: ["First"] } },
+        },
+      };
+      expect((await app.inject(request)).statusCode).toBe(202);
+      await vi.waitFor(() => expect(store.view().messageReceipts?.answer?.turnId).toBe("turn"));
+      expect(attention.get(pending.id)).toBeUndefined();
+      await app.inject(request);
+      if (deliveryVersion === 1) {
+        expect(respond).not.toHaveBeenCalled();
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "turn/steer"),
+        ).toHaveLength(1);
+      } else {
+        expect(respond).toHaveBeenCalledExactlyOnceWith(901, {
+          answers: { choice: { answers: ["First"] } },
+        });
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "turn/steer"),
+        ).toHaveLength(0);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("resumes an unloaded new session only after rejection and retries the same message id", async () => {
-    const { app, bridge, headers, store } = await createForkHarness();
+    const { app, bridge, headers, store } = await createForkHarness(deliveryVersion);
     try {
       const created = await app.inject({
         method: "POST",
@@ -7743,8 +7876,8 @@ describe("reliable first messages", () => {
     }
   });
 
-  it("replays the saved native receipt when its start response was lost", async () => {
-    const { app, bridge, headers, store, projection } = await createForkHarness();
+  it("recovers an accepted message after a lost response without duplicating it", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
     try {
       const created = await app.inject({
         method: "POST",
@@ -7788,17 +7921,17 @@ describe("reliable first messages", () => {
       );
       expect(bridge.threadTurns.get(id)).toHaveLength(1);
       expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
-        2,
+        deliveryVersion === 1 ? 2 : 1,
       );
       const attempts = bridge.request.mock.calls.filter(([method]) => method === "turn/start");
-      expect(attempts[0]?.[1]).toEqual(attempts[1]?.[1]);
+      if (deliveryVersion === 1) expect(attempts[0]?.[1]).toEqual(attempts[1]?.[1]);
     } finally {
       await app.close();
     }
   });
 
   it("serves preserved messages and attachments even when session history has disappeared", async () => {
-    const { app, bridge, headers, store, projection } = await createForkHarness();
+    const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
     try {
       const upload = await app.inject({
         method: "POST",
