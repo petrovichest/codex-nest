@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import { useEffect, useRef, useState } from "react";
 
 import type { AppUpdateStatus, CodexManagementStatus } from "@codexnest/protocol";
@@ -124,22 +125,24 @@ export function RecoverySettingsCard({
       icon={<AlertIcon />}
       title={t("Аварийное восстановление")}
     >
-      <div className="settings-notice danger" role="status">
-        {activeTurnCount > 0
-          ? t("Активных ответов: {{count}}. Жёсткий перезапуск может их прервать.", {
-              count: activeTurnCount,
-            })
-          : t("Жёсткий перезапуск может прервать незавершённые операции.")}
-      </div>
-
-      {feedback && (
-        <div
-          className={`settings-notice ${feedback.kind === "error" ? "danger" : "success"}`}
-          role={feedback.kind === "error" ? "alert" : "status"}
-        >
-          {feedback.message}
+      <div className="settings-feedback-slot">
+        <div className="settings-notice danger" role="status">
+          {activeTurnCount > 0
+            ? t("Активных ответов: {{count}}. Жёсткий перезапуск может их прервать.", {
+                count: activeTurnCount,
+              })
+            : t("Жёсткий перезапуск может прервать незавершённые операции.")}
         </div>
-      )}
+
+        {feedback && (
+          <div
+            className={`settings-notice ${feedback.kind === "error" ? "danger" : "success"}`}
+            role={feedback.kind === "error" ? "alert" : "status"}
+          >
+            {feedback.message}
+          </div>
+        )}
+      </div>
 
       <div className="settings-actions codex-actions recovery-actions">
         <button
@@ -148,7 +151,11 @@ export function RecoverySettingsCard({
           type="button"
           onClick={() => void forceRestartApp()}
         >
-          {action === "app" ? t("Перезапускаем CodexNest…") : t("Жёстко перезапустить CodexNest")}
+          <ActionLabel
+            idle={t("Жёстко перезапустить CodexNest")}
+            busy={t("Перезапускаем CodexNest…")}
+            pending={action === "app"}
+          />
         </button>
         <button
           className="danger"
@@ -156,7 +163,11 @@ export function RecoverySettingsCard({
           type="button"
           onClick={() => void forceRestartCodex()}
         >
-          {action === "codex" ? t("Перезапускаем Codex…") : t("Жёстко перезапустить Codex")}
+          <ActionLabel
+            idle={t("Жёстко перезапустить Codex")}
+            busy={t("Перезапускаем Codex…")}
+            pending={action === "codex"}
+          />
         </button>
       </div>
     </SettingsGroup>

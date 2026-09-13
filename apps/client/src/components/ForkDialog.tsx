@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { useConnection } from "../connection";
@@ -134,62 +135,64 @@ export function ForkDialog({
         </button>
       </div>
 
-      <div className="fork-source-summary">
-        <span className="fork-source-icon" aria-hidden="true">
-          <GitBranchIcon />
-        </span>
-        <span className="fork-source-copy">
-          <small>{t("Точка ответвления")}</small>
-          <strong>{sourceTitle}</strong>
-        </span>
-        <span className="fork-source-size">
-          {estimate || estimateFailed
-            ? estimate
-              ? formatForkBytes(estimate.sourceBytes, language, t)
-              : t("размер неизвестен")
-            : t("Считаем…")}
-        </span>
-      </div>
-
-      <div
-        className="fork-mode-options"
-        role="radiogroup"
-        aria-label={t("Способ переноса контекста")}
-      >
-        <ForkModeCard
-          mode="compressed"
-          title={t("Компактная")}
-          badge={t("Быстрее")}
-          description={t(
-            "Создаёт свежее сжатие и переносит только компактный контекст. Лучше для больших сессий.",
-          )}
-          estimate={compressed}
-          loading={!estimate && !estimateFailed}
-          checked={mode === "compressed"}
-          onChange={setMode}
-          t={t}
-          language={language}
-        />
-        <ForkModeCard
-          mode="exact"
-          title={t("Полная история")}
-          description={t(
-            "Копирует всё до выбранного ответа. Выбирайте, если важны дословные детали.",
-          )}
-          estimate={exact}
-          loading={!estimate && !estimateFailed}
-          checked={mode === "exact"}
-          onChange={setMode}
-          t={t}
-          language={language}
-        />
-      </div>
-
-      {error && (
-        <div className="dialog-notice danger" role="alert">
-          {error}
+      <div className="fork-dialog-body">
+        <div className="fork-source-summary">
+          <span className="fork-source-icon" aria-hidden="true">
+            <GitBranchIcon />
+          </span>
+          <span className="fork-source-copy">
+            <small>{t("Точка ответвления")}</small>
+            <strong>{sourceTitle}</strong>
+          </span>
+          <span className="fork-source-size">
+            {estimate || estimateFailed
+              ? estimate
+                ? formatForkBytes(estimate.sourceBytes, language, t)
+                : t("размер неизвестен")
+              : t("Считаем…")}
+          </span>
         </div>
-      )}
+
+        <div
+          className="fork-mode-options"
+          role="radiogroup"
+          aria-label={t("Способ переноса контекста")}
+        >
+          <ForkModeCard
+            mode="compressed"
+            title={t("Компактная")}
+            badge={t("Быстрее")}
+            description={t(
+              "Создаёт свежее сжатие и переносит только компактный контекст. Лучше для больших сессий.",
+            )}
+            estimate={compressed}
+            loading={!estimate && !estimateFailed}
+            checked={mode === "compressed"}
+            onChange={setMode}
+            t={t}
+            language={language}
+          />
+          <ForkModeCard
+            mode="exact"
+            title={t("Полная история")}
+            description={t(
+              "Копирует всё до выбранного ответа. Выбирайте, если важны дословные детали.",
+            )}
+            estimate={exact}
+            loading={!estimate && !estimateFailed}
+            checked={mode === "exact"}
+            onChange={setMode}
+            t={t}
+            language={language}
+          />
+        </div>
+
+        {error && (
+          <div className="dialog-notice danger" role="alert">
+            {error}
+          </div>
+        )}
+      </div>
       <div className="dialog-actions fork-dialog-actions">
         <button type="button" disabled={submitting} onClick={close}>
           {t("Отмена")}
@@ -201,7 +204,7 @@ export function ForkDialog({
           aria-busy={submitting || undefined}
           onClick={() => void create()}
         >
-          {submitting ? t("Создаём…") : t("Создать ветку")}
+          <ActionLabel idle={t("Создать ветку")} busy={t("Создаём…")} pending={submitting} />
         </button>
       </div>
     </Dialog>

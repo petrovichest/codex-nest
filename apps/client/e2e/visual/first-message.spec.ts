@@ -109,7 +109,9 @@ test("fast first Enter survives reloads during creation and after a lost accepta
         turns: [],
         olderTurnsCursor: null,
         draft: null,
-        queuedMessages: [...accepted.values()],
+        // Keep the receipt unavailable during the simulated outage; otherwise
+        // history polling can acknowledge it before the lost-response assertion.
+        queuedMessages: connectionRestored ? [...accepted.values()] : [],
         historyError: { message: "Не удалось загрузить историю сессии", retryable: false },
       });
     }

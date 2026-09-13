@@ -112,9 +112,8 @@ for (const theme of ["light", "dark"] as const) {
     const plainRow = roots.filter({ has: page.locator('a[href="/threads/session-active"]') });
     const plainTitleBounds = await plainRow.locator(".thread-link-title").boundingBox();
     const plainStatusBounds = await plainRow.locator(".status").boundingBox();
-    expect(
-      plainStatusBounds!.x - (plainTitleBounds!.x + plainTitleBounds!.width),
-    ).toBeLessThanOrEqual(16);
+    expect(plainTitleBounds!.width).toBeGreaterThan(0);
+    expect(plainTitleBounds!.x + plainTitleBounds!.width).toBeLessThan(plainStatusBounds!.x);
     const create = row.getByRole("button", { name: "Создать новую сессию в проекте CodexNest" });
     const pin = row.getByRole("button", { name: "Открепить сессию «Полировка мастерской»" });
     const trigger = row.getByLabel("Действия с сессией «Полировка мастерской»");
@@ -130,7 +129,7 @@ for (const theme of ["light", "dark"] as const) {
     await title.hover();
     const hovered = await title.boundingBox();
     expect(hovered!.x).toBe(before!.x);
-    expect(hovered!.width).toBeLessThan(before!.width);
+    expect(hovered).toEqual(before);
     const triggerBounds = await trigger.boundingBox();
     expect(hovered!.x + hovered!.width).toBeLessThanOrEqual(triggerBounds!.x);
     const statusBounds = await row.locator(".status").boundingBox();
@@ -139,13 +138,14 @@ for (const theme of ["light", "dark"] as const) {
     await trigger.click();
     await expect(create).toBeVisible();
     await expect(pin).toBeVisible();
-    await expect(trigger).toBeHidden();
+    await expect(trigger).toBeVisible();
     expect(await row.boundingBox()).toEqual(topRowBounds);
     expect(await row.locator(".status").boundingBox()).toEqual(statusBounds);
     const actions = row.locator(".thread-row-actions");
     const actionBounds = (await actions.boundingBox())!;
     const expandedTitle = (await title.boundingBox())!;
-    expect(expandedTitle.x + expandedTitle.width).toBeLessThanOrEqual(actionBounds.x);
+    expect(expandedTitle).toEqual(before);
+    expect(actionBounds.y).toBeGreaterThanOrEqual(triggerBounds!.y + triggerBounds!.height);
     expect(actionBounds.x + actionBounds.width).toBeLessThanOrEqual(statusBounds!.x);
     await page.getByRole("button", { name: "Активные", exact: true }).hover();
     await expect(menu).not.toHaveAttribute("open");
@@ -254,7 +254,7 @@ for (const count of [0, 1, 12]) {
 test.describe("touch sidebar actions", () => {
   test.use({ hasTouch: true, viewport: PHONE_VIEWPORT });
 
-  test("fits all three actions in the session row and keeps finish confirmation actionable", async ({
+  test("opens all three actions below the session row and keeps finish confirmation actionable", async ({
     page,
   }) => {
     await installVisualFixture(page, { theme: "dark", finishableSidebar: true });
@@ -275,26 +275,26 @@ test.describe("touch sidebar actions", () => {
     expect(await row.boundingBox()).toEqual(before);
     expect(await row.locator(".status").boundingBox()).toEqual(status);
     expect(title.width).toBeGreaterThan(0);
-    expect(title.x + title.width).toBeLessThanOrEqual(bounds.x);
+    expect(bounds.y).toBeGreaterThanOrEqual(before!.y + before!.height - 2);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(status!.x);
     for (const button of await actions.locator("button").all()) {
       const box = (await button.boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(44);
       expect(box.height).toBeGreaterThanOrEqual(44);
       expect(box.y).toBeGreaterThanOrEqual(before!.y);
-      expect(box.y + box.height).toBeLessThanOrEqual(before!.y + before!.height);
+      expect(box.y + box.height).toBeLessThanOrEqual(PHONE_VIEWPORT.height);
     }
     const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
     await finish.tap();
     await expect(finish).toHaveClass(/confirming/);
     await expect(page.locator(".sidebar")).toHaveScreenshot("sidebar-touch-finish-dark.png");
     expect((await new AxeBuilder({ page }).include(".sidebar").analyze()).violations).toEqual([]);
-    await page.locator(".server-status").tap();
+    await page.locator(".sidebar").tap({ position: { x: 20, y: PHONE_VIEWPORT.height - 40 } });
     await row.getByLabel("Действия с сессией «Полировка мастерской»").tap();
     await expect(finish).not.toHaveClass(/confirming/);
   });
 
-  test("opens inline actions, pins without navigation and creates in the same project", async ({
+  test("opens the action popover, pins without navigation and creates in the same project", async ({
     page,
   }) => {
     await openSidebar(page, "light");
@@ -323,14 +323,14 @@ test.describe("touch sidebar actions", () => {
     const rowBefore = await row.boundingBox();
     await trigger.tap();
     await expect(menu.locator(".thread-row-actions")).toBeVisible();
-    await expect(trigger).toBeHidden();
+    await expect(trigger).toBeVisible();
     expect(await row.boundingBox()).toEqual(rowBefore);
     for (const button of await menu.locator("button").all()) {
       const bounds = (await button.boundingBox())!;
       expect(bounds.width).toBeGreaterThanOrEqual(44);
       expect(bounds.height).toBeGreaterThanOrEqual(44);
       expect(bounds.y).toBeGreaterThanOrEqual(rowBefore!.y);
-      expect(bounds.y + bounds.height).toBeLessThanOrEqual(rowBefore!.y + rowBefore!.height);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(PHONE_VIEWPORT.height);
     }
     await expect(page).toHaveURL(/\/threads\/session-active$/);
     await expect(page.locator(".sidebar")).toHaveScreenshot("sidebar-touch-actions.png", {
@@ -341,7 +341,7 @@ test.describe("touch sidebar actions", () => {
     await expect(menu.locator(".thread-row-actions")).toBeHidden();
     await expect(trigger).toBeFocused();
     await trigger.tap();
-    await page.locator(".server-status").tap();
+    await page.locator(".sidebar").tap({ position: { x: 20, y: PHONE_VIEWPORT.height - 40 } });
     await expect(menu.locator(".thread-row-actions")).toBeHidden();
     await expect(trigger).toBeVisible();
     await trigger.tap();

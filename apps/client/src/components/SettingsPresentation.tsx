@@ -8,7 +8,9 @@ export function SettingsGroup({
   icon,
   title,
   onSubmit,
+  loading = false,
 }: {
+  loading?: boolean;
   as?: "form" | "section";
   children: ReactNode;
   className?: string;
@@ -32,19 +34,30 @@ export function SettingsGroup({
           {description && <p>{description}</p>}
         </div>
       </div>
-      <div className="settings-group-body">{children}</div>
+      <div
+        className="settings-group-body"
+        aria-busy={loading || undefined}
+        inert={loading || undefined}
+      >
+        {children}
+      </div>
     </>
   );
 
   if (as === "form") {
     return (
-      <form aria-labelledby={headingId} className={classes} onSubmit={onSubmit}>
+      <form
+        aria-busy={loading || undefined}
+        aria-labelledby={headingId}
+        className={classes}
+        onSubmit={onSubmit}
+      >
         {contents}
       </form>
     );
   }
   return (
-    <section aria-labelledby={headingId} className={classes}>
+    <section aria-busy={loading || undefined} aria-labelledby={headingId} className={classes}>
       {contents}
     </section>
   );

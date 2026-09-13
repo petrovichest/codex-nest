@@ -1208,6 +1208,15 @@ export function Composer({
         if (canSubmit) onSubmit("queue");
       }}
     >
+      {composerError && (
+        <div
+          className={`composer-error${voiceTranscriptionErrorVisible ? " voice-transcription-error" : ""}`}
+          role="alert"
+        >
+          {voiceTranscriptionErrorVisible && <MicrophoneIcon />}
+          <span>{composerError}</span>
+        </div>
+      )}
       {creating && projects.length === 0 && (
         <div className="composer-empty-projects">
           <span>{t("Чтобы начать задачу, добавьте рабочую папку.")}</span>
@@ -1524,7 +1533,7 @@ export function Composer({
             {running && onStop && (
               <button
                 aria-label={t("Остановить задачу")}
-                className="composer-action stop"
+                className="composer-action stop composer-task-stop"
                 type="button"
                 onClick={onStop}
               >
@@ -1574,15 +1583,6 @@ export function Composer({
           </span>
         )}
       </div>
-      {composerError && (
-        <div
-          className={`composer-error${voiceTranscriptionErrorVisible ? " voice-transcription-error" : ""}`}
-          role="alert"
-        >
-          {voiceTranscriptionErrorVisible && <MicrophoneIcon />}
-          <span>{composerError}</span>
-        </div>
-      )}
     </form>
   );
 }

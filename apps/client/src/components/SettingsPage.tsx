@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import { Capacitor } from "@capacitor/core";
 import {
   type FormEvent,
@@ -474,7 +475,11 @@ export function SettingsPage({
                       type="button"
                       onClick={() => void enableBrowserNotifications()}
                     >
-                      {notificationRequesting ? t("Запрашиваем…") : t("Разрешить уведомления")}
+                      <ActionLabel
+                        idle={t("Разрешить уведомления")}
+                        busy={t("Запрашиваем…")}
+                        pending={notificationRequesting}
+                      />
                     </button>
                   </div>
                 )}
@@ -611,7 +616,11 @@ export function SettingsPage({
                   }
                   type="submit"
                 >
-                  {taskDefaultsSaving ? t("Сохраняем…") : t("Сохранить настройки новых задач")}
+                  <ActionLabel
+                    idle={t("Сохранить настройки новых задач")}
+                    busy={t("Сохраняем…")}
+                    pending={taskDefaultsSaving}
+                  />
                 </button>
               </div>
             </SettingsGroup>
@@ -623,64 +632,68 @@ export function SettingsPage({
               title={t("Разрешения Codex")}
               onSubmit={save}
             >
-              {loading ? (
-                <div className="settings-loading">
-                  <span className="spinner small" /> {t("Загружаем конфигурацию…")}
-                </div>
-              ) : (
-                <fieldset className="permission-presets" disabled={saving}>
-                  <legend className="sr-only">{t("Режим разрешений")}</legend>
-                  {PRESETS.map((preset) => (
-                    <label
-                      className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
-                      key={preset.id}
-                    >
-                      <input
-                        type="radio"
-                        name="permission-preset"
-                        value={preset.id}
-                        checked={selected === preset.id}
-                        onChange={() => setSelected(preset.id)}
-                      />
-                      <span>
-                        <strong>{t(preset.title)}</strong>
-                        <small>{t(preset.description)}</small>
-                      </span>
-                    </label>
-                  ))}
-                </fieldset>
+              {loading && (
+                <span className="sr-only" role="status">
+                  {t("Загружаем конфигурацию…")}
+                </span>
               )}
+              <fieldset
+                className="permission-presets"
+                disabled={loading || saving}
+                aria-busy={loading || undefined}
+              >
+                <legend className="sr-only">{t("Режим разрешений")}</legend>
+                {PRESETS.map((preset) => (
+                  <label
+                    className={`permission-preset${selected === preset.id ? " selected" : ""}${preset.id === "full-access" ? " dangerous" : ""}`}
+                    key={preset.id}
+                  >
+                    <input
+                      type="radio"
+                      name="permission-preset"
+                      value={preset.id}
+                      checked={selected === preset.id}
+                      onChange={() => setSelected(preset.id)}
+                    />
+                    <span>
+                      <strong>{t(preset.title)}</strong>
+                      <small>{t(preset.description)}</small>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
 
-              {!loading && settings?.preset === null && (
-                <div className="settings-notice warning" role="status">
-                  {t(
-                    "Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.",
-                  )}
-                </div>
-              )}
-              {settings?.overridden && (
-                <div className="settings-notice warning" role="status">
-                  {settings.message
-                    ? (localizeKnownServerText(language, settings.message) ?? settings.message)
-                    : t("Настройка переопределена управляемой политикой Codex.")}
-                </div>
-              )}
-              {selected === "full-access" && !loading && (
-                <div className="settings-notice danger" role="alert">
-                  {t(
-                    "Полный доступ снимает ограничения на файлы и сеть. Используйте его только на доверенном сервере.",
-                  )}
-                </div>
-              )}
-              {error && (
-                <div className="settings-notice danger" role="alert">
-                  {error}
-                </div>
-              )}
-
+              <div className="settings-feedback-slot">
+                {!loading && settings?.preset === null && (
+                  <div className="settings-notice warning" role="status">
+                    {t(
+                      "Обнаружена нестандартная конфигурация. Выберите один из режимов и сохраните его.",
+                    )}
+                  </div>
+                )}
+                {settings?.overridden && (
+                  <div className="settings-notice warning" role="status">
+                    {settings.message
+                      ? (localizeKnownServerText(language, settings.message) ?? settings.message)
+                      : t("Настройка переопределена управляемой политикой Codex.")}
+                  </div>
+                )}
+                {selected === "full-access" && !loading && (
+                  <div className="settings-notice danger" role="alert">
+                    {t(
+                      "Полный доступ снимает ограничения на файлы и сеть. Используйте его только на доверенном сервере.",
+                    )}
+                  </div>
+                )}
+                {error && (
+                  <div className="settings-notice danger" role="alert">
+                    {error}
+                  </div>
+                )}
+              </div>
               <div className="settings-actions">
                 <button className="primary" disabled={loading || saving || !changed} type="submit">
-                  {saving ? t("Сохраняем…") : t("Сохранить")}
+                  <ActionLabel idle={t("Сохранить")} busy={t("Сохраняем…")} pending={saving} />
                 </button>
               </div>
             </SettingsGroup>
@@ -805,6 +818,7 @@ function TranscriptionSettingsCard({
 
   async function saveTranscriptionSettings(event: FormEvent) {
     event.preventDefault();
+    if (!config) return;
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -832,49 +846,56 @@ function TranscriptionSettingsCard({
 
   return (
     <SettingsGroup
+      loading={!config && !configError}
       description={t("Эти настройки общие для всех клиентов и сохраняются на сервере.")}
       icon={<MicrophoneIcon />}
       title={t("Распознавание речи")}
     >
-      {configError && (
-        <div className="settings-notice danger" role="alert">
-          {t("Не удалось получить настройки распознавания: {{error}}", {
-            error: localizeKnownServerText(language, configError) ?? configError,
-          })}
-        </div>
-      )}
-      {!config && !configError && (
-        <div className="settings-loading compact">
-          <span className="spinner small" /> {t("Загружаем настройки…")}
-        </div>
-      )}
-      {config && (
-        <form className="transcription-settings-form" onSubmit={saveTranscriptionSettings}>
-          <SettingsRow
-            description={t("Где обрабатывается записанное аудио.")}
-            label={t("Провайдер")}
-            labelFor="settings-transcription-provider"
+      <div className="settings-feedback-slot">
+        {configError && (
+          <div className="settings-notice danger" role="alert">
+            {t("Не удалось получить настройки распознавания: {{error}}", {
+              error: localizeKnownServerText(language, configError) ?? configError,
+            })}
+          </div>
+        )}
+        {!config && !configError && (
+          <div className="settings-loading compact" role="status">
+            <span className="spinner small" /> {t("Загружаем настройки…")}
+          </div>
+        )}
+      </div>
+      <form
+        className="transcription-settings-form"
+        inert={!config || undefined}
+        onSubmit={saveTranscriptionSettings}
+      >
+        <SettingsRow
+          description={t("Где обрабатывается записанное аудио.")}
+          label={t("Провайдер")}
+          labelFor="settings-transcription-provider"
+        >
+          <select
+            aria-label={t("Провайдер распознавания речи")}
+            disabled={saving}
+            id="settings-transcription-provider"
+            value={form.provider ?? ""}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                provider: event.target.value as TranscriptionProvider,
+              }))
+            }
           >
-            <select
-              aria-label={t("Провайдер распознавания речи")}
-              disabled={saving}
-              id="settings-transcription-provider"
-              value={form.provider ?? ""}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  provider: event.target.value as TranscriptionProvider,
-                }))
-              }
-            >
-              <option value="" disabled>
-                {t("Выберите провайдера")}
-              </option>
-              <option value="local">{t("Локальная модель")}</option>
-              <option value="openai">OpenAI API</option>
-            </select>
-          </SettingsRow>
+            <option value="" disabled>
+              {t("Выберите провайдера")}
+            </option>
+            <option value="local">{t("Локальная модель")}</option>
+            <option value="openai">OpenAI API</option>
+          </select>
+        </SettingsRow>
 
+        <div className="transcription-provider-region">
           {form.provider === "local" && (
             <div className="transcription-provider-settings">
               <SettingsRow
@@ -977,7 +998,7 @@ function TranscriptionSettingsCard({
                     disabled={!secure || saving}
                     id="settings-openai-api-key"
                     placeholder={
-                      config.openAiApiKeyConfigured && !removeApiKey
+                      config?.openAiApiKeyConfigured && !removeApiKey
                         ? t("Ключ сохранён; оставьте пустым без изменений")
                         : "sk-…"
                     }
@@ -994,11 +1015,11 @@ function TranscriptionSettingsCard({
                     type="button"
                     onClick={() => setShowApiKey((current) => !current)}
                   >
-                    {showApiKey ? t("Скрыть") : t("Показать")}
+                    <ActionLabel idle={t("Показать")} busy={t("Скрыть")} pending={showApiKey} />
                   </button>
                 </span>
               </SettingsRow>
-              {config.openAiApiKeyConfigured && (
+              {config?.openAiApiKeyConfigured && (
                 <div className="settings-actions codex-actions transcription-key-actions">
                   <span>{removeApiKey ? t("Ключ будет удалён") : t("API key настроен")}</span>
                   <button
@@ -1009,7 +1030,11 @@ function TranscriptionSettingsCard({
                       setApiKey("");
                     }}
                   >
-                    {removeApiKey ? t("Не удалять") : t("Удалить ключ")}
+                    <ActionLabel
+                      idle={t("Удалить ключ")}
+                      busy={t("Не удалять")}
+                      pending={removeApiKey}
+                    />
                   </button>
                 </div>
               )}
@@ -1025,32 +1050,33 @@ function TranscriptionSettingsCard({
               </div>
             </div>
           )}
+        </div>
+        <SettingsRow
+          description={t("Код языка аудио, например ru или en.")}
+          label={t("Язык")}
+          labelFor="settings-transcription-language"
+        >
+          <input
+            aria-label={t("Язык распознавания")}
+            disabled={saving}
+            id="settings-transcription-language"
+            maxLength={32}
+            placeholder="ru"
+            spellCheck={false}
+            value={form.language ?? ""}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, language: event.target.value || null }))
+            }
+          />
+        </SettingsRow>
 
-          <SettingsRow
-            description={t("Код языка аудио, например ru или en.")}
-            label={t("Язык")}
-            labelFor="settings-transcription-language"
-          >
-            <input
-              aria-label={t("Язык распознавания")}
-              disabled={saving}
-              id="settings-transcription-language"
-              maxLength={32}
-              placeholder="ru"
-              spellCheck={false}
-              value={form.language ?? ""}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, language: event.target.value || null }))
-              }
-            />
-          </SettingsRow>
-
-          {config.providers.length === 0 && (
+        <div className="settings-feedback-slot">
+          {config?.providers.length === 0 && (
             <div className="settings-notice warning" role="status">
               {t("Настройте URL локального STT или OpenAI API key, чтобы включить микрофон.")}
             </div>
           )}
-          {config.provider && !config.providers.includes(config.provider) && (
+          {config?.provider && !config.providers.includes(config.provider) && (
             <div className="settings-notice danger" role="alert">
               {t(
                 "Выбранный провайдер настроен не полностью. Исправьте параметры и сохраните форму.",
@@ -1067,13 +1093,17 @@ function TranscriptionSettingsCard({
               {notice}
             </div>
           )}
-          <div className="settings-actions">
-            <button className="primary" disabled={saving || !form.provider} type="submit">
-              {saving ? t("Сохраняем…") : t("Сохранить распознавание")}
-            </button>
-          </div>
-        </form>
-      )}
+        </div>
+        <div className="settings-actions">
+          <button className="primary" disabled={saving || !form.provider} type="submit">
+            <ActionLabel
+              idle={t("Сохранить распознавание")}
+              busy={t("Сохраняем…")}
+              pending={saving}
+            />
+          </button>
+        </div>
+      </form>
     </SettingsGroup>
   );
 }

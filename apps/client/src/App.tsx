@@ -85,7 +85,6 @@ const PROJECT_LONG_PRESS_MOVE_TOLERANCE = 10;
 const PROJECT_DRAG_SCROLL_EDGE = 48;
 const PROJECT_DRAG_SCROLL_SPEED = 12;
 const THREAD_PREVIEW_LIMIT = 5;
-const THREAD_TITLE_SCROLL_MIN_DURATION_MS = 1_500;
 const THREAD_TITLE_SCROLL_PX_PER_SECOND = 45;
 const SIDEBAR_TREE_STATE_KEY_PREFIX = "codexnest.sidebarTree.v1:";
 const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
@@ -1470,6 +1469,14 @@ function Sidebar({
       <nav
         className={`thread-nav ${projectListDirection}`}
         aria-label={t("Задачи")}
+        onScroll={(event) => {
+          if (event.target !== event.currentTarget) return;
+          event.currentTarget
+            .querySelectorAll<HTMLDetailsElement>(".thread-row-menu[open]")
+            .forEach((menu) => {
+              menu.open = false;
+            });
+        }}
         onClickCapture={(event) => {
           if (
             !(event.target instanceof Element) ||
@@ -2050,9 +2057,20 @@ function ThreadLink({
   function closeActions(restoreFocus = false) {
     const menu = menuRef.current;
     if (!menu) return;
+    menu.querySelector<HTMLElement>(".thread-row-actions")?.hidePopover?.();
     menu.open = false;
     resetFinishInteraction();
     if (restoreFocus) menu.querySelector("summary")?.focus();
+  }
+
+  function positionActions(menu: HTMLDetailsElement) {
+    const panel = menu.querySelector<HTMLElement>(".thread-row-actions");
+    if (!panel) return;
+    panel.showPopover?.();
+    const trigger = menu.querySelector("summary")!.getBoundingClientRect();
+    const bounds = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(8, Math.min(trigger.right - bounds.width, window.innerWidth - bounds.width - 8))}px`;
+    panel.style.top = `${trigger.bottom + bounds.height <= window.innerHeight - 8 ? trigger.bottom : Math.max(8, trigger.top - bounds.height)}px`;
   }
 
   async function togglePin() {
@@ -2215,26 +2233,32 @@ function ThreadLink({
               {displayTitle}
             </span>
           )}
-          {thread.pinned && (
-            <span
-              className="thread-pinned-marker"
-              title={t("Сессия закреплена")}
-              aria-hidden="true"
-            >
-              <PinIcon />
-            </span>
-          )}
-          {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
-            <span
-              aria-hidden="true"
-              className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
-              title={
-                thread.browserStatus === "connected" ? t("Браузер подключён") : t("Браузер включён")
-              }
-            >
-              <BrowserIcon />
-            </span>
-          )}
+          <span className="thread-marker-slot">
+            {thread.pinned && (
+              <span
+                className="thread-pinned-marker"
+                title={t("Сессия закреплена")}
+                aria-hidden="true"
+              >
+                <PinIcon />
+              </span>
+            )}
+          </span>
+          <span className="thread-marker-slot">
+            {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
+              <span
+                aria-hidden="true"
+                className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
+                title={
+                  thread.browserStatus === "connected"
+                    ? t("Браузер подключён")
+                    : t("Браузер включён")
+                }
+              >
+                <BrowserIcon />
+              </span>
+            )}
+          </span>
           <span className={threadStatusClasses(thread)} title={thread.state} />
         </NavLink>
         {hasActions && (
@@ -2243,8 +2267,13 @@ function ThreadLink({
             data-dismiss-on-outside-click
             ref={menuRef}
             onToggle={(event) => {
-              if (!event.currentTarget.open) resetFinishInteraction();
-              prepareThreadTitleScroll(titleRef.current);
+              if (event.currentTarget.open) positionActions(event.currentTarget);
+              else {
+                event.currentTarget
+                  .querySelector<HTMLElement>(".thread-row-actions")
+                  ?.hidePopover?.();
+                resetFinishInteraction();
+              }
             }}
             onKeyDown={(event) => {
               if (event.key !== "Escape") return;
@@ -2260,13 +2289,29 @@ function ThreadLink({
                 event.preventDefault();
                 const menu = menuRef.current;
                 if (!menu) return;
-                menu.open = true;
+                menu.open = !menu.open;
+                if (!menu.open) {
+                  closeActions();
+                  return;
+                }
+                positionActions(menu);
                 menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
               }}
             >
               <MoreIcon />
             </summary>
-            <div className="thread-row-actions">{actions}</div>
+            <div
+              className="thread-row-actions"
+              popover="manual"
+              onToggle={(event) => event.stopPropagation()}
+            >
+              {actions}
+              {pinError && (
+                <div className="thread-action-error" role="alert">
+                  {pinError}
+                </div>
+              )}
+            </div>
           </details>
         )}
         {finishError && (
@@ -2275,11 +2320,6 @@ function ThreadLink({
           </span>
         )}
       </div>
-      {pinError && (
-        <div className="thread-action-error" role="alert">
-          {pinError}
-        </div>
-      )}
     </>
   );
 }
@@ -2295,10 +2335,7 @@ function prepareThreadTitleScroll(element: HTMLSpanElement | null): void {
     return;
   }
 
-  const duration = Math.max(
-    THREAD_TITLE_SCROLL_MIN_DURATION_MS,
-    Math.round((overflow / THREAD_TITLE_SCROLL_PX_PER_SECOND) * 1_000),
-  );
+  const duration = (overflow / THREAD_TITLE_SCROLL_PX_PER_SECOND) * 1_000;
   element.dataset.overflowing = "true";
   element.style.setProperty("--thread-title-scroll-distance", `${overflow}px`);
   element.style.setProperty("--thread-title-scroll-duration", `${duration}ms`);

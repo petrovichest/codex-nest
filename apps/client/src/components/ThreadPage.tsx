@@ -112,6 +112,7 @@ import {
   SessionInspector,
 } from "./SessionInspector";
 import { WorkspaceHeader } from "./WorkspaceHeader";
+import { ActionLabel } from "./ActionLabel";
 
 type ComposerDraftState = {
   threadId: string;
@@ -3890,6 +3891,10 @@ export function ThreadPage({
                 )}
                 <QueuedMessages
                   messages={queuedMessages}
+                  onLoadImage={loadLocalImage}
+                  cwd={project?.path ?? workspaceSummary.cwd}
+                  onDownload={downloadFile}
+                  onOpenArtifact={openLinkedArtifact}
                   canSendNow={!inputUnavailable && !settingsBusy}
                   action={queueAction}
                   inTimeline
@@ -4026,7 +4031,11 @@ export function ThreadPage({
                   disabled={refreshing}
                   onClick={() => void forceRefreshSession()}
                 >
-                  {refreshing ? t("Обновляем…") : t("Проверить снова")}
+                  <ActionLabel
+                    idle={t("Проверить снова")}
+                    busy={t("Обновляем…")}
+                    pending={refreshing}
+                  />
                 </button>
               </div>
             )}
@@ -4392,7 +4401,10 @@ function MarkdownImage({
   const [viewer, setViewer] = useState<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    if (!localPath || !onLoadImage) return;
+    if (!localPath || !onLoadImage) {
+      setState({ status: "ready", source: src ?? "" });
+      return;
+    }
     let active = true;
     let source: string | null = null;
     setState({ status: "loading" });
@@ -4409,9 +4421,8 @@ function MarkdownImage({
       active = false;
       if (source) URL.revokeObjectURL(source);
     };
-  }, [attempt, localPath, onLoadImage]);
+  }, [attempt, localPath, onLoadImage, src]);
 
-  if (!localPath || !onLoadImage) return <img src={src} alt={alt} title={title} />;
   if (state.status === "loading") {
     return (
       <span className="markdown-image-state" role="status">
@@ -4435,7 +4446,7 @@ function MarkdownImage({
   const label =
     alt ||
     descriptor?.fileName ||
-    localPath.split("/").at(-1) ||
+    localPath?.split("/").at(-1) ||
     t("Изображение {{number}}", { number: 1 });
   return (
     <>
@@ -4445,7 +4456,12 @@ function MarkdownImage({
         aria-label={t("Открыть изображение {{name}}", { name: label })}
         onClick={(event) => setViewer(event.currentTarget)}
       >
-        <img src={state.source} alt={alt} title={title} />
+        <img
+          src={state.source}
+          alt={alt}
+          title={title}
+          onError={() => setState({ status: "failed" })}
+        />
       </button>
       {viewer && (
         <ImageViewer
@@ -5653,7 +5669,15 @@ export function QueuedMessages({
   onDelete,
   inTimeline = false,
   onRetry,
+  cwd,
+  onDownload,
+  onOpenArtifact,
+  onLoadImage,
 }: {
+  onLoadImage?: LocalImageLoader;
+  cwd?: string;
+  onDownload?(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   messages: QueuedMessageView[];
   action: QueueAction | null;
   canSendNow?: boolean;
@@ -5717,7 +5741,7 @@ export function QueuedMessages({
                     : t("В очереди");
           return (
             <article
-              className={`queued-message${inTimeline ? " message userMessage" : ""}`}
+              className="queued-message message userMessage"
               data-message-id={message.id}
               key={message.id}
             >
@@ -5726,24 +5750,7 @@ export function QueuedMessages({
                   {String(index + 1).padStart(2, "0")}
                 </span>
               )}
-              <div className={`queued-message-content${inTimeline ? " message-body" : ""}`}>
-                <div className="queued-message-heading">
-                  {inTimeline && (
-                    <span className="outgoing-delivery-status" role="status">
-                      {message.confirmed || message.serverAccepted
-                        ? t("В очереди")
-                        : message.deliveryError
-                          ? t("Сохранено на устройстве")
-                          : t("Отправляется…")}
-                    </span>
-                  )}
-                  {(!inTimeline ||
-                    message.deliveryError ||
-                    busy ||
-                    message.status === "dispatching") && (
-                    <span className="queued-message-status">{status}</span>
-                  )}
-                </div>
+              <div className="queued-message-content message-body">
                 {editing ? (
                   <div className="queued-message-editor">
                     <textarea
@@ -5770,21 +5777,52 @@ export function QueuedMessages({
                           });
                         }}
                       >
-                        {busy ? t("Сохраняем…") : t("Сохранить")}
+                        <ActionLabel idle={t("Сохранить")} busy={t("Сохраняем…")} pending={busy} />
                       </button>
                     </div>
                   </div>
                 ) : (
                   <>
-                    {message.text && <div className="queued-message-text">{message.text}</div>}
+                    {message.text && (
+                      <div className="queued-message-text">
+                        <MarkdownContent
+                          text={message.text}
+                          onLoadImage={onLoadImage}
+                          cwd={cwd}
+                          onDownload={onDownload}
+                          onOpenArtifact={onOpenArtifact}
+                        />
+                      </div>
+                    )}
                     {(message.images?.length ?? 0) > 0 && (
                       <MessageImages images={message.images ?? []} />
                     )}
                     {(message.files?.length ?? 0) > 0 && (
-                      <MessageFiles files={message.files ?? []} />
+                      <MessageFiles files={message.files ?? []} onDownload={onDownload} />
                     )}
                   </>
                 )}
+              </div>
+              <footer className="message-footer queued-message-footer">
+                <div className="queued-message-heading">
+                  {inTimeline && (
+                    <span className="outgoing-delivery-status" role="status">
+                      {message.confirmed || message.serverAccepted
+                        ? t("В очереди")
+                        : message.deliveryError
+                          ? t("Сохранено на устройстве")
+                          : t("Отправляется…")}
+                    </span>
+                  )}
+                  {(!inTimeline ||
+                    message.deliveryError ||
+                    busy ||
+                    message.status === "dispatching") && (
+                    <span className="queued-message-status" title={status ?? undefined}>
+                      {status}
+                    </span>
+                  )}
+                </div>
                 <div className="queued-message-actions">
                   {(message.deliveryError || !message.confirmed) && message.text && (
                     <button
@@ -5811,18 +5849,20 @@ export function QueuedMessages({
                         <RefreshIcon />
                       </button>
                     )}
-                  {!editing && (
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={t("Изменить сообщение в очереди")}
-                      title={t("Изменить сообщение в очереди")}
-                      disabled={actionsDisabled}
-                      onClick={() => setEditor({ messageId: message.id, value: message.text })}
-                    >
-                      <PencilIcon />
-                    </button>
-                  )}
+                  <span className="queued-action-slot">
+                    {!editing && (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={t("Изменить сообщение в очереди")}
+                        title={t("Изменить сообщение в очереди")}
+                        disabled={actionsDisabled}
+                        onClick={() => setEditor({ messageId: message.id, value: message.text })}
+                      >
+                        <PencilIcon />
+                      </button>
+                    )}
+                  </span>
                   <button
                     type="button"
                     className="icon-button danger"
@@ -5833,20 +5873,22 @@ export function QueuedMessages({
                   >
                     <TrashIcon />
                   </button>
-                  {canSendNow && (
-                    <button
-                      type="button"
-                      className="icon-button queued-message-send"
-                      aria-label={t("Отправить сейчас")}
-                      title={t("Отправить сейчас")}
-                      disabled={actionsDisabled}
-                      onClick={() => void onSendNow(message.id)}
-                    >
-                      <SendIcon />
-                    </button>
-                  )}
+                  <span className="queued-action-slot">
+                    {canSendNow && (
+                      <button
+                        type="button"
+                        className="icon-button queued-message-send"
+                        aria-label={t("Отправить сейчас")}
+                        title={t("Отправить сейчас")}
+                        disabled={actionsDisabled}
+                        onClick={() => void onSendNow(message.id)}
+                      >
+                        <SendIcon />
+                      </button>
+                    )}
+                  </span>
                 </div>
-              </div>
+              </footer>
             </article>
           );
         })}
@@ -5968,8 +6010,16 @@ function MessageFooter({
 
   return (
     <footer className="message-footer">
-      {copyState === "copied" && <span role="status">{t("Скопировано")}</span>}
-      {copyState === "failed" && <span role="alert">{t("Не удалось скопировать")}</span>}
+      {copyState === "copied" && (
+        <span className="message-footer-feedback" role="status">
+          {t("Скопировано")}
+        </span>
+      )}
+      {copyState === "failed" && (
+        <span className="message-footer-feedback" role="alert">
+          {t("Не удалось скопировать")}
+        </span>
+      )}
       {timestamp !== null && (
         <time dateTime={new Date(timestamp).toISOString()}>
           {formatMessageTime(timestamp, language)}
@@ -6426,7 +6476,7 @@ function RenameDialog({
             {t("Отмена")}
           </button>
           <button className="primary" disabled={busy || !value.trim()}>
-            {busy ? t("Сохраняем…") : t("Сохранить")}
+            <ActionLabel idle={t("Сохранить")} busy={t("Сохраняем…")} pending={busy} />
           </button>
         </div>
       </form>

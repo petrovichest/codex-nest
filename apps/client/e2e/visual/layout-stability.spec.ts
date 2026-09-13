@@ -1,0 +1,461 @@
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
+import type { ServerEvent, ThreadDetail, ThreadSummary, TurnView } from "@codexnest/protocol";
+import {
+  DESKTOP_VIEWPORT,
+  PHONE_VIEWPORT,
+  installVisualFixture,
+  mainThread,
+  snapshot,
+  waitForVisualReady,
+} from "./fixtures";
+
+async function json(route: Route, body: unknown, status = 200) {
+  await route.fulfill({
+    status,
+    headers: { "access-control-allow-origin": "*", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function geometry(locator: Locator) {
+  return locator.evaluateAll((elements) =>
+    elements.map((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return { x, y, width, height };
+    }),
+  );
+}
+
+function unchanged(before: Awaited<ReturnType<typeof geometry>>, after: typeof before) {
+  expect(after).toHaveLength(before.length);
+  before.forEach((box, index) => {
+    for (const key of ["x", "y", "width", "height"] as const) {
+      expect(
+        Math.abs(box[key] - after[index]![key]),
+        `element ${index}: ${key}`,
+      ).toBeLessThanOrEqual(1);
+    }
+  });
+}
+
+const messageText =
+  "Одинаковое **сообщение** со ссылкой [пример](https://example.test).\n\n" +
+  "Длинный текст должен целиком сохранять переносы и размеры до и после отправки. ".repeat(8);
+
+function turn(id: string, text: string, messageId = id): TurnView {
+  return {
+    id,
+    status: "completed",
+    startedAt: 1,
+    completedAt: 2,
+    durationMs: 1,
+    progress: {
+      startedAt: 1,
+      explanation: null,
+      steps: [],
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+    },
+    items: [
+      {
+        id: messageId,
+        type: "userMessage",
+        text,
+        images: [],
+        status: "completed",
+        timestamp: 1,
+        phase: null,
+      },
+    ],
+  };
+}
+
+async function chat(page: Page, theme: "light" | "dark", text = messageText) {
+  const summary: ThreadSummary = { ...mainThread, state: "completed", currentTurnId: null };
+  const seed = structuredClone(snapshot);
+  seed.attention = [];
+  seed.threads = [summary];
+  const detail: ThreadDetail = {
+    summary,
+    turns: [turn("original", text)],
+    olderTurnsCursor: null,
+    draft: null,
+    queuedMessages: [{ id: "queued", threadId: summary.id, text, status: "queued", createdAt: 1 }],
+  };
+  await installVisualFixture(page, { theme, snapshot: seed });
+  await page.route("**/api/v1/threads/session-main", (route) => json(route, detail));
+  let sequence = seed.sequence;
+  let send!: (event: ServerEvent) => void;
+  await page.routeWebSocket("wss://codexnest.visual/api/v1/events", (socket) => {
+    send = (event) => socket.send(JSON.stringify({ type: "event", sequence: ++sequence, event }));
+    socket.onMessage((message) => {
+      const frame = JSON.parse(message.toString());
+      if (frame.type === "authenticate")
+        socket.send(JSON.stringify({ type: "snapshot", snapshot: seed }));
+      if (frame.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
+    });
+  });
+  await page.goto("/threads/session-main");
+  await expect(page.locator(".queued-message-text")).toBeVisible();
+  await waitForVisualReady(page);
+  return { summary, detail, send: (event: ServerEvent) => send(event) };
+}
+
+for (const mobile of [false, true]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`${mobile ? "mobile" : "desktop"} ${theme}: queue typography and delivery geometry`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+      const { detail, send } = await chat(page, theme);
+      const original = page.locator('[data-message-id="original"] > .message-body');
+      const queued = page.locator('[data-message-id="queued"] > .message-body');
+      const compare = async (locator: Locator) =>
+        locator.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return {
+            width: element.getBoundingClientRect().width,
+            height: element.getBoundingClientRect().height,
+            font: style.fontFamily,
+            size: style.fontSize,
+            lineHeight: style.lineHeight,
+          };
+        });
+      const before = await compare(queued);
+      expect(before).toEqual(await compare(original));
+      await expect(queued.locator("strong")).toHaveText("сообщение");
+      expect(
+        await queued
+          .locator("p")
+          .last()
+          .evaluate((el) => el.scrollHeight <= el.clientHeight),
+      ).toBe(true);
+      send({
+        type: "turn.replaced",
+        threadId: mainThread.id,
+        turn: turn("delivered", messageText, "queued"),
+      });
+      detail.queuedMessages = [];
+      send({ type: "queue.changed", threadId: mainThread.id, messages: [] });
+      await expect(page.locator(".queued-message")).toHaveCount(0);
+      expect(await compare(queued)).toEqual(before);
+    });
+
+    test(`${mobile ? "mobile" : "desktop"} ${theme}: toolbar stays still through running and voice states`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+      const { summary, send } = await chat(page, theme, "Проверка");
+      const controls = page.locator(
+        ".composer-add-image,.model-toggle,.plan-toggle,.team-toggle,.goal-toggle,.composer-actions > .microphone,.composer-actions > .composer-action:last-child",
+      );
+      const before = await geometry(controls);
+      send({
+        type: "thread.upserted",
+        thread: { ...summary, state: "running", currentTurnId: "running" },
+      });
+      await expect(
+        page.getByRole("button", { name: "Остановить задачу", exact: true }),
+      ).toBeVisible();
+      unchanged(before, await geometry(controls));
+      await page.evaluate(() => {
+        class Recorder extends EventTarget {
+          static isTypeSupported() {
+            return true;
+          }
+          state = "inactive";
+          mimeType = "audio/webm";
+          start() {
+            this.state = "recording";
+          }
+          stop() {
+            this.state = "inactive";
+            this.dispatchEvent(new Event("stop"));
+          }
+        }
+        Object.defineProperty(window, "MediaRecorder", { configurable: true, value: Recorder });
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+          },
+        });
+      });
+      const now = await page.evaluate(() => Date.now());
+      await page.getByRole("button", { name: "Начать запись", exact: true }).click();
+      await expect(
+        page.getByRole("button", { name: "Остановить запись", exact: true }),
+      ).toBeVisible();
+      for (const elapsed of [9, 10, 59, 60, 599, 600]) {
+        await page.evaluate(
+          (time) => {
+            Date.now = () => time;
+          },
+          now + elapsed * 1000,
+        );
+        await expect(page.locator(".composer-action-timer")).toHaveText(
+          `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
+        );
+        unchanged(before, await geometry(controls));
+      }
+      await page.getByRole("button", { name: "Отменить запись", exact: true }).click();
+      send({
+        type: "voiceTranscription.upserted",
+        job: {
+          id: "voice",
+          threadId: summary.id,
+          mode: "draft",
+          status: "failed",
+          createdAt: now,
+          startedAt: now,
+          audioDurationMs: 10000,
+          estimatedTotalSeconds: null,
+          error: "No speech was detected in the recording",
+        },
+      });
+      await expect(page.locator(".composer-error")).toBeVisible();
+      unchanged(before, await geometry(controls));
+      expect(
+        await page.locator(".composer-options").evaluate((el) => el.scrollWidth <= el.clientWidth),
+      ).toBe(true);
+    });
+  }
+
+  test(`${mobile ? "mobile" : "desktop"}: settings and fork loading keep their controls anchored`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    await installVisualFixture(page, { theme: "light" });
+    const loading = deferred();
+    await page.route("**/api/v1/settings/codex", async (route) => {
+      await loading.promise;
+      return route.fallback();
+    });
+    await page.goto("/settings?section=maintenance");
+    const card = page.locator(".codex-settings-card").first();
+    await expect(card.locator(".settings-group-body")).toHaveAttribute("aria-busy", "true");
+    await waitForVisualReady(page);
+    const actions = card.locator(".settings-actions button");
+    const initial = await geometry(actions);
+    loading.resolve();
+    await expect(card.locator(".settings-group-body")).not.toHaveAttribute("aria-busy");
+    unchanged(initial, await geometry(actions));
+    const checking = deferred();
+    await page.route("**/api/v1/settings/app/check", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      await checking.promise;
+      return json(route, { error: "Fixture failure" }, 500);
+    });
+    const app = page.locator(".application-settings-card");
+    const appActions = app.locator(".settings-actions > *");
+    await appActions.last().scrollIntoViewIfNeeded();
+    const before = await geometry(appActions);
+    await app.getByRole("button", { name: "Проверить обновления", exact: true }).click();
+    await expect(app.getByRole("button", { name: "Проверяем…", exact: true })).toBeVisible();
+    unchanged(before, await geometry(appActions));
+    checking.resolve();
+    await expect(app.getByRole("alert")).toBeVisible();
+    unchanged(before, await geometry(appActions));
+    const restarting = deferred();
+    await page.route("**/api/v1/settings/codex/force-restart", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      await restarting.promise;
+      return json(route, {});
+    });
+    const recovery = page.locator(".recovery-settings-card");
+    const recoveryActions = recovery.locator(".settings-actions button");
+    await recoveryActions.last().scrollIntoViewIfNeeded();
+    const recoveryBefore = await geometry(recoveryActions);
+    page.once("dialog", (dialog) => dialog.accept());
+    await recovery.getByRole("button", { name: "Жёстко перезапустить Codex", exact: true }).click();
+    await expect(
+      recovery.getByRole("button", { name: "Перезапускаем Codex…", exact: true }),
+    ).toBeVisible();
+    unchanged(recoveryBefore, await geometry(recoveryActions));
+    restarting.resolve();
+    await expect(recovery.getByText("Codex daemon аварийно перезапущен.")).toBeVisible();
+    unchanged(recoveryBefore, await geometry(recoveryActions));
+    await page.goto("/threads/session-main");
+    const estimate = deferred();
+    await page.route("**/fork-estimate", async (route) => {
+      await estimate.promise;
+      return route.fallback();
+    });
+    await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
+    const dialog = page.getByRole("dialog", { name: "Создать ветку" });
+    await expect(dialog.getByText("Считаем…").first()).toBeVisible();
+    const chrome = dialog.locator(".dialog-header,.fork-dialog-actions");
+    const pending = await geometry(chrome);
+    estimate.resolve();
+    await expect(dialog.getByText("Считаем…")).toHaveCount(0);
+    unchanged(pending, await geometry(chrome));
+  });
+}
+
+test("sidebar typography and actual title animation use fixed geometry and speed", async ({
+  page,
+}) => {
+  const seed = structuredClone(snapshot);
+  seed.threads[0]!.title =
+    "Очень длинное название сессии для проверки одинаковой скорости движения текста";
+  await installVisualFixture(page, { theme: "dark", snapshot: seed });
+  await page.goto("/threads/session-main");
+  await waitForVisualReady(page);
+  const fonts = await page.locator(".sidebar-control-action").evaluateAll((elements) =>
+    elements.map((el) => {
+      const s = getComputedStyle(el);
+      return [s.fontSize, s.lineHeight, s.fontFamily];
+    }),
+  );
+  expect(new Set(fonts.map((font) => JSON.stringify(font))).size).toBe(1);
+  expect(fonts[0]![0]).toBe("14px");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => document.querySelector("style[data-visual-test-motion]")?.remove());
+  const row = page.locator('a[href="/threads/session-main"]').locator("..");
+  const title = row.locator(".thread-link-title");
+  const before = await geometry(title);
+  await title.hover();
+  const speed = await title.evaluate((el) => {
+    const animation = el.getAnimations()[0]!;
+    animation.pause();
+    animation.currentTime = 0;
+    const start = parseFloat(getComputedStyle(el).textIndent);
+    animation.currentTime = 200;
+    const end = parseFloat(getComputedStyle(el).textIndent);
+    return Math.abs(end - start) / 0.2;
+  });
+  expect(speed).toBeCloseTo(45, 1);
+  unchanged(before, await geometry(title));
+  await row.locator("summary").click();
+  unchanged(before, await geometry(title));
+  await page.keyboard.press("Escape");
+  await expect(row.locator("summary")).toBeFocused();
+});
+
+test("image loading and retry keep preview frames and following content stationary", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1800 });
+  const image = deferred();
+  let failImage = true;
+  await page.route("https://image.test/preview.svg", async (route) => {
+    await image.promise;
+    if (failImage) return route.abort();
+    await route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="240"><rect width="80" height="240" fill="#888"/></svg>',
+    });
+  });
+  await chat(page, "light", "![Превью](https://image.test/preview.svg)\n\nТекст под изображением.");
+  const frames = page.locator(".markdown-image-preview,.markdown-image-state");
+  await expect(frames).toHaveCount(2);
+  const paragraphs = page.getByText("Текст под изображением.", { exact: true });
+  const following = await geometry(paragraphs);
+  const before = await geometry(frames);
+  image.resolve();
+  await expect(page.locator(".markdown-image-retry")).toHaveCount(2);
+  unchanged(before, await geometry(frames));
+  unchanged(following, await geometry(paragraphs));
+  failImage = false;
+  for (let remaining = 2; remaining > 0; remaining--) {
+    await page.locator(".markdown-image-retry").first().click();
+    await expect(page.locator(".markdown-image-retry")).toHaveCount(remaining - 1);
+  }
+  await expect
+    .poll(() =>
+      frames
+        .locator("img")
+        .evaluateAll((images) =>
+          images.every((image) => (image as HTMLImageElement).naturalWidth > 0),
+        ),
+    )
+    .toBe(true);
+  unchanged(before, await geometry(frames));
+  unchanged(following, await geometry(paragraphs));
+  for (const frame of before) expect(frame.width / frame.height).toBeCloseTo(4 / 3, 2);
+});
+
+for (const mobile of [false, true]) {
+  test(`${mobile ? "mobile" : "desktop"}: English busy labels keep adjacent actions stationary`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    await installVisualFixture(page, {
+      theme: "light",
+      snapshot: { ...snapshot, uiLanguage: "en" },
+    });
+    const checking = deferred();
+    await page.route("**/api/v1/settings/app/check", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      await checking.promise;
+      return json(route, { error: "Fixture failure" }, 500);
+    });
+    await page.goto("/settings?section=maintenance");
+    const card = page.locator(".application-settings-card");
+    const check = card.getByRole("button", { name: "Check for updates", exact: true });
+    await expect(check).toBeEnabled();
+    await card.locator(".settings-actions > *").last().scrollIntoViewIfNeeded();
+    const controls = card.locator(".settings-actions > *");
+    const before = await geometry(controls);
+    await check.click();
+    await expect(card.getByRole("button", { name: "Checking…", exact: true })).toBeVisible();
+    unchanged(before, await geometry(controls));
+    checking.resolve();
+    await expect(card.getByRole("alert")).toBeVisible();
+    unchanged(before, await geometry(controls));
+  });
+
+  test(`${mobile ? "mobile" : "desktop"}: background updates preserve the reader's scroll position`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    const { summary, send } = await chat(page, "light", (messageText + "\n\n").repeat(12));
+    const scroll = page.locator(".conversation-scroll");
+    await scroll.evaluate((element) => {
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -500, bubbles: true }));
+      element.scrollTop = 250;
+    });
+    await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBe(250);
+    const before = await geometry(
+      page.locator(
+        '.workspace-header,.composer-toolbar,[data-message-id="original"] > .message-body',
+      ),
+    );
+    send({
+      type: "thread.upserted",
+      thread: {
+        ...summary,
+        state: "running",
+        currentTurnId: "new-turn",
+        updatedAt: summary.updatedAt + 1,
+      },
+    });
+    send({
+      type: "turn.replaced",
+      threadId: summary.id,
+      turn: turn("new-turn", "Новое сообщение в конце истории."),
+    });
+    await expect(page.getByText("Новое сообщение в конце истории.", { exact: true })).toHaveCount(
+      1,
+    );
+    await waitForVisualReady(page);
+    expect(await scroll.evaluate((element) => element.scrollTop)).toBe(250);
+    unchanged(
+      before,
+      await geometry(
+        page.locator(
+          '.workspace-header,.composer-toolbar,[data-message-id="original"] > .message-body',
+        ),
+      ),
+    );
+  });
+}

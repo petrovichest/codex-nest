@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { App as CapacitorApp } from "@capacitor/app";
@@ -177,6 +178,7 @@ export function ApplicationSettingsCard({
 
   return (
     <SettingsGroup
+      loading={loading}
       className="application-settings-card"
       description={t(
         "Сервер, APK и расширение для Chrome обновляются из одной проверенной CI-сборки с автоматическим откатом.",
@@ -184,36 +186,37 @@ export function ApplicationSettingsCard({
       icon={<ServerIcon />}
       title={t("Обновление CodexNest")}
     >
-      {loading ? (
-        <div className="settings-loading compact">
-          <span className="spinner small" /> {t("Получаем версию CodexNest…")}
-        </div>
-      ) : (
-        <>
-          <dl className="settings-status-list">
-            <div>
-              <dt>{t("Установлено на сервере")}</dt>
-              <dd className="settings-technical">{status?.currentVersion ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>{t("Актуальная версия в GitHub")}</dt>
-              <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
-            </div>
-            <div>
-              <dt>{t("APK на этом устройстве")}</dt>
-              <dd className="settings-technical">{apkVersionLabel}</dd>
-            </div>
-            <div>
-              <dt>{t("Состояние")}</dt>
-              <dd>{operationLabel(status?.operation, t)}</dd>
-            </div>
-            <div>
-              <dt>{t("Результат")}</dt>
-              <dd>{resultLabel(status?.result, t)}</dd>
-            </div>
-          </dl>
+      {loading && (
+        <span className="sr-only" role="status">
+          {t("Получаем версию CodexNest…")}
+        </span>
+      )}
+      <>
+        <dl className="settings-status-list">
+          <div>
+            <dt>{t("Установлено на сервере")}</dt>
+            <dd className="settings-technical">{status?.currentVersion ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>{t("Актуальная версия в GitHub")}</dt>
+            <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
+          </div>
+          <div>
+            <dt>{t("APK на этом устройстве")}</dt>
+            <dd className="settings-technical">{apkVersionLabel}</dd>
+          </div>
+          <div>
+            <dt>{t("Состояние")}</dt>
+            <dd>{operationLabel(status?.operation, t)}</dd>
+          </div>
+          <div>
+            <dt>{t("Результат")}</dt>
+            <dd>{resultLabel(status?.result, t)}</dd>
+          </div>
+        </dl>
 
-          {!status?.supported && (
+        <div className="settings-feedback-slot">
+          {!loading && !status?.supported && (
             <div className="settings-notice warning" role="status">
               {status?.message
                 ? (localizeKnownServerText(language, status.message) ?? status.message)
@@ -240,52 +243,53 @@ export function ApplicationSettingsCard({
               {error}
             </div>
           )}
-
-          <div className="settings-actions codex-actions">
-            <a
-              className="settings-action-link"
-              href={REPOSITORY_URL}
-              rel="noopener noreferrer"
-              target="_blank"
-              onClick={(event) => {
-                if (!nativePlatform) return;
-                event.preventDefault();
-                void openRepository();
-              }}
-            >
-              {t("Открыть GitHub")}
-            </a>
-            <button type="button" onClick={() => void downloadApk()}>
-              {t("Скачать свежий APK")}
-            </button>
-            <button type="button" onClick={() => void downloadChromeExtension()}>
-              {t("Скачать расширение для Chrome")}
-            </button>
-            <button
-              disabled={!status?.supported || busy}
-              type="button"
-              onClick={() => void check()}
-            >
-              {action === "checking" ? t("Проверяем…") : t("Проверить обновления")}
-            </button>
-            <button
-              className="primary"
-              disabled={
-                !status?.supported ||
-                busy ||
-                activeTurnsBlockUpdate ||
-                status?.updateAvailable !== true
-              }
-              type="button"
-              onClick={() => void update()}
-            >
-              {action === "updating" || (status !== null && status.operation !== "idle")
-                ? t("Обновляем…")
-                : t("Обновить CodexNest")}
-            </button>
-          </div>
-        </>
-      )}
+        </div>
+        <div className="settings-actions codex-actions">
+          <a
+            className="settings-action-link"
+            href={REPOSITORY_URL}
+            rel="noopener noreferrer"
+            target="_blank"
+            onClick={(event) => {
+              if (!nativePlatform) return;
+              event.preventDefault();
+              void openRepository();
+            }}
+          >
+            {t("Открыть GitHub")}
+          </a>
+          <button type="button" onClick={() => void downloadApk()}>
+            {t("Скачать свежий APK")}
+          </button>
+          <button type="button" onClick={() => void downloadChromeExtension()}>
+            {t("Скачать расширение для Chrome")}
+          </button>
+          <button disabled={!status?.supported || busy} type="button" onClick={() => void check()}>
+            <ActionLabel
+              idle={t("Проверить обновления")}
+              busy={t("Проверяем…")}
+              pending={action === "checking"}
+            />
+          </button>
+          <button
+            className="primary"
+            disabled={
+              !status?.supported ||
+              busy ||
+              activeTurnsBlockUpdate ||
+              status?.updateAvailable !== true
+            }
+            type="button"
+            onClick={() => void update()}
+          >
+            <ActionLabel
+              idle={t("Обновить CodexNest")}
+              busy={t("Обновляем…")}
+              pending={action === "updating" || (status !== null && status.operation !== "idle")}
+            />
+          </button>
+        </div>
+      </>
     </SettingsGroup>
   );
 }

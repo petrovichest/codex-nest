@@ -118,7 +118,7 @@ test.describe("CodexNest redesign visual contract", () => {
       );
       await link.hover();
       const hoveredTitle = await title.boundingBox();
-      expect(hoveredTitle!.width).toBeLessThan(titleBeforeHover!.width);
+      expect(hoveredTitle).toEqual(titleBeforeHover);
       const trigger = row.getByLabel("Действия с сессией «Полировка мастерской»");
       const triggerBounds = await trigger.boundingBox();
       expect(hoveredTitle!.x + hoveredTitle!.width).toBeLessThanOrEqual(triggerBounds!.x);
@@ -136,7 +136,7 @@ test.describe("CodexNest redesign visual contract", () => {
       );
 
       await finish.hover();
-      expect(await row.evaluate((element) => element.matches(":hover"))).toBe(true);
+      await expect(row.locator(".thread-row-menu")).toHaveAttribute("open", "");
       expect(await link.evaluate((element) => element.matches(":hover"))).toBe(false);
       await expect(link).toHaveCSS("background-color", rowHoverBackground);
       expect(

@@ -329,6 +329,7 @@ export function PendingForkPage({
             error={error}
           >
             <QueuedMessages
+              cwd={sourceSummary.cwd}
               messages={queue}
               action={queueAction}
               canSendNow={false}

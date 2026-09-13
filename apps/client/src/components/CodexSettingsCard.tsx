@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import {
   createContext,
   type FormEvent,
@@ -232,36 +233,38 @@ export function CodexSettingsCard() {
 
   return (
     <SettingsGroup
+      loading={loading}
       className="codex-settings-card"
       description={t("Версия и состояние Codex daemon на сервере.")}
       icon={<ToolIcon />}
       title="Codex CLI"
     >
-      {loading ? (
-        <div className="settings-loading compact">
-          <span className="spinner small" /> {t("Получаем состояние Codex…")}
-        </div>
-      ) : (
-        <>
-          <dl className="settings-status-list">
-            <div>
-              <dt>{t("Установленная версия Codex CLI")}</dt>
-              <dd className="settings-technical">{status?.cliVersion ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>Daemon</dt>
-              <dd className="settings-technical">{status?.appServerVersion ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>{t("Состояние")}</dt>
-              <dd>{daemonLabel(status?.daemonStatus, t)}</dd>
-            </div>
-            <div>
-              <dt>{t("Актуальная версия Codex CLI")}</dt>
-              <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
-            </div>
-          </dl>
+      {loading && (
+        <span className="sr-only" role="status">
+          {t("Получаем состояние Codex…")}
+        </span>
+      )}
+      <>
+        <dl className="settings-status-list">
+          <div>
+            <dt>{t("Установленная версия Codex CLI")}</dt>
+            <dd className="settings-technical">{status?.cliVersion ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>Daemon</dt>
+            <dd className="settings-technical">{status?.appServerVersion ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>{t("Состояние")}</dt>
+            <dd>{daemonLabel(status?.daemonStatus, t)}</dd>
+          </div>
+          <div>
+            <dt>{t("Актуальная версия Codex CLI")}</dt>
+            <dd className="settings-technical">{status?.latestVersion ?? t("Не проверялась")}</dd>
+          </div>
+        </dl>
 
+        <div className="settings-feedback-slot">
           {status?.unavailableReason && (
             <div className="settings-notice warning" role="status">
               {localizeKnownServerText(language, status.unavailableReason) ??
@@ -281,24 +284,36 @@ export function CodexSettingsCard() {
             </div>
           )}
           <SettingsFeedback feedback={codexFeedback} />
+        </div>
 
-          <div className="settings-actions codex-actions">
-            <button disabled={!supported || busy} type="button" onClick={() => void check()}>
-              {action === "checking" ? t("Проверяем…") : t("Проверить Codex CLI")}
-            </button>
-            <button
-              disabled={maintenanceDisabled || status?.updateAvailable !== true}
-              type="button"
-              onClick={() => void update()}
-            >
-              {action === "updating" ? t("Обновляем…") : t("Обновить Codex CLI")}
-            </button>
-            <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
-              {action === "restarting" ? t("Перезапускаем…") : t("Перезапустить")}
-            </button>
-          </div>
-        </>
-      )}
+        <div className="settings-actions codex-actions">
+          <button disabled={!supported || busy} type="button" onClick={() => void check()}>
+            <ActionLabel
+              idle={t("Проверить Codex CLI")}
+              busy={t("Проверяем…")}
+              pending={action === "checking"}
+            />
+          </button>
+          <button
+            disabled={maintenanceDisabled || status?.updateAvailable !== true}
+            type="button"
+            onClick={() => void update()}
+          >
+            <ActionLabel
+              idle={t("Обновить Codex CLI")}
+              busy={t("Обновляем…")}
+              pending={action === "updating"}
+            />
+          </button>
+          <button disabled={maintenanceDisabled} type="button" onClick={() => void restart()}>
+            <ActionLabel
+              idle={t("Перезапустить")}
+              busy={t("Перезапускаем…")}
+              pending={action === "restarting"}
+            />
+          </button>
+        </div>
+      </>
     </SettingsGroup>
   );
 }
@@ -324,6 +339,7 @@ export function ProxySettingsCard() {
 
   return (
     <SettingsGroup
+      loading={loading}
       className="codex-settings-card"
       description={t(
         "Внутренние запросы Codex идут через fail-closed прокси; команды агента — напрямую.",
@@ -331,16 +347,17 @@ export function ProxySettingsCard() {
       icon={<ToolIcon />}
       title={t("Прокси")}
     >
-      {loading ? (
-        <div className="settings-loading compact">
-          <span className="spinner small" /> {t("Получаем состояние прокси…")}
-        </div>
-      ) : (
-        <>
-          <SettingsRow className="codex-proxy-summary" label={t("Текущий прокси")}>
-            <code>{proxySummary(status, language, t)}</code>
-          </SettingsRow>
+      {loading && (
+        <span className="sr-only" role="status">
+          {t("Получаем состояние прокси…")}
+        </span>
+      )}
+      <>
+        <SettingsRow className="codex-proxy-summary" label={t("Текущий прокси")}>
+          <code>{proxySummary(status, language, t)}</code>
+        </SettingsRow>
 
+        <div className="settings-feedback-slot">
           {status?.networkStatus === "ok" && (
             <div className="settings-notice success" role="status">
               {t("WebSocket ChatGPT/OpenAI доступен через прокси.")}
@@ -357,51 +374,54 @@ export function ProxySettingsCard() {
             </div>
           )}
 
-          <form className="codex-proxy-form" onSubmit={applyProxy}>
-            <SettingsRow
-              description={t("Будет проверен до перезапуска Codex daemon.")}
-              label={t("Новый HTTP/HTTPS-прокси")}
-              labelFor="settings-codex-proxy"
-            >
-              <span className="codex-proxy-input">
-                <input
-                  autoComplete="off"
-                  disabled={!supported || busy || !secure}
-                  id="settings-codex-proxy"
-                  placeholder="host:port:user:password"
-                  spellCheck={false}
-                  type={showProxy ? "text" : "password"}
-                  value={proxy}
-                  onChange={(event) => setProxy(event.target.value)}
-                />
-                <button
-                  disabled={!proxy}
-                  type="button"
-                  onClick={() => setShowProxy((current) => !current)}
-                >
-                  {showProxy ? t("Скрыть") : t("Показать")}
-                </button>
-              </span>
-            </SettingsRow>
-            <small>
-              {t(
-                "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.",
-              )}
-            </small>
-            <div className="settings-actions codex-actions">
-              <button
-                className="primary"
-                disabled={maintenanceDisabled || !secure || !proxy.trim()}
-                type="submit"
-              >
-                {action === "proxy" ? t("Проверяем и применяем…") : t("Проверить и применить")}
-              </button>
-            </div>
-          </form>
-
           <SettingsFeedback feedback={proxyFeedback} />
-        </>
-      )}
+        </div>
+        <form className="codex-proxy-form" onSubmit={applyProxy}>
+          <SettingsRow
+            description={t("Будет проверен до перезапуска Codex daemon.")}
+            label={t("Новый HTTP/HTTPS-прокси")}
+            labelFor="settings-codex-proxy"
+          >
+            <span className="codex-proxy-input">
+              <input
+                autoComplete="off"
+                disabled={!supported || busy || !secure}
+                id="settings-codex-proxy"
+                placeholder="host:port:user:password"
+                spellCheck={false}
+                type={showProxy ? "text" : "password"}
+                value={proxy}
+                onChange={(event) => setProxy(event.target.value)}
+              />
+              <button
+                disabled={!proxy}
+                type="button"
+                onClick={() => setShowProxy((current) => !current)}
+              >
+                <ActionLabel idle={t("Показать")} busy={t("Скрыть")} pending={showProxy} />
+              </button>
+            </span>
+          </SettingsRow>
+          <small>
+            {t(
+              "Форматы: host:port, host:port:user:password, user:password@host:port или полный URL.",
+            )}
+          </small>
+          <div className="settings-actions codex-actions">
+            <button
+              className="primary"
+              disabled={maintenanceDisabled || !secure || !proxy.trim()}
+              type="submit"
+            >
+              <ActionLabel
+                idle={t("Проверить и применить")}
+                busy={t("Проверяем и применяем…")}
+                pending={action === "proxy"}
+              />
+            </button>
+          </div>
+        </form>
+      </>
     </SettingsGroup>
   );
 }

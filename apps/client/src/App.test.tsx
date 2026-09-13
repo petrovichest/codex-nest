@@ -1748,7 +1748,11 @@ describe("App routing and navigation", () => {
     expect(enabledMarker).toHaveAttribute("title", "Браузер включён");
   });
 
-  it("prepares only overflowing session titles to scroll on hover", () => {
+  it.each([
+    [18, "400ms"],
+    [90, "2000ms"],
+    [180, "4000ms"],
+  ] as const)("scrolls overflowing titles at 45 px/s (overflow: %s)", (overflow, duration) => {
     const overflowingThread = {
       ...baseThread,
       id: "overflowing-title",
@@ -1771,7 +1775,7 @@ describe("App routing and navigation", () => {
     const fittingTitle = fittingLink.querySelector(".thread-link-title") as HTMLSpanElement;
     Object.defineProperties(overflowingTitle, {
       clientWidth: { configurable: true, value: 120 },
-      scrollWidth: { configurable: true, value: 210 },
+      scrollWidth: { configurable: true, value: 120 + overflow },
     });
     Object.defineProperties(fittingTitle, {
       clientWidth: { configurable: true, value: 160 },
@@ -1782,9 +1786,11 @@ describe("App routing and navigation", () => {
     fireEvent.mouseEnter(fittingLink);
 
     expect(overflowingTitle).toHaveAttribute("data-overflowing", "true");
-    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe("90px");
+    expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe(
+      `${overflow}px`,
+    );
     expect(overflowingTitle.style.getPropertyValue("--thread-title-scroll-duration")).toBe(
-      "2000ms",
+      duration,
     );
     expect(fittingTitle).not.toHaveAttribute("data-overflowing");
     expect(fittingTitle.style.getPropertyValue("--thread-title-scroll-distance")).toBe("");

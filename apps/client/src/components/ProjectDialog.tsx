@@ -1,3 +1,4 @@
+import { ActionLabel } from "./ActionLabel";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DirectoryListing } from "@codexnest/protocol";
@@ -137,7 +138,9 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
             <span className="project-breadcrumb-placeholder">{t("Домашняя папка")}</span>
           )}
         </nav>
-        {operation === "loading" && <div className="spinner small" aria-label={t("Загрузка")} />}
+        <span className="project-browser-loading">
+          {operation === "loading" && <div className="spinner small" aria-label={t("Загрузка")} />}
+        </span>
       </div>
 
       <div className="project-browser-controls">
@@ -174,7 +177,11 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
             onChange={(event) => setDirectoryName(event.target.value)}
           />
           <button type="submit" className="primary" disabled={busy || !directoryName.trim()}>
-            {operation === "creating" ? t("Создаём…") : t("Создать")}
+            <ActionLabel
+              idle={t("Создать")}
+              busy={t("Создаём…")}
+              pending={operation === "creating"}
+            />
           </button>
           <button
             type="button"
@@ -242,7 +249,12 @@ export function ProjectDialog({ onClose }: { onClose(): void }) {
           disabled={busy || !listing}
           onClick={() => void selectDirectory()}
         >
-          <FolderIcon /> {operation === "selecting" ? t("Добавляем…") : t("Выбрать эту папку")}
+          <FolderIcon />{" "}
+          <ActionLabel
+            idle={t("Выбрать эту папку")}
+            busy={t("Добавляем…")}
+            pending={operation === "selecting"}
+          />
         </button>
       </div>
     </Dialog>
