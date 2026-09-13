@@ -322,7 +322,7 @@ export function PendingForkPage({
             running
             settings={sourceSummary.settings}
             onSettingsChange={() => undefined}
-            settingsBusy
+            settingsDisabled
             models={state.snapshot?.models ?? []}
             transcriptionConfig={null}
             transcriptionProvider={null}

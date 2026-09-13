@@ -374,6 +374,26 @@ describe("Composer", () => {
     expect(input ? onSubmit : onSendQueuedNow).toHaveBeenCalledOnce();
   });
 
+  it("allows messages while settings are read-only", () => {
+    const onSubmit = vi.fn();
+    const onSettingsChange = vi.fn();
+    render(
+      <Harness
+        initialInput="Сообщение"
+        settingsDisabled
+        onSubmit={onSubmit}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Модель и уровень рассуждений" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.keyDown(textarea, { key: "Tab", shiftKey: true });
+    expect(onSettingsChange).not.toHaveBeenCalled();
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith("queue");
+  });
+
   it("submits modified Enter instead of selecting a skill suggestion", async () => {
     const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
     render(<Harness cwd="/work/project" onSubmit={onSubmit} />);
@@ -1166,6 +1186,7 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 function Harness({
   busy = false,
   settingsBusy = false,
+  settingsDisabled = false,
   children,
   cwd,
   goalMode = false,
@@ -1193,6 +1214,7 @@ function Harness({
 }: {
   busy?: boolean;
   settingsBusy?: boolean;
+  settingsDisabled?: boolean;
   children?: ReactNode;
   cwd?: string;
   goalMode?: boolean;
@@ -1238,6 +1260,7 @@ function Harness({
       onSendQueuedNow={onSendQueuedNow}
       busy={busy}
       settingsBusy={settingsBusy}
+      settingsDisabled={settingsDisabled}
       cwd={cwd}
       projects={projectOptions}
       projectId={projectId}

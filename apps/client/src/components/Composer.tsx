@@ -118,6 +118,7 @@ export function Composer({
   settings,
   onSettingsChange,
   settingsBusy = false,
+  settingsDisabled = false,
   goalMode = false,
   goal,
   goalBusy = false,
@@ -172,6 +173,7 @@ export function Composer({
   settings: SessionSettings;
   onSettingsChange(value: UpdateThreadSettingsRequest): void;
   settingsBusy?: boolean;
+  settingsDisabled?: boolean;
   goalMode?: boolean;
   goal?: ThreadGoal | null;
   goalBusy?: boolean;
@@ -345,6 +347,7 @@ export function Composer({
     !running &&
     !busy &&
     !settingsBusy &&
+    !settingsDisabled &&
     !speechBusy &&
     !goal &&
     Boolean(
@@ -1390,10 +1393,11 @@ export function Composer({
               </label>
             )}
             <SettingsPicker
-              disabled={running || busy || settingsBusy || speechBusy}
+              disabled={running || busy || settingsBusy || settingsDisabled || speechBusy}
               teamToggleDisabled={
                 busy ||
                 settingsBusy ||
+                settingsDisabled ||
                 speechBusy ||
                 (running && settings.collaborationMode !== "team")
               }
