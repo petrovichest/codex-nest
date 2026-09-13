@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CodexNest — desktop and mobile</title>
+    <style>
+      @font-face {
+        font-family: Onest;
+        src: url("{{FONT}}") format("woff2");
+        font-weight: 100 900;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: #eef0e9;
+        color: #292a29;
+        font-family: Onest, sans-serif;
+      }
+      .brand {
+        position: absolute;
+        top: 64px;
+        left: 72px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 32px;
+        font-weight: 650;
+        letter-spacing: -1px;
+      }
+      .brand img {
+        width: 52px;
+        height: 52px;
+      }
+      .copy {
+        position: absolute;
+        top: 208px;
+        left: 72px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 76px;
+        font-weight: 600;
+        line-height: 1.06;
+        letter-spacing: -4px;
+      }
+      .subtitle {
+        margin: 26px 0 0;
+        font-size: 30px;
+        letter-spacing: -1px;
+      }
+      .rule {
+        width: 48px;
+        height: 5px;
+        margin-top: 36px;
+        background: #4b9ce8;
+      }
+      .note {
+        margin-top: 28px;
+        font-size: 19px;
+        line-height: 1.6;
+        color: #6a6c67;
+      }
+      .platforms {
+        position: absolute;
+        bottom: 67px;
+        left: 72px;
+        font:
+          13px/1.8 ui-monospace,
+          monospace;
+        letter-spacing: 1px;
+        color: #6a6c67;
+      }
+      .desktop {
+        position: absolute;
+        width: 936px;
+        top: 134px;
+        right: 56px;
+        border: 1px solid #41443f;
+        border-radius: 16px;
+        background: #171817;
+        overflow: hidden;
+        box-shadow: 0 24px 55px #292a2929;
+      }
+      .chrome {
+        height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 14px;
+        background: #252725;
+        border-bottom: 1px solid #41443f;
+      }
+      .chrome i {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #6a6c67;
+      }
+      .chrome span {
+        margin-left: 12px;
+        color: #b1b4ae;
+        font-size: 11px;
+      }
+      .desktop > img {
+        display: block;
+        width: 100%;
+      }
+      .phone {
+        position: absolute;
+        top: 363px;
+        left: 446px;
+        width: 230px;
+        padding: 7px;
+        border: 1px solid #d7d8d2;
+        border-radius: 22px;
+        background: #ffffff;
+        box-shadow: 0 20px 46px #292a2938;
+      }
+      .phone img {
+        display: block;
+        width: 100%;
+        border-radius: 15px;
+      }
+      @media (max-width: 1280px) {
+        .brand {
+          top: 44px;
+          left: 52px;
+          font-size: 28px;
+          gap: 13px;
+        }
+        .brand img {
+          width: 46px;
+          height: 46px;
+        }
+        .copy {
+          top: 157px;
+          left: 52px;
+        }
+        h1 {
+          font-size: 62px;
+          letter-spacing: -3px;
+        }
+        .subtitle {
+          margin-top: 20px;
+          font-size: 25px;
+        }
+        .rule {
+          margin-top: 28px;
+        }
+        .note {
+          font-size: 16px;
+          margin-top: 22px;
+        }
+        .platforms {
+          bottom: 44px;
+          left: 52px;
+          font-size: 11px;
+        }
+        .desktop {
+          width: 670px;
+          right: 36px;
+          top: 109px;
+          border-radius: 12px;
+        }
+        .chrome {
+          height: 27px;
+        }
+        .phone {
+          width: 170px;
+          top: 253px;
+          left: 449px;
+          padding: 5px;
+          border-radius: 16px;
+        }
+        .phone img {
+          border-radius: 11px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="brand"><img src="{{LOGO}}" alt="" />CodexNest</div>
+    <div class="copy">
+      <h1>Your Codex<br />workspace.</h1>
+      <p class="subtitle">Desktop and mobile.</p>
+      <div class="rule"></div>
+      <p class="note">Your projects. Your conversations.<br />On your own Linux machine.</p>
+    </div>
+    <div class="platforms">SELF-HOSTED<br />BROWSER · ANDROID</div>
+    <div class="desktop">
+      <div class="chrome"><i></i><i></i><i></i><span>CodexNest / Launchpad</span></div>
+      <img src="{{DESKTOP}}" alt="Project search session on desktop" />
+    </div>
+    <div class="phone"><img src="{{MOBILE}}" alt="The same session on mobile" /></div>
+  </body>
+</html>

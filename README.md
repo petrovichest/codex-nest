@@ -1,26 +1,109 @@
-# CodexNest
+<h1 align="center">CodexNest</h1>
 
-English | [Русский](./README.ru.md)
+<p align="center">English · <a href="./README.ru.md">Русский</a></p>
 
-CodexNest is an unofficial, self-hosted Android and browser client for managing
-Codex CLI sessions on a private Linux machine. It is not affiliated with or
-endorsed by OpenAI.
+<p align="center">
+  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: the same project search session on desktop and mobile" /></a>
+</p>
 
-CodexNest gives one owner an app-like workspace for Codex:
+<p align="center">
+  <strong>Your Codex workspace. Desktop and mobile.</strong><br />
+  Manage Codex CLI sessions on your own Linux machine, from your browser or Android phone.
+</p>
 
-- organize server-side project folders and their sessions;
-- start, resume, fork, archive, steer, queue, and interrupt work;
-- follow streamed messages, plans, commands, file changes, approvals, and
-  artifacts while multiple sessions run concurrently;
-- keep drafts and recent session data available across temporary disconnects;
-- use English or Russian with system, light, and dark themes;
-- dictate prompts through configurable speech-to-text;
-- receive browser and Android notifications when work finishes, fails, or needs
-  attention; and
-- attach Chrome tabs to a session so Codex can inspect and operate the browser.
+<p align="center">
+  <a href="https://github.com/petrovichest/codex-nest/actions/workflows/ci.yml"><img src="https://github.com/petrovichest/codex-nest/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="https://github.com/petrovichest/codex-nest/releases/latest"><img src="https://img.shields.io/github/v/release/petrovichest/codex-nest?label=release&amp;color=4b9ce8" alt="Latest release" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-292a29" alt="License: Apache 2.0" /></a>
+</p>
 
-The React interface runs in a browser and is bundled into the Capacitor Android
-app. On iOS, the HTTPS site can also be added to the Home Screen as a web app.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="https://github.com/petrovichest/codex-nest/releases/latest/download/CodexNest-latest.apk">Android APK</a> ·
+  <a href="./deploy/DEPLOYMENT.md">Documentation</a>
+</p>
+
+CodexNest is an unofficial, self-hosted project for a single owner. It is not
+affiliated with or endorsed by OpenAI.
+
+## Quick start
+
+Use an Ubuntu or Debian machine (`amd64` or `arm64`) with Codex CLI installed and
+signed in. Run the installer as a regular user:
+
+> **Private access only.** Keep CodexNest on the host, a fully trusted LAN, or your
+> private VPN. Do not expose port `4310` to the public internet.
+> Read the [security boundary](#security-boundary) before connecting.
+
+```bash
+curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
+```
+
+The installer supplies its pinned Node.js runtime and managed user services; it
+does not install or sign in to Codex CLI. Follow the
+[first connection instructions](./deploy/DEPLOYMENT.md#6-проверка-и-первый-вход)
+to open the browser client or connect the
+[Android app](https://github.com/petrovichest/codex-nest/releases/latest/download/CodexNest-latest.apk).
+
+## What you can do
+
+- **Keep projects together.** Organize server-side folders and sessions; resume,
+  fork or archive conversations as work evolves.
+- **Guide work as it happens.** Follow streamed answers and plans, inspect
+  commands and file changes, answer questions, queue follow-ups or interrupt a turn.
+- **Run several sessions.** Follow concurrent work and use
+  [CodexNest Team](#codexnest-team) for application-managed child tasks.
+- **Take the workspace with you.** Use the browser or Android app, keep drafts
+  and recent session data across temporary disconnects, and choose English or
+  Russian with system, light or dark themes. On iOS, add the HTTPS site to your
+  Home Screen as a web app.
+- **Open the result.** Preview artifacts inside the conversation workspace and
+  download the finished files.
+- **Use voice and browser tools.** Dictate prompts, receive completion and
+  attention notifications, and attach Chrome tabs through the
+  [browser extension](#browser-extension).
+
+## Screenshots
+
+The current interface with a prepared **Launchpad** demo: adding project search,
+reviewing progress and opening the result. All projects and conversations shown
+here are demonstration data. Select an image to view it at full size.
+
+### A workspace for your projects
+
+Projects and sessions stay alongside the conversation. See the plan, follow
+progress and send the next instruction from the same screen.
+
+[![Dark desktop workspace showing projects, a plan and the completed search task](./docs/assets/desktop-session.png)](./docs/assets/desktop-session.png)
+
+### Keep the next step in view
+
+Answer a question while a follow-up waits in the queue. The light theme offers
+the same controls and project navigation.
+
+[![Light desktop workspace with a clarification question and a queued follow-up](./docs/assets/desktop-queue.png)](./docs/assets/desktop-queue.png)
+
+### Inspect the work behind the answer
+
+Expand the activity log to review commands, test output and file changes.
+
+[![Expanded desktop activity showing a test command, its output and a file patch](./docs/assets/desktop-activity.png)](./docs/assets/desktop-activity.png)
+
+### The same workspace on your phone
+
+Read the plan and continue the session, answer a clarification, or open the
+finished report. These are mobile web views, also used inside the Android app.
+
+<p align="center">
+  <a href="./docs/assets/mobile-session.png"><img src="./docs/assets/mobile-session.png" width="260" alt="Light mobile interface: plan, completed task and message composer" /></a>
+  <a href="./docs/assets/mobile-question.png"><img src="./docs/assets/mobile-question.png" width="260" alt="Dark mobile interface: clarification options and a queued message" /></a>
+  <a href="./docs/assets/mobile-report.png"><img src="./docs/assets/mobile-report.png" width="260" alt="Dark mobile interface: project search report in the Markdown viewer" /></a>
+</p>
+
+<p align="center"><sub>Continue the conversation · Make a decision · Read the result</sub></p>
+
+---
 
 ## Security boundary
 
@@ -218,20 +301,13 @@ NODE_ENV=test npm run test:e2e -w @codexnest/extension
 
 ## Installation and operations
 
-Install the latest successful rolling build on Ubuntu or Debian (`amd64` or
-`arm64`) as a regular user:
-
-```bash
-curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/install.sh | bash
-```
-
-The installer supplies its pinned Node.js runtime and managed user services but
-does not install or sign in to Codex CLI. Keep the resulting listener inside the
-private LAN/VPN boundary.
+Start with the [quick start](#quick-start) above for the latest successful rolling
+build. For configuration and ongoing operation:
 
 - [Deployment, configuration, updates, backup, and recovery](./deploy/DEPLOYMENT.md)
 - [Android build, signing, networking, and notifications](./apps/client/android/README.md)
 - [Contributing](./CONTRIBUTING.md)
+- [Regenerating the README screenshots and covers](./docs/media/README.md)
 
 ## License
 
