@@ -1469,14 +1469,6 @@ function Sidebar({
       <nav
         className={`thread-nav ${projectListDirection}`}
         aria-label={t("Задачи")}
-        onScroll={(event) => {
-          if (event.target !== event.currentTarget) return;
-          event.currentTarget
-            .querySelectorAll<HTMLDetailsElement>(".thread-row-menu[open]")
-            .forEach((menu) => {
-              menu.open = false;
-            });
-        }}
         onClickCapture={(event) => {
           if (
             !(event.target instanceof Element) ||
@@ -2057,20 +2049,9 @@ function ThreadLink({
   function closeActions(restoreFocus = false) {
     const menu = menuRef.current;
     if (!menu) return;
-    menu.querySelector<HTMLElement>(".thread-row-actions")?.hidePopover?.();
     menu.open = false;
     resetFinishInteraction();
     if (restoreFocus) menu.querySelector("summary")?.focus();
-  }
-
-  function positionActions(menu: HTMLDetailsElement) {
-    const panel = menu.querySelector<HTMLElement>(".thread-row-actions");
-    if (!panel) return;
-    panel.showPopover?.();
-    const trigger = menu.querySelector("summary")!.getBoundingClientRect();
-    const bounds = panel.getBoundingClientRect();
-    panel.style.left = `${Math.max(8, Math.min(trigger.right - bounds.width, window.innerWidth - bounds.width - 8))}px`;
-    panel.style.top = `${trigger.bottom + bounds.height <= window.innerHeight - 8 ? trigger.bottom : Math.max(8, trigger.top - bounds.height)}px`;
   }
 
   async function togglePin() {
@@ -2267,13 +2248,8 @@ function ThreadLink({
             data-dismiss-on-outside-click
             ref={menuRef}
             onToggle={(event) => {
-              if (event.currentTarget.open) positionActions(event.currentTarget);
-              else {
-                event.currentTarget
-                  .querySelector<HTMLElement>(".thread-row-actions")
-                  ?.hidePopover?.();
-                resetFinishInteraction();
-              }
+              if (!event.currentTarget.open) resetFinishInteraction();
+              prepareThreadTitleScroll(titleRef.current);
             }}
             onKeyDown={(event) => {
               if (event.key !== "Escape") return;
@@ -2289,29 +2265,13 @@ function ThreadLink({
                 event.preventDefault();
                 const menu = menuRef.current;
                 if (!menu) return;
-                menu.open = !menu.open;
-                if (!menu.open) {
-                  closeActions();
-                  return;
-                }
-                positionActions(menu);
+                menu.open = true;
                 menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
               }}
             >
               <MoreIcon />
             </summary>
-            <div
-              className="thread-row-actions"
-              popover="manual"
-              onToggle={(event) => event.stopPropagation()}
-            >
-              {actions}
-              {pinError && (
-                <div className="thread-action-error" role="alert">
-                  {pinError}
-                </div>
-              )}
-            </div>
+            <div className="thread-row-actions">{actions}</div>
           </details>
         )}
         {finishError && (
@@ -2320,6 +2280,11 @@ function ThreadLink({
           </span>
         )}
       </div>
+      {pinError && (
+        <div className="thread-action-error" role="alert">
+          {pinError}
+        </div>
+      )}
     </>
   );
 }

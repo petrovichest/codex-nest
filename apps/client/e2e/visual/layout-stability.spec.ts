@@ -341,10 +341,12 @@ test("sidebar typography and actual title animation use fixed geometry and speed
   });
   expect(speed).toBeCloseTo(45, 1);
   unchanged(before, await geometry(title));
+  const rowBefore = await geometry(row);
   await row.locator("summary").click();
-  unchanged(before, await geometry(title));
+  unchanged(rowBefore, await geometry(row));
   await page.keyboard.press("Escape");
   await expect(row.locator("summary")).toBeFocused();
+  unchanged(before, await geometry(title));
 });
 
 test.describe("compact mobile controls", () => {
@@ -394,6 +396,12 @@ test.describe("compact mobile controls", () => {
     const trigger = (await row.locator("summary").boundingBox())!;
     expect(trigger.x - before.x - before.width).toBeLessThanOrEqual(5);
     await row.locator("summary").click();
+    const expanded = (await title.boundingBox())!;
+    const actions = (await row.locator(".thread-row-actions").boundingBox())!;
+    expect(expanded.x).toBe(before.x);
+    expect(expanded.width).toBeLessThan(before.width);
+    expect(expanded.x + expanded.width).toBeLessThanOrEqual(actions.x);
+    await page.keyboard.press("Escape");
     expect(await title.boundingBox()).toEqual(before);
   });
 });

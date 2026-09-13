@@ -138,14 +138,18 @@ for (const theme of ["light", "dark"] as const) {
     await trigger.click();
     await expect(create).toBeVisible();
     await expect(pin).toBeVisible();
-    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeHidden();
+    await expect(row.locator(".thread-pinned-marker")).toBeHidden();
     expect(await row.boundingBox()).toEqual(topRowBounds);
     expect(await row.locator(".status").boundingBox()).toEqual(statusBounds);
     const actions = row.locator(".thread-row-actions");
     const actionBounds = (await actions.boundingBox())!;
     const expandedTitle = (await title.boundingBox())!;
-    expect(expandedTitle).toEqual(before);
-    expect(actionBounds.y).toBeGreaterThanOrEqual(triggerBounds!.y + triggerBounds!.height);
+    expect(expandedTitle.x + expandedTitle.width).toBeLessThanOrEqual(actionBounds.x);
+    expect(actionBounds.y).toBeGreaterThanOrEqual(topRowBounds!.y);
+    expect(actionBounds.y + actionBounds.height).toBeLessThanOrEqual(
+      topRowBounds!.y + topRowBounds!.height,
+    );
     expect(actionBounds.x + actionBounds.width).toBeLessThanOrEqual(statusBounds!.x);
     await page.getByRole("button", { name: "Активные", exact: true }).hover();
     await expect(menu).not.toHaveAttribute("open");
@@ -254,7 +258,7 @@ for (const count of [0, 1, 12]) {
 test.describe("touch sidebar actions", () => {
   test.use({ hasTouch: true, viewport: PHONE_VIEWPORT });
 
-  test("opens all three actions below the session row and keeps finish confirmation actionable", async ({
+  test("fits all three actions in the session row and keeps finish confirmation actionable", async ({
     page,
   }) => {
     await installVisualFixture(page, { theme: "dark", finishableSidebar: true });
@@ -275,14 +279,14 @@ test.describe("touch sidebar actions", () => {
     expect(await row.boundingBox()).toEqual(before);
     expect(await row.locator(".status").boundingBox()).toEqual(status);
     expect(title.width).toBeGreaterThan(0);
-    expect(bounds.y).toBeGreaterThanOrEqual(before!.y + before!.height - 2);
+    expect(title.x + title.width).toBeLessThanOrEqual(bounds.x);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(status!.x);
     for (const button of await actions.locator("button").all()) {
       const box = (await button.boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(44);
       expect(box.height).toBeGreaterThanOrEqual(44);
       expect(box.y).toBeGreaterThanOrEqual(before!.y);
-      expect(box.y + box.height).toBeLessThanOrEqual(PHONE_VIEWPORT.height);
+      expect(box.y + box.height).toBeLessThanOrEqual(before!.y + before!.height);
     }
     const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
     await finish.tap();
@@ -294,7 +298,7 @@ test.describe("touch sidebar actions", () => {
     await expect(finish).not.toHaveClass(/confirming/);
   });
 
-  test("opens the action popover, pins without navigation and creates in the same project", async ({
+  test("opens inline actions, pins without navigation and creates in the same project", async ({
     page,
   }) => {
     await openSidebar(page, "light");
@@ -323,14 +327,14 @@ test.describe("touch sidebar actions", () => {
     const rowBefore = await row.boundingBox();
     await trigger.tap();
     await expect(menu.locator(".thread-row-actions")).toBeVisible();
-    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeHidden();
     expect(await row.boundingBox()).toEqual(rowBefore);
     for (const button of await menu.locator("button").all()) {
       const bounds = (await button.boundingBox())!;
       expect(bounds.width).toBeGreaterThanOrEqual(44);
       expect(bounds.height).toBeGreaterThanOrEqual(44);
       expect(bounds.y).toBeGreaterThanOrEqual(rowBefore!.y);
-      expect(bounds.y + bounds.height).toBeLessThanOrEqual(PHONE_VIEWPORT.height);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(rowBefore!.y + rowBefore!.height);
     }
     await expect(page).toHaveURL(/\/threads\/session-active$/);
     await expect(page.locator(".sidebar")).toHaveScreenshot("sidebar-touch-actions.png", {

@@ -136,7 +136,7 @@ test.describe("CodexNest redesign visual contract", () => {
       );
 
       await finish.hover();
-      await expect(row.locator(".thread-row-menu")).toHaveAttribute("open", "");
+      expect(await row.evaluate((element) => element.matches(":hover"))).toBe(true);
       expect(await link.evaluate((element) => element.matches(":hover"))).toBe(false);
       await expect(link).toHaveCSS("background-color", rowHoverBackground);
       expect(
