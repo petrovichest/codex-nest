@@ -8,6 +8,17 @@ export function isThreadNotLoadedError(error: unknown): boolean {
   return error instanceof RpcError && /thread not loaded/i.test(error.message);
 }
 
+export function isThreadResumeRequiredError(error: unknown, threadId: string): boolean {
+  // Standard Codex reports an unloaded session as "thread not found" on turn/start.
+  // Match only that session's explicit rejection, not missing files or rollout history.
+  return (
+    isThreadNotLoadedError(error) ||
+    (error instanceof RpcError &&
+      error.code === -32600 &&
+      error.message === `thread not found: ${threadId}`)
+  );
+}
+
 export function isMissingThreadError(error: unknown): boolean {
   return error instanceof RpcError && MISSING_THREAD_ERROR.test(error.message);
 }

@@ -172,7 +172,7 @@ import type {
   TeamToolOperationState,
 } from "./state/store";
 import type { ThreadTitleGenerator } from "./thread-title";
-import { isMissingThreadError, isThreadNotLoadedError } from "./thread-state";
+import { isMissingThreadError, isThreadResumeRequiredError } from "./thread-state";
 import {
   computeTeamWorkspaceDelta,
   createTeamWorkspace,
@@ -679,9 +679,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       try {
         started = await send();
       } catch (error) {
-        // A durable empty session can be unloaded by a daemon restart. Only this
-        // explicit rejection is safe to retry without first reconciling delivery.
-        if (!isThreadNotLoadedError(error)) throw error;
+        // Restore unloaded sessions only after an explicit rejection; ambiguous
+        // sends still use durable replay or history reconciliation inside send().
+        if (!isThreadResumeRequiredError(error, threadId)) throw error;
         await resume();
         started = await send();
       }
@@ -1257,7 +1257,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       try {
         delivered = await durableDelivery.replay(messageId);
       } catch (error) {
-        if (!isThreadNotLoadedError(error)) throw error;
+        if (!isThreadResumeRequiredError(error, threadId)) throw error;
         await bridge.request("thread/resume", { threadId, excludeTurns: true });
         delivered = await durableDelivery.replay(messageId);
       }
@@ -6828,7 +6828,7 @@ async function deliveredClientMessageTurnId(
   try {
     return (await sender.replay(markerId)).turnId;
   } catch (error) {
-    if (!isThreadNotLoadedError(error)) throw error;
+    if (!isThreadResumeRequiredError(error, threadId)) throw error;
     await bridge.request("thread/resume", { threadId, excludeTurns: true });
     return (await sender.replay(markerId)).turnId;
   }

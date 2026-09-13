@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { StateStore } from "./state/store";
-import { isMissingThreadError, isThreadNotLoadedError, removeThreadState } from "./thread-state";
+import {
+  isMissingThreadError,
+  isThreadNotLoadedError,
+  isThreadResumeRequiredError,
+  removeThreadState,
+} from "./thread-state";
 import { RpcError } from "./codex/transport";
 
 const directories: string[] = [];
@@ -15,6 +20,25 @@ afterEach(async () =>
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   ),
 );
+
+describe("isThreadResumeRequiredError", () => {
+  it.each(["thread not loaded", "thread not found: thread"])(
+    "allows recovery after %s",
+    (message) => {
+      expect(isThreadResumeRequiredError(new RpcError(-32600, message), "thread")).toBe(true);
+    },
+  );
+
+  it.each([
+    new RpcError(-32600, "no rollout found for thread id thread"),
+    new RpcError(-32600, "thread not found: another-thread"),
+    new RpcError(-32600, "file not found: thread"),
+    new RpcError(-32603, "thread not found: thread"),
+    new Error("thread not found: thread"),
+  ])("does not resume for an unrelated or ambiguous failure: %s", (error) => {
+    expect(isThreadResumeRequiredError(error, "thread")).toBe(false);
+  });
+});
 
 describe("removeThreadState", () => {
   it("distinguishes an unloaded thread from missing durable history", () => {
