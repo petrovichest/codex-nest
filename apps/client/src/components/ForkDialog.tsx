@@ -260,10 +260,8 @@ function ForkModeCard({
         {checked && <CheckIcon />}
       </span>
       <span className="fork-mode-description">{description}</span>
-      <span className="fork-mode-metrics">
-        {loading ? (
-          <span>{t("Считаем…")}</span>
-        ) : unavailable ? (
+      <span className="fork-mode-metrics" aria-busy={loading || undefined}>
+        {unavailable ? (
           <span className="fork-mode-unavailable">
             {t("Сжатый контекст для этой точки недоступен. Выберите полную историю.")}
           </span>
@@ -271,13 +269,19 @@ function ForkModeCard({
           <>
             <span>
               <small>{t("Объём")}</small>
-              {mode === "compressed" && estimate.estimatedBytes === null
-                ? t("рассчитается при создании")
-                : formatForkBytes(estimate.estimatedBytes, language, t)}
+              <span className="fork-metric-value">
+                {loading
+                  ? t("Считаем…")
+                  : mode === "compressed" && estimate.estimatedBytes === null
+                    ? t("рассчитается при создании")
+                    : formatForkBytes(estimate.estimatedBytes, language, t)}
+              </span>
             </span>
             <span>
               <small>{t("Время")}</small>
-              {formatForkTime(estimate.estimatedSeconds, t)}
+              <span className="fork-metric-value">
+                {loading ? t("Считаем…") : formatForkTime(estimate.estimatedSeconds, t)}
+              </span>
             </span>
           </>
         )}

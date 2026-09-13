@@ -14,6 +14,26 @@
   --font-ui: "Onest", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: var(--font-ui);
 
+  /* Existing type sizes: tokenizing them must not change layout. */
+  --text-micro: 9px;
+  --text-tiny: 10px;
+  --text-caption: 11px;
+  --text-small: 12px;
+  --text-label: 13px;
+  --text-ui: 14px;
+  --text-message: 15px;
+  --text-input: 16px;
+  --text-section: 17px;
+  --text-dialog: 19px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-action: 650;
+  --weight-bold: 700;
+  --leading-tight: 1.25;
+  --leading-copy: 1.5;
+  --leading-message: 1.6;
+
   --color-canvas: #ffffff;
   --color-surface: #ffffff;
   --color-recessed: #f4f4f2;
@@ -42,10 +62,14 @@
   --status-failed: #c53b43;
   --status-interrupted: #9974db;
 
+  --space-0-5: 2px;
   --space-1: 4px;
+  --space-1-5: 6px;
   --space-2: 8px;
+  --space-2-5: 10px;
   --space-3: 12px;
   --space-4: 16px;
+  --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
   --radius-sm: 6px;

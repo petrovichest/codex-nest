@@ -6,9 +6,19 @@
   "version": "0.1.9",
   "minimum_chrome_version": "116",
   "key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDWKijMNwTCbFtcSSwslEcwVYVbctnfIejtkoEEQODF057dQTJe+h+l8OvrhBYYNL1M8tTDXfz2OyA+XbfzfqPPtGx7ZEmCptRjgTybK2hw+LdENdR5/7sM56751xiC2jhJxi4likwz4jHbNhUPA2RHxla7sXP4+z40LRTd5ntASQIDAQAB",
+  "icons": {
+    "16": "icons/codexnest-16.png",
+    "32": "icons/codexnest-32.png",
+    "48": "icons/codexnest-48.png",
+    "128": "icons/codexnest-128.png"
+  },
   "action": {
     "default_title": "CodexNest Browser",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/codexnest-16.png",
+      "32": "icons/codexnest-32.png"
+    }
   },
   "side_panel": {
     "default_path": "panel.html"

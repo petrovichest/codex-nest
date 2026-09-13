@@ -12,6 +12,6 @@
     "noEmit": true,
     "types": []
   },
-  "include": ["src/**/*.ts", "vite.config.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "e2e/**"]
 }

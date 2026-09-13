@@ -63,9 +63,13 @@ describe("ForkDialog", () => {
     const dialog = screen.getByRole("dialog", { name: "Создать ветку" });
     expect(dialog).toBeVisible();
     expect(within(dialog).getAllByText("Считаем…").length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText("Объём")).toHaveLength(2);
+    expect(within(dialog).getAllByText("Время")).toHaveLength(2);
+    expect(dialog.querySelectorAll('.fork-mode-metrics[aria-busy="true"]')).toHaveLength(2);
     expect(within(dialog).getByRole("button", { name: "Закрыть" })).toHaveFocus();
 
     await act(async () => resolveEstimate(estimate));
+    expect(dialog.querySelectorAll('.fork-mode-metrics[aria-busy="true"]')).toHaveLength(0);
     expect(within(dialog).getByText("рассчитается при создании")).toBeVisible();
     const compressed = within(dialog).getByRole("radio", { name: /Компактная/ });
     expect(compressed).toBeChecked();

@@ -31,6 +31,10 @@ interface BackgroundResponse<T> {
 
 const copy = {
   en: {
+    theme: "Theme",
+    themeSystem: "System",
+    themeLight: "Light",
+    themeDark: "Dark",
     browser: browserDisplayName,
     setupTitle: `Connect this ${browserDisplayName}`,
     setupBody: "Use the address and owner token from your CodexNest instance.",
@@ -59,6 +63,10 @@ const copy = {
     tabCount: (count: number) => `${count} ${count === 1 ? "tab" : "tabs"}`,
   },
   ru: {
+    theme: "Тема",
+    themeSystem: "Системная",
+    themeLight: "Светлая",
+    themeDark: "Тёмная",
     browser: browserDisplayName,
     setupTitle: `Подключить ${browserDisplayName}`,
     setupBody: "Введите адрес и токен владельца из вашего CodexNest.",
@@ -90,6 +98,36 @@ const copy = {
 
 const app = requirePopupRoot();
 const surface = document.body.dataset.surface === "panel" ? "panel" : "popup";
+const THEME_KEY = "codexnest.theme";
+type ThemeMode = "system" | "light" | "dark";
+const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+let theme = readTheme();
+const themeLabel = el("label", { htmlFor: "extension-theme" });
+const themeSelect = el("select", { id: "extension-theme" }, [
+  el("option", { value: "system" }),
+  el("option", { value: "light" }),
+  el("option", { value: "dark" }),
+]);
+const appearance = el("footer", { className: "appearance" }, [themeLabel, themeSelect]);
+app.after(appearance);
+applyTheme();
+
+themeSelect.addEventListener("change", () => {
+  theme = normaliseTheme(themeSelect.value);
+  localStorage.setItem(THEME_KEY, theme);
+  applyTheme();
+});
+colorScheme.addEventListener("change", applyTheme);
+window.addEventListener("storage", syncStoredTheme);
+window.addEventListener(
+  "pagehide",
+  (event) => {
+    if (event.persisted) return;
+    colorScheme.removeEventListener("change", applyTheme);
+    window.removeEventListener("storage", syncStoredTheme);
+  },
+  { once: true },
+);
 
 let snapshot: PopupSnapshot | null = null;
 let browserWindowId: number | null = null;
@@ -111,6 +149,27 @@ webext.runtime.onMessage.addListener((message) => {
 
 render();
 void initialise().catch(showLocalError);
+
+function normaliseTheme(value: string | null): ThemeMode {
+  return value === "light" || value === "dark" ? value : "system";
+}
+
+function readTheme(): ThemeMode {
+  return normaliseTheme(localStorage.getItem(THEME_KEY));
+}
+
+function applyTheme(): void {
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.resolvedTheme =
+    theme === "system" ? (colorScheme.matches ? "dark" : "light") : theme;
+  themeSelect.value = theme;
+}
+
+function syncStoredTheme(event: StorageEvent): void {
+  if (event.storageArea !== localStorage || (event.key !== THEME_KEY && event.key !== null)) return;
+  theme = readTheme();
+  applyTheme();
+}
 
 async function initialise(): Promise<void> {
   const currentWindow = await webext.windows.getCurrent();
@@ -154,6 +213,10 @@ function render(): void {
   const language = snapshot?.locale ?? browserLanguage();
   document.documentElement.lang = language;
   const text = copy[language];
+  themeLabel.textContent = text.theme;
+  themeSelect.options[0]!.textContent = text.themeSystem;
+  themeSelect.options[1]!.textContent = text.themeLight;
+  themeSelect.options[2]!.textContent = text.themeDark;
   document.body.dataset.status = snapshot?.status ?? "pending";
 
   app.append(header(text));
@@ -170,7 +233,13 @@ function render(): void {
 
 function header(text: (typeof copy)[UiLanguage]): HTMLElement {
   const wordmark = el("div", { className: "wordmark" }, [
-    el("span", { className: "nest-mark", ariaHidden: "true" }, [el("i"), el("i"), el("i")]),
+    el("img", {
+      className: "nest-logo",
+      src: new URL("../../client/public/favicon.svg", import.meta.url).href,
+      alt: "",
+      width: 24,
+      height: 24,
+    }),
     el("span", { textContent: "CodexNest" }),
     el("span", { className: "wordmark-context", textContent: text.browser }),
   ]);
@@ -526,6 +595,10 @@ async function request<T = void>(message: Record<string, unknown>): Promise<T> {
 type ElementOptions = {
   className?: string;
   textContent?: string;
+  src?: string;
+  alt?: string;
+  width?: number;
+  height?: number;
   type?: string;
   id?: string;
   value?: string;

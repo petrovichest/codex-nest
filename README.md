@@ -250,6 +250,10 @@ both backends are in the [deployment guide](./deploy/DEPLOYMENT.md#speech-to-tex
 Requirements: Node.js 24 LTS, npm 10 or newer, and a signed-in Codex CLI. Android
 builds additionally require JDK 21 and the Android SDK.
 
+For UI changes, start with the [design kit](./docs/design-kit.md): shared tokens,
+component patterns, approved exceptions, and the new-feature checklist.
+CI checks the client's Chromium visual suite and the extension's browser tests.
+
 ```bash
 npm install
 npm run protocol:generate

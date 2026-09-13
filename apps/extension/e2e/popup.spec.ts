@@ -57,7 +57,7 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
   await expect(page.locator('option[value^="new:"]')).toHaveCount(0);
   await expect(page.getByRole("option", { name: "New session" })).toHaveCount(0);
   await expect(page.getByRole("option", { name: /^Existing/ })).toHaveCount(0);
-  await expect(page.locator("select")).toHaveValue("");
+  await expect(page.getByRole("combobox", { name: "Session", exact: true })).toHaveValue("");
   await expect(page.getByRole("button", { name: "Attach current tab" })).toBeDisabled();
   await expect
     .poll(() => clientFrames.find((frame) => frame.type === "client.hello"))
@@ -67,7 +67,9 @@ test("loads and controls Chrome through the stable MV3 extension", async ({
       instanceId: expect.any(String),
     });
 
-  await page.locator("select").selectOption("thread-existing");
+  await page
+    .getByRole("combobox", { name: "Session", exact: true })
+    .selectOption("thread-existing");
   await page.getByRole("button", { name: "Attach current tab" }).click();
   await expect
     .poll(() => clientFrames.find((frame) => frame.type === "session.request")?.target)
@@ -177,7 +179,7 @@ test("keeps the session select stable across background catalog updates", async 
       });
     });
   });
-  const select = page.locator("select");
+  const select = page.getByRole("combobox", { name: "Session", exact: true });
   const originalSelect = await select.elementHandle();
   if (!originalSelect) throw new Error("Session select is unavailable");
   await select.selectOption("thread-existing");

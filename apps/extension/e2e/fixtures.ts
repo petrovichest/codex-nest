@@ -20,9 +20,7 @@ interface ExtensionFixtures {
 }
 
 export const test = base.extend<ExtensionFixtures>({
-  // Playwright fixture callbacks require an object-destructured first argument.
-  // eslint-disable-next-line no-empty-pattern
-  browserServer: async ({}, use) => {
+  browserServer: async ({ locale }, use) => {
     const clientFrames: BrowserExtensionClientFrame[] = [];
     const server = createServer();
     const webSockets = new WebSocketServer({
@@ -41,7 +39,7 @@ export const test = base.extend<ExtensionFixtures>({
               type: "server.hello",
               protocol: "codexnest.browser",
               version: 1,
-              locale: "en",
+              locale: locale?.startsWith("ru") ? "ru" : "en",
               projects: [{ id: "project-1", displayName: "E2E Project", path: "/work" }],
               threads: [
                 {
@@ -108,12 +106,13 @@ export const test = base.extend<ExtensionFixtures>({
       );
     }
   },
-  context: async ({ playwright }, use) => {
+  context: async ({ playwright, locale }, use) => {
     const profile = await mkdtemp(join(tmpdir(), "codexnest-extension-"));
     const extensionPath = resolve(import.meta.dirname, "../dist/chrome");
     const context = await playwright.chromium.launchPersistentContext(profile, {
       channel: "chromium",
       headless: true,
+      locale,
       args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
     });
     try {

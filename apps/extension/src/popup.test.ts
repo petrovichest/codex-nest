@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   BindingSummary,
@@ -32,11 +32,107 @@ const activeTab: BrowserTabSummary = {
   url: "https://example.test/",
 };
 
+let systemTheme: EventTarget & { matches: boolean };
+
+beforeEach(() => {
+  systemTheme = Object.assign(new EventTarget(), { matches: false });
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => systemTheme),
+  );
+});
+
 afterEach(() => {
+  window.dispatchEvent(new Event("pagehide"));
+  localStorage.clear();
+  delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.resolvedTheme;
   vi.unstubAllGlobals();
   vi.resetModules();
   document.body.replaceChildren();
   document.body.removeAttribute("data-surface");
+});
+
+describe("appearance", () => {
+  it("uses the application's CN logo instead of a separate CSS mark", async () => {
+    await loadPopup(snapshot());
+    const logo = document.querySelector<HTMLImageElement>("img.nest-logo")!;
+    expect(logo).not.toBeNull();
+    expect(logo.src).toBe(new URL("../../client/public/favicon.svg", import.meta.url).href);
+    expect(logo.alt).toBe("");
+    expect(logo.width).toBe(24);
+    expect(logo.height).toBe(24);
+    expect(document.querySelector(".nest-mark")).toBeNull();
+  });
+
+  it("follows the system until a local choice is made, without rerendering inputs", async () => {
+    systemTheme.matches = true;
+    const { sendMessage } = await loadPopup(snapshot({ configured: false }));
+    const input = document.querySelector<HTMLInputElement>("#base-url")!;
+    const picker = document.querySelector<HTMLSelectElement>("#extension-theme")!;
+    input.value = "http://draft.example";
+    input.focus();
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+
+    systemTheme.matches = false;
+    systemTheme.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+    expect(document.activeElement).toBe(input);
+
+    picker.value = "dark";
+    picker.dispatchEvent(new Event("change"));
+    expect(localStorage.getItem("codexnest.theme")).toBe("dark");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+    systemTheme.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+    expect(document.querySelector("#base-url")).toBe(input);
+    expect(input.value).toBe("http://draft.example");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    picker.value = "system";
+    picker.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+  });
+
+  it("restores a saved choice and accepts changes from another surface without losing selection", async () => {
+    localStorage.setItem("codexnest.theme", "dark");
+    await loadPopup(
+      snapshot({
+        locale: "ru",
+        projects: [{ id: "project-1", displayName: "Проект", path: "/one" }],
+        threads: [thread("selected", "project-1", "Сессия", "idle")],
+      }),
+    );
+    const select = requireSelect();
+    select.value = "selected";
+    select.dispatchEvent(new Event("change"));
+    select.focus();
+    const picker = document.querySelector<HTMLSelectElement>("#extension-theme")!;
+    expect(picker.value).toBe("dark");
+    expect(picker.options[0]?.textContent).toBe("Системная");
+
+    localStorage.setItem("codexnest.theme", "light");
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: "codexnest.theme",
+        newValue: "light",
+        storageArea: localStorage,
+      }),
+    );
+    expect(picker.value).toBe("light");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+    expect(requireSelect()).toBe(select);
+    expect(select.value).toBe("selected");
+    expect(document.activeElement).toBe(select);
+  });
+
+  it("uses the system for an unknown stored value", async () => {
+    localStorage.setItem("codexnest.theme", "unknown");
+    systemTheme.matches = true;
+    await loadPopup(snapshot());
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(document.documentElement.dataset.resolvedTheme).toBe("dark");
+  });
 });
 
 describe("popup and panel surfaces", () => {
@@ -202,6 +298,7 @@ describe("popup session catalog", () => {
       }),
     );
 
+    window.dispatchEvent(new Event("pagehide"));
     vi.resetModules();
     document.body.replaceChildren();
     const setup = await loadPopup(snapshot({ configured: false }), { windowId: 37 });
