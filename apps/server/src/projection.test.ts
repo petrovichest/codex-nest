@@ -1968,6 +1968,7 @@ describe("AppProjection", () => {
       }
       if (method === "thread/loaded/list") return { data: [], nextCursor: null };
       if (method === "model/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") throw new RpcError(-32_600, "thread not loaded");
       throw new Error(`Unexpected ${method}`);
     });
     const reloaded = new AppProjection(
@@ -4030,6 +4031,190 @@ describe("AppProjection", () => {
     });
   });
 
+  it.each(["completed", "failed", "interrupted"] as const)(
+    "recovers a missed %s completion from history and persists it once",
+    async (status) => {
+      const { store, bridge, projection, events } = await createCompletionRecoveryHarness(status);
+
+      const detail = await projection.readThread("one");
+
+      expect(detail.summary).toMatchObject({
+        state: status,
+        currentTurnId: null,
+        updatedAt: 6_000,
+      });
+      expect(detail.turns[0]).toMatchObject({
+        id: "live",
+        status,
+        completedAt: 6_000,
+        durationMs: 5_000,
+        items: [expect.objectContaining({ id: "answer", text: "Finished" })],
+      });
+      expect(store.view().threadMeta.one).toMatchObject({
+        lastOutcome: status,
+        outcomeUpdatedAt: 6_000,
+        sessionSnapshot: { currentTurnId: null },
+      });
+      expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(1);
+      await projection.readThread("one");
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),
+      ).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(1);
+
+      const reloadedStore = new StateStore(store.path);
+      await reloadedStore.load();
+      const reloaded = new AppProjection(
+        bridge as unknown as CodexBridge,
+        reloadedStore,
+        new AttentionManager(),
+      );
+      expect(reloaded.summary("one")).toMatchObject({ state: status, currentTurnId: null });
+    },
+  );
+
+  it("recovers completion from resume even when an idle notification changes the sync revision", async () => {
+    const { store, bridge, projection, terminal } = await createCompletionRecoveryHarness();
+    const original = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/resume") {
+        bridge.emit("notification", {
+          method: "thread/status/changed",
+          params: { threadId: "one", status: { type: "idle" } },
+        } satisfies ServerNotification);
+        return { thread: thread("one", "/work", 6, { type: "idle" }, [terminal]) };
+      }
+      return original(method, params);
+    });
+
+    await projection.sync();
+
+    expect(projection.summary("one")).toMatchObject({ state: "completed", currentTurnId: null });
+    expect(store.view().threadMeta.one?.sessionSnapshot?.currentTurnId).toBeNull();
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps resumed thread metadata when recovering its completed turn", async () => {
+    const { bridge, projection } = await createCompletionRecoveryHarness();
+    const original = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      const result = await original(method, params);
+      if (method === "thread/resume" && "thread" in result) {
+        result.thread.path = "/work/resumed-history.jsonl";
+      }
+      return result;
+    });
+
+    await projection.sync();
+
+    expect(projection.summary("one")).toMatchObject({ state: "completed", currentTurnId: null });
+    expect(projection.rolloutPath("one")).toBe("/work/resumed-history.jsonl");
+  });
+
+  it("checks only unresolved saved active turns when recovery has no turn payload", async () => {
+    const { bridge, projection } = await createCompletionRecoveryHarness();
+    const original = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/resume") {
+        return { thread: thread("one", "/work", 5, { type: "active", activeFlags: [] }) };
+      }
+      return original(method, params);
+    });
+
+    await projection.sync();
+
+    expect(projection.summary("one")).toMatchObject({ state: "completed", currentTurnId: null });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list")).toEqual([
+      [
+        "thread/turns/list",
+        { threadId: "one", limit: 1, sortDirection: "desc", itemsView: "full" },
+        30_000,
+      ],
+    ]);
+  });
+
+  it.each(["history", "resume"] as const)(
+    "does not clear a new turn when an old completion arrives from %s",
+    async (source) => {
+      const { store, bridge, projection } = await createCompletionRecoveryHarness();
+      const original = bridge.request.getMockImplementation()!;
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      bridge.request.mockImplementation(async (method, params) => {
+        if (method === (source === "history" ? "thread/turns/list" : "thread/resume")) {
+          entered();
+          await gate;
+        }
+        return original(method, params);
+      });
+      const reading = source === "history" ? projection.readThread("one") : projection.sync();
+      await started;
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "one", turn: testTurn("next", "inProgress") },
+      } satisfies ServerNotification);
+      await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBe("next"));
+      release();
+      // A history read invalidated by a newer notification may ask the client to retry.
+      await reading.catch((error: unknown) => {
+        expect(error).toMatchObject({
+          message: "Thread view changed while it was being refreshed",
+        });
+      });
+      expect(projection.summary("one")).toMatchObject({ state: "running", currentTurnId: "next" });
+      await store.flushed();
+      expect(store.view().threadMeta.one?.sessionSnapshot?.currentTurnId).toBe("next");
+      expect(store.view().threadMeta.one?.lastOutcome).toBeUndefined();
+    },
+  );
+
+  it("keeps final text active until the turn itself is terminal", async () => {
+    const { bridge, projection, terminal } = await createCompletionRecoveryHarness();
+    terminal.status = "inProgress";
+    terminal.completedAt = null;
+    terminal.durationMs = null;
+
+    await projection.sync();
+    const detail = await projection.readThread("one");
+
+    expect(detail.summary).toMatchObject({ state: "running", currentTurnId: "live" });
+    expect(detail.turns[0]?.items).toContainEqual(
+      expect.objectContaining({ phase: "final_answer" }),
+    );
+    expect(
+      bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),
+    ).toHaveLength(1);
+  });
+
+  it("preserves active goals and pending plan responses when recovering a completed turn", async () => {
+    const { store, projection, terminal } = await createCompletionRecoveryHarness();
+    await store.update((state) => {
+      state.threadMeta.one!.settings = { collaborationMode: "plan" };
+    });
+    terminal.items = [{ type: "plan", id: "plan", text: "Implementation plan" }];
+    await projection.readThread("one");
+    expect(projection.summary("one")).toMatchObject({
+      state: "needsAttention",
+      currentTurnId: null,
+    });
+
+    const withGoal = await createCompletionRecoveryHarness();
+    withGoal.bridge.emit("notification", goalNotification("active"));
+    await withGoal.projection.readThread("one");
+    expect(withGoal.projection.summary("one")).toMatchObject({
+      state: "running",
+      currentTurnId: null,
+    });
+  });
+
   it("does not restore an active history turn older than the terminal outcome", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -5261,6 +5446,74 @@ function userInputServerRequest(id: number, question = "Which one?"): ServerRequ
       ],
     },
   } as ServerRequest;
+}
+
+async function createCompletionRecoveryHarness(
+  status: "completed" | "failed" | "interrupted" = "completed",
+) {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-completion-recovery-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  await store.update((state) => {
+    state.threadMeta.one = {
+      pinned: false,
+      lastReadUpdatedAt: 0,
+      sessionSnapshot: {
+        sessionId: "one",
+        name: "Test",
+        preview: "Test",
+        cwd: "/work",
+        createdAt: 1,
+        updatedAt: 5,
+        archived: false,
+        currentTurnId: "live",
+      },
+    };
+  });
+  const terminal: Thread["turns"][number] = {
+    ...testTurn("live", "completed"),
+    status,
+    completedAt: 6,
+    durationMs: 5_000,
+    itemsView: "full",
+    items: [{ type: "agentMessage", id: "answer", text: "Finished", phase: "final_answer" }],
+  };
+  const bridge = new FakeBridge();
+  bridge.request.mockImplementation(async (method, params) => {
+    if (method === "thread/list")
+      return {
+        data: params.archived
+          ? []
+          : [thread("one", "/work", 5, { type: "active", activeFlags: [] })],
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    if (method === "thread/loaded/list") return { data: ["one"], nextCursor: null };
+    if (method === "model/list") return { data: [], nextCursor: null };
+    if (method === "thread/goal/get") return { goal: null };
+    if (method === "thread/resume")
+      return {
+        thread: thread(
+          "one",
+          "/work",
+          6,
+          terminal.status === "inProgress" ? { type: "active", activeFlags: [] } : { type: "idle" },
+          [terminal],
+        ),
+      };
+    if (method === "thread/turns/list")
+      return { data: [terminal], nextCursor: null, backwardsCursor: null };
+    throw new Error(`Unexpected ${method}`);
+  });
+  const projection = new AppProjection(
+    bridge as unknown as CodexBridge,
+    store,
+    new AttentionManager(),
+  );
+  const events: ServerEvent[] = [];
+  projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+  return { store, bridge, projection, terminal, events };
 }
 
 function thread(

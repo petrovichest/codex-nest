@@ -496,6 +496,9 @@ export class AppProjection extends EventEmitter {
       !previous ||
       previous.historyError !== undefined ||
       options.refresh ||
+      previous.turns.some(
+        (turn) => turn.id === cached.currentTurnId && turn.status !== "inProgress",
+      ) ||
       [...boundaryIds].some((turnId) => !previousIds.has(turnId));
     let page: CachedTurnsPage | undefined;
     let historyError: ThreadDetail["historyError"];
@@ -720,6 +723,24 @@ export class AppProjection extends EventEmitter {
     await this.setCurrentTurn(cached.thread.id, activeTurn.id);
   }
 
+  private async reconcileCompletedTurn(
+    threadId: string,
+    turns: Turn[],
+  ): Promise<{ historyChanged: boolean } | null> {
+    const currentTurnId = this.threads.get(threadId)?.currentTurnId;
+    if (!currentTurnId) return null;
+    // A terminal record for this exact turn is authoritative even if an idle
+    // notification arrived during recovery. Neither missing turns nor final text
+    // alone prove completion, and a newer active turn must remain active.
+    if (turns.some((turn) => turn.status === "inProgress" && turn.id !== currentTurnId)) {
+      return null;
+    }
+    const completed = turns.find(
+      (turn) => turn.id === currentTurnId && turn.status !== "inProgress",
+    );
+    return completed ? this.completeTurn(threadId, completed, true) : null;
+  }
+
   private async readTurnsPage(
     id: string,
     cursor: string | null,
@@ -768,6 +789,10 @@ export class AppProjection extends EventEmitter {
         `CodexNest thread history read slow (${durationMs}ms, ${response.data.length} turns)\n`,
       );
     }
+    const completion =
+      cursor === null && direction === "desc"
+        ? await this.reconcileCompletedTurn(id, response.data)
+        : null;
     const artifacts = Object.fromEntries(
       response.data.map((turn) => [turn.id, this.timelineArtifacts(id, turn.id)]),
     );
@@ -778,7 +803,9 @@ export class AppProjection extends EventEmitter {
       cursor,
       direction,
       threadUpdatedAt,
-      historyRevision,
+      // Account only for our own retained-text update, so concurrent notifications
+      // still invalidate this read instead of being mistaken for recovery writes.
+      historyRevision: historyRevision + (completion?.historyChanged ? 1 : 0),
       turns: ordered.map((turn) => {
         const normalized = conversationTurn(
           normalizeTurn(
@@ -1719,6 +1746,13 @@ export class AppProjection extends EventEmitter {
     const changedDuringSync = (threadId: string) =>
       this.historyRevision(threadId) !== (revisionBaseline.get(threadId) ?? 0);
     const shouldRecoverLoaded = this.recoverLoadedThreads;
+    const recoveryTurns = new Map(
+      shouldRecoverLoaded
+        ? [...this.threads.values()].flatMap((cached) =>
+            cached.currentTurnId ? [[cached.thread.id, cached.currentTurnId] as const] : [],
+          )
+        : [],
+    );
     let loadedRecoveryFailed = false;
     const [listedActive, archived, models, loadedThreadIds] = await Promise.all([
       this.listAllThreads(false),
@@ -1763,6 +1797,14 @@ export class AppProjection extends EventEmitter {
     for (const { thread, restoredGoalStatus } of active) {
       if (this.removedThreads.has(thread.id)) continue;
       incoming.add(thread.id);
+      if (thread.turns.some((turn) => turn.id === recoveryTurns.get(thread.id))) {
+        recoveryTurns.delete(thread.id);
+      }
+      const recovering = this.threads.get(thread.id);
+      if (recovering && recovering.goalStatus === undefined) {
+        recovering.goalStatus = restoredGoalStatus;
+      }
+      await this.reconcileCompletedTurn(thread.id, thread.turns);
       if (changedDuringSync(thread.id)) continue;
       const liveCached = this.threads.get(thread.id);
       if (wouldRollbackLiveTurn(liveCached, thread)) continue;
@@ -1832,7 +1874,7 @@ export class AppProjection extends EventEmitter {
         state.threadMeta[cached.thread.id] = meta;
       }
     });
-    await this.reconcileOutcomes();
+    await this.reconcileOutcomes(recoveryTurns);
     this.models = models;
     this.syncedAt = new Date().toISOString();
     if (shouldRecoverLoaded) {
@@ -2309,19 +2351,26 @@ export class AppProjection extends EventEmitter {
     return models.map(normalizeModel);
   }
 
-  private async reconcileOutcomes(): Promise<void> {
+  private async reconcileOutcomes(recoveryTurns: ReadonlyMap<string, string>): Promise<void> {
     const state = this.store.view();
     for (const cached of this.threads.values()) {
-      if (cached.thread.status.type !== "idle") continue;
+      const currentTurnId = cached.currentTurnId;
+      const needsRecovery =
+        currentTurnId !== null && recoveryTurns.get(cached.thread.id) === currentTurnId;
+      if (cached.thread.status.type !== "idle" && !needsRecovery) continue;
       if (isSpawnedSubagent(cached.thread)) continue;
       if (this.isUnmaterialized(cached.thread.id)) continue;
       const updatedAt = cached.thread.updatedAt * 1_000;
       const meta = state.threadMeta[cached.thread.id];
-      if (meta?.outcomeUpdatedAt === updatedAt && meta.awaitingPlanResponse !== undefined) {
+      if (
+        !currentTurnId &&
+        meta?.outcomeUpdatedAt === updatedAt &&
+        meta.awaitingPlanResponse !== undefined
+      ) {
         continue;
       }
       const planMode = meta?.settings?.collaborationMode === "plan";
-      if (meta?.outcomeUpdatedAt === updatedAt && !planMode) {
+      if (!currentTurnId && meta?.outcomeUpdatedAt === updatedAt && !planMode) {
         await this.store.update((draft) => {
           const item = draft.threadMeta[cached.thread.id];
           if (item) item.awaitingPlanResponse = false;
@@ -2337,7 +2386,7 @@ export class AppProjection extends EventEmitter {
               threadId: cached.thread.id,
               limit: 1,
               sortDirection: "desc",
-              itemsView: planMode ? "full" : "notLoaded",
+              itemsView: planMode || currentTurnId ? "full" : "notLoaded",
             },
             30_000,
           ),
@@ -2350,6 +2399,10 @@ export class AppProjection extends EventEmitter {
         if (isThreadNotLoadedError(error)) continue;
         throw error;
       }
+      if (this.threads.get(cached.thread.id) !== cached || cached.currentTurnId !== currentTurnId)
+        continue;
+      if (await this.reconcileCompletedTurn(cached.thread.id, page.data)) continue;
+      if (currentTurnId) continue;
       const latestTurn = page.data[0];
       const outcome = normalizeOutcome(latestTurn?.status);
       const awaitingPlanResponse =
@@ -2365,6 +2418,106 @@ export class AppProjection extends EventEmitter {
         draft.threadMeta[cached.thread.id] = item;
       });
     }
+  }
+
+  private async completeTurn(
+    threadId: string,
+    turn: Turn,
+    recovered = false,
+  ): Promise<{ historyChanged: boolean } | null> {
+    if (turn.status === "inProgress") return null;
+    this.flushActivityDeltas(threadId, turn.id);
+    await this.clearUserInputDraftsForTurn(threadId, turn.id);
+    const cached = this.threads.get(threadId);
+    if (recovered && cached?.currentTurnId !== turn.id) return null;
+    const outcome = normalizeOutcome(turn.status);
+    const interruptedTextActivities =
+      outcome === "interrupted"
+        ? this.collectInterruptedTextActivities(threadId, turn.id, turn)
+        : [];
+    if (cached) {
+      const turnIndex = cached.thread.turns.findIndex((candidate) => candidate.id === turn.id);
+      if (turnIndex >= 0) {
+        cached.thread.turns[turnIndex] = turn;
+      } else {
+        cached.thread.turns.push(turn);
+      }
+    }
+    if (cached?.currentTurnId && cached.currentTurnId !== turn.id) return null;
+    if (cached) {
+      cached.currentTurnId = null;
+      cached.liveOutcome = outcome;
+      cached.thread.status = { type: "idle" };
+      cached.thread.updatedAt = Math.max(
+        cached.thread.updatedAt,
+        recovered ? (turn.completedAt ?? cached.thread.updatedAt) : Math.floor(Date.now() / 1_000),
+      );
+      const updatedAt = cached.thread.updatedAt * 1_000;
+      const hasPlan = turnContainsPlan(turn) || this.hasLivePlan(threadId, turn.id);
+      const startedAt = turn.startedAt === null ? null : turn.startedAt * 1_000;
+      const completedAt = turn.completedAt === null ? null : turn.completedAt * 1_000;
+      const artifactAliases = mergeLiveActivities(
+        turn.items
+          .filter((item) => !isInternalTeamContinuationItem(item))
+          .map((item) =>
+            normalizeActivity(
+              item,
+              item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
+            ),
+          ),
+        this.liveActivities(threadId, turn.id),
+        outcome,
+      ).aliases;
+      let retainedTextChanged = false;
+      await this.store.update((state) => {
+        const meta = state.threadMeta[cached.thread.id] ?? {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+        };
+        meta.lastOutcome = outcome;
+        meta.outcomeUpdatedAt = updatedAt;
+        retainedTextChanged = updateInterruptedTextActivities(
+          meta,
+          turn.id,
+          interruptedTextActivities,
+          outcome === "interrupted" ? "merge" : "clear",
+        );
+        const artifacts = meta.timelineArtifacts?.[turn.id];
+        meta.awaitingPlanResponse =
+          outcome === "completed" &&
+          ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
+            latestPlanChecklistIsIncomplete(artifacts));
+        if (artifacts) {
+          meta.timelineArtifacts![turn.id] = artifacts.map((item): TimelineArtifact => {
+            const afterItemId = item.afterItemId
+              ? (artifactAliases.get(item.afterItemId) ?? item.afterItemId)
+              : null;
+            return item.type === "planChecklist"
+              ? {
+                  ...item,
+                  afterItemId,
+                  status: outcome === "failed" ? "failed" : "completed",
+                }
+              : { ...item, afterItemId };
+          });
+        }
+        const snapshot = sessionSnapshot(cached);
+        if (snapshot) meta.sessionSnapshot = snapshot;
+        state.threadMeta[cached.thread.id] = meta;
+      });
+      if (retainedTextChanged) {
+        this.bumpHistoryRevision(threadId);
+        await this.historyCache.invalidateThread(threadId);
+      }
+      this.clearTurnActivities(threadId, turn.id);
+      this.replaceTurnState(threadId, turn.id, {
+        publish: true,
+        source: turn,
+      });
+      this.publishThread(threadId);
+      return { historyChanged: retainedTextChanged };
+    }
+    return null;
   }
 
   private async onNotification(notification: ServerNotification): Promise<void> {
@@ -2532,114 +2685,7 @@ export class AppProjection extends EventEmitter {
         break;
       }
       case "turn/completed": {
-        this.flushActivityDeltas(notification.params.threadId, notification.params.turn.id);
-        await this.clearUserInputDraftsForTurn(
-          notification.params.threadId,
-          notification.params.turn.id,
-        );
-        const cached = this.threads.get(notification.params.threadId);
-        const outcome = normalizeOutcome(notification.params.turn.status);
-        const interruptedTextActivities =
-          outcome === "interrupted"
-            ? this.collectInterruptedTextActivities(
-                notification.params.threadId,
-                notification.params.turn.id,
-                notification.params.turn,
-              )
-            : [];
-        if (cached) {
-          const turnIndex = cached.thread.turns.findIndex(
-            (turn) => turn.id === notification.params.turn.id,
-          );
-          if (turnIndex >= 0) {
-            cached.thread.turns[turnIndex] = notification.params.turn;
-          } else {
-            cached.thread.turns.push(notification.params.turn);
-          }
-        }
-        if (cached?.currentTurnId && cached.currentTurnId !== notification.params.turn.id) break;
-        if (cached) {
-          cached.currentTurnId = null;
-          cached.liveOutcome = outcome;
-          cached.thread.status = { type: "idle" };
-          cached.thread.updatedAt = Math.max(
-            cached.thread.updatedAt,
-            Math.floor(Date.now() / 1_000),
-          );
-          const updatedAt = cached.thread.updatedAt * 1_000;
-          const hasPlan =
-            turnContainsPlan(notification.params.turn) ||
-            this.hasLivePlan(notification.params.threadId, notification.params.turn.id);
-          const startedAt =
-            notification.params.turn.startedAt === null
-              ? null
-              : notification.params.turn.startedAt * 1_000;
-          const completedAt =
-            notification.params.turn.completedAt === null
-              ? null
-              : notification.params.turn.completedAt * 1_000;
-          const artifactAliases = mergeLiveActivities(
-            notification.params.turn.items
-              .filter((item) => !isInternalTeamContinuationItem(item))
-              .map((item) =>
-                normalizeActivity(
-                  item,
-                  item.type === "userMessage" ? startedAt : (completedAt ?? startedAt),
-                ),
-              ),
-            this.liveActivities(notification.params.threadId, notification.params.turn.id),
-            outcome,
-          ).aliases;
-          let retainedTextChanged = false;
-          await this.store.update((state) => {
-            const meta = state.threadMeta[cached.thread.id] ?? {
-              pinned: false,
-              lastReadUpdatedAt: 0,
-            };
-            meta.lastOutcome = outcome;
-            meta.outcomeUpdatedAt = updatedAt;
-            retainedTextChanged = updateInterruptedTextActivities(
-              meta,
-              notification.params.turn.id,
-              interruptedTextActivities,
-              outcome === "interrupted" ? "merge" : "clear",
-            );
-            const artifacts = meta.timelineArtifacts?.[notification.params.turn.id];
-            meta.awaitingPlanResponse =
-              outcome === "completed" &&
-              ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
-                latestPlanChecklistIsIncomplete(artifacts));
-            if (artifacts) {
-              meta.timelineArtifacts![notification.params.turn.id] = artifacts.map(
-                (item): TimelineArtifact => {
-                  const afterItemId = item.afterItemId
-                    ? (artifactAliases.get(item.afterItemId) ?? item.afterItemId)
-                    : null;
-                  return item.type === "planChecklist"
-                    ? {
-                        ...item,
-                        afterItemId,
-                        status: outcome === "failed" ? "failed" : "completed",
-                      }
-                    : { ...item, afterItemId };
-                },
-              );
-            }
-            const snapshot = sessionSnapshot(cached);
-            if (snapshot) meta.sessionSnapshot = snapshot;
-            state.threadMeta[cached.thread.id] = meta;
-          });
-          if (retainedTextChanged) {
-            this.bumpHistoryRevision(notification.params.threadId);
-            await this.historyCache.invalidateThread(notification.params.threadId);
-          }
-          this.clearTurnActivities(notification.params.threadId, notification.params.turn.id);
-          this.replaceTurnState(notification.params.threadId, notification.params.turn.id, {
-            publish: true,
-            source: notification.params.turn,
-          });
-          this.publishThread(notification.params.threadId);
-        }
+        await this.completeTurn(notification.params.threadId, notification.params.turn);
         break;
       }
       case "turn/plan/updated": {

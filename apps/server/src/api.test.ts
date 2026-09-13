@@ -8124,6 +8124,61 @@ describe.each([1, 0])("reliable first messages (delivery version %s)", (delivery
   );
 });
 
+describe("completion recovery", () => {
+  it("releases a queued message exactly once after history confirms a missed completion", async () => {
+    const { app, bridge, projection, store, headers } = await createTeamHarness();
+    try {
+      await projection.setSettings("thread", { collaborationMode: "default" });
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "thread", turn: testTurn("finished", "inProgress") },
+      } satisfies ServerNotification);
+      await vi.waitFor(() => expect(projection.summary("thread")?.currentTurnId).toBe("finished"));
+      const queued = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: { input: "Next request", clientMessageId: "after-missed-completion" },
+      });
+      expect(queued.statusCode).toBe(202);
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        0,
+      );
+      bridge.threadTurns.set("thread", [
+        {
+          ...testTurn("finished", "completed"),
+          itemsView: "full",
+          items: [agentMessage("final", "Finished")],
+        },
+      ]);
+
+      const detail = await app.inject({ url: "/api/v1/threads/thread", headers });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().turns).toContainEqual(
+        expect.objectContaining({ id: "finished", status: "completed" }),
+      );
+      await vi.waitFor(() =>
+        expect(store.view().messageReceipts?.["after-missed-completion"]).toMatchObject({
+          status: "delivered",
+          turnId: "turn",
+        }),
+      );
+      expect(store.view().messageQueues?.thread).toBeUndefined();
+
+      await app.inject({ url: "/api/v1/threads/thread", headers });
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        1,
+      );
+      expect(projection.summary("thread")).toMatchObject({
+        state: "running",
+        currentTurnId: "turn",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe("file attachments", () => {
   it("uploads, persists, dispatches, and downloads a file attachment", async () => {
     const repository = await createApiTestRepository();
