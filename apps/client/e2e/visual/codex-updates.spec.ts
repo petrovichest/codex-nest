@@ -77,8 +77,7 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     ).toBe(true);
     expect(
       await connection.evaluate(
-        (element, nextSelector) => element.nextElementSibling?.matches(nextSelector),
-        updateAvailable ? ".app-update-indicator" : ".sidebar-search-action",
+        (element) => element.nextElementSibling?.matches(".sidebar-search-action"),
       ),
     ).toBe(true);
     expect((await settings.locator("svg").boundingBox())!.x).toBe(
@@ -86,21 +85,23 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     );
     const settingsBox = (await settings.boundingBox())!;
     const connectionBox = (await connection.boundingBox())!;
-    expect(connectionBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
     const searchBox = (await search.boundingBox())!;
     const headerBox = (await header.boundingBox())!;
     expect(headerBox.x + headerBox.width - (searchBox.x + searchBox.width)).toBe(10);
+    expect(searchBox.x - (connectionBox.x + connectionBox.width)).toBe(6);
     expect(searchBox.width).toBeGreaterThanOrEqual(32);
     expect(searchBox.height).toBeGreaterThanOrEqual(32);
     if (updateAvailable) {
       const updateBox = (await update.boundingBox())!;
-      expect(searchBox.x - (updateBox.x + updateBox.width)).toBe(6);
+      expect(updateBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
+      expect(connectionBox.x - (updateBox.x + updateBox.width)).toBe(6);
       expect(updateBox.y + updateBox.height / 2).toBe(searchBox.y + searchBox.height / 2);
       if (mobile) expect(updateBox.width).toBeGreaterThanOrEqual(32);
       await update.focus();
       await page.keyboard.press("Tab");
       await expect(search).toBeFocused();
     } else {
+      expect(connectionBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
       await search.focus();
     }
     await expect(header).toHaveScreenshot(

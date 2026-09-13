@@ -1322,7 +1322,9 @@ describe("App routing and navigation", () => {
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(indicator).toHaveTextContent("");
     expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
-    expect(indicator.nextElementSibling).toBe(
+    const status = screen.getByRole("status", { name: "Состояние сервера: Подключено" });
+    expect(indicator.nextElementSibling).toBe(status);
+    expect(status.nextElementSibling).toBe(
       screen.getByRole("button", { name: "Поиск по диалогам" }),
     );
 

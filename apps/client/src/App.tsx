@@ -1380,16 +1380,6 @@ function Sidebar({
             <SlidersIcon />
             {t("Настройки")}
           </NavLink>
-          <div
-            aria-label={t("Состояние сервера: {{state}}", {
-              state: networkLabel(state.network, t),
-            })}
-            className="server-connection"
-            role="status"
-          >
-            <ConnectionDot state={state.network} />
-            <span className="sr-only">{networkLabel(state.network, t)}</span>
-          </div>
           {updateAvailable && (
             <NavLink
               aria-label={t("Доступно обновление CodexNest")}
@@ -1401,6 +1391,16 @@ function Sidebar({
               <ArrowDownIcon />
             </NavLink>
           )}
+          <div
+            aria-label={t("Состояние сервера: {{state}}", {
+              state: networkLabel(state.network, t),
+            })}
+            className="server-connection"
+            role="status"
+          >
+            <ConnectionDot state={state.network} />
+            <span className="sr-only">{networkLabel(state.network, t)}</span>
+          </div>
           <button
             aria-label={t("Поиск по диалогам")}
             className="icon-button sidebar-search-action"
