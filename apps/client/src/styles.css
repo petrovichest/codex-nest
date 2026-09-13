@@ -396,6 +396,10 @@
   flex: 0 0 20px;
 }
 
+.thread-marker-slot:empty {
+  display: none;
+}
+
 .thread-browser-status {
   width: 20px;
   height: 20px;
@@ -6210,25 +6214,29 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-actions {
-    grid-template-columns: 32px 64px 32px 32px;
+    grid-template-columns: 32px 40px 32px 32px;
+    gap: 0;
   }
 
-  .composer-actions > .microphone {
-    width: 64px;
-    min-width: 64px;
+  .composer-actions > .composer-action.microphone {
+    width: 40px;
+    min-width: 40px;
+    padding-inline: 0;
   }
 
   .composer-toolbar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding-inline: 3px;
   }
 
   .composer-options {
-    min-height: 36px;
+    gap: 0;
   }
 
-  .composer-actions {
-    justify-self: end;
+  .composer-options .settings-picker {
+    min-width: 128px;
+    flex: 0 1 auto;
+    gap: 0;
   }
 
   .queued-action-slot {
@@ -6483,12 +6491,14 @@ button.message-file:hover:not(:disabled) {
 
   .composer-options {
     max-width: none;
-    overflow: hidden;
+    overflow-x: auto;
   }
 
   .model-toggle {
     width: 60px;
+    min-width: 32px;
     max-width: 60px;
+    flex-shrink: 1;
     padding-inline: 6px;
   }
 
@@ -6497,7 +6507,8 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-options:has(.project-picker) .project-picker select {
-    max-width: 70px;
+    max-width: clamp(32px, calc(100vw - 320px), 70px);
+    padding-inline: 5px 18px;
   }
 
   .composer-options:has(.project-picker) .model-toggle {

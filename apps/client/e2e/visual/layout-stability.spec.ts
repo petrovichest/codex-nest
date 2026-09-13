@@ -159,6 +159,12 @@ for (const mobile of [false, true]) {
         ".composer-add-image,.model-toggle,.plan-toggle,.team-toggle,.goal-toggle,.composer-actions > .microphone,.composer-actions > .composer-action:last-child",
       );
       const before = await geometry(controls);
+      if (mobile) {
+        for (const control of before) expect(control.y).toBeCloseTo(before[0]!.y, 0);
+        expect((await page.locator(".composer-toolbar").boundingBox())!.height).toBeLessThanOrEqual(
+          48,
+        );
+      }
       send({
         type: "thread.upserted",
         thread: { ...summary, state: "running", currentTurnId: "running" },
@@ -305,7 +311,7 @@ test("sidebar typography and actual title animation use fixed geometry and speed
   page,
 }) => {
   const seed = structuredClone(snapshot);
-  seed.threads[0]!.title =
+  seed.threads.find((thread) => thread.id === mainThread.id)!.title =
     "Очень длинное название сессии для проверки одинаковой скорости движения текста";
   await installVisualFixture(page, { theme: "dark", snapshot: seed });
   await page.goto("/threads/session-main");
@@ -339,6 +345,57 @@ test("sidebar typography and actual title animation use fixed geometry and speed
   unchanged(before, await geometry(title));
   await page.keyboard.press("Escape");
   await expect(row.locator("summary")).toBeFocused();
+});
+
+test.describe("compact mobile controls", () => {
+  test.use({ hasTouch: true });
+
+  for (const width of [320, 360, 390, 412]) {
+    test(`one toolbar row at ${width}px with a reduced viewport`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      const { summary, send } = await chat(page, "dark", "Проверка");
+      await page.locator(".composer-box textarea").focus();
+      send({
+        type: "thread.upserted",
+        thread: { ...summary, state: "running", currentTurnId: "running" },
+      });
+      await expect(
+        page.getByRole("button", { name: "Остановить задачу", exact: true }),
+      ).toBeVisible();
+      for (const height of [844, 520]) {
+        await page.setViewportSize({ width, height });
+        const toolbar = (await page.locator(".composer-toolbar").boundingBox())!;
+        const buttons = await geometry(
+          page.locator(".composer-add-image,.settings-picker > button,.composer-actions > button"),
+        );
+        expect(buttons).toHaveLength(9);
+        expect(toolbar.height).toBeLessThanOrEqual(48);
+        for (const button of buttons) {
+          expect(button.y).toBeCloseTo(buttons[0]!.y, 0);
+          expect(button.x).toBeGreaterThanOrEqual(toolbar.x);
+          expect(button.x + button.width).toBeLessThanOrEqual(toolbar.x + toolbar.width);
+          expect(button.width).toBeGreaterThanOrEqual(32);
+        }
+      }
+    });
+  }
+
+  test("session titles use the space up to the menu when markers are absent", async ({ page }) => {
+    await page.setViewportSize(PHONE_VIEWPORT);
+    await installVisualFixture(page, { theme: "dark" });
+    await page.goto("/threads/session-active");
+    await page.getByRole("button", { name: "Открыть список задач" }).click();
+    await page.getByRole("button", { name: "Активные", exact: true }).click();
+    const row = page
+      .locator('.active-session-list a[href="/threads/session-active"]')
+      .locator("..");
+    const title = row.locator(".thread-link-title");
+    const before = (await title.boundingBox())!;
+    const trigger = (await row.locator("summary").boundingBox())!;
+    expect(trigger.x - before.x - before.width).toBeLessThanOrEqual(5);
+    await row.locator("summary").click();
+    expect(await title.boundingBox()).toEqual(before);
+  });
 });
 
 test("image loading and retry keep preview frames and following content stationary", async ({
