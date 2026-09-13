@@ -58,9 +58,15 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
     const sidebar = page.locator(".sidebar");
     const header = sidebar.locator(".server-status");
+    const settings = header.getByRole("link", { name: "Настройки", exact: true });
+    const connection = header.getByRole("status", {
+      name: "Состояние сервера: Подключено",
+    });
     const search = header.getByRole("button", { name: "Поиск по диалогам", exact: true });
     const update = header.getByRole("link", { name: "Доступно обновление CodexNest" });
     await expect(page.locator(".app-frame")).toHaveAttribute("data-sidebar-side", sidebarSide);
+    await expect(settings).toBeVisible();
+    await expect(connection.locator(".connection-dot.connected")).toBeVisible();
     await expect(search).toBeVisible();
     await expect(search).toHaveText("");
     await expect(search).toHaveAttribute("title", "Поиск по диалогам");
@@ -69,6 +75,15 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     expect(
       await search.evaluate((element) => element === element.parentElement?.lastElementChild),
     ).toBe(true);
+    expect(
+      await connection.evaluate(
+        (element, nextSelector) => element.nextElementSibling?.matches(nextSelector),
+        updateAvailable ? ".app-update-indicator" : ".sidebar-search-action",
+      ),
+    ).toBe(true);
+    expect((await settings.locator("svg").boundingBox())!.x).toBe(
+      (await sidebar.locator(".codex-limits svg").boundingBox())!.x,
+    );
     const searchBox = (await search.boundingBox())!;
     const headerBox = (await header.boundingBox())!;
     expect(headerBox.x + headerBox.width - (searchBox.x + searchBox.width)).toBe(10);

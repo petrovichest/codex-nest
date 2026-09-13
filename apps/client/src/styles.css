@@ -937,17 +937,22 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
+  padding: 0 10px 0 0;
   color: var(--muted-strong);
   font-size: 13px;
+}
+
+.sidebar-settings-action {
+  width: auto;
+  flex: 0 1 auto;
 }
 
 .server-connection {
   min-width: 0;
   display: flex;
-  flex: 1;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 7px;
+  margin-left: auto;
 }
 
 .app-update-indicator {
@@ -957,7 +962,6 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  margin-left: auto;
   border-radius: 8px;
   background: var(--warning);
   color: var(--warning-text);

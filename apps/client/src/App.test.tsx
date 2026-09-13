@@ -286,12 +286,16 @@ describe("App routing and navigation", () => {
     const modeSwitch = screen.getByRole("group", { name: "Режим списка сессий" });
 
     expect(controls).not.toBeNull();
-    expect(Array.from(controls!.children).map((element) => element.textContent?.trim())).toEqual([
-      "Подключено",
-      "Настройки",
-      "Лимиты Codex",
-      "Добавить проект",
-    ]);
+    expect(controls?.children).toHaveLength(3);
+    expect(controls?.firstElementChild).toHaveClass("server-status");
+    expect(
+      within(controls?.firstElementChild as HTMLElement).getByRole("link", { name: "Настройки" }),
+    ).toBeInTheDocument();
+    expect(
+      Array.from(controls!.children)
+        .slice(1)
+        .map((element) => element.textContent?.trim()),
+    ).toEqual(["Лимиты Codex", "Добавить проект"]);
     expect(controls?.nextElementSibling).toBe(modeSwitch);
     expect(modeSwitch.nextElementSibling).toHaveClass("thread-nav");
     expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
@@ -1251,14 +1255,14 @@ describe("App routing and navigation", () => {
     ["connected", "Подключено"],
     ["connecting", "Подключение…"],
     ["offline", "Нет связи"],
-  ] as const)("renders the %s server state as only a dot and label", (network, label) => {
+  ] as const)("renders the %s server state as an accessible dot", (network, label) => {
     mockConnection(snapshot([baseThread]), network);
 
     renderApp("/threads/newer");
     const status = screen.getByRole("status", { name: `Состояние сервера: ${label}` });
     const dot = status.querySelector(".connection-dot");
 
-    expect(status).toHaveTextContent(label);
+    expect(within(status).getByText(label)).toHaveClass("sr-only");
     expect(status.children).toHaveLength(2);
     expect(dot).toHaveClass(network);
     expect(status.querySelector("svg")).toBeNull();
@@ -1276,12 +1280,18 @@ describe("App routing and navigation", () => {
 
       const search = screen.getByRole("button", { name: "Поиск по диалогам" });
       const header = view.container.querySelector(".server-status");
+      const settings = within(header as HTMLElement).getByRole("link", { name: "Настройки" });
+      const status = within(header as HTMLElement).getByRole("status", {
+        name: "Состояние сервера: Подключено",
+      });
+      expect(header?.firstElementChild).toBe(settings);
+      expect(settings.nextElementSibling).toBe(status);
       expect(header?.lastElementChild).toBe(search);
       expect(search.textContent).toBe("");
       expect(search.querySelector("svg")).not.toBeNull();
       expect(search).toHaveAttribute("title", "Поиск по диалогам");
       expect(screen.queryByText("Поиск по диалогам")).not.toBeInTheDocument();
-      expect(within(header as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
+      expect(within(header as HTMLElement).getAllByRole("link")).toEqual([settings]);
 
       search.focus();
       fireEvent.click(search);

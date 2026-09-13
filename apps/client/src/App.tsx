@@ -1372,6 +1372,14 @@ function Sidebar({
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
       <div className="sidebar-controls">
         <div className="server-status">
+          <NavLink
+            className="sidebar-control-action sidebar-settings-action"
+            to="/settings"
+            onClick={onClose}
+          >
+            <SlidersIcon />
+            {t("Настройки")}
+          </NavLink>
           <div
             aria-label={t("Состояние сервера: {{state}}", {
               state: networkLabel(state.network, t),
@@ -1380,7 +1388,7 @@ function Sidebar({
             role="status"
           >
             <ConnectionDot state={state.network} />
-            <span>{networkLabel(state.network, t)}</span>
+            <span className="sr-only">{networkLabel(state.network, t)}</span>
           </div>
           {updateAvailable && (
             <NavLink
@@ -1403,10 +1411,6 @@ function Sidebar({
             <SearchIcon />
           </button>
         </div>
-        <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
-          <SlidersIcon />
-          {t("Настройки")}
-        </NavLink>
         <button
           aria-busy={rateLimitsLoading}
           aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
