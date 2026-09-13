@@ -3,8 +3,16 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { installVisualFixture, snapshot, waitForVisualReady, PHONE_VIEWPORT } from "./fixtures";
 
-async function openSidebar(page: Page, theme: "light" | "dark") {
+async function openSidebar(page: Page, theme: "light" | "dark", pinnedCount?: number) {
   const seed = structuredClone(snapshot);
+  if (pinnedCount !== undefined) {
+    const main = seed.threads.find((thread) => thread.id === "session-main")!;
+    main.pinned = pinnedCount > 0;
+    for (let index = 1; index < pinnedCount; index++) {
+      const id = `extra-pin-${index}`;
+      seed.threads.push({ ...main, id, relation: { kind: "session", sessionId: id } });
+    }
+  }
   await installVisualFixture(page, { theme, snapshot: seed });
   await page.route("**/api/v1/threads/session-main", async (route) => {
     if (route.request().method() !== "PATCH") return route.fallback();
@@ -37,14 +45,25 @@ async function openSidebar(page: Page, theme: "light" | "dark") {
   await waitForVisualReady(page);
 }
 
+async function modeButtonBounds(page: Page) {
+  return page.locator(".session-list-mode button").evaluateAll((buttons) =>
+    buttons.map((button) => {
+      const { x, y, width, height } = button.getBoundingClientRect();
+      return { x, y, width, height };
+    }),
+  );
+}
+
 for (const theme of ["light", "dark"] as const) {
   test(`desktop ${theme} active alignment, hover actions and pin persistence`, async ({ page }) => {
     await openSidebar(page, theme);
     const switcher = page.locator(".session-list-mode");
     const switcherBefore = await switcher.boundingBox();
+    const buttonsBefore = await modeButtonBounds(page);
     const navBefore = await page.locator(".thread-nav").boundingBox();
     await page.getByRole("button", { name: "Активные", exact: true }).click();
     expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
     expect(await page.locator(".thread-nav").boundingBox()).toEqual(navBefore);
     const roots = page.locator(
       ".active-session-list > .thread-branch > .thread-branch-row, .active-pinned-sessions > .thread-branch > .thread-branch-row",
@@ -61,6 +80,7 @@ for (const theme of ["light", "dark"] as const) {
     await expect(row).toBeHidden();
     await expect(collapse).toHaveAttribute("aria-expanded", "false");
     expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
     const ordinary = page.locator('a[href="/threads/session-active"]');
     expect((await ordinary.boundingBox())!.y).toBe(topRowBounds!.y);
     await expect(page.locator(".sidebar")).toHaveScreenshot(
@@ -72,7 +92,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.keyboard.press("Tab");
     await expect(ordinary).toBeFocused();
     await page.getByRole("button", { name: "Проекты", exact: true }).click();
-    await expect(collapse).toHaveCount(0);
+    await expect(collapse).toBeVisible();
     await page.getByRole("button", { name: "Активные", exact: true }).click();
     await expect(collapse).toHaveAttribute("aria-expanded", "false");
     await expect(row).toBeHidden();
@@ -119,9 +139,23 @@ for (const theme of ["light", "dark"] as const) {
     await trigger.click();
     await expect(create).toBeVisible();
     await expect(pin).toBeVisible();
+    await expect(trigger).toBeHidden();
+    expect(await row.boundingBox()).toEqual(topRowBounds);
+    expect(await row.locator(".status").boundingBox()).toEqual(statusBounds);
+    const actions = row.locator(".thread-row-actions");
+    const actionBounds = (await actions.boundingBox())!;
+    const expandedTitle = (await title.boundingBox())!;
+    expect(expandedTitle.x + expandedTitle.width).toBeLessThanOrEqual(actionBounds.x);
+    expect(actionBounds.x + actionBounds.width).toBeLessThanOrEqual(statusBounds!.x);
     await page.getByRole("button", { name: "Активные", exact: true }).hover();
-    await expect(menu).toHaveAttribute("open", "");
+    await expect(menu).not.toHaveAttribute("open");
+    await expect(trigger).toHaveCSS("opacity", "0");
+    await expect(create).toBeHidden();
+    expect(await title.boundingBox()).toEqual(before);
+    await title.hover();
     await expect(trigger).toHaveCSS("opacity", "1");
+    await expect(create).toBeHidden();
+    await trigger.click();
     await expect(page.locator(".sidebar")).toHaveScreenshot(`sidebar-active-${theme}.png`, {
       maxDiffPixelRatio: 0,
     });
@@ -129,6 +163,20 @@ for (const theme of ["light", "dark"] as const) {
 
     await page.keyboard.press("Escape");
     await expect(create).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(create).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(pin).toBeFocused();
+    await page.getByRole("button", { name: "Активные", exact: true }).hover();
+    await expect(pin).toBeFocused();
+    await expect(menu).toHaveAttribute("open", "");
+    await page.keyboard.press("Tab");
+    await expect(menu).not.toHaveAttribute("open");
+    await trigger.focus();
+    await page.keyboard.press("Space");
+    await expect(create).toBeFocused();
+    await page.keyboard.press("Escape");
     await expect(trigger).toBeFocused();
     await trigger.evaluate((element) => (element as HTMLElement).blur());
     await page.getByRole("button", { name: "Активные", exact: true }).hover();
@@ -138,8 +186,9 @@ for (const theme of ["light", "dark"] as const) {
     await trigger.click();
     await pin.click();
     await expect(row).toHaveCount(0);
-    await expect(collapse).toHaveCount(0);
+    await expect(collapse).toHaveText(/0$/);
     expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
     await page.getByRole("button", { name: "Проекты", exact: true }).click();
     await page.getByLabel("Действия с сессией «Полировка мастерской»").focus();
     await page.getByLabel("Действия с сессией «Полировка мастерской»").click();
@@ -157,67 +206,144 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-test("keeps the pinned toggle on one line in a narrow sidebar", async ({ page }) => {
-  await openSidebar(page, "light");
-  await page.locator(".sidebar").evaluate((element) => {
-    (element as HTMLElement).style.width = "240px";
+for (const count of [0, 1, 12]) {
+  test(`keeps each mode button fixed in a narrow sidebar with ${count} pins`, async ({ page }) => {
+    await openSidebar(page, "light", count);
+    await page.locator(".sidebar").evaluate((element) => {
+      (element as HTMLElement).style.width = "240px";
+    });
+    const switcher = page.locator(".session-list-mode");
+    const before = await switcher.boundingBox();
+    const buttonsBefore = await modeButtonBounds(page);
+    expect(buttonsBefore).toHaveLength(3);
+    expect(buttonsBefore[0]!.width).toBe(buttonsBefore[1]!.width);
+    const pinned = page.locator(".pinned-group-toggle");
+    await pinned.click();
+    expect(await switcher.boundingBox()).toEqual(before);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
+    await expect(page.getByRole("button", { name: "Активные", exact: true })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(pinned).toHaveAttribute("aria-expanded", String(count > 0));
+    await pinned.click();
+    await expect(pinned).toHaveAttribute("aria-expanded", "false");
+    await page.getByRole("button", { name: "Проекты", exact: true }).click();
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
+    await pinned.click();
+    await expect(pinned).toHaveAttribute("aria-expanded", String(count > 0));
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
+    expect(
+      await switcher.locator("button").evaluateAll((buttons) =>
+        buttons.every((button) => {
+          const bounds = button.getBoundingClientRect();
+          const parent = button.parentElement!.getBoundingClientRect();
+          return (
+            bounds.left >= parent.left &&
+            bounds.right <= parent.right &&
+            bounds.top >= parent.top &&
+            bounds.bottom <= parent.bottom &&
+            button.scrollWidth <= button.clientWidth
+          );
+        }),
+      ),
+    ).toBe(true);
   });
-  const switcher = page.locator(".session-list-mode");
-  const before = await switcher.boundingBox();
-  await page.getByRole("button", { name: "Активные", exact: true }).click();
-  expect(await switcher.boundingBox()).toEqual(before);
-  expect(
-    await switcher.locator("button").evaluateAll((buttons) =>
-      buttons.every((button) => {
-        const bounds = button.getBoundingClientRect();
-        const parent = button.parentElement!.getBoundingClientRect();
-        return (
-          bounds.left >= parent.left &&
-          bounds.right <= parent.right &&
-          bounds.top >= parent.top &&
-          bounds.bottom <= parent.bottom &&
-          button.scrollWidth <= button.clientWidth
-        );
-      }),
-    ),
-  ).toBe(true);
-});
+}
 
 test.describe("touch sidebar actions", () => {
   test.use({ hasTouch: true, viewport: PHONE_VIEWPORT });
 
-  test("opens a compact menu, pins without navigation and creates in the same project", async ({
+  test("fits all three actions in the session row and keeps finish confirmation actionable", async ({
+    page,
+  }) => {
+    await installVisualFixture(page, { theme: "dark", finishableSidebar: true });
+    await page.goto("/threads/session-active");
+    await waitForVisualReady(page);
+    await page.getByRole("button", { name: "Открыть список задач" }).tap();
+    await page.locator(".pinned-group-toggle").tap();
+    const row = page
+      .locator(".thread-branch-row")
+      .filter({ has: page.locator('a[href="/threads/session-main"]') });
+    const before = await row.boundingBox();
+    const status = await row.locator(".status").boundingBox();
+    await row.getByLabel("Действия с сессией «Полировка мастерской»").tap();
+    const actions = row.locator(".thread-row-actions");
+    await expect(actions.locator("button")).toHaveCount(3);
+    const bounds = (await actions.boundingBox())!;
+    const title = (await row.locator(".thread-link-title").boundingBox())!;
+    expect(await row.boundingBox()).toEqual(before);
+    expect(await row.locator(".status").boundingBox()).toEqual(status);
+    expect(title.width).toBeGreaterThan(0);
+    expect(title.x + title.width).toBeLessThanOrEqual(bounds.x);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(status!.x);
+    for (const button of await actions.locator("button").all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.y).toBeGreaterThanOrEqual(before!.y);
+      expect(box.y + box.height).toBeLessThanOrEqual(before!.y + before!.height);
+    }
+    const finish = row.getByRole("button", { name: "Закончить сессию «Полировка мастерской»" });
+    await finish.tap();
+    await expect(finish).toHaveClass(/confirming/);
+    await expect(page.locator(".sidebar")).toHaveScreenshot("sidebar-touch-finish-dark.png");
+    expect((await new AxeBuilder({ page }).include(".sidebar").analyze()).violations).toEqual([]);
+    await page.locator(".server-status").tap();
+    await row.getByLabel("Действия с сессией «Полировка мастерской»").tap();
+    await expect(finish).not.toHaveClass(/confirming/);
+  });
+
+  test("opens inline actions, pins without navigation and creates in the same project", async ({
     page,
   }) => {
     await openSidebar(page, "light");
     await page.getByRole("button", { name: "Открыть список задач" }).click();
     const switcher = page.locator(".session-list-mode");
     const switcherBefore = await switcher.boundingBox();
+    const buttonsBefore = await modeButtonBounds(page);
     await page.getByRole("button", { name: "Активные", exact: true }).click();
     expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
     const collapse = page.locator(".pinned-group-toggle");
     expect((await collapse.boundingBox())!.height).toBeGreaterThanOrEqual(32);
     await collapse.tap();
     await expect(page.locator(".active-pinned-sessions")).toBeHidden();
     expect(await switcher.boundingBox()).toEqual(switcherBefore);
+    expect(await modeButtonBounds(page)).toEqual(buttonsBefore);
     await collapse.tap();
     await expect(page.locator(".active-pinned-sessions")).toBeVisible();
     const trigger = page.getByLabel("Действия с сессией «Полировка мастерской»");
     const menu = trigger.locator("..");
-    await expect(menu.locator(".thread-row-popover")).toBeHidden();
-    await trigger.tap();
-    await expect(menu.locator(".thread-row-popover")).toBeVisible();
-    await expect(page).toHaveURL(/\/threads\/session-active$/);
+    await expect(menu.locator(".thread-row-actions")).toBeHidden();
     const touchBounds = await trigger.boundingBox();
     expect(touchBounds!.width).toBeGreaterThanOrEqual(44);
     expect(touchBounds!.height).toBeGreaterThanOrEqual(44);
+    const row = menu.locator("..");
+    const rowBefore = await row.boundingBox();
+    await trigger.tap();
+    await expect(menu.locator(".thread-row-actions")).toBeVisible();
+    await expect(trigger).toBeHidden();
+    expect(await row.boundingBox()).toEqual(rowBefore);
+    for (const button of await menu.locator("button").all()) {
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.y).toBeGreaterThanOrEqual(rowBefore!.y);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(rowBefore!.y + rowBefore!.height);
+    }
+    await expect(page).toHaveURL(/\/threads\/session-active$/);
     await expect(page.locator(".sidebar")).toHaveScreenshot("sidebar-touch-actions.png", {
       maxDiffPixelRatio: 0,
     });
     expect((await new AxeBuilder({ page }).include(".sidebar").analyze()).violations).toEqual([]);
     await page.keyboard.press("Escape");
-    await expect(menu.locator(".thread-row-popover")).toBeHidden();
+    await expect(menu.locator(".thread-row-actions")).toBeHidden();
     await expect(trigger).toBeFocused();
+    await trigger.tap();
+    await page.locator(".server-status").tap();
+    await expect(menu.locator(".thread-row-actions")).toBeHidden();
+    await expect(trigger).toBeVisible();
     await trigger.tap();
     await menu.getByRole("button", { name: "Открепить сессию «Полировка мастерской»" }).tap();
     await expect(trigger).toHaveCount(0);
@@ -225,7 +351,7 @@ test.describe("touch sidebar actions", () => {
     await page.getByRole("button", { name: "Проекты", exact: true }).tap();
     await trigger.tap();
     await menu.getByRole("button", { name: "Закрепить сессию «Полировка мастерской»" }).tap();
-    await expect(menu.locator(".thread-row-popover")).toBeHidden();
+    await expect(menu.locator(".thread-row-actions")).toBeHidden();
     await page.getByRole("button", { name: "Активные", exact: true }).tap();
     await trigger.tap();
     await menu.getByRole("button", { name: "Создать новую сессию в проекте CodexNest" }).tap();

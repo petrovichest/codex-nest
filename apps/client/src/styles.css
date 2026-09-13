@@ -446,8 +446,7 @@
 }
 
 .thread-branch-row:hover > .thread-link.has-actions,
-.thread-branch-row:focus-within > .thread-link.has-actions,
-.thread-branch-row:has(> .thread-row-menu[open]) > .thread-link.has-actions {
+.thread-branch-row:focus-within > .thread-link.has-actions {
   padding-right: calc(var(--thread-menu-width) + 16px);
 }
 
@@ -464,10 +463,10 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
+  width: var(--thread-menu-width);
+  min-width: var(--thread-menu-width);
+  height: var(--thread-menu-width);
+  min-height: var(--thread-menu-width);
   padding: 0;
   border-color: transparent;
   border-radius: var(--radius-sm);
@@ -507,8 +506,12 @@
   color: var(--text-strong);
 }
 
-.thread-row-menu[open] {
-  z-index: 45;
+.thread-row-menu[open] > .thread-more-action {
+  display: none;
+}
+
+.thread-branch-row:has(> .thread-row-menu[open] .thread-pin-action) .thread-pinned-marker {
+  display: none;
 }
 
 .thread-more-action {
@@ -525,8 +528,7 @@
 }
 
 .thread-branch-row:hover > .thread-row-menu > .thread-more-action,
-.thread-branch-row:focus-within > .thread-row-menu > .thread-more-action,
-.thread-row-menu[open] > .thread-more-action {
+.thread-branch-row:focus-within > .thread-row-menu > .thread-more-action {
   opacity: 1;
   pointer-events: auto;
 }
@@ -565,28 +567,13 @@
   height: 18px;
 }
 
-.thread-row-popover {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  width: 220px;
-  display: grid;
+.thread-row-actions {
+  display: flex;
   gap: 2px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow);
 }
 
-.thread-row-popover .thread-row-action {
-  width: 100%;
-  min-height: 44px;
-  height: auto;
-  justify-content: flex-start;
-  gap: 8px;
-  padding: 6px 9px;
-  text-align: left;
+.thread-branch-row:has(> .thread-row-menu[open]) > .thread-link.has-actions {
+  padding-right: calc(var(--thread-action-count) * (var(--thread-menu-width) + 2px) + 14px);
 }
 
 .thread-action-error {
@@ -855,7 +842,7 @@
 .session-list-mode {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 72px;
   gap: 2px;
   margin: 8px 10px 0;
   padding: 2px;
@@ -886,10 +873,6 @@
   box-shadow: none;
 }
 
-.session-list-mode:has(.pinned-group-toggle) {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-}
-
 .session-list-mode .pinned-group-toggle {
   display: flex;
   align-items: center;
@@ -897,6 +880,13 @@
   gap: 3px;
   padding: 0 4px;
   font-variant-numeric: tabular-nums;
+}
+
+.pinned-group-toggle span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pinned-group-toggle svg {

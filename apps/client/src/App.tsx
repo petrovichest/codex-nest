@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type TouchEvent as ReactTouchEvent,
@@ -780,9 +781,11 @@ function Sidebar({
   );
   const pinnedFeedRoots = activeFeedRoots.filter((thread) => thread.pinned);
   const unpinnedFeedRoots = activeFeedRoots.filter((thread) => !thread.pinned);
-  const pinnedGroupLabel = sidebarTree.pinnedGroupCollapsed
-    ? t("Показать закрепленные ({{count}})", { count: pinnedFeedRoots.length })
-    : t("Свернуть закрепленные ({{count}})", { count: pinnedFeedRoots.length });
+  const pinnedGroupExpanded =
+    sessionListMode === "active" && pinnedFeedRoots.length > 0 && !sidebarTree.pinnedGroupCollapsed;
+  const pinnedGroupLabel = pinnedGroupExpanded
+    ? t("Свернуть закрепленные ({{count}})", { count: pinnedFeedRoots.length })
+    : t("Показать закрепленные ({{count}})", { count: pinnedFeedRoots.length });
   const projectNames = new Map(
     (snapshot?.projects ?? []).map((project) => [project.id, project.displayName]),
   );
@@ -1434,26 +1437,31 @@ function Sidebar({
         >
           {t("Активные")}
         </button>
-        {sessionListMode === "active" && pinnedFeedRoots.length > 0 && (
-          <button
-            aria-controls="active-pinned-sessions"
-            aria-expanded={!sidebarTree.pinnedGroupCollapsed}
-            aria-label={pinnedGroupLabel}
-            className="pinned-group-toggle"
-            onClick={() =>
-              setSidebarTree((current) => ({
-                ...current,
-                pinnedGroupCollapsed: !current.pinnedGroupCollapsed,
-              }))
-            }
-            title={pinnedGroupLabel}
-            type="button"
-          >
-            {sidebarTree.pinnedGroupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
-            <PinIcon />
-            <span aria-hidden="true">{pinnedFeedRoots.length}</span>
-          </button>
-        )}
+        <button
+          aria-controls={
+            sessionListMode === "active" && pinnedFeedRoots.length > 0
+              ? "active-pinned-sessions"
+              : undefined
+          }
+          aria-expanded={pinnedGroupExpanded}
+          aria-label={pinnedGroupLabel}
+          className="pinned-group-toggle"
+          onClick={() => {
+            if (sessionListMode === "active" && pinnedFeedRoots.length === 0) return;
+            setSidebarTree((current) => ({
+              ...current,
+              pinnedGroupCollapsed:
+                sessionListMode === "active" ? !current.pinnedGroupCollapsed : false,
+            }));
+            setSessionListMode("active");
+          }}
+          title={pinnedGroupLabel}
+          type="button"
+        >
+          {sidebarTree.pinnedGroupCollapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+          <PinIcon />
+          <span aria-hidden="true">{pinnedFeedRoots.length}</span>
+        </button>
       </div>
       <nav
         className={`thread-nav ${projectListDirection}`}
@@ -1998,6 +2006,7 @@ function ThreadLink({
   const location = useLocation();
   const titleRef = useRef<HTMLSpanElement>(null);
   const menuRef = useRef<HTMLDetailsElement>(null);
+  const keyboardActionsRef = useRef(true);
   const [pinning, setPinning] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
   const [finishConfirmationUpdatedAt, setFinishConfirmationUpdatedAt] = useState<number | null>(
@@ -2034,6 +2043,14 @@ function ThreadLink({
     setFinishError(null);
   }
 
+  function closeActions(restoreFocus = false) {
+    const menu = menuRef.current;
+    if (!menu) return;
+    menu.open = false;
+    resetFinishInteraction();
+    if (restoreFocus) menu.querySelector("summary")?.focus();
+  }
+
   async function togglePin() {
     if (pinning) return;
     setPinning(true);
@@ -2041,7 +2058,7 @@ function ThreadLink({
     try {
       const updated = await api.updateThread(thread.id, { pinned: !thread.pinned });
       dispatch({ type: "thread", thread: updated });
-      menuRef.current?.removeAttribute("open");
+      closeActions(menuRef.current?.contains(document.activeElement));
     } catch (caught) {
       setPinError(
         caught instanceof Error
@@ -2065,7 +2082,7 @@ function ThreadLink({
     setFinishing(true);
     try {
       await api.markRead(thread.id, { observedUpdatedAt: thread.updatedAt });
-      menuRef.current?.removeAttribute("open");
+      closeActions(menuRef.current?.contains(document.activeElement));
     } catch (caught) {
       setFinishError(
         caught instanceof Error
@@ -2077,7 +2094,8 @@ function ThreadLink({
     }
   }
 
-  const hasActions = Boolean(project) || canPin || canFinish;
+  const actionCount = Number(Boolean(project)) + Number(canPin) + Number(canFinish);
+  const hasActions = actionCount > 0;
   const actions = (
     <>
       {project && (
@@ -2087,14 +2105,13 @@ function ThreadLink({
           })}
           className="thread-row-action thread-create-action"
           onClick={() => {
-            menuRef.current?.removeAttribute("open");
+            closeActions();
             onNewSession?.(project.id);
           }}
           title={t("Создать новую сессию в проекте {{project}}", { project: project.displayName })}
           type="button"
         >
           <PlusIcon />
-          {t("Новая сессия")}
         </button>
       )}
       {canPin && (
@@ -2109,7 +2126,6 @@ function ThreadLink({
           type="button"
         >
           {pinning ? <span className="spinner small" /> : <PinIcon />}
-          {thread.pinned ? t("Открепить") : t("Закрепить")}
         </button>
       )}
       {canFinish && (
@@ -2123,7 +2139,6 @@ function ThreadLink({
           type="button"
         >
           {finishing ? <span className="spinner small" /> : <CheckIcon />}
-          {finishConfirmationArmed ? t("Подтвердить завершение") : t("Закончить сессию")}
         </button>
       )}
     </>
@@ -2133,8 +2148,26 @@ function ThreadLink({
     <>
       <div
         className="thread-branch-row"
+        style={{ "--thread-action-count": actionCount } as CSSProperties}
+        onPointerDownCapture={() => {
+          keyboardActionsRef.current = false;
+        }}
+        onKeyDownCapture={() => {
+          keyboardActionsRef.current = true;
+        }}
+        onMouseLeave={(event) => {
+          if (window.matchMedia("(hover: none), (pointer: coarse)").matches) return;
+          const focused = document.activeElement;
+          if (keyboardActionsRef.current && event.currentTarget.contains(focused)) return;
+          closeActions();
+          if (focused instanceof HTMLElement && event.currentTarget.contains(focused))
+            focused.blur();
+        }}
         onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) resetFinishInteraction();
+          if (!event.currentTarget.contains(event.relatedTarget)) {
+            closeActions();
+            keyboardActionsRef.current = true;
+          }
         }}
       >
         <span className="thread-branch-spacer" />
@@ -2200,29 +2233,30 @@ function ThreadLink({
             data-dismiss-on-outside-click
             ref={menuRef}
             onToggle={(event) => {
-              if (event.currentTarget.open) {
-                event.currentTarget
-                  .querySelector(".thread-row-popover")
-                  ?.scrollIntoView?.({ block: "nearest" });
-              } else {
-                resetFinishInteraction();
-              }
+              if (!event.currentTarget.open) resetFinishInteraction();
+              prepareThreadTitleScroll(titleRef.current);
             }}
             onKeyDown={(event) => {
               if (event.key !== "Escape") return;
               event.preventDefault();
               event.stopPropagation();
-              event.currentTarget.open = false;
-              event.currentTarget.querySelector("summary")?.focus();
+              closeActions(true);
             }}
           >
             <summary
               className="thread-more-action"
               aria-label={t("Действия с сессией «{{title}}»", { title: displayTitle })}
+              onClick={(event) => {
+                event.preventDefault();
+                const menu = menuRef.current;
+                if (!menu) return;
+                menu.open = true;
+                menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+              }}
             >
               <MoreIcon />
             </summary>
-            <div className="thread-row-popover">{actions}</div>
+            <div className="thread-row-actions">{actions}</div>
           </details>
         )}
         {finishError && (

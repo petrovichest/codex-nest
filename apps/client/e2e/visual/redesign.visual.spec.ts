@@ -141,14 +141,14 @@ test.describe("CodexNest redesign visual contract", () => {
       await expect(link).toHaveCSS("background-color", rowHoverBackground);
       expect(
         await row.evaluate((element) => {
-          const action = element.querySelector<HTMLElement>(".thread-more-action");
+          const action = element.querySelector<HTMLElement>(".thread-row-actions");
           if (!action) return null;
           return Math.round(
             element.getBoundingClientRect().right - action.getBoundingClientRect().right,
           );
         }),
       ).toBe(12);
-      await expect(row.locator(".thread-row-popover")).toHaveScreenshot(
+      await expect(row.locator(".thread-row-actions")).toHaveScreenshot(
         "18-desktop-light-sidebar-finish.png",
       );
 
@@ -315,7 +315,7 @@ test.describe("CodexNest redesign visual contract", () => {
     await openVisualPage(page, "/threads/session-attention", "light", DESKTOP_VIEWPORT);
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
     await expect(queue).toBeVisible();
-    await expect(queue.getByText("Отправлено", { exact: true })).toBeVisible();
+    await expect(queue.getByText("В очереди", { exact: true })).toBeVisible();
     expect(
       await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),
       "desktop queue fits without horizontal scrolling",
@@ -368,7 +368,7 @@ test.describe("CodexNest redesign visual contract", () => {
     await expect(page.getByText("Какую поверхность использовать", { exact: false })).toBeVisible();
     const queue = page.getByRole("region", { name: "Очередь сообщений" });
     await expect(queue).toBeVisible();
-    await expect(queue.getByText("Отправлено", { exact: true })).toBeVisible();
+    await expect(queue.getByText("В очереди", { exact: true })).toBeVisible();
     await expect(queue.locator(".queued-message-order")).toHaveCount(0);
     expect(
       await queue.evaluate((element) => element.scrollWidth <= element.clientWidth),

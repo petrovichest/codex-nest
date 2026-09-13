@@ -433,7 +433,7 @@ describe("App routing and navigation", () => {
     expect(manualNavigationIntent).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
-    expect(screen.queryByRole("button", { name: /закрепленные/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Показать закрепленные (2)" })).toBeVisible();
     expect(screen.getByRole("link", { name: pinned.title })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Активные" }));
     expect(screen.getByRole("button", { name: "Показать закрепленные (2)" })).toHaveAttribute(
@@ -478,7 +478,7 @@ describe("App routing and navigation", () => {
     expect(screen.queryByText("Нет активных сессий")).not.toBeInTheDocument();
 
     update([{ ...pinned, pinned: false }, running]);
-    expect(screen.queryByRole("button", { name: /закрепленные/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Показать закрепленные (0)" })).toBeVisible();
     expect(screen.getAllByRole("link", { name: new RegExp(running.title) })).toHaveLength(1);
     expect(screen.queryByRole("link", { name: /Закрепленная/ })).not.toBeInTheDocument();
     update([pinned, running]);
@@ -486,6 +486,56 @@ describe("App routing and navigation", () => {
       "aria-expanded",
       "false",
     );
+  });
+
+  it.each([false, true])(
+    "opens and expands pins from Projects when collapsed was %s",
+    (collapsed) => {
+      localStorage.setItem(
+        "codexnest.sidebarTree.v1:https%3A%2F%2Fpi.local",
+        JSON.stringify({
+          version: 1,
+          collapsedProjectIds: [],
+          pinnedGroupCollapsed: collapsed,
+        }),
+      );
+      const api = mockConnection(snapshot([{ ...baseThread, pinned: true }]));
+      renderApp("/threads/newer");
+      const toggle = screen.getByRole("button", { name: "Показать закрепленные (1)" });
+      expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      fireEvent.click(toggle);
+      expect(screen.getByRole("button", { name: "Активные" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("link", { name: new RegExp(baseThread.title) })).toBeVisible();
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(api.updateThread).not.toHaveBeenCalled();
+      expect(api.markRead).not.toHaveBeenCalled();
+      expect(manualNavigationIntent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the zero pin count visible and opens Active without toggling an empty group", () => {
+    mockConnection(snapshot([baseThread]));
+    renderApp("/threads/newer");
+    const toggle = screen.getByRole("button", { name: "Показать закрепленные (0)" });
+    expect(toggle).toHaveTextContent("0");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Активные" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
   it("restores pinned collapse per server and preserves it when stale projects are pruned", async () => {
@@ -677,7 +727,7 @@ describe("App routing and navigation", () => {
     },
   );
 
-  it("requires a second touch menu click to finish and keeps the pinned session visible", async () => {
+  it("requires a second touch action click to finish and keeps the pinned session visible", async () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const thread = { ...baseThread, state: "completed" as const, unread: true, pinned: true };
     const api = mockConnection(snapshot([thread]));
@@ -1530,7 +1580,7 @@ describe("App routing and navigation", () => {
     expect(finish.closest("details")).not.toHaveAttribute("open");
   });
 
-  it("keeps finish confirmation on mouse leave and resets it on menu close or blur", async () => {
+  it("resets finish confirmation and closes actions on mouse leave or blur", async () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const finishable = {
       ...baseThread,
@@ -1546,21 +1596,27 @@ describe("App routing and navigation", () => {
     renderApp("/threads/running");
 
     const trigger = screen.getByLabelText("Действия с сессией «Результат»");
+    fireEvent.pointerDown(trigger);
     fireEvent.click(trigger);
     const finish = screen.getByRole("button", { name: "Закончить сессию «Результат»" });
     fireEvent.click(finish);
     expect(finish).toHaveAccessibleName("Нажмите ещё раз, чтобы закончить сессию «Результат»");
-    fireEvent.mouseLeave(finish.closest(".thread-branch-row")!);
-    expect(finish).toHaveAccessibleName("Нажмите ещё раз, чтобы закончить сессию «Результат»");
-    fireEvent.click(trigger);
-    await waitFor(() => expect(finish).toHaveAccessibleName("Закончить сессию «Результат»"));
+    const row = finish.closest(".thread-branch-row")!;
+    fireEvent.mouseLeave(row);
+    expect(trigger.closest("details")).not.toHaveAttribute("open");
+    expect(row.contains(document.activeElement)).toBe(false);
+    expect(finish).toHaveAccessibleName("Закончить сессию «Результат»");
+    fireEvent.mouseEnter(row);
+    expect(trigger.closest("details")).not.toHaveAttribute("open");
     fireEvent.click(trigger);
 
     fireEvent.click(finish);
     fireEvent.blur(finish, { relatedTarget: document.body });
     expect(finish).toHaveAccessibleName("Закончить сессию «Результат»");
     expect(api.markRead).not.toHaveBeenCalled();
+    expect(trigger.closest("details")).not.toHaveAttribute("open");
 
+    fireEvent.click(trigger);
     fireEvent.click(finish);
     fireEvent.click(finish);
     expect(api.markRead).toHaveBeenCalledWith("finishable", { observedUpdatedAt: 123 });
