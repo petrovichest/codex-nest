@@ -1370,46 +1370,23 @@ function Sidebar({
   return (
     <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
       <div className="sidebar-controls">
-        <div className="server-status">
-          <NavLink
-            className="sidebar-control-action sidebar-settings-action"
-            to="/settings"
-            onClick={onClose}
-          >
-            <SlidersIcon />
-            {t("Настройки")}
-          </NavLink>
-          {updateAvailable && (
-            <NavLink
-              aria-label={t("Доступно обновление CodexNest")}
-              className="app-update-indicator"
-              onClick={onClose}
-              title={t("Доступно обновление CodexNest")}
-              to="/settings?section=maintenance"
-            >
-              <ArrowDownIcon />
-            </NavLink>
-          )}
-          <div
-            aria-label={t("Состояние сервера: {{state}}", {
-              state: networkLabel(state.network, t),
-            })}
-            className="server-connection"
-            role="status"
-          >
-            <ConnectionDot state={state.network} />
-            <span className="sr-only">{networkLabel(state.network, t)}</span>
-          </div>
-          <button
-            aria-label={t("Поиск по диалогам")}
-            className="icon-button sidebar-search-action"
-            onClick={() => setSearchOpen(true)}
-            title={t("Поиск по диалогам")}
-            type="button"
-          >
-            <SearchIcon />
-          </button>
-        </div>
+        <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
+          <SlidersIcon />
+          {t("Настройки")}
+        </NavLink>
+        <NavLink
+          aria-label={
+            updateAvailable ? t("Доступно обновление CodexNest") : t("Обновление CodexNest")
+          }
+          className={`sidebar-compact-control app-update-indicator${
+            updateAvailable ? " update-available" : ""
+          }`}
+          onClick={onClose}
+          title={updateAvailable ? t("Доступно обновление CodexNest") : t("Обновление CodexNest")}
+          to="/settings?section=maintenance"
+        >
+          <ArrowDownIcon />
+        </NavLink>
         <button
           aria-busy={rateLimitsLoading}
           aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
@@ -1420,9 +1397,28 @@ function Sidebar({
           {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
           <span>{rateLimitsText}</span>
         </button>
+        <div
+          aria-label={t("Состояние сервера: {{state}}", {
+            state: networkLabel(state.network, t),
+          })}
+          className="sidebar-compact-control server-connection"
+          role="status"
+        >
+          <ConnectionDot state={state.network} />
+          <span className="sr-only">{networkLabel(state.network, t)}</span>
+        </div>
         <button className="sidebar-control-action" onClick={onNewProject}>
           <PlusIcon />
           {t("Добавить проект")}
+        </button>
+        <button
+          aria-label={t("Поиск по диалогам")}
+          className="icon-button sidebar-compact-control sidebar-search-action"
+          onClick={() => setSearchOpen(true)}
+          title={t("Поиск по диалогам")}
+          type="button"
+        >
+          <SearchIcon />
         </button>
       </div>
       <div className="session-list-mode" role="group" aria-label={t("Режим списка сессий")}>

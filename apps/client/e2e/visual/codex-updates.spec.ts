@@ -28,7 +28,7 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
   { mobile: true, theme: "light", sidebarSide: "right", updateAvailable: true },
   { mobile: true, theme: "dark", sidebarSide: "left", updateAvailable: false },
 ] as const) {
-  test(`sidebar header search on ${mobile ? "mobile" : "desktop"} ${theme}`, async ({ page }) => {
+  test(`sidebar control grid on ${mobile ? "mobile" : "desktop"} ${theme}`, async ({ page }) => {
     await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
     await installVisualFixture(page, { theme, sidebarSide });
     let checks = 0;
@@ -57,54 +57,83 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     await expect.poll(() => checks).toBe(1);
     if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
     const sidebar = page.locator(".sidebar");
-    const header = sidebar.locator(".server-status");
-    const settings = header.getByRole("link", { name: "Настройки", exact: true });
-    const connection = header.getByRole("status", {
+    const controls = sidebar.locator(".sidebar-controls");
+    const settings = controls.getByRole("link", { name: "Настройки", exact: true });
+    const update = controls.getByRole("link", {
+      name: updateAvailable ? "Доступно обновление CodexNest" : "Обновление CodexNest",
+      exact: true,
+    });
+    const limits = controls.locator(".codex-limits");
+    const connection = controls.getByRole("status", {
       name: "Состояние сервера: Подключено",
     });
-    const search = header.getByRole("button", { name: "Поиск по диалогам", exact: true });
-    const update = header.getByRole("link", { name: "Доступно обновление CodexNest" });
+    const addProject = controls.getByRole("button", { name: "Добавить проект", exact: true });
+    const search = controls.getByRole("button", { name: "Поиск по диалогам", exact: true });
     await expect(page.locator(".app-frame")).toHaveAttribute("data-sidebar-side", sidebarSide);
     await expect(settings).toBeVisible();
+    await expect(update).toBeVisible();
+    if (updateAvailable) await expect(update).toHaveClass(/update-available/);
+    else await expect(update).not.toHaveClass(/update-available/);
     await expect(connection.locator(".connection-dot.connected")).toBeVisible();
     await expect(search).toBeVisible();
     await expect(search).toHaveText("");
     await expect(search).toHaveAttribute("title", "Поиск по диалогам");
     await expect(sidebar.getByText("Поиск по диалогам", { exact: true })).toHaveCount(0);
-    await expect(update).toHaveCount(updateAvailable ? 1 : 0);
+    expect(await controls.locator(":scope > *").evaluateAll((elements) => elements.length)).toBe(6);
     expect(
-      await search.evaluate((element) => element === element.parentElement?.lastElementChild),
+      await settings.evaluate((element) => element === element.parentElement?.children[0]),
+    ).toBe(true);
+    expect(await update.evaluate((element) => element === element.parentElement?.children[1])).toBe(
+      true,
+    );
+    expect(await limits.evaluate((element) => element === element.parentElement?.children[2])).toBe(
+      true,
+    );
+    expect(
+      await connection.evaluate((element) => element === element.parentElement?.children[3]),
     ).toBe(true);
     expect(
-      await connection.evaluate((element) =>
-        element.nextElementSibling?.matches(".sidebar-search-action"),
-      ),
+      await addProject.evaluate((element) => element === element.parentElement?.children[4]),
     ).toBe(true);
+    expect(await search.evaluate((element) => element === element.parentElement?.children[5])).toBe(
+      true,
+    );
     expect((await settings.locator("svg").boundingBox())!.x).toBe(
-      (await sidebar.locator(".codex-limits svg").boundingBox())!.x,
+      (await limits.locator("svg").boundingBox())!.x,
     );
     const settingsBox = (await settings.boundingBox())!;
+    const updateBox = (await update.boundingBox())!;
+    const limitsBox = (await limits.boundingBox())!;
     const connectionBox = (await connection.boundingBox())!;
+    const addProjectBox = (await addProject.boundingBox())!;
     const searchBox = (await search.boundingBox())!;
-    const headerBox = (await header.boundingBox())!;
-    expect(headerBox.x + headerBox.width - (searchBox.x + searchBox.width)).toBe(10);
-    expect(searchBox.x - (connectionBox.x + connectionBox.width)).toBe(6);
-    expect(searchBox.width).toBeGreaterThanOrEqual(32);
-    expect(searchBox.height).toBeGreaterThanOrEqual(32);
-    if (updateAvailable) {
-      const updateBox = (await update.boundingBox())!;
-      expect(updateBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
-      expect(connectionBox.x - (updateBox.x + updateBox.width)).toBe(6);
-      expect(updateBox.y + updateBox.height / 2).toBe(searchBox.y + searchBox.height / 2);
-      if (mobile) expect(updateBox.width).toBeGreaterThanOrEqual(32);
-      await update.focus();
-      await page.keyboard.press("Tab");
-      await expect(search).toBeFocused();
-    } else {
-      expect(connectionBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
-      await search.focus();
-    }
-    await expect(header).toHaveScreenshot(
+    expect(settingsBox.x).toBe(limitsBox.x);
+    expect(settingsBox.x).toBe(addProjectBox.x);
+    expect(settingsBox.width).toBe(limitsBox.width);
+    expect(settingsBox.width).toBe(addProjectBox.width);
+    expect(updateBox.x).toBe(connectionBox.x);
+    expect(updateBox.x).toBe(searchBox.x);
+    expect(updateBox.width).toBe(connectionBox.width);
+    expect(updateBox.width).toBe(searchBox.width);
+    expect(updateBox.width).toBe(updateBox.height);
+    expect(connectionBox.width).toBe(connectionBox.height);
+    expect(searchBox.width).toBe(searchBox.height);
+    expect(updateBox.x - (settingsBox.x + settingsBox.width)).toBe(2);
+    expect(connectionBox.x - (limitsBox.x + limitsBox.width)).toBe(2);
+    expect(searchBox.x - (addProjectBox.x + addProjectBox.width)).toBe(2);
+    expect(settingsBox.y + settingsBox.height / 2).toBe(updateBox.y + updateBox.height / 2);
+    expect(limitsBox.y + limitsBox.height / 2).toBe(connectionBox.y + connectionBox.height / 2);
+    expect(addProjectBox.y + addProjectBox.height / 2).toBe(searchBox.y + searchBox.height / 2);
+    await settings.focus();
+    await page.keyboard.press("Tab");
+    await expect(update).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(limits).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(addProject).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(search).toBeFocused();
+    await expect(controls).toHaveScreenshot(
       `sidebar-header-${mobile ? "mobile" : "desktop"}-${theme}.png`,
     );
     expect(
@@ -118,22 +147,13 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(search).toBeFocused();
-    if (updateAvailable) {
-      await update.click();
-      await expect(page).toHaveURL(/\/settings\?section=maintenance$/);
-      await expect(page.getByRole("tab", { name: "Обслуживание" })).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      if (mobile) await expect(sidebar).not.toHaveClass(/open/);
-    } else {
-      await page.mouse.click(
-        settingsBox.x + settingsBox.width - 2,
-        settingsBox.y + settingsBox.height / 2,
-      );
-      await expect(page).toHaveURL(/\/settings\?section=application$/);
-      if (mobile) await expect(sidebar).not.toHaveClass(/open/);
-    }
+    await update.click();
+    await expect(page).toHaveURL(/\/settings\?section=maintenance$/);
+    await expect(page.getByRole("tab", { name: "Обслуживание" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    if (mobile) await expect(sidebar).not.toHaveClass(/open/);
   });
 }
 

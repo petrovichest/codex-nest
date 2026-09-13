@@ -842,7 +842,13 @@
 }
 
 .sidebar-controls {
+  --sidebar-control-size: 38px;
+
   flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-control-size);
+  align-items: center;
+  column-gap: 2px;
   padding: var(--space-2) 10px 9px;
   border-bottom: 1px solid var(--color-line-strong);
 }
@@ -907,7 +913,7 @@
   font-size: 14px;
   line-height: 1.4;
   width: 100%;
-  height: 38px;
+  height: var(--sidebar-control-size);
   display: flex;
   align-items: center;
   gap: 7px;
@@ -942,48 +948,31 @@
   opacity: 1;
 }
 
-.server-status {
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px 0 0;
+.sidebar-compact-control {
+  width: var(--sidebar-control-size);
+  min-width: var(--sidebar-control-size);
+  height: var(--sidebar-control-size);
+  min-height: var(--sidebar-control-size);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--muted-strong);
-  font-size: 13px;
-}
-
-.sidebar-settings-action {
-  width: auto;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.server-connection {
-  min-width: 0;
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
 }
 
 .app-update-indicator {
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--warning);
-  color: var(--warning-text);
+  text-decoration: none;
 }
 
 .app-update-indicator:hover,
 .app-update-indicator.active {
-  background: color-mix(in srgb, var(--warning-text) 14%, var(--warning));
+  background: var(--sidebar-hover);
 }
 
-.sidebar-search-action {
-  flex: 0 0 auto;
+.app-update-indicator.update-available {
+  color: var(--success);
 }
 
 .app-update-indicator svg,
@@ -5793,6 +5782,10 @@ button.message-file:hover:not(:disabled) {
     --header-height: calc(56px + var(--app-safe-area-top));
   }
 
+  .sidebar-controls {
+    --sidebar-control-size: var(--control-touch-height);
+  }
+
   .sidebar {
     z-index: 80;
     width: min(310px, 88vw);
@@ -6256,7 +6249,6 @@ button.message-file:hover:not(:disabled) {
   }
 
   .sidebar-control-action,
-  .server-status,
   .session-list-mode button,
   .project-title,
   .project-toggle,
@@ -6275,8 +6267,7 @@ button.message-file:hover:not(:disabled) {
     height: var(--control-touch-height);
   }
 
-  .sidebar-search-action,
-  .app-update-indicator,
+  .sidebar-compact-control,
   .project-icon-action,
   .thread-branch-toggle {
     width: var(--control-touch-height);

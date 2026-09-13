@@ -286,16 +286,30 @@ describe("App routing and navigation", () => {
     const modeSwitch = screen.getByRole("group", { name: "Режим списка сессий" });
 
     expect(controls).not.toBeNull();
-    expect(controls?.children).toHaveLength(3);
-    expect(controls?.firstElementChild).toHaveClass("server-status");
-    expect(
-      within(controls?.firstElementChild as HTMLElement).getByRole("link", { name: "Настройки" }),
-    ).toBeInTheDocument();
-    expect(
-      Array.from(controls!.children)
-        .slice(1)
-        .map((element) => element.textContent?.trim()),
-    ).toEqual(["Лимиты Codex", "Добавить проект"]);
+    const settings = within(controls as HTMLElement).getByRole("link", { name: "Настройки" });
+    const update = within(controls as HTMLElement).getByRole("link", {
+      name: "Обновление CodexNest",
+    });
+    const limits = within(controls as HTMLElement).getByRole("button", {
+      name: "Показать лимиты Codex",
+    });
+    const status = within(controls as HTMLElement).getByRole("status", {
+      name: "Состояние сервера: Подключено",
+    });
+    const addProject = within(controls as HTMLElement).getByRole("button", {
+      name: "Добавить проект",
+    });
+    const search = within(controls as HTMLElement).getByRole("button", {
+      name: "Поиск по диалогам",
+    });
+    expect(Array.from(controls!.children)).toEqual([
+      settings,
+      update,
+      limits,
+      status,
+      addProject,
+      search,
+    ]);
     expect(controls?.nextElementSibling).toBe(modeSwitch);
     expect(modeSwitch.nextElementSibling).toHaveClass("thread-nav");
     expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
@@ -1271,7 +1285,7 @@ describe("App routing and navigation", () => {
   });
 
   it.each([false, true])(
-    "opens search from an icon in the sidebar header (mobile: %s)",
+    "opens search from the final icon in the sidebar control grid (mobile: %s)",
     (mobile) => {
       mockConnection(snapshot([baseThread]));
       if (mobile) mockMobileViewport();
@@ -1279,19 +1293,27 @@ describe("App routing and navigation", () => {
       if (mobile) fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
 
       const search = screen.getByRole("button", { name: "Поиск по диалогам" });
-      const header = view.container.querySelector(".server-status");
-      const settings = within(header as HTMLElement).getByRole("link", { name: "Настройки" });
-      const status = within(header as HTMLElement).getByRole("status", {
+      const controls = view.container.querySelector(".sidebar-controls") as HTMLElement;
+      const settings = within(controls).getByRole("link", { name: "Настройки" });
+      const update = within(controls).getByRole("link", { name: "Обновление CodexNest" });
+      const limits = within(controls).getByRole("button", { name: "Показать лимиты Codex" });
+      const status = within(controls).getByRole("status", {
         name: "Состояние сервера: Подключено",
       });
-      expect(header?.firstElementChild).toBe(settings);
-      expect(settings.nextElementSibling).toBe(status);
-      expect(header?.lastElementChild).toBe(search);
+      const addProject = within(controls).getByRole("button", { name: "Добавить проект" });
+      expect(Array.from(controls.children)).toEqual([
+        settings,
+        update,
+        limits,
+        status,
+        addProject,
+        search,
+      ]);
       expect(search.textContent).toBe("");
       expect(search.querySelector("svg")).not.toBeNull();
       expect(search).toHaveAttribute("title", "Поиск по диалогам");
       expect(screen.queryByText("Поиск по диалогам")).not.toBeInTheDocument();
-      expect(within(header as HTMLElement).getAllByRole("link")).toEqual([settings]);
+      expect(within(controls).getAllByRole("link")).toEqual([settings, update]);
 
       search.focus();
       fireEvent.click(search);
@@ -1322,11 +1344,21 @@ describe("App routing and navigation", () => {
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(indicator).toHaveTextContent("");
     expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
+    expect(indicator).toHaveClass("update-available");
+    const controls = indicator.closest(".sidebar-controls") as HTMLElement;
+    const settings = within(controls).getByRole("link", { name: "Настройки" });
+    const limits = within(controls).getByRole("button", { name: "Показать лимиты Codex" });
     const status = screen.getByRole("status", { name: "Состояние сервера: Подключено" });
-    expect(indicator.nextElementSibling).toBe(status);
-    expect(status.nextElementSibling).toBe(
-      screen.getByRole("button", { name: "Поиск по диалогам" }),
-    );
+    const addProject = within(controls).getByRole("button", { name: "Добавить проект" });
+    const search = screen.getByRole("button", { name: "Поиск по диалогам" });
+    expect(Array.from(controls.children)).toEqual([
+      settings,
+      indicator,
+      limits,
+      status,
+      addProject,
+      search,
+    ]);
 
     fireEvent.click(indicator);
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
@@ -1375,9 +1407,9 @@ describe("App routing and navigation", () => {
     expect(
       screen.getByRole("status", { name: "Состояние сервера: Подключено" }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("link", { name: "Доступно обновление CodexNest" }),
-    ).not.toBeInTheDocument();
+    const indicator = screen.getByRole("link", { name: "Обновление CodexNest" });
+    expect(indicator).not.toHaveClass("update-available");
+    expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
   });
 
   it("loads and refreshes inline Codex limits only when clicked, without opening a dialog", async () => {
