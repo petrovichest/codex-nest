@@ -190,6 +190,91 @@ describe("AppProjection", () => {
     expect(projection.summary("one")?.canAcceptDirectInput).toBeNull();
   });
 
+  it("updates reported first-turn settings without replacing user choices or issuing RPCs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-notification-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread({
+      ...thread("one", "/work", 5),
+      model: "gpt-5.6-sol",
+      reasoningEffort: null,
+    });
+    await projection.setSettings("one", {
+      collaborationMode: "plan",
+      model: "gpt-6-astra",
+      reasoningEffort: "xhigh",
+    });
+    const original = projection.summary("one")!;
+    expect(original.codexSettings).toEqual({ model: "gpt-5.6-sol", reasoningEffort: null });
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const notification = {
+      method: "thread/settings/updated",
+      params: {
+        threadId: "one",
+        threadSettings: {
+          cwd: "/work",
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "dangerFullAccess" },
+          activePermissionProfile: null,
+          model: "gpt-6-astra",
+          modelProvider: "openai",
+          serviceTier: null,
+          effort: "xhigh",
+          summary: null,
+          collaborationMode: {
+            mode: "plan",
+            settings: {
+              model: "gpt-6-astra",
+              reasoning_effort: "xhigh",
+              developer_instructions: null,
+            },
+          },
+          multiAgentMode: "explicitRequestOnly",
+          personality: null,
+        },
+      },
+    } satisfies ServerNotification;
+    bridge.emit("notification", notification);
+    const updated = {
+      ...original,
+      codexSettings: { model: "gpt-6-astra", reasoningEffort: "xhigh" },
+    };
+    expect(projection.summary("one")).toEqual(updated);
+    expect(events).toEqual([{ type: "thread.upserted", thread: updated }]);
+
+    bridge.emit("notification", {
+      ...notification,
+      params: {
+        ...notification.params,
+        threadSettings: { ...notification.params.threadSettings, effort: null },
+      },
+    } satisfies ServerNotification);
+    expect(projection.summary("one")).toEqual({
+      ...original,
+      codexSettings: { model: "gpt-6-astra", reasoningEffort: null },
+    });
+    expect(store.view().threadMeta.one?.settings).toEqual(original.settings);
+
+    events.length = 0;
+    bridge.emit("notification", {
+      ...notification,
+      params: { ...notification.params, threadId: "unknown" },
+    } satisfies ServerNotification);
+    expect(projection.summary("unknown")).toBeUndefined();
+    expect(events).toEqual([]);
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
   it("searches unloaded roots without expanding the snapshot and isolates targeted turn history", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
     directories.push(directory);

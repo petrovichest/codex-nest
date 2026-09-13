@@ -2413,6 +2413,16 @@ export class AppProjection extends EventEmitter {
         }
         break;
       }
+      case "thread/settings/updated": {
+        const { threadId, threadSettings } = notification.params;
+        const cached = this.threads.get(threadId);
+        if (cached) {
+          cached.thread.model = threadSettings.model;
+          cached.thread.reasoningEffort = threadSettings.effort;
+          this.publishThread(threadId);
+        }
+        break;
+      }
       case "thread/status/changed": {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {

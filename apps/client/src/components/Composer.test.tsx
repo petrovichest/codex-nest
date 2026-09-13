@@ -141,6 +141,11 @@ describe("Composer", () => {
     view.rerender(<Composer {...props} inputUnavailable={false} />);
     expect(textbox).toHaveValue("Исправленный черновик");
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+    view.rerender(
+      <Composer {...props} codexSettings={{ model: "chosen", reasoningEffort: "low" }} />,
+    );
+    expect(screen.queryByText(/^В Codex:/)).not.toBeInTheDocument();
+    expect(textbox).toHaveValue("Исправленный черновик");
   });
   it("opens filtered skill suggestions for a dollar token and inserts with Enter", async () => {
     const api = connection().api;
