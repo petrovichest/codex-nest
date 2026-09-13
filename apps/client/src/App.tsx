@@ -2160,11 +2160,17 @@ function ThreadLink({
           const focused = document.activeElement;
           if (keyboardActionsRef.current && event.currentTarget.contains(focused)) return;
           closeActions();
+          keyboardActionsRef.current = true;
           if (focused instanceof HTMLElement && event.currentTarget.contains(focused))
             focused.blur();
         }}
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
+            // Safari can omit relatedTarget while moving focus between controls
+            // during a pointer tap. The document click handler still closes the
+            // menu for an actual outside tap, so do not remove the tapped button
+            // before its click is delivered.
+            if (!keyboardActionsRef.current) return;
             closeActions();
             keyboardActionsRef.current = true;
           }

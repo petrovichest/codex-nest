@@ -727,6 +727,30 @@ describe("App routing and navigation", () => {
     },
   );
 
+  it("keeps actions mounted until a touch click when blur has no related target", async () => {
+    localStorage.setItem("codexnest.sessionListMode", "active");
+    const thread = { ...baseThread, state: "running" as const };
+    const api = mockConnection(snapshot([thread]));
+    mockMobileViewport();
+    renderApp("/threads/newer");
+
+    const trigger = screen.getByLabelText(`Действия с сессией «${thread.title}»`);
+    const menu = trigger.closest("details")!;
+    fireEvent.pointerDown(trigger, { pointerType: "touch" });
+    fireEvent.click(trigger);
+    const create = within(menu).getByRole("button", { name: /Создать новую сессию/ });
+    const pin = within(menu).getByRole("button", { name: /Закрепить сессию/ });
+    expect(create).toHaveFocus();
+
+    fireEvent.pointerDown(pin, { pointerType: "touch" });
+    fireEvent.blur(create, { relatedTarget: null });
+    expect(menu).toHaveAttribute("open");
+    expect(pin).toBeVisible();
+    fireEvent.click(pin);
+
+    await waitFor(() => expect(api.updateThread).toHaveBeenCalledWith(thread.id, { pinned: true }));
+  });
+
   it("requires a second touch action click to finish and keeps the pinned session visible", async () => {
     localStorage.setItem("codexnest.sessionListMode", "active");
     const thread = { ...baseThread, state: "completed" as const, unread: true, pinned: true };
