@@ -76,8 +76,8 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
       await search.evaluate((element) => element === element.parentElement?.lastElementChild),
     ).toBe(true);
     expect(
-      await connection.evaluate(
-        (element) => element.nextElementSibling?.matches(".sidebar-search-action"),
+      await connection.evaluate((element) =>
+        element.nextElementSibling?.matches(".sidebar-search-action"),
       ),
     ).toBe(true);
     expect((await settings.locator("svg").boundingBox())!.x).toBe(
