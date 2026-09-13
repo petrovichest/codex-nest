@@ -32,7 +32,6 @@ import type { ConnectionSettings } from "./storage";
 import { copyText } from "./clipboard";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { Dialog } from "./components/Dialog";
-import { RateLimitsDialog } from "./components/RateLimitsDialog";
 import { ThreadSearchDialog } from "./components/ThreadSearchDialog";
 import {
   ArrowDownIcon,
@@ -740,8 +739,6 @@ function Sidebar({
   const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState(false);
-  const [rateLimitsOpen, setRateLimitsOpen] = useState(false);
-  const [rateLimitsUpdatedAt, setRateLimitsUpdatedAt] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const rateLimitsGeneration = useRef(0);
   useEffect(() => {
@@ -749,8 +746,6 @@ function Sidebar({
     setRateLimits(null);
     setRateLimitsError(false);
     setRateLimitsLoading(false);
-    setRateLimitsUpdatedAt(null);
-    setRateLimitsOpen(false);
     return () => {
       rateLimitsGeneration.current++;
     };
@@ -1335,7 +1330,6 @@ function Sidebar({
       const limits = await api.readCodexRateLimits();
       if (generation !== rateLimitsGeneration.current) return;
       setRateLimits(limits);
-      setRateLimitsUpdatedAt(Date.now());
     } catch {
       if (generation === rateLimitsGeneration.current) setRateLimitsError(true);
     } finally {
@@ -1396,6 +1390,15 @@ function Sidebar({
               <ArrowDownIcon />
             </NavLink>
           )}
+          <button
+            aria-label={t("Поиск по диалогам")}
+            className="icon-button sidebar-search-action"
+            onClick={() => setSearchOpen(true)}
+            title={t("Поиск по диалогам")}
+            type="button"
+          >
+            <SearchIcon />
+          </button>
         </div>
         <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
           <SlidersIcon />
@@ -1406,17 +1409,10 @@ function Sidebar({
           aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
           className="sidebar-control-action codex-limits"
           disabled={rateLimitsLoading}
-          onClick={() => {
-            setRateLimitsOpen(true);
-            void refreshRateLimits();
-          }}
+          onClick={() => void refreshRateLimits()}
         >
           {rateLimitsLoading ? <span className="spinner small" /> : <GaugeIcon />}
           <span>{rateLimitsText}</span>
-        </button>
-        <button className="sidebar-control-action" onClick={() => setSearchOpen(true)}>
-          <SearchIcon />
-          {t("Поиск по диалогам")}
         </button>
         <button className="sidebar-control-action" onClick={onNewProject}>
           <PlusIcon />
@@ -1764,16 +1760,6 @@ function Sidebar({
         onClose={() => setSearchOpen(false)}
         onNavigate={onClose}
       />
-      {rateLimitsOpen && (
-        <RateLimitsDialog
-          limits={rateLimits}
-          loading={rateLimitsLoading}
-          error={rateLimitsError}
-          updatedAt={rateLimitsUpdatedAt}
-          onRefresh={() => void refreshRateLimits()}
-          onClose={() => setRateLimitsOpen(false)}
-        />
-      )}
     </aside>
   );
 }

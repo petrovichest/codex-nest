@@ -326,6 +326,12 @@ export function asyncQuestionReplyMessageId(
   return `async-answer:${threadId}:${turnId}:${questionKey}`;
 }
 
+export type UserInputReply = {
+  turnId: string;
+  itemId: string;
+  answers: Record<string, string[]>;
+};
+
 export type QueuedMessage = {
   id: string;
   threadId: string;
@@ -335,8 +341,10 @@ export type QueuedMessage = {
   goal?: boolean;
   createdAt: number;
   status: "queued" | "dispatching";
+  deliveryVersion?: 1;
   deliveryError?: { message: string; retryable: boolean };
   replyToAsyncQuestion?: AsyncQuestionReference;
+  replyToUserInput?: UserInputReply;
 };
 
 export type TurnPlanStep = {
@@ -389,6 +397,13 @@ export type OrchestrationNoticeAgent = {
   workspaceIntegrationStatus?: OrchestrationWorkspaceIntegrationStatus;
 };
 
+export interface DeliveryReceipt {
+  version: 1;
+  clientId: string;
+  threadId: string;
+  turnId: string | null;
+}
+
 export type ActivityItem =
   | {
       type: "userMessage" | "agentMessage" | "reasoning" | "plan";
@@ -400,6 +415,7 @@ export type ActivityItem =
       timestamp: number | null;
       phase: "commentary" | "final_answer" | null;
       delivery?: "async" | null;
+      deliveryReceipt?: DeliveryReceipt;
       questions?: AsyncUserInputQuestion[] | null;
       /** Stable across live/history item renumbering, scoped to the source turn. */
       questionKey?: string;
@@ -1315,6 +1331,7 @@ export type QueueMessageRequest = {
   goal?: boolean;
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
+  replyToUserInput?: UserInputReply;
 };
 
 export type UpdateQueuedMessageRequest = {

@@ -74,8 +74,41 @@ function AttentionCard({
     setBusy(true);
     setError(null);
     try {
-      await api.respond(request.id, response);
-      if (response.kind === "userInput") connection.clearUserInputDraft?.(request.id);
+      if (
+        response.kind === "userInput" &&
+        request.kind === "userInput" &&
+        request.threadId &&
+        request.turnId &&
+        request.itemId
+      ) {
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(
+            JSON.stringify([request.threadId, request.turnId, request.itemId]),
+          ),
+        );
+        const clientMessageId = `user-input:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+        await connection.sendReliable(
+          request.threadId,
+          {
+            clientMessageId,
+            input: request.questions
+              .map(
+                (question) =>
+                  `${question.question}\n${(response.answers[question.id] ?? []).join("\n")}`,
+              )
+              .join("\n\n"),
+            replyToUserInput: {
+              turnId: request.turnId,
+              itemId: request.itemId,
+              answers: response.answers,
+            },
+          },
+          () => connection.clearUserInputDraft?.(request.id),
+        );
+      } else {
+        await api.respond(request.id, response);
+      }
     } catch (caught) {
       setError(
         caught instanceof Error

@@ -94,6 +94,16 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
         ],
       },
     ];
+    await store.saveCachedThread(settings, detail);
+    const unconfirmedHistory = await store.listOutboxMessages(settings);
+    const item = detail.turns[0]!.items[0]!;
+    if (item.type === "userMessage")
+      item.deliveryReceipt = {
+        version: 1,
+        clientId: message.id,
+        threadId: summary.id,
+        turnId: "turn",
+      };
     abortWritesTo("threads");
     const abortedCache = await store.saveCachedThread(settings, detail);
     IDBObjectStore.prototype.put = originalPut;
@@ -115,6 +125,7 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
       draftAfterTransfer,
       accepted,
       queueOnly,
+      unconfirmedHistory,
       abortedCache,
       afterFailedCache,
       cached,
@@ -129,7 +140,12 @@ test("outbox handoffs are atomic in real IndexedDB, including aborted transactio
   expect(result.outboxAfterAbort).toEqual([]);
   expect(result.transferred).toBe(true);
   expect(result.draftAfterTransfer).toBeNull();
-  for (const records of [result.accepted, result.queueOnly, result.afterFailedCache])
+  for (const records of [
+    result.accepted,
+    result.queueOnly,
+    result.unconfirmedHistory,
+    result.afterFailedCache,
+  ])
     expect(records).toEqual([expect.objectContaining({ id: "storage-message", accepted: true })]);
   expect(result.abortedCache).toBe(false);
   expect(result.cached).toBe(true);
@@ -208,4 +224,58 @@ test("the preparation handoff preserves attachments and the next draft across re
       files: [expect.objectContaining({ id: "file" })],
     }),
   ]);
+});
+
+test("a repeated question answer cannot overwrite the original saved intent", async ({ page }) => {
+  await installVisualFixture(page, { theme: "light" });
+  await page.goto("/threads/session-main");
+  const result = await page.evaluate(async () => {
+    const modulePath = "/src/offline-store.ts";
+    const store = (await import(modulePath)) as typeof OfflineStore;
+    const settings = { baseUrl: "https://question-storage.invalid", token: "test" };
+    const message = {
+      id: "question-answer",
+      connectionKey: store.connectionCacheKey(settings),
+      threadId: "thread",
+      input: "Original answer",
+      images: [],
+      files: [],
+      goal: false,
+      createdAt: 1,
+      attempts: 0,
+      lastError: null,
+      replyToUserInput: {
+        turnId: "original-turn",
+        itemId: "question",
+        answers: { choice: ["first"] },
+      },
+    };
+    const saved = await store.putOutboxMessage(message);
+    const same = await store.putOutboxMessage({ ...message, attempts: 1 });
+    const changed = await store.putOutboxMessage({
+      ...message,
+      replyToUserInput: { ...message.replyToUserInput, answers: { choice: ["second"] } },
+    });
+    const moved = await store.putOutboxMessage({ ...message, threadId: "another-thread" });
+    return { saved, same, changed, moved, stored: await store.listOutboxMessages(settings) };
+  });
+  expect(result).toEqual({
+    saved: true,
+    same: true,
+    changed: false,
+    moved: false,
+    stored: [
+      expect.objectContaining({
+        id: "question-answer",
+        threadId: "thread",
+        input: "Original answer",
+        attempts: 1,
+        replyToUserInput: {
+          turnId: "original-turn",
+          itemId: "question",
+          answers: { choice: ["first"] },
+        },
+      }),
+    ],
+  });
 });

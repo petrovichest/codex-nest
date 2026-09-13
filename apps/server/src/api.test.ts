@@ -950,7 +950,7 @@ describe("skills API and explicit invocation", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers: harness.headers,
-      payload: { input: "$review, this change" },
+      payload: { clientMessageId: "direct-test-33253", input: "$review, this change" },
     });
 
     expect(started.statusCode).toBe(201);
@@ -977,7 +977,7 @@ describe("skills API and explicit invocation", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers: harness.headers,
-      payload: { input: "$review immediately" },
+      payload: { clientMessageId: "direct-test-34174", input: "$review immediately" },
     });
 
     expect(started.statusCode).toBe(201);
@@ -1593,7 +1593,7 @@ describe("audio transcriptions", () => {
           method: "POST",
           url: "/api/v1/threads/voice/turns",
           headers: authorization,
-          payload: { input: "Нельзя отправить" },
+          payload: { clientMessageId: "direct-test-55790", input: "Нельзя отправить" },
         })
       ).statusCode,
     ).toBe(409);
@@ -3310,7 +3310,7 @@ describe("task defaults", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers: harness.headers,
-      payload: { input: "Первое сообщение" },
+      payload: { clientMessageId: "direct-test-115487", input: "Первое сообщение" },
     });
 
     expect(response.statusCode).toBe(201);
@@ -3394,7 +3394,7 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "hello" },
+      payload: { clientMessageId: "direct-test-118025", input: "hello" },
     });
     expect(send.statusCode).toBe(409);
     expect(send.json().error.message).toContain("не принимает");
@@ -3412,6 +3412,7 @@ describe("thread settings", () => {
     expect(draft.statusCode).toBe(200);
     expect(store.view().threadMeta.thread?.draft?.input).toBe("saved");
     projection.upsertThread({ ...testThread(), canAcceptDirectInput: null });
+    bridge.request.mockRejectedValueOnce(new RpcError(-32600, "thread not loaded"));
     bridge.request.mockResolvedValueOnce({
       thread: { ...testThread(), canAcceptDirectInput: false },
     });
@@ -3419,10 +3420,10 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "after resume" },
+      payload: { clientMessageId: "direct-test-119045", input: "after resume" },
     });
     expect(resumedSend.statusCode).toBe(409);
-    expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
     expect(store.view().threadMeta.thread?.draft?.input).toBe("saved");
     await app.close();
   });
@@ -3722,7 +3723,7 @@ describe("thread settings", () => {
       {
         method: "POST",
         url: "/api/v1/threads/child/turns",
-        payload: { input: "Нет" },
+        payload: { clientMessageId: "direct-test-129624", input: "Нет" },
       },
     ]) {
       const response = await app.inject({ ...request, headers });
@@ -3760,6 +3761,7 @@ describe("thread settings", () => {
         app.inject({
           method: "POST",
           url: "/api/v1/projects/project/threads",
+          payload: { clientCreationId: "test-creation" },
           headers,
         }),
       ),
@@ -3770,12 +3772,10 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
       threadStartsBeforeEmptyThread + 1,
     );
-    expect(projection.summary("stale-empty")).toBeUndefined();
-    expect(store.snapshot().threadMeta["stale-empty"]).toBeUndefined();
-    expect(bridge.request).toHaveBeenCalledWith("thread/metadata/update", {
-      threadId: "created",
-      gitInfo: { sha: null },
-    });
+    expect(projection.summary("stale-empty")).toBeDefined();
+    expect(bridge.request.mock.calls.some(([method]) => method === "thread/metadata/update")).toBe(
+      false,
+    );
     expect(emptyCreated.json().thread.settings).toEqual({ collaborationMode: "plan" });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "thread/start").at(-1)?.[1],
@@ -3793,11 +3793,12 @@ describe("thread settings", () => {
     const resetEmpty = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "test-creation" },
       headers,
     });
     expect(resetEmpty.json().thread).toMatchObject({
       id: "created",
-      settings: { collaborationMode: "plan" },
+      settings: { collaborationMode: "default" },
     });
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/start")).toHaveLength(
       threadStartsBeforeEmptyThread + 1,
@@ -3855,15 +3856,13 @@ describe("thread settings", () => {
     const draftReopened = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "test-creation" },
       headers,
     });
     expect(draftReopened.statusCode).toBe(201);
     expect(draftReopened.json().thread.id).toBe("created");
     expect(draftReopened.json().draft).toEqual(savedDraft.json());
-    expect(bridge.request.mock.calls.slice(callsBeforeDraftReopen)).toEqual([
-      ["thread/metadata/update", { threadId: "created", gitInfo: { sha: null } }],
-    ]);
-    bridge.missingRolloutThreadIds.add("created");
+    expect(bridge.request.mock.calls.slice(callsBeforeDraftReopen)).toEqual([]);
     const teamResumeStart = bridge.request.mock.calls.length;
     const emptyTeam = await app.inject({
       method: "PATCH",
@@ -3887,16 +3886,6 @@ describe("thread settings", () => {
         }),
         30_000,
       ],
-      ["thread/metadata/update", { threadId: "created", gitInfo: { sha: null } }],
-      [
-        "thread/resume",
-        expect.objectContaining({
-          threadId: "created",
-          config: { agents: { enabled: false } },
-          developerInstructions: expect.stringMatching(/standalone final deliverables/i),
-        }),
-        30_000,
-      ],
     ]);
     const resumesBeforeFirstTurn = bridge.request.mock.calls.filter(
       ([method]) => method === "thread/resume",
@@ -3905,7 +3894,7 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/created/turns",
       headers,
-      payload: { input: "Первое сообщение" },
+      payload: { clientMessageId: "direct-test-135941", input: "Первое сообщение" },
     });
     expect(firstTurn.statusCode).toBe(201);
     expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
@@ -3952,9 +3941,11 @@ describe("thread settings", () => {
     expect(preferredEffort.statusCode).toBe(200);
     expect(store.snapshot().defaultReasoningEffort).toBe("high");
 
+    bridge.nextCreatedThreadId = "inherited";
     const inherited = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "inherited-creation" },
       headers,
     });
     expect(inherited.statusCode).toBe(201);
@@ -3996,6 +3987,7 @@ describe("thread settings", () => {
       url: "/api/v1/threads/thread/turns",
       headers,
       payload: {
+        clientMessageId: "direct-test-138920",
         input: "Не используй это",
         settings: { collaborationMode: "default", model: "gpt-a" },
       },
@@ -4122,20 +4114,27 @@ describe("thread settings", () => {
     });
     expect(queuedUserInput.statusCode).toBe(202);
     await vi.waitFor(() =>
-      expect(userInputTransport.respond).toHaveBeenCalledWith(7, {
-        answers: {
-          transition: {
-            answers: ["Закрывать автоматически"],
+      expect(bridge.request).toHaveBeenCalledWith(
+        "turn/steer",
+        expect.objectContaining({
+          clientUserMessageId: "client-user-input",
+          userInputResponse: {
+            itemId: "question",
+            response: {
+              answers: {
+                transition: { answers: ["Закрывать автоматически"] },
+              },
+            },
           },
-        },
-      }),
+        }),
+      ),
     );
     await vi.waitFor(() => expect(store.snapshot().messageQueues?.thread).toBeUndefined());
     expect(attention.list()).not.toContainEqual(
       expect.objectContaining({ id: userInputRequest.id }),
     );
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
-      steersBeforeUserInput,
+      steersBeforeUserInput + 1,
     );
     expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toContainEqual(
       expect.objectContaining({
@@ -4156,9 +4155,11 @@ describe("thread settings", () => {
     expect(repeatedUserInputSend.statusCode).toBe(200);
     expect(repeatedUserInputSend.json()).toEqual({ turnId: "turn" });
 
+    bridge.nextCreatedThreadId = "team-root";
     const teamRoot = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "team-root-creation" },
       headers,
     });
     expect(teamRoot.statusCode).toBe(201);
@@ -4200,7 +4201,7 @@ describe("thread settings", () => {
       method: "POST",
       url: `/api/v1/threads/${teamThreadId}/turns`,
       headers,
-      payload: { input: "Выполни многошаговый план" },
+      payload: { clientMessageId: "direct-test-145681", input: "Выполни многошаговый план" },
     });
     expect(teamCreated.statusCode).toBe(201);
     const managedTools = teamThreadStart.dynamicTools?.find(
@@ -4279,10 +4280,7 @@ describe("thread settings", () => {
       method: "POST",
       url: `/api/v1/threads/${teamThreadId}/turns`,
       headers,
-      payload: {
-        input: "Несовместимо",
-        goal: true,
-      },
+      payload: { clientMessageId: "direct-test-150477", input: "Несовместимо", goal: true },
     });
     expect(invalidTeamGoal.statusCode).toBe(409);
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
@@ -4347,7 +4345,6 @@ describe("thread settings", () => {
       expect.objectContaining({ id: "client-queued", text: "Исправленный текст" }),
     ]);
 
-    const steerWarning = vi.spyOn(app.log, "warn");
     const sentNow = await app.inject({
       method: "POST",
       url: `/api/v1/threads/thread/queue/${queued.json().id}/send`,
@@ -4374,12 +4371,6 @@ describe("thread settings", () => {
         text: "Исправленный текст",
       },
     });
-    expect(steerWarning).toHaveBeenCalledTimes(1);
-    expect(steerWarning).toHaveBeenCalledWith(
-      { threadId: "thread", expectedTurnId: "turn", returnedTurnId: "steered" },
-      "turn/steer returned an unexpected turn ID",
-    );
-    steerWarning.mockRestore();
 
     const queuedAfterSteer = await app.inject({
       method: "POST",
@@ -4430,7 +4421,7 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/queue",
       headers,
-      payload: { input: "Следующий ход" },
+      payload: { clientMessageId: "direct-test-155974", input: "Следующий ход" },
     });
     expect(nextQueued.statusCode).toBe(202);
     const startsBeforeCompletion = bridge.request.mock.calls.filter(
@@ -4452,7 +4443,11 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Проверь изображение", images: [image] },
+      payload: {
+        clientMessageId: "direct-test-156840",
+        input: "Проверь изображение",
+        images: [image],
+      },
     });
     expect(imageTurn.statusCode).toBe(201);
     expect(
@@ -4482,9 +4477,11 @@ describe("thread settings", () => {
       personality: "friendly",
     });
     expect(projection.summary("thread")?.settings).not.toMatchObject({ serviceTier: "fast" });
+    bridge.nextCreatedThreadId = "with-defaults";
     const withDefaults = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "defaults-creation" },
       headers,
     });
     expect(withDefaults.json().thread.settings).toMatchObject({
@@ -4497,7 +4494,11 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Доведи задачу до конца", goal: true },
+      payload: {
+        clientMessageId: "direct-test-158276",
+        input: "Доведи задачу до конца",
+        goal: true,
+      },
     });
     expect(goalStart.statusCode).toBe(201);
     expect(
@@ -4509,7 +4510,6 @@ describe("thread settings", () => {
         ]),
     ).toEqual([
       ["thread/goal/set", "paused"],
-      ["thread/resume", undefined],
       ["turn/start", undefined],
       ["thread/goal/set", "active"],
     ]);
@@ -4577,7 +4577,11 @@ describe("thread settings", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Цель останется на паузе", goal: true },
+      payload: {
+        clientMessageId: "direct-test-160774",
+        input: "Цель останется на паузе",
+        goal: true,
+      },
     });
     expect(failedActivation.statusCode).toBe(201);
     expect(failedActivation.json().goalWarning).toMatch(/осталась на паузе/i);
@@ -5073,7 +5077,7 @@ describe("browser thread lifecycle", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers: { authorization: "Bearer correct" },
-      payload: { input: "Use the attached browser" },
+      payload: { clientMessageId: "direct-test-178034", input: "Use the attached browser" },
     });
     expect(turn.statusCode).toBe(201);
     expect(
@@ -5147,6 +5151,7 @@ describe("explicit session artifacts", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "test-creation" },
       headers,
     });
 
@@ -5172,6 +5177,7 @@ describe("explicit session artifacts", () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/v1/projects/project/threads",
+      payload: { clientCreationId: "test-creation" },
       headers,
     });
     expect(created.statusCode).toBe(201);
@@ -5560,7 +5566,7 @@ describe("Team orchestration", () => {
     await lifecycle?.close();
   });
 
-  it("recovers starting tasks and delivered parent claims from durable Codex markers", async () => {
+  it("recovers starting tasks and delivered parent claims from persisted delivery receipts", async () => {
     const { app, bridge, projection, store } = await createTeamHarness();
     const spawned = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
@@ -5600,6 +5606,17 @@ describe("Team orchestration", () => {
         claimId,
         markerId,
         dispatchStartedAt: Date.now(),
+      };
+    });
+    await store.update((state) => {
+      state.messageReceipts ??= {};
+      state.messageReceipts[markerId] = {
+        threadId: "thread",
+        turnId: "recovered-parent-turn",
+        contentHash: createHash("sha256").update("saved-claim").digest("hex"),
+        createdAt: Date.now(),
+        status: "delivered",
+        deliveryVersion: 1,
       };
     });
     bridge.threadTurns.set("thread", [
@@ -5703,7 +5720,7 @@ describe("Team orchestration", () => {
     await app.close();
   });
 
-  it("releases an ambiguous parent claim after the active parent turn finishes", async () => {
+  it("keeps an ambiguous legacy parent claim parked without repeating work or spinning recovery", async () => {
     const { app, bridge, projection, store } = await createTeamHarness();
     const spawned = dynamicToolJson(
       await callTeamTool(bridge, "thread", "spawn_task", {
@@ -5747,18 +5764,13 @@ describe("Team orchestration", () => {
       },
     } satisfies ServerNotification);
 
-    await vi.waitFor(() =>
-      expect(
-        store.snapshot().threadMeta.thread?.teamOrchestration?.tasks[String(spawned.taskId)]
-          ?.delivery,
-      ).toMatchObject({ status: "delivered" }),
-    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(
       bridge.request.mock.calls.filter(
         ([method, params]) =>
           method === "turn/start" && (params as Record<string, unknown>).threadId === "thread",
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     await app.close();
   });
 
@@ -6224,7 +6236,7 @@ describe("Team orchestration", () => {
       method: "POST",
       url: "/api/v1/threads/thread/turns",
       headers,
-      payload: { input: "Останови субагентов" },
+      payload: { clientMessageId: "direct-test-218106", input: "Останови субагентов" },
     });
     expect(processed.statusCode).toBe(201);
     expect(store.snapshot().threadMeta.thread?.teamOrchestration).toBeUndefined();
@@ -7101,6 +7113,8 @@ function createAppManagerMock() {
 
 class SettingsBridge extends EventEmitter {
   state = "ready" as const;
+  deliveryVersion = 1;
+  private nativeReceipts = new Map<string, { params: string; response: unknown }>();
   actualVersion = "0.144.6";
   permissionConfig: Record<string, unknown> = {
     sandbox_mode: "workspace-write",
@@ -7169,7 +7183,45 @@ class SettingsBridge extends EventEmitter {
       enabled: true,
     },
   ];
-  request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
+  nextCreatedThreadId = "created";
+  request = vi.fn(
+    async (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+      const clientId =
+        method === "thread/start" ? params.clientCreationId : params.clientUserMessageId;
+      const keyed =
+        typeof clientId === "string" &&
+        ["thread/start", "turn/start", "turn/steer"].includes(method);
+      const key = `${method}:${params.threadId ?? ""}:${clientId}`;
+      const previous = keyed ? this.nativeReceipts.get(key) : undefined;
+      if (previous) {
+        if (previous.params !== JSON.stringify(params))
+          throw new RpcError(-32602, "delivery conflict");
+        return structuredClone(previous.response);
+      }
+      const response = await this.handleRequest(method, params);
+      if (!keyed) return response;
+      const value = response as { thread?: Thread; turn?: Turn; turnId?: string };
+      const accepted = {
+        ...value,
+        deliveryReceipt: {
+          version: 1,
+          clientId,
+          threadId: value.thread?.id ?? params.threadId,
+          turnId: value.turn?.id ?? value.turnId ?? null,
+        },
+      };
+      this.nativeReceipts.set(key, {
+        params: JSON.stringify(params),
+        response: structuredClone(accepted),
+      });
+      return accepted;
+    },
+  );
+
+  private async handleRequest(
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<unknown> {
     if (method === "thread/list") {
       return params.archived
         ? { data: [], nextCursor: null, backwardsCursor: null }
@@ -7216,7 +7268,7 @@ class SettingsBridge extends EventEmitter {
         return { thread };
       }
       const thread = {
-        ...testThread("created"),
+        ...testThread(this.nextCreatedThreadId),
         cwd: String(params.cwd ?? "/work"),
         path: this.nextForkTargetPath,
         threadSource: typeof params.threadSource === "string" ? params.threadSource : null,
@@ -7411,6 +7463,7 @@ class SettingsBridge extends EventEmitter {
           : [],
       };
       this.threadTurns.set(threadId, [...(this.threadTurns.get(threadId) ?? []), turn]);
+      this.emit("notification", { method: "turn/started", params: { threadId, turn } });
       return {
         turn,
       };
@@ -7428,7 +7481,7 @@ class SettingsBridge extends EventEmitter {
           content: params.input as Extract<ThreadItem, { type: "userMessage" }>["content"],
         });
       }
-      return { turnId: threadId.startsWith("managed-") ? (active?.id ?? "steered") : "steered" };
+      return { turnId: String(params.expectedTurnId) };
     }
     if (method === "turn/interrupt") {
       if (this.failInterrupts > 0) {
@@ -7527,7 +7580,7 @@ class SettingsBridge extends EventEmitter {
       };
     }
     throw new Error(`Unexpected ${method}`);
-  });
+  }
 }
 
 async function createSkillsHarness() {
@@ -7640,6 +7693,7 @@ describe("reliable first messages", () => {
       const created = await app.inject({
         method: "POST",
         url: "/api/v1/projects/project/threads",
+        payload: { clientCreationId: "test-creation" },
         headers,
       });
       expect(created.statusCode).toBe(201);
@@ -7689,18 +7743,21 @@ describe("reliable first messages", () => {
     }
   });
 
-  it("restores the first turn from paginated history when its start response and events were lost", async () => {
+  it("replays the saved native receipt when its start response was lost", async () => {
     const { app, bridge, headers, store, projection } = await createForkHarness();
     try {
       const created = await app.inject({
         method: "POST",
         url: "/api/v1/projects/project/threads",
+        payload: { clientCreationId: "test-creation" },
         headers,
       });
       const id = created.json().thread.id as string;
       const original = bridge.request.getMockImplementation()!;
+      let loseReply = true;
       bridge.request.mockImplementation(async (method, params = {}) => {
-        if (method === "turn/start" && params.threadId === id) {
+        if (method === "turn/start" && params.threadId === id && loseReply) {
+          loseReply = false;
           await original(method, params);
           throw new Error("Response lost after acceptance");
         }
@@ -7718,7 +7775,9 @@ describe("reliable first messages", () => {
       });
       expect(accepted.statusCode).toBe(202);
       await vi.waitFor(() =>
-        expect(store.snapshot().messageReceipts?.[payload.clientMessageId]?.turnId).toBeDefined(),
+        expect(store.snapshot().messageReceipts?.[payload.clientMessageId]?.status).toBe(
+          "delivered",
+        ),
       );
       expect(projection.isUnmaterialized(id)).toBe(false);
       const detail = await projection.readThread(id);
@@ -7729,13 +7788,10 @@ describe("reliable first messages", () => {
       );
       expect(bridge.threadTurns.get(id)).toHaveLength(1);
       expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
-        1,
+        2,
       );
-      expect(bridge.request).toHaveBeenCalledWith(
-        "thread/turns/list",
-        expect.objectContaining({ threadId: id, cursor: "accepted-page", itemsView: "full" }),
-        30_000,
-      );
+      const attempts = bridge.request.mock.calls.filter(([method]) => method === "turn/start");
+      expect(attempts[0]?.[1]).toEqual(attempts[1]?.[1]);
     } finally {
       await app.close();
     }
@@ -7755,7 +7811,7 @@ describe("reliable first messages", () => {
       const original = bridge.request.getMockImplementation()!;
       bridge.request.mockImplementation(async (method, params = {}) => {
         if (
-          ["thread/resume", "thread/turns/list"].includes(method) &&
+          ["turn/start", "thread/resume", "thread/turns/list"].includes(method) &&
           params.threadId === "thread"
         ) {
           throw new RpcError(-32600, "no rollout found for thread id thread");
@@ -7850,6 +7906,7 @@ describe("file attachments", () => {
       url: "/api/v1/threads/thread/queue",
       headers,
       payload: {
+        clientMessageId: "direct-test-279098",
         input: "",
         files: [
           {
@@ -8152,7 +8209,7 @@ function testThread(id = "thread"): Thread {
     sessionId: id,
     forkedFromId: null,
     parentThreadId: null,
-    preview: "Thread",
+    preview: id === "created" ? "" : "Thread",
     ephemeral: false,
     historyMode: "full",
     modelProvider: "openai",

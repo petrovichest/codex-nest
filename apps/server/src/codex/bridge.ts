@@ -33,6 +33,7 @@ export class CodexBridge extends EventEmitter {
   private stopping = false;
   private _state: AppServerState = "unavailable";
   private _actualVersion?: string;
+  private _deliveryVersion?: number;
 
   constructor(private readonly options: BridgeOptions) {
     super();
@@ -44,6 +45,10 @@ export class CodexBridge extends EventEmitter {
 
   get actualVersion(): string | undefined {
     return this._actualVersion;
+  }
+
+  get deliveryVersion(): number | undefined {
+    return this._deliveryVersion;
   }
 
   get ready(): boolean {
@@ -92,6 +97,7 @@ export class CodexBridge extends EventEmitter {
 
   private async launch(): Promise<void> {
     if (this.stopping) return;
+    this._deliveryVersion = undefined;
     this.setState("starting");
     let child: JsonlProcess;
     try {
@@ -128,7 +134,7 @@ export class CodexBridge extends EventEmitter {
     });
 
     try {
-      await transport.request<InitializeResponse>(
+      const initialized = await transport.request<InitializeResponse>(
         "initialize",
         {
           clientInfo: { name: "codexnest", title: "CodexNest", version: "0.1.0" },
@@ -140,6 +146,7 @@ export class CodexBridge extends EventEmitter {
         },
         10_000,
       );
+      this._deliveryVersion = initialized.durableDeliveryVersion ?? undefined;
       transport.notify("initialized");
       this.setState("ready");
       this.stableTimer = setTimeout(() => {

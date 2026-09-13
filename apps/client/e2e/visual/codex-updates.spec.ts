@@ -5,6 +5,7 @@ import {
   installVisualFixture,
   mainThread,
   snapshot,
+  waitForVisualReady,
   PHONE_VIEWPORT,
   DESKTOP_VIEWPORT,
 } from "./fixtures";
@@ -18,6 +19,95 @@ async function json(route: Route, body: unknown, status = 200) {
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
+  });
+}
+
+for (const { mobile, theme, sidebarSide, updateAvailable } of [
+  { mobile: false, theme: "light", sidebarSide: "left", updateAvailable: false },
+  { mobile: false, theme: "dark", sidebarSide: "right", updateAvailable: true },
+  { mobile: true, theme: "light", sidebarSide: "right", updateAvailable: true },
+  { mobile: true, theme: "dark", sidebarSide: "left", updateAvailable: false },
+] as const) {
+  test(`sidebar header search on ${mobile ? "mobile" : "desktop"} ${theme}`, async ({ page }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    await installVisualFixture(page, { theme, sidebarSide });
+    let checks = 0;
+    let searches = 0;
+    await page.route("**/api/v1/settings/app{,/check}", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      if (new URL(route.request().url()).pathname.endsWith("/check")) checks++;
+      return json(route, {
+        supported: true,
+        canUpdateWithActiveTurns: false,
+        currentVersion: "0.1.6",
+        latestVersion: updateAvailable ? "0.1.7" : "0.1.6",
+        updateAvailable,
+        operation: "idle",
+        result: "none",
+        message: null,
+        checkedAt: "2026-08-03T11:45:00.000Z",
+        updatedAt: null,
+      });
+    });
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/v1/threads/search") searches++;
+    });
+    await page.goto("/threads/session-main");
+    await waitForVisualReady(page);
+    await expect.poll(() => checks).toBe(1);
+    if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
+    const sidebar = page.locator(".sidebar");
+    const header = sidebar.locator(".server-status");
+    const search = header.getByRole("button", { name: "Поиск по диалогам", exact: true });
+    const update = header.getByRole("link", { name: "Доступно обновление CodexNest" });
+    await expect(page.locator(".app-frame")).toHaveAttribute("data-sidebar-side", sidebarSide);
+    await expect(search).toBeVisible();
+    await expect(search).toHaveText("");
+    await expect(search).toHaveAttribute("title", "Поиск по диалогам");
+    await expect(sidebar.getByText("Поиск по диалогам", { exact: true })).toHaveCount(0);
+    await expect(update).toHaveCount(updateAvailable ? 1 : 0);
+    expect(
+      await search.evaluate((element) => element === element.parentElement?.lastElementChild),
+    ).toBe(true);
+    const searchBox = (await search.boundingBox())!;
+    const headerBox = (await header.boundingBox())!;
+    expect(headerBox.x + headerBox.width - (searchBox.x + searchBox.width)).toBe(10);
+    expect(searchBox.width).toBeGreaterThanOrEqual(32);
+    expect(searchBox.height).toBeGreaterThanOrEqual(32);
+    if (updateAvailable) {
+      const updateBox = (await update.boundingBox())!;
+      expect(searchBox.x - (updateBox.x + updateBox.width)).toBe(6);
+      expect(updateBox.y + updateBox.height / 2).toBe(searchBox.y + searchBox.height / 2);
+      if (mobile) expect(updateBox.width).toBeGreaterThanOrEqual(32);
+      await update.focus();
+      await page.keyboard.press("Tab");
+      await expect(search).toBeFocused();
+    } else {
+      await search.focus();
+    }
+    await expect(header).toHaveScreenshot(
+      `sidebar-header-${mobile ? "mobile" : "desktop"}-${theme}.png`,
+    );
+    expect(
+      (await new AxeBuilder({ page }).include(".sidebar-controls").analyze()).violations,
+    ).toEqual([]);
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Поиск по диалогам" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox")).toBeFocused();
+    expect(searches).toBe(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(search).toBeFocused();
+    if (updateAvailable) {
+      await update.click();
+      await expect(page).toHaveURL(/\/settings\?section=maintenance$/);
+      await expect(page.getByRole("tab", { name: "Обслуживание" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      if (mobile) await expect(sidebar).not.toHaveClass(/open/);
+    }
   });
 }
 
@@ -186,36 +276,52 @@ for (const mobile of [false, true]) {
   });
 }
 
-test("quota dialog retains explicit restrictions and stale data after refresh failure", async ({
-  page,
-}, testInfo) => {
-  await installVisualFixture(page, { theme: "light" });
-  let reads = 0;
-  await page.route("https://codexnest.visual/api/v1/codex/rate-limits", async (route) => {
-    if (route.request().method() === "OPTIONS") return route.fallback();
-    reads++;
-    return reads === 1
-      ? json(route, {
-          primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: Date.UTC(2026, 8, 13) },
-          secondary: null,
-          ordinaryUsageAllowed: false,
-          spendControlReached: true,
-          rateLimitReachedType: "spend_control",
-        })
-      : json(route, { error: { code: "app_server_unavailable", message: "Unavailable" } }, 503);
+for (const mobile of [false, true]) {
+  test(`quota button only refreshes inline values on ${mobile ? "mobile" : "desktop"}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    await installVisualFixture(page, { theme: mobile ? "dark" : "light" });
+    let reads = 0;
+    await page.route("https://codexnest.visual/api/v1/codex/rate-limits", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      reads++;
+      if (reads === 2)
+        return json(
+          route,
+          { error: { code: "app_server_unavailable", message: "Unavailable" } },
+          503,
+        );
+      return json(route, {
+        primary: {
+          usedPercent: reads === 1 ? 8 : 12,
+          windowDurationMins: 10_080,
+          resetsAt: Date.UTC(2026, 8, 19),
+        },
+        secondary: null,
+        ordinaryUsageAllowed: true,
+        spendControlReached: false,
+        rateLimitReachedType: null,
+      });
+    });
+    await page.goto("/threads/session-main");
+    await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
+    if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
+    expect(reads).toBe(0);
+    const button = page.locator(".codex-limits");
+    const dialog = page.getByRole("dialog", { name: "Лимиты Codex" });
+    await button.click();
+    await expect(button).toHaveText("19.09 92%");
+    await expect(dialog).toHaveCount(0);
+    expect(reads).toBe(1);
+    await button.click();
+    await expect(button).toHaveText("Повторить лимиты");
+    await expect(dialog).toHaveCount(0);
+    expect(reads).toBe(2);
+    await button.click();
+    await expect(button).toHaveText("19.09 88%");
+    await expect(dialog).toHaveCount(0);
+    expect(reads).toBe(3);
+    await page.screenshot({ path: testInfo.outputPath("inline-limits.png") });
   });
-  await page.goto("/threads/session-main");
-  await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
-  expect(reads).toBe(0);
-  await page.getByRole("button", { name: "Показать лимиты Codex" }).click();
-  const dialog = page.getByRole("dialog", { name: "Лимиты Codex" });
-  await expect(dialog.getByText("100%", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("spend_control")).toBeVisible();
-  await dialog.getByRole("button", { name: "Обновить", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toContainText("последние полученные данные");
-  await expect(dialog.getByText("100%", { exact: true })).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("quota-details.png") });
-  expect(
-    (await new AxeBuilder({ page }).include(".rate-limits-dialog").analyze()).violations,
-  ).toEqual([]);
-});
+}

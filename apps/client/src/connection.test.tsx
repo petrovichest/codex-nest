@@ -265,13 +265,10 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("waits for server acceptance when the outbox is unavailable", async () => {
-    const accepted = deferred<Response>();
+  it("does not send or clear the composer when the outbox write fails", async () => {
     putOutboxMessage.mockResolvedValue(false);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() => accepted.promise),
-    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let controls: ReturnType<typeof useConnection> | undefined;
     const committed = vi.fn();
@@ -280,29 +277,15 @@ describe("ConnectionProvider", () => {
         <ConnectionProbe onConnection={(value) => (controls = value)} />
       </ConnectionProvider>,
     );
-
-    const delivery = controls!.sendReliable(
-      "thread",
-      { input: "Ждать сервер", clientMessageId: "message" },
-      committed,
-    );
-    await flushPromises();
-    expect(committed).not.toHaveBeenCalled();
-
-    accepted.resolve(
-      new Response(
-        JSON.stringify({
-          id: "message",
-          threadId: "thread",
-          text: "Ждать сервер",
-          createdAt: 1,
-          status: "queued",
-        }),
-        { status: 202 },
+    await expect(
+      controls!.sendReliable(
+        "thread",
+        { input: "Сохранить сначала", clientMessageId: "message" },
+        committed,
       ),
-    );
-    await expect(delivery).resolves.toBe("delivered");
-    expect(committed).toHaveBeenCalledOnce();
+    ).rejects.toThrow("Не удалось сохранить сообщение на устройстве");
+    expect(committed).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
     view.unmount();
   });
 
@@ -457,9 +440,9 @@ describe("ConnectionProvider", () => {
         { input: "Оставить в поле", clientMessageId: "message" },
         committed,
       ),
-    ).rejects.toThrow("Failed to connect to the server");
+    ).rejects.toThrow("Не удалось сохранить сообщение на устройстве");
     expect(committed).not.toHaveBeenCalled();
-    expect(putOutboxMessage).toHaveBeenCalledTimes(2);
+    expect(putOutboxMessage).toHaveBeenCalledOnce();
     view.unmount();
   });
 

@@ -452,6 +452,7 @@ export type VisualFixtureOptions = {
   forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
   forkLineage?: boolean;
   notificationPrompt?: boolean;
+  sidebarSide?: "left" | "right";
   theme: "light" | "dark";
   voiceFailure?: boolean;
 };
@@ -464,6 +465,7 @@ export async function installVisualFixture(
     forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
+    sidebarSide = "left",
     snapshot: suppliedSnapshot,
     theme,
     voiceFailure = false,
@@ -503,6 +505,7 @@ export async function installVisualFixture(
       fixedNow,
       notificationPrompt: showPrompt,
       serverOrigin,
+      sidebarSide: seededSidebarSide,
       theme: seededTheme,
       token,
     }) => {
@@ -512,7 +515,7 @@ export async function installVisualFixture(
         localStorage.setItem("codexnest.theme", seededTheme);
         localStorage.setItem("codexnest.uiLanguage", "ru");
         localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
-        localStorage.setItem("codexnest.sidebarSide", "left");
+        localStorage.setItem("codexnest.sidebarSide", seededSidebarSide);
         localStorage.setItem("codexnest.projectListDirection", "top-down");
         localStorage.setItem("codexnest.sessionListMode", "projects");
         if (seedConnection) {
@@ -555,6 +558,7 @@ export async function installVisualFixture(
       fixedNow: FIXED_NOW,
       notificationPrompt,
       serverOrigin: SERVER_ORIGIN,
+      sidebarSide,
       theme,
       token: TOKEN,
     },

@@ -44,6 +44,7 @@ import {
   listPendingVoiceRecordings,
   loadPendingVoiceRecording,
   putOutboxMessage,
+  outboxMessageIntent,
   putPendingVoiceRecording,
   saveCachedMeta,
   saveCachedThread,
@@ -296,6 +297,10 @@ export function ConnectionProvider({
               const record = reliableMessages.current.get(item.id);
               if (
                 item.type === "userMessage" &&
+                item.deliveryReceipt?.version === 1 &&
+                item.deliveryReceipt.clientId === item.id &&
+                item.deliveryReceipt.threadId === threadId &&
+                item.deliveryReceipt.turnId === turn.id &&
                 record?.message.accepted &&
                 record.message.connectionKey === connectionKey
               )
@@ -644,7 +649,7 @@ export function ConnectionProvider({
                   message.retryable === false
                 )
                   continue;
-                await record.staged;
+                if (!(await record.staged)) continue;
                 try {
                   await api.enqueue(threadId, {
                     input: message.input,
@@ -654,6 +659,9 @@ export function ConnectionProvider({
                     clientMessageId: message.id,
                     ...(message.replyToAsyncQuestion
                       ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
+                      : {}),
+                    ...(message.replyToUserInput
+                      ? { replyToUserInput: message.replyToUserInput }
                       : {}),
                   });
                   record.message = {
@@ -686,11 +694,14 @@ export function ConnectionProvider({
                     ...message,
                     attempts: message.attempts + 1,
                     retryable,
-                    lastError: retryable
-                      ? "Нет связи — повторим отправку"
-                      : error instanceof Error
-                        ? error.message
-                        : "Не удалось отправить сообщение",
+                    lastError:
+                      error instanceof ApiClientError && error.code === "connection_failed"
+                        ? "Нет связи — повторим отправку"
+                        : retryable
+                          ? "Сервер временно недоступен — повторим отправку"
+                          : error instanceof Error
+                            ? error.message
+                            : "Не удалось отправить сообщение",
                   };
                   const saved = await putOutboxMessage(record.message);
                   if (saved) {
@@ -742,6 +753,7 @@ export function ConnectionProvider({
         files: body.files ?? [],
         goal: body.goal ?? false,
         ...(body.replyToAsyncQuestion ? { replyToAsyncQuestion: body.replyToAsyncQuestion } : {}),
+        ...(body.replyToUserInput ? { replyToUserInput: body.replyToUserInput } : {}),
         createdAt: (lastMessageTime.current = Math.max(Date.now(), lastMessageTime.current + 1)),
         attempts: 0,
         lastError: null,
@@ -752,7 +764,11 @@ export function ConnectionProvider({
         committed = true;
         onCommitted?.();
       };
-      const record = {
+      const previous = reliableMessages.current.get(message.id);
+      if (previous && outboxMessageIntent(previous.message) !== outboxMessageIntent(message)) {
+        throw new Error("Идентификатор сообщения уже использован для другого ответа");
+      }
+      const record = previous ?? {
         message,
         staged: putOutboxMessage(message, source),
         commit,
@@ -760,7 +776,11 @@ export function ConnectionProvider({
       };
       reliableMessages.current.set(message.id, record);
       const persisted = await record.staged;
-      if (persisted) commit();
+      if (!persisted) {
+        if (!previous) reliableMessages.current.delete(message.id);
+        throw new Error("Не удалось сохранить сообщение на устройстве. Повторите отправку.");
+      }
+      commit();
       await drainReliableOutbox(threadId);
       if (record.message.accepted) return "delivered";
       if (!(await record.staged)) {

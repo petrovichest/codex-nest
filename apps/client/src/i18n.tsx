@@ -49,20 +49,6 @@ const ENGLISH: Record<string, string> = {
   "Найденное сообщение больше недоступно. Можно вернуться к текущему диалогу.":
     "The matching message is no longer available. You can return to the current conversation.",
   "Не сообщено": "Not reported",
-  "Не удалось обновить. Ниже — последние полученные данные, они могут устареть.":
-    "Refresh failed. The last successful data is shown below and may be outdated.",
-  "Не удалось получить лимиты": "Could not fetch limits",
-  "Основное окно": "Primary window",
-  "Дополнительное окно": "Secondary window",
-  Осталось: "Remaining",
-  Длительность: "Duration",
-  "Сброс окна": "Window reset",
-  "Обычное использование разрешено": "Ordinary usage allowed",
-  "Порог расходов достигнут": "Spend control reached",
-  "Причина ограничения": "Limit reason",
-  "Процент и время сброса не гарантируют доступность. Codex сообщает ограничения отдельно.":
-    "Percentage and reset time do not guarantee availability. Codex reports restrictions separately.",
-  "Получено: {{date}}": "Fetched: {{date}}",
   "Модель в Codex": "Model in Codex",
   "Усилие в Codex": "Reasoning effort in Codex",
   "Приём сообщений": "Direct input",
@@ -707,6 +693,11 @@ const ENGLISH: Record<string, string> = {
   "Повторить загрузку истории": "Retry loading history",
   "Скопировать сообщение": "Copy message",
   Отправлено: "Sent",
+  "Сохранено на устройстве": "Saved on this device",
+  "Сервер временно недоступен — повторим отправку": "Server temporarily unavailable — we’ll retry",
+  "Codex временно недоступен. Повторим отправку. Сообщение сохранено.":
+    "Codex is temporarily unavailable. We’ll retry. Your message is saved.",
+  "Не удалось сохранить черновик на устройстве": "Could not save the draft on this device",
   "Не отправлено": "Not sent",
   "Нет связи — повторим отправку": "Offline — we’ll retry sending",
   "Повторить отправку": "Retry sending",

@@ -132,6 +132,7 @@ const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
 type NewSessionPreparation = {
   active: boolean;
   projectId: string;
+  clientCreationId: string;
   value: UpdateThreadDraftRequest;
   settings: SessionSettings;
   phase: "creating" | "transferring";
@@ -539,6 +540,7 @@ export function ThreadPage({
   const preparationRef = useRef<NewSessionPreparation>({
     active: initialNewSessionRef.current.active,
     projectId: initialNewSessionRef.current.projectId,
+    clientCreationId: crypto.randomUUID(),
     value: emptyComposerDraft(),
     settings: pendingSettings,
     phase: "creating",
@@ -1094,6 +1096,7 @@ export function ThreadPage({
       .catch(() => undefined)
       .then(async () => {
         const saved = await saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
+          clientCreationId: snapshot.clientCreationId,
           phase: snapshot.phase,
           threadId: snapshot.threadId,
           thread: snapshot.thread,
@@ -1260,7 +1263,14 @@ export function ThreadPage({
           if (existingThreadId) {
             thread = (await api.readThread(existingThreadId, { fresh: true })).summary;
           } else {
-            const created = await api.createProjectThread(activeProject.id);
+            if (!(await enqueuePreparationSave(snapshotPreparation()))) {
+              throw new Error(t("Не удалось сохранить черновик на устройстве"));
+            }
+            assertPreparationGeneration(generation);
+            const created = await api.createProjectThread(
+              activeProject.id,
+              preparationRef.current.clientCreationId,
+            );
             assertPreparationGeneration(generation);
             thread = created.thread;
             // The endpoint can reuse a session whose first message is still a draft.
@@ -1810,6 +1820,7 @@ export function ThreadPage({
       preparationRef.current = {
         ...current,
         projectId: newSessionProject.id,
+        clientCreationId: stored?.clientCreationId ?? current.clientCreationId,
         value,
         settings,
         phase: storedThreadId ? "transferring" : "creating",
@@ -2880,7 +2891,9 @@ export function ThreadPage({
           staged: stagedInPreparation,
           deliveryError: {
             message: retryable
-              ? t("Нет связи — повторим отправку")
+              ? caught instanceof ApiClientError && caught.code === "connection_failed"
+                ? t("Нет связи — повторим отправку")
+                : t("Сервер временно недоступен — повторим отправку")
               : caught instanceof Error
                 ? caught.message
                 : t("Не удалось отправить сообщение"),
@@ -2956,7 +2969,7 @@ export function ThreadPage({
     setError(null);
     setTeamUpgradeRequired(false);
     let changedMode = false;
-    let optimisticAdded = false;
+    let deliveryCommitted = false;
     try {
       const thread = await api.updateThreadSettings(threadId, {
         collaborationMode: targetMode === "team" ? "team" : "default",
@@ -2964,38 +2977,34 @@ export function ThreadPage({
       changedMode = true;
       dispatch({ type: "thread", thread });
       scrollTargetMessageId.current = clientMessageId;
-      optimisticAdded = true;
-      dispatch({
-        type: "optimistic.add",
-        message: {
-          id: clientMessageId,
-          threadId,
-          text: implementationMessage,
-          images: [],
-          ...(goalMode ? { goal: true } : {}),
-          createdAt: Date.now(),
-          destination: "turn",
-          turnId: null,
-        },
-      });
-      const result = await api.startTurn(threadId, {
-        input: implementationMessage,
-        clientMessageId,
-        ...(goalMode ? { goal: true } : {}),
-      });
-      dispatch({
-        type: "optimistic.accept",
+      await sendReliable(
         threadId,
-        messageId: clientMessageId,
-        turnId: result.turnId,
-      });
+        {
+          input: implementationMessage,
+          clientMessageId,
+          ...(goalMode ? { goal: true } : {}),
+        },
+        () => {
+          deliveryCommitted = true;
+          dispatch({
+            type: "optimistic.add",
+            message: {
+              id: clientMessageId,
+              threadId,
+              text: implementationMessage,
+              images: [],
+              ...(goalMode ? { goal: true } : {}),
+              createdAt: Date.now(),
+              destination: "queue",
+              turnId: null,
+            },
+          });
+        },
+      );
       releaseSubmittedMessageClaim(messageClaimKey);
     } catch (caught) {
       releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
-      if (optimisticAdded) {
-        dispatch({ type: "optimistic.remove", threadId, messageId: clientMessageId });
-      }
-      if (changedMode) {
+      if (changedMode && !deliveryCommitted) {
         await api
           .updateThreadSettings(threadId, { collaborationMode: "plan" })
           .then((thread) => dispatch({ type: "thread", thread }))
@@ -3202,7 +3211,7 @@ export function ThreadPage({
     setSettingsBusy(true);
     setError(null);
     try {
-      const created = await api.createProjectThread(project.id);
+      const created = await api.createProjectThread(project.id, `team-upgrade:${threadId}`);
       dispatch({ type: "thread", thread: created.thread });
       const configured = await api.updateThreadSettings(created.thread.id, {
         collaborationMode: "team",
@@ -3652,7 +3661,10 @@ export function ThreadPage({
                     <div className="outgoing-delivery-status" role="status">
                       {pendingOptimisticMessage.deliveryError
                         ? pendingOptimisticMessage.deliveryError.retryable
-                          ? t("Нет связи — повторим отправку")
+                          ? localizeKnownServerText(
+                              language,
+                              pendingOptimisticMessage.deliveryError.message,
+                            )
                           : t("Не отправлено")
                         : t("Отправляется…")}
                       {pendingOptimisticMessage.deliveryError?.retryable === false && (
@@ -5713,17 +5725,16 @@ export function QueuedMessages({
                   {inTimeline && (
                     <span className="outgoing-delivery-status" role="status">
                       {message.confirmed || message.serverAccepted
-                        ? t("Отправлено")
+                        ? t("В очереди")
                         : message.deliveryError
-                          ? message.deliveryError.retryable
-                            ? t("Нет связи — повторим отправку")
-                            : t("Не отправлено")
+                          ? t("Сохранено на устройстве")
                           : t("Отправляется…")}
                     </span>
                   )}
                   {(!inTimeline ||
-                    message.confirmed ||
-                    message.deliveryError?.retryable === false) && (
+                    message.deliveryError ||
+                    busy ||
+                    message.status === "dispatching") && (
                     <span className="queued-message-status">{status}</span>
                   )}
                 </div>

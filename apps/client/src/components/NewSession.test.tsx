@@ -158,7 +158,9 @@ describe("NewSession", () => {
     fireEvent.change(textbox, { target: { value: "Повтори после сбоя" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() =>
-      expect(screen.getByText("Нет связи — повторим отправку")).toBeInTheDocument(),
+      expect(
+        screen.getByText("Сервер временно недоступен — повторим отправку"),
+      ).toBeInTheDocument(),
     );
     const firstSubmission = drafts.save.mock.calls.find((call) => call[3]?.submission)?.[3]
       .submission;
@@ -230,28 +232,21 @@ describe("NewSession", () => {
     expect(sendQueuedNow).toHaveBeenCalledWith(thread.id, clientMessageId);
   });
 
-  it("keeps the first message in the editor if local persistence fails until server acceptance", async () => {
+  it("retains the first draft and does not create a session when local persistence fails", async () => {
     drafts.save.mockResolvedValue(false);
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const delivery = deferred<"delivered">();
-    const sendReliable = vi.fn().mockReturnValue(delivery.promise);
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockReturnValue(creation.promise),
-        sendReliable,
-      }),
-    );
+    const createProjectThread = vi.fn();
+    const sendReliable = vi.fn();
+    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
     renderNewSession();
     const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Не очищать без копии" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
-    await waitFor(() => expect(drafts.save).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText("Не удалось сохранить черновик на устройстве")).toBeInTheDocument(),
+    );
     expect(textbox).toHaveValue("Не очищать без копии");
-    creation.resolve({ thread });
-    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(textbox).toHaveValue("Не очищать без копии");
-    await act(async () => delivery.resolve("delivered"));
-    expect(textbox).toHaveValue("");
+    expect(createProjectThread).not.toHaveBeenCalled();
+    expect(sendReliable).not.toHaveBeenCalled();
   });
 
   it("keeps the next draft separate while the first message waits for session creation", async () => {
@@ -336,7 +331,9 @@ describe("NewSession", () => {
     expect(textbox).toHaveFocus();
     expect(screen.queryByRole("combobox", { name: "Проект" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
-    await waitFor(() => expect(createProjectThread).toHaveBeenCalledWith(project.id));
+    await waitFor(() =>
+      expect(createProjectThread).toHaveBeenCalledWith(project.id, expect.any(String)),
+    );
 
     fireEvent.change(textbox, { target: { value: "Не потерять этот текст" } });
     creation.resolve({ thread });

@@ -82,8 +82,20 @@ export class AttachmentStore {
           offset += bytesWritten;
         }
       }
+      await handle.sync();
       await handle.close();
       await rename(temporaryPath, path);
+      // The file and every newly created directory entry must survive a
+      // restart before the caller can safely put this attachment in its outbox.
+      for (let current = directory; ; current = dirname(current)) {
+        const directoryHandle = await open(current, "r");
+        try {
+          await directoryHandle.sync();
+        } finally {
+          await directoryHandle.close();
+        }
+        if (current === dirname(this.root)) break;
+      }
       return { id, name, path, size, mediaType };
     } catch (error) {
       await handle.close().catch(() => undefined);

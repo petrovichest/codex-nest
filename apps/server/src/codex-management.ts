@@ -48,6 +48,7 @@ export type CodexManagerOptions = {
   activeTurnCount(): number;
   bridgeState(): AppServerState;
   bridgeVersion(): string | undefined;
+  deliveryVersion?(): number | undefined;
   runCommand?: RunCommand;
 };
 
@@ -185,6 +186,12 @@ export class CodexManager {
 
   async update(): Promise<CodexManagementStatus> {
     this.assertSupported();
+    if (this.options.deliveryVersion) {
+      throw new CodexManagementError(
+        "unsupported",
+        "Для этой сборки Codex требуется совместимое обновление с подтверждением доставки.",
+      );
+    }
     const diagnostics = await this.runMaintenance("updating", async () => {
       await this.runManaged(["update"], 300_000);
       const checked = await this.runDoctor(this.options.proxyEnvFile);

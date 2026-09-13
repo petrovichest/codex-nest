@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type {
   AsyncQuestionReference,
+  UserInputReply,
   QueuedMessage,
   ThreadFileAttachment,
 } from "@codexnest/protocol";
@@ -9,8 +10,10 @@ import type {
 import type { StateStore } from "./state/store";
 import { RpcError } from "./codex/transport";
 import { isMissingThreadError, isThreadNotLoadedError } from "./thread-state";
+import { DeliveryContractError } from "./durable-delivery";
 
 export interface MessageQueueDelivery {
+  requiresDurableReceipt?: boolean;
   paused(): boolean;
   acceptsInput?(threadId: string): boolean;
   currentTurnId(threadId: string): string | null;
@@ -59,6 +62,7 @@ export class MessageQueue {
       files?: ThreadFileAttachment[];
       completeVoiceTranscriptionId?: string;
       replyToAsyncQuestion?: AsyncQuestionReference;
+      replyToUserInput?: UserInputReply;
     } = {},
   ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
@@ -71,6 +75,7 @@ export class MessageQueue {
       ...(options.replyToAsyncQuestion
         ? { replyToAsyncQuestion: options.replyToAsyncQuestion }
         : {}),
+      ...(options.replyToUserInput ? { replyToUserInput: options.replyToUserInput } : {}),
       createdAt: Date.now(),
       status: "queued",
     };
@@ -79,13 +84,23 @@ export class MessageQueue {
       message.images ?? [],
       message.files ?? [],
       !!message.goal,
+      message.replyToUserInput ?? message.replyToAsyncQuestion,
     );
     let stored = message;
     await this.store.update((state) => {
       const receipt = state.messageReceipts?.[messageId];
-      if (receipt) {
+      if (receipt && (receipt.threadId !== threadId || receipt.contentHash !== contentHash)) {
+        throw new MessageQueueConflictError("Message id has already been used");
+      }
+      if (receipt && receipt.status !== "prepared" && receipt.status !== "rejected") {
+        if (receipt.status === "canceled") {
+          throw new MessageQueueConflictError("Message has been canceled");
+        }
         if (receipt.threadId !== threadId || receipt.contentHash !== contentHash) {
           throw new MessageQueueConflictError("Message id has already been used");
+        }
+        if (this.delivery.requiresDurableReceipt && receipt.deliveryVersion !== 1) {
+          throw new DeliveryContractError("Доставка старого сообщения не подтверждена Codex.");
         }
         stored = { ...message, status: "dispatching" };
         const queue = state.messageQueues?.[threadId];
@@ -116,6 +131,7 @@ export class MessageQueue {
             existing.images ?? [],
             existing.files ?? [],
             !!existing.goal,
+            existing.replyToUserInput ?? existing.replyToAsyncQuestion,
           ) !== contentHash ||
           JSON.stringify(existing.replyToAsyncQuestion) !==
             JSON.stringify(message.replyToAsyncQuestion)
@@ -133,7 +149,7 @@ export class MessageQueue {
       }
       queue.push(message);
       const meta = state.threadMeta[threadId];
-      if (meta && !message.replyToAsyncQuestion) delete meta.draft;
+      if (meta && !message.replyToAsyncQuestion && !message.replyToUserInput) delete meta.draft;
       if (
         options.completeVoiceTranscriptionId &&
         state.voiceTranscriptions?.[threadId]?.id === options.completeVoiceTranscriptionId
@@ -180,7 +196,13 @@ export class MessageQueue {
     return this.withLock(threadId, async () => {
       const current = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!current) throw new MessageQueueNotFoundError("Queued message not found");
-      if (current.status !== "queued") {
+      if (this.store.view().messageReceipts?.[messageId]?.status === "rejected") {
+        throw new MessageQueueConflictError(
+          "Отклонённое сообщение можно отменить и отправить заново.",
+        );
+      }
+      const receipt = this.store.view().messageReceipts?.[messageId];
+      if ((current.status !== "queued" && receipt?.status !== "rejected") || receipt?.request) {
         throw new MessageQueueConflictError("Queued message is already being sent");
       }
       const trimmed = text.trim();
@@ -206,10 +228,33 @@ export class MessageQueue {
     return this.withLock(threadId, async () => {
       const current = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!current) throw new MessageQueueNotFoundError("Queued message not found");
-      if (current.status !== "queued") {
+      const receipt = this.store.view().messageReceipts?.[messageId];
+      if ((current.status !== "queued" && receipt?.status !== "rejected") || receipt?.request) {
         throw new MessageQueueConflictError("Queued message is already being sent");
       }
-      await this.remove(threadId, messageId);
+      await this.store.update((state) => {
+        state.messageReceipts ??= {};
+        state.messageReceipts[messageId] = {
+          ...state.messageReceipts[messageId],
+          threadId,
+          turnId: null,
+          contentHash: messageContentHash(
+            current.text,
+            current.images ?? [],
+            current.files ?? [],
+            !!current.goal,
+            current.replyToUserInput ?? current.replyToAsyncQuestion,
+          ),
+          status: "canceled",
+          createdAt: Date.now(),
+        };
+        state.messageQueues![threadId] = (state.messageQueues?.[threadId] ?? []).filter(
+          (message) => message.id !== messageId,
+        );
+        if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
+      });
+      this.clearRetry(threadId);
+      this.publish(threadId);
     });
   }
 
@@ -221,13 +266,18 @@ export class MessageQueue {
       if (messages.some((message) => message.status === "dispatching")) return;
       const active = this.delivery.currentTurnId(threadId) !== null;
       const message = active
-        ? messages.find((candidate) => candidate.replyToAsyncQuestion)
+        ? messages.find((candidate) => candidate.replyToAsyncQuestion || candidate.replyToUserInput)
         : messages[0];
       if (!message || message.status !== "queued" || message.deliveryError?.retryable === false)
         return;
       if (this.retries.get(threadId)?.timer) return;
-      await this.dispatch(threadId, message, Boolean(message.replyToAsyncQuestion));
-      if (message.replyToAsyncQuestion) void this.drain(threadId).catch(() => undefined);
+      await this.dispatch(
+        threadId,
+        message,
+        Boolean(message.replyToAsyncQuestion || message.replyToUserInput),
+      );
+      if (message.replyToAsyncQuestion || message.replyToUserInput)
+        void this.drain(threadId).catch(() => undefined);
     });
   }
 
@@ -250,6 +300,11 @@ export class MessageQueue {
 
   private async reconcile(threadId: string, message: QueuedMessage): Promise<boolean> {
     try {
+      if (this.delivery.requiresDurableReceipt && message.deliveryVersion !== 1) {
+        throw new DeliveryContractError(
+          "Старый Codex не подтвердил доставку. Автоматическая повторная отправка остановлена, чтобы избежать дубля.",
+        );
+      }
       const receipt = this.store.view().messageReceipts?.[message.id];
       const turnId = receipt?.turnId ?? (await this.delivery.deliveredTurnId(threadId, message.id));
       if (turnId) await this.remove(threadId, message.id, turnId, message);
@@ -306,7 +361,7 @@ export class MessageQueue {
     if (this.suspended) throw new MessageQueuePausedError("CodexNest is preparing to restart");
     if (this.delivery.acceptsInput?.(threadId) === false)
       throw new MessageQueueInputUnavailableError();
-    const activeTurnId = this.delivery.currentTurnId(threadId);
+    const activeTurnId = message.replyToUserInput?.turnId ?? this.delivery.currentTurnId(threadId);
     if (activeTurnId && !allowSteer) return activeTurnId;
     await this.setStatus(threadId, message.id, "dispatching");
     let turnId: string;
@@ -367,7 +422,14 @@ export class MessageQueue {
         throw new MessageQueueNotFoundError("Queued message not found");
       }
       state.messageQueues![threadId] = queue.map((message) =>
-        message.id === messageId ? { ...message, status, deliveryError } : message,
+        message.id === messageId
+          ? {
+              ...message,
+              status: state.messageReceipts?.[messageId]?.request ? "dispatching" : status,
+              ...(this.delivery.requiresDurableReceipt ? { deliveryVersion: 1 as const } : {}),
+              deliveryError,
+            }
+          : message,
       );
     });
     this.publish(threadId);
@@ -385,7 +447,15 @@ export class MessageQueue {
       if (!state.messageQueues![threadId].length) delete state.messageQueues![threadId];
       if (deliveredTurnId && deliveredMessage) {
         state.messageReceipts ??= {};
+        if (
+          this.delivery.requiresDurableReceipt &&
+          (state.messageReceipts[messageId]?.deliveryVersion !== 1 ||
+            state.messageReceipts[messageId]?.status !== "delivered")
+        ) {
+          throw new DeliveryContractError("Codex не подтвердил сохранение сообщения.");
+        }
         state.messageReceipts[messageId] = {
+          ...state.messageReceipts[messageId],
           threadId,
           turnId: deliveredTurnId,
           contentHash: messageContentHash(
@@ -393,6 +463,7 @@ export class MessageQueue {
             deliveredMessage.images ?? [],
             deliveredMessage.files ?? [],
             !!deliveredMessage.goal,
+            deliveredMessage.replyToUserInput ?? deliveredMessage.replyToAsyncQuestion,
           ),
           createdAt: Date.now(),
         };
@@ -415,6 +486,7 @@ export class MessageQueue {
     const missing = isMissingThreadError(error);
     const retryable =
       !missing &&
+      !(error instanceof DeliveryContractError) &&
       !(
         error instanceof RpcError &&
         [-32600, -32602].includes(error.code) &&
@@ -423,11 +495,13 @@ export class MessageQueue {
     await this.setStatus(threadId, messageId, status, {
       message: missing
         ? "Сессия недоступна. Сообщение сохранено."
-        : status === "dispatching"
-          ? "Проверяем, было ли сообщение отправлено."
-          : retryable
-            ? "Ожидаем восстановления связи. Сообщение сохранено."
-            : "Не удалось отправить сообщение. Оно сохранено.",
+        : error instanceof DeliveryContractError
+          ? error.message
+          : status === "dispatching"
+            ? "Проверяем, было ли сообщение отправлено."
+            : retryable
+              ? "Codex временно недоступен. Повторим отправку. Сообщение сохранено."
+              : "Не удалось отправить сообщение. Оно сохранено.",
       retryable,
     });
     if (retryable) this.scheduleRetry(threadId);
@@ -469,11 +543,16 @@ export function messageContentHash(
   images: readonly string[],
   files: readonly ThreadFileAttachment[],
   goal: boolean,
+  reply?: unknown,
 ): string {
   return createHash("sha256")
     .update(
       JSON.stringify(
-        files.length ? [text.trim(), images, files, goal] : [text.trim(), images, goal],
+        reply !== undefined
+          ? [text.trim(), images, files, goal, reply]
+          : files.length
+            ? [text.trim(), images, files, goal]
+            : [text.trim(), images, goal],
       ),
     )
     .digest("hex");

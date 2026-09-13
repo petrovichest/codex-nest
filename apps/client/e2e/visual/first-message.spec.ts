@@ -167,7 +167,7 @@ test("fast first Enter survives reloads during creation and after a lost accepta
     await expect.poll(async () => (await storedMessages(page, "outbox"))[0]?.accepted).toBe(true);
     const attempts = submissions.length;
     await page.reload();
-    await expect(page.locator(".queued-message")).toContainText("Отправлено");
+    await expect(page.locator(".queued-message")).toContainText("В очереди");
     await expect(page.locator(".queued-message")).toContainText(messageText);
     expect(submissions).toHaveLength(attempts);
     expect(submissions.length).toBeGreaterThanOrEqual(2);

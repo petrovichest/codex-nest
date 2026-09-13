@@ -3822,12 +3822,12 @@ describe("Activity", () => {
 
   it("releases a failed completed-plan claim so acceptance can be retried", async () => {
     const api = threadApi();
-    api.startTurn.mockRejectedValueOnce(new Error("Codex недоступен"));
     const planThread = {
       ...summary,
       settings: { collaborationMode: "plan" as const },
     };
-    mockThreadConnection(api, planThread, completedPlanDetail());
+    const context = mockThreadConnection(api, planThread, completedPlanDetail());
+    context.sendReliable.mockRejectedValueOnce(new Error("Не удалось сохранить сообщение"));
     renderThread();
     const button = screen.getByRole("button", { name: "Да, реализуй этот план" });
 
@@ -3840,7 +3840,7 @@ describe("Activity", () => {
 
     fireEvent.click(button);
 
-    await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledTimes(2));
     expect(api.updateThreadSettings).toHaveBeenNthCalledWith(3, "thread", {
       collaborationMode: "default",
     });
@@ -3899,12 +3899,12 @@ describe("Activity", () => {
 
   it("returns to Plan mode when orchestrator implementation fails to start", async () => {
     const api = threadApi();
-    api.startTurn.mockRejectedValueOnce(new Error("Codex недоступен"));
     const planThread = {
       ...summary,
       settings: { collaborationMode: "plan" as const },
     };
-    mockThreadConnection(api, planThread, completedPlanDetail());
+    const context = mockThreadConnection(api, planThread, completedPlanDetail());
+    context.sendReliable.mockRejectedValueOnce(new Error("Не удалось сохранить сообщение"));
     renderThread();
 
     fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
@@ -3914,7 +3914,7 @@ describe("Activity", () => {
         collaborationMode: "plan",
       }),
     );
-    expect(screen.getByText("Codex недоступен")).toBeInTheDocument();
+    expect(screen.getByText("Не удалось сохранить сообщение")).toBeInTheDocument();
   });
 
   it("does not migrate an incompatible Plan session when starting the orchestrator", async () => {
@@ -4009,7 +4009,7 @@ describe("Activity", () => {
       Array.from(queue.querySelectorAll(".queued-message-order")).map((node) => node.textContent),
     ).toEqual([]);
     expect(queue.querySelector(".queued-messages-count")).toBeNull();
-    expect(screen.getAllByText("Отправлено")).toHaveLength(2);
+    expect(screen.queryByText("Отправлено")).not.toBeInTheDocument();
     expect(screen.getAllByText("В очереди")).toHaveLength(2);
     fireEvent.click(screen.getAllByRole("button", { name: "Изменить сообщение в очереди" })[0]!);
     fireEvent.change(screen.getByRole("textbox", { name: "Текст сообщения в очереди" }), {

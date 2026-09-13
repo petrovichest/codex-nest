@@ -80,6 +80,7 @@ const codexManager = new CodexManager({
     projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
   bridgeState: () => bridge.state,
   bridgeVersion: () => bridge.actualVersion,
+  deliveryVersion: () => bridge.deliveryVersion,
 });
 let emergencyShutdownRequested = false;
 const appManager = new AppManager({

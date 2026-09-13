@@ -22,6 +22,21 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("keeps cancellation across restart and rejects a delayed enqueue replay", async () => {
+    const { queue, store, delivery } = await setup("active");
+    await queue.enqueue("thread", "Canceled text", [], "canceled");
+    await queue.cancel("thread", "canceled");
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    const recovered = new MessageQueue(reopened, delivery);
+    queues.push(recovered);
+    await expect(recovered.enqueue("thread", "Canceled text", [], "canceled")).rejects.toThrow(
+      "Message has been canceled",
+    );
+    expect(recovered.list("thread")).toEqual([]);
+    expect(delivery.start).not.toHaveBeenCalled();
+    expect(delivery.steer).not.toHaveBeenCalled();
+  });
   it("parks accepted messages without delivery RPCs while direct input is unavailable", async () => {
     const { queue, store, delivery } = await setup(null);
     delivery.acceptsInput.mockReturnValue(false);

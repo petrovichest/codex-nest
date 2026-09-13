@@ -15,7 +15,11 @@ import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStartSource } from "./ThreadStartSource";
 import type { TurnEnvironmentParams } from "./TurnEnvironmentParams";
 
-export type ThreadStartParams = { model?: string | null, modelProvider?: string | null,
+export type ThreadStartParams = {
+/**
+ * Idempotency key retained across connection loss and process restarts.
+ */
+clientCreationId?: string | null, model?: string | null, modelProvider?: string | null,
 /**
  * Allow a provider with an authoritative static model catalog to replace an unavailable
  * requested model with its default.

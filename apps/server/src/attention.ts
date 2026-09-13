@@ -73,6 +73,15 @@ export class AttentionManager extends EventEmitter {
     return found[1].request;
   }
 
+  /** Retire a question already answered through the durable command route. */
+  expire(id: string): AttentionRequest | null {
+    const pending = this.pending.get(id);
+    if (!pending) return null;
+    this.pending.delete(id);
+    this.emit("removed", id);
+    return pending.request;
+  }
+
   expireAll(): void {
     const ids = [...this.pending.keys()];
     this.pending.clear();

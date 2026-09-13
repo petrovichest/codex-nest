@@ -124,6 +124,7 @@ export interface ManagedTeamTaskState {
   childThreadSource?: string;
   childTurnId?: string;
   startMessageId?: string;
+  deliveryVersion?: 1;
   title: string;
   prompt: string;
   status: ManagedTeamTaskStatus;
@@ -153,6 +154,7 @@ export interface ManagedTeamTaskState {
     claimId?: string;
     markerId?: string;
     dispatchStartedAt?: number;
+    deliveryVersion?: 1;
     contextHash?: string;
   };
   terminalTurnId?: string;
@@ -164,6 +166,7 @@ export interface ManagedTeamTaskState {
     parentTurnId?: string;
     markerId?: string;
     dispatchStartedAt?: number;
+    deliveryVersion?: 1;
     contextHash?: string;
   };
 }
@@ -333,6 +336,9 @@ export interface MessageReceiptState {
   turnId: string | null;
   contentHash: string;
   createdAt: number;
+  status?: "prepared" | "delivered" | "rejected" | "canceled";
+  deliveryVersion?: 1;
+  request?: { method: string; params: Record<string, unknown> };
 }
 
 export interface CodexNestState {
@@ -347,6 +353,15 @@ export interface CodexNestState {
   taskDefaults?: TaskDefaults;
   messageQueues?: Record<string, QueuedMessage[]>;
   messageReceipts?: Record<string, MessageReceiptState>;
+  threadCreations?: Record<
+    string,
+    {
+      projectId: string;
+      params: Record<string, unknown>;
+      settings?: SessionSettings;
+      threadId: string | null;
+    }
+  >;
   teamToolOperations?: Record<string, TeamToolOperationState>;
   forkOperations?: Record<string, ForkOperationState>;
   voiceTranscriptions?: Record<string, VoiceTranscriptionState>;
@@ -377,6 +392,7 @@ export function emptyState(): CodexNestState {
     uiLanguage: "en",
     messageQueues: {},
     messageReceipts: {},
+    threadCreations: {},
     teamToolOperations: {},
     voiceTranscriptions: {},
     voiceReceipts: {},
@@ -806,6 +822,7 @@ const MAP_NAMESPACES = [
   "transcriptionTimings",
   "messageQueues",
   "messageReceipts",
+  "threadCreations",
   "teamToolOperations",
   "forkOperations",
   "voiceTranscriptions",
@@ -894,6 +911,7 @@ function loadDatabaseState(database: DatabaseSync): CodexNestState {
     transcriptionTimings: {},
     messageQueues: {},
     messageReceipts: {},
+    threadCreations: {},
     teamToolOperations: {},
     voiceTranscriptions: {},
     voiceReceipts: {},
@@ -1192,9 +1210,30 @@ function validateState(value: unknown): CodexNestState {
       (receipt.turnId !== null && typeof receipt.turnId !== "string") ||
       typeof receipt.contentHash !== "string" ||
       !/^[a-f\d]{64}$/iu.test(receipt.contentHash) ||
-      typeof receipt.createdAt !== "number"
+      typeof receipt.createdAt !== "number" ||
+      (receipt.status !== undefined &&
+        !["prepared", "delivered", "rejected", "canceled"].includes(receipt.status as string)) ||
+      (receipt.deliveryVersion !== undefined && receipt.deliveryVersion !== 1) ||
+      (receipt.request !== undefined &&
+        (!isRecord(receipt.request) ||
+          typeof receipt.request.method !== "string" ||
+          !isRecord(receipt.request.params)))
     ) {
       throw new Error("Corrupt message receipt");
+    }
+  }
+  if (value.threadCreations !== undefined && !isRecord(value.threadCreations)) {
+    throw new Error("Corrupt thread creations");
+  }
+  for (const creation of Object.values(value.threadCreations ?? {})) {
+    if (
+      !isRecord(creation) ||
+      typeof creation.projectId !== "string" ||
+      !isRecord(creation.params) ||
+      (creation.settings !== undefined && !isSessionSettings(creation.settings)) ||
+      (creation.threadId !== null && typeof creation.threadId !== "string")
+    ) {
+      throw new Error("Corrupt thread creation");
     }
   }
   for (const operation of Object.values(value.teamToolOperations ?? {})) {
@@ -1568,6 +1607,7 @@ function isTeamOrchestrationState(value: unknown): value is TeamOrchestrationSta
 function isManagedTeamTaskState(value: unknown): value is ManagedTeamTaskState {
   if (
     !isRecord(value) ||
+    (value.deliveryVersion !== undefined && value.deliveryVersion !== 1) ||
     typeof value.id !== "string" ||
     typeof value.childThreadId !== "string" ||
     typeof value.title !== "string" ||
@@ -1632,6 +1672,7 @@ function isManagedTeamTaskState(value: unknown): value is ManagedTeamTaskState {
 function isManagedDelivery(value: unknown): boolean {
   return (
     isRecord(value) &&
+    (value.deliveryVersion === undefined || value.deliveryVersion === 1) &&
     ["claimed", "delivered"].includes(String(value.status)) &&
     typeof value.claimId === "string" &&
     (value.parentTurnId === undefined || typeof value.parentTurnId === "string") &&
@@ -1904,6 +1945,7 @@ function isManagedResultCandidate(value: unknown): value is ManagedTeamTaskResul
 function isManagedWatchdog(value: unknown): boolean {
   return (
     isRecord(value) &&
+    (value.deliveryVersion === undefined || value.deliveryVersion === 1) &&
     ["pending", "claimed"].includes(String(value.status)) &&
     typeof value.triggeredAt === "number" &&
     (value.claimId === undefined || typeof value.claimId === "string") &&
@@ -2007,6 +2049,16 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     (value.files === undefined ||
       (Array.isArray(value.files) && value.files.every(isStoredFileAttachment))) &&
     (value.goal === undefined || typeof value.goal === "boolean") &&
+    (value.deliveryVersion === undefined || value.deliveryVersion === 1) &&
+    (value.replyToUserInput === undefined ||
+      (isRecord(value.replyToUserInput) &&
+        isBoundedString(value.replyToUserInput.turnId, 200) &&
+        isBoundedString(value.replyToUserInput.itemId, 200) &&
+        isRecord(value.replyToUserInput.answers) &&
+        Object.values(value.replyToUserInput.answers).every(
+          (answers) =>
+            Array.isArray(answers) && answers.every((answer) => typeof answer === "string"),
+        ))) &&
     (value.replyToAsyncQuestion === undefined ||
       (isRecord(value.replyToAsyncQuestion) &&
         isBoundedString(value.replyToAsyncQuestion.turnId, 200) &&

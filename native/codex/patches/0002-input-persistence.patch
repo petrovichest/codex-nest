@@ -1,0 +1,1308 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index ae02620..fc5f0fe 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -454,6 +454,61 @@ impl CodexThread {
+         &self,
+         request: TurnInputRequest,
+         mode: TurnInputMode,
++    ) -> CodexResult<TurnInputSubmission> {
++        let client_id = if request.delivery.is_some() {
++            match &request.input {
++                codex_protocol::turn_input::TurnInput::UserInput { client_id, .. } => {
++                    client_id.clone()
++                }
++                _ => None,
++            }
++        } else {
++            None
++        };
++        let result = self.admit_turn_input_with_mode(request, mode).await?;
++        if let Some(client_id) = client_id
++            && !matches!(result, TurnInputSubmission::NotSubmitted { .. })
++        {
++            self.session.await_delivery(&client_id).await?;
++        }
++        Ok(result)
++    }
++
++    /// Admits input without holding an app-server command queue while its
++    /// persistence barrier waits on hooks or a running turn. The caller must
++    /// await_input_delivery before returning any durable acknowledgement.
++    pub async fn admit_start_or_steer_turn(
++        &self,
++        request: TurnInputRequest,
++    ) -> CodexResult<TurnInputSubmission> {
++        self.admit_turn_input_with_mode(request, TurnInputMode::StartOrSteer)
++            .await
++    }
++
++    /// Steer-only admission; the receipt is completed separately.
++    pub async fn admit_steer_turn(
++        &self,
++        request: TurnInputRequest,
++        expected_turn_id: String,
++    ) -> CodexResult<SteerSubmission> {
++        match self
++            .admit_turn_input_with_mode(request, TurnInputMode::Steer { expected_turn_id })
++            .await?
++        {
++            TurnInputSubmission::Steered { turn_id } => Ok(SteerSubmission::Steered { turn_id }),
++            TurnInputSubmission::NotSubmitted { reason } => {
++                Ok(SteerSubmission::NotSubmitted { reason })
++            }
++            TurnInputSubmission::Started { .. } => {
++                unreachable!("steer-only submission cannot start")
++            }
++        }
++    }
++
++    async fn admit_turn_input_with_mode(
++        &self,
++        request: TurnInputRequest,
++        mode: TurnInputMode,
+     ) -> CodexResult<TurnInputSubmission> {
+         if !matches!(mode, TurnInputMode::Steer { .. }) {
+             self.session
+@@ -465,6 +520,26 @@ impl CodexThread {
+         self.io.submit_turn_input(request, mode).await
+     }
+ 
++    pub async fn cancel_pending_user_input(&self, turn_id: &str) {
++        self.session.cancel_pending_user_input(turn_id).await;
++    }
++
++    pub async fn prepare_durable_user_response(
++        &self,
++        request: TurnInputRequest,
++        turn_id: &str,
++        call_id: &str,
++        response: codex_protocol::request_user_input::RequestUserInputResponse,
++    ) -> CodexResult<()> {
++        self.session
++            .prepare_durable_user_response(request, turn_id, call_id, response)
++            .await
++    }
++
++    pub async fn await_input_delivery(&self, client_id: &str) -> CodexResult<()> {
++        self.session.await_delivery(client_id).await
++    }
++
+     /// Persist whether this thread is eligible for future memory generation.
+     pub async fn set_thread_memory_mode(&self, mode: ThreadMemoryMode) -> anyhow::Result<()> {
+         self.session.set_thread_memory_mode(mode).await
+diff --git a/codex-rs/core/src/session/durable_input.rs b/codex-rs/core/src/session/durable_input.rs
+new file mode 100644
+index 0000000..b24511d
+--- /dev/null
++++ b/codex-rs/core/src/session/durable_input.rs
+@@ -0,0 +1,415 @@
++//! Receiver-side idempotency and the persistence barrier for user input.
++//! The session loop never waits for hooks: the submitting caller waits outside
++//! it, while normal prompt recording completes the receipt before sampling.
++
++mod answers;
++
++use super::session::Session;
++use codex_history::RolloutItem;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::turn_input::TurnInput;
++use codex_protocol::turn_input::TurnInputRequest;
++use codex_protocol::turn_input::TurnInputSubmission;
++use codex_rollout::RolloutRecorder;
++use codex_state::DeliveryOperation;
++use codex_thread_store::PersistContext;
++use serde::Deserialize;
++use serde::Serialize;
++use tokio::sync::watch;
++
++pub(super) struct PendingDelivery {
++    turn_id: String,
++    completion: watch::Sender<Option<Result<(), String>>>,
++    answer: Option<(String, Vec<codex_protocol::user_input::UserInput>)>,
++}
++
++pub(super) struct DurableInput {
++    operation_id: String,
++    client_id: String,
++    request_hash: String,
++    request_json: String,
++    item: codex_protocol::items::UserMessageItem,
++    answer_call_id: Option<String>,
++    content: Vec<codex_protocol::user_input::UserInput>,
++}
++
++#[derive(Serialize, Deserialize)]
++struct Outcome {
++    turn_id: String,
++    started: bool,
++    #[serde(default)]
++    error: Option<String>,
++}
++
++impl Outcome {
++    fn submission(self) -> CodexResult<TurnInputSubmission> {
++        if let Some(error) = self.error {
++            return Err(CodexErr::InvalidRequest(error));
++        }
++        Ok(if self.started {
++            TurnInputSubmission::Started {
++                turn_id: self.turn_id,
++            }
++        } else {
++            TurnInputSubmission::Steered {
++                turn_id: self.turn_id,
++            }
++        })
++    }
++}
++
++impl DurableInput {
++    pub(super) fn from_request(
++        session: &Session,
++        request: &TurnInputRequest,
++    ) -> CodexResult<Option<Self>> {
++        let Some(delivery) = &request.delivery else {
++            return Ok(None);
++        };
++        let TurnInput::UserInput {
++            content,
++            client_id: Some(client_id),
++        } = &request.input
++        else {
++            return Err(CodexErr::InvalidRequest(
++                "durable input requires a client message ID".into(),
++            ));
++        };
++        if content.is_empty() || client_id.is_empty() || client_id.len() > 512 {
++            return Err(CodexErr::InvalidRequest(
++                "invalid durable user input".into(),
++            ));
++        }
++        let mut item = codex_protocol::items::UserMessageItem::new(content);
++        item.client_id = Some(client_id.clone());
++        Ok(Some(Self {
++            operation_id: operation_id(session, client_id),
++            client_id: client_id.clone(),
++            request_hash: delivery.request_hash.clone(),
++            request_json: delivery.request_json.clone(),
++            item,
++            answer_call_id: None,
++            content: content.clone(),
++        }))
++    }
++
++    pub(super) async fn replay(
++        &self,
++        session: &Session,
++        submission_id: &mut String,
++    ) -> CodexResult<Option<TurnInputSubmission>> {
++        let state = session
++            .state_db()
++            .ok_or_else(|| storage("delivery storage is unavailable"))?;
++        let Some(operation) = state
++            .thread_queue()
++            .read_delivery(&self.operation_id)
++            .await
++            .map_err(storage)?
++        else {
++            return Ok(None);
++        };
++        if operation.request_hash != self.request_hash {
++            return Err(CodexErr::InvalidRequest(
++                "DELIVERY_CONFLICT: client message ID has different input".into(),
++            ));
++        }
++        let mut outcome: Outcome = serde_json::from_str(&operation.result_json).map_err(storage)?;
++        if operation.ready
++            || session
++                .pending_deliveries
++                .lock()
++                .await
++                .contains_key(&self.client_id)
++        {
++            return outcome.submission().map(Some);
++        }
++        let expected_item_id = model_item_id(session.thread_id, &self.client_id);
++        // Only recovery reads history. The ordinary send path does no history RPC.
++        let live = session
++            .live_thread_for_persistence("recover delivery")
++            .map_err(storage)?;
++        if let Some(path) = live.local_rollout_path().await.map_err(storage)? {
++            let items = match RolloutRecorder::load_rollout_items(&path).await {
++                Ok((items, _, _)) => items,
++                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
++                Err(error) => return Err(error.into()),
++            };
++            let canonical = items.iter().any(|item| {
++                matches!(item,
++                RolloutItem::ResponseItem(envelope) if matches!(&envelope.item,
++                    ResponseItem::Message { id: Some(id), .. } if id == &expected_item_id))
++            });
++            let present = canonical && items.iter().any(|item| {
++                matches!(item,
++                RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
++                    if event.turn_id == outcome.turn_id && matches!(&event.item, codex_protocol::items::TurnItem::UserMessage(message)
++                        if message.client_id.as_deref() == Some(&self.client_id)))
++            });
++            if present {
++                live.persist(PersistContext::Standard)
++                    .await
++                    .map_err(storage)?;
++                state
++                    .thread_queue()
++                    .finish_delivery(&self.operation_id)
++                    .await
++                    .map_err(storage)?;
++                return outcome.submission().map(Some);
++            }
++            // Recover the UI event if the process died between recording the
++            // model-visible input and its matching lifecycle event.
++            if items.iter().any(|item| {
++                matches!(item,
++                RolloutItem::ResponseItem(envelope)
++                    if matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. }
++                        if id == &expected_item_id) ||
++                    matches!(&envelope.item, ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
++                        if self.answer_call_id.as_ref() == Some(call_id)))
++            }) {
++                if self.answer_call_id.is_some() && !items.iter().any(|item| matches!(item,
++                    RolloutItem::ResponseItem(envelope) if matches!(&envelope.item,
++                        ResponseItem::Message { id: Some(id), .. } if id == &expected_item_id))) {
++                    let mut response = session.response_item_from_user_input(self.content.clone());
++                    if let ResponseItem::Message { id, .. } = &mut response {
++                        *id = Some(expected_item_id.clone());
++                    }
++                    live.append_items(&[RolloutItem::ResponseItem(codex_history::ResponseItemEnvelope::new(response))])
++                        .await.map_err(storage)?;
++                }
++                live.append_items(&[RolloutItem::EventMsg(EventMsg::ItemCompleted(
++                    codex_protocol::protocol::ItemCompletedEvent {
++                        thread_id: session.thread_id,
++                        turn_id: outcome.turn_id.clone(),
++                        item: codex_protocol::items::TurnItem::UserMessage(self.item.clone()),
++                        started_at_ms: None,
++                        completed_at_ms: crate::turn_timing::now_unix_timestamp_ms(),
++                    },
++                ))])
++                .await
++                .map_err(storage)?;
++                live.persist(PersistContext::Standard)
++                    .await
++                    .map_err(storage)?;
++                state
++                    .thread_queue()
++                    .finish_delivery(&self.operation_id)
++                    .await
++                    .map_err(storage)?;
++                return outcome.submission().map(Some);
++            }
++        }
++        if !outcome.started
++            && self.answer_call_id.is_none()
++            && session.active_turn.lock().await.is_none()
++        {
++            // An interrupted turn must not be restarted just to consume a
++            // steer. It never passed the input barrier; report a definitive
++            // rejection so the sender retains the text for a fresh submission.
++            outcome.error =
++                Some("DELIVERY_REJECTED: the turn ended before accepting this message".into());
++            state
++                .thread_queue()
++                .complete_delivery(
++                    &self.operation_id,
++                    &serde_json::to_string(&outcome).map_err(storage)?,
++                )
++                .await
++                .map_err(storage)?;
++            return outcome.submission().map(Some);
++        }
++        // No prompt was recorded, so execution has not passed its persistence
++        // barrier. Reuse the reserved turn ID rather than creating another turn.
++        *submission_id = outcome.turn_id;
++        Ok(None)
++    }
++
++    pub(super) async fn accept(
++        &self,
++        session: &Session,
++        turn_id: &str,
++        started: bool,
++    ) -> CodexResult<()> {
++        let state = session
++            .state_db()
++            .ok_or_else(|| storage("delivery storage is unavailable"))?;
++        session
++            .live_thread_for_persistence("accept delivery")
++            .map_err(storage)?;
++        let operation = DeliveryOperation {
++            operation_id: self.operation_id.clone(),
++            request_hash: self.request_hash.clone(),
++            request_json: Some(self.request_json.clone()),
++            result_json: serde_json::to_string(&Outcome {
++                turn_id: turn_id.into(),
++                started,
++                error: None,
++            })
++            .map_err(storage)?,
++            ready: false,
++        };
++        if !state
++            .thread_queue()
++            .prepare_delivery(&operation)
++            .await
++            .map_err(storage)?
++        {
++            let previous = state
++                .thread_queue()
++                .read_delivery(&self.operation_id)
++                .await
++                .map_err(storage)?
++                .ok_or_else(|| storage("missing delivery reservation"))?;
++            if previous.request_hash != operation.request_hash
++                || previous.result_json != operation.result_json
++                || previous.ready
++            {
++                return Err(storage("DELIVERY_CONFLICT: delivery reservation changed"));
++            }
++        }
++        let (completion, _) = watch::channel(None);
++        session.pending_deliveries.lock().await.insert(
++            self.client_id.clone(),
++            PendingDelivery {
++                turn_id: turn_id.into(),
++                completion,
++                answer: None,
++            },
++        );
++        Ok(())
++    }
++}
++
++impl Session {
++    pub(crate) async fn await_delivery(&self, client_id: &str) -> CodexResult<()> {
++        let receiver = self
++            .pending_deliveries
++            .lock()
++            .await
++            .get(client_id)
++            .map(|pending| pending.completion.subscribe());
++        if let Some(mut receiver) = receiver {
++            loop {
++                if let Some(result) = receiver.borrow_and_update().clone() {
++                    return result.map_err(storage);
++                }
++                receiver.changed().await.map_err(storage)?;
++            }
++        }
++        let state = self
++            .state_db()
++            .ok_or_else(|| storage("delivery storage is unavailable"))?;
++        let operation = state
++            .thread_queue()
++            .read_delivery(&operation_id(self, client_id))
++            .await
++            .map_err(storage)?
++            .ok_or_else(|| storage("missing delivery receipt"))?;
++        if !operation.ready {
++            return Err(storage(
++                "DELIVERY_UNCONFIRMED: input has not been persisted",
++            ));
++        }
++        let outcome: Outcome = serde_json::from_str(&operation.result_json).map_err(storage)?;
++        outcome.submission().map(|_| ())
++    }
++
++    pub(crate) async fn finish_input_delivery(&self, client_id: Option<&str>) -> CodexResult<()> {
++        let Some(client_id) = client_id else {
++            return Ok(());
++        };
++        if !self.pending_deliveries.lock().await.contains_key(client_id) {
++            return Ok(());
++        }
++        let result = async {
++            self.try_ensure_rollout_materialized(PersistContext::Standard)
++                .await?;
++            let state = self
++                .state_db()
++                .ok_or_else(|| storage("delivery storage is unavailable"))?;
++            state
++                .thread_queue()
++                .finish_delivery(&operation_id(self, client_id))
++                .await
++                .map_err(storage)
++        }
++        .await;
++        if let Some(pending) = self.pending_deliveries.lock().await.remove(client_id) {
++            pending.completion.send_replace(Some(
++                result.as_ref().map(|_| ()).map_err(ToString::to_string),
++            ));
++        }
++        result
++    }
++
++    pub(crate) async fn reject_input_delivery(&self, client_id: Option<&str>) -> CodexResult<()> {
++        let Some(client_id) = client_id else {
++            return Ok(());
++        };
++        if !self.pending_deliveries.lock().await.contains_key(client_id) {
++            return Ok(());
++        }
++        let state = self
++            .state_db()
++            .ok_or_else(|| storage("delivery storage is unavailable"))?;
++        let id = operation_id(self, client_id);
++        let operation = state
++            .thread_queue()
++            .read_delivery(&id)
++            .await
++            .map_err(storage)?
++            .ok_or_else(|| storage("missing delivery reservation"))?;
++        let mut outcome: Outcome = serde_json::from_str(&operation.result_json).map_err(storage)?;
++        let message = "DELIVERY_REJECTED: input was blocked by a user-prompt hook";
++        outcome.error = Some(message.into());
++        state
++            .thread_queue()
++            .complete_delivery(&id, &serde_json::to_string(&outcome).map_err(storage)?)
++            .await
++            .map_err(storage)?;
++        if let Some(pending) = self.pending_deliveries.lock().await.remove(client_id) {
++            pending.completion.send_replace(Some(Err(message.into())));
++        }
++        Ok(())
++    }
++
++    pub(crate) async fn interrupt_pending_deliveries(&self, turn_id: &str) {
++        self.pending_deliveries.lock().await.retain(|_, pending| {
++            if pending.turn_id != turn_id {
++                return true;
++            }
++            pending.completion.send_replace(Some(Err(
++                "DELIVERY_UNCONFIRMED: turn ended before input persistence".into(),
++            )));
++            false
++        });
++    }
++}
++
++fn operation_id(session: &Session, client_id: &str) -> String {
++    format!("input:{}/{client_id}", session.thread_id)
++}
++
++fn storage(error: impl std::fmt::Display) -> CodexErr {
++    if error.to_string().starts_with("DELIVERY_REJECTED:") {
++        return CodexErr::InvalidRequest(error.to_string());
++    }
++    CodexErr::Io(std::io::Error::other(format!("durable delivery: {error}")))
++}
++
++/// Keep recovery markers valid Responses API message IDs for every client ID.
++pub(super) fn model_item_id(
++    thread_id: codex_protocol::ThreadId,
++    client_id: &str,
++) -> codex_protocol::ResponseItemId {
++    codex_protocol::ResponseItemId::with_suffix(
++        "msg",
++        uuid::Uuid::new_v5(
++            &uuid::Uuid::NAMESPACE_OID,
++            format!("codex-delivery:{thread_id}/{client_id}").as_bytes(),
++        ),
++    )
++}
+diff --git a/codex-rs/core/src/session/durable_input/answers.rs b/codex-rs/core/src/session/durable_input/answers.rs
+new file mode 100644
+index 0000000..ec46043
+--- /dev/null
++++ b/codex-rs/core/src/session/durable_input/answers.rs
+@@ -0,0 +1,193 @@
++//! Bind a saved answer to its original native question and persistence barrier.
++
++use super::*;
++
++impl Session {
++    pub(crate) async fn cancel_pending_user_input(&self, turn_id: &str) {
++        let turn_state = {
++            let active = self.active_turn.lock().await;
++            active
++                .as_ref()
++                .map(|active| std::sync::Arc::clone(&active.turn_state))
++        };
++        if let Some(turn_state) = turn_state {
++            turn_state.lock().await.remove_pending_user_input(turn_id);
++        }
++    }
++
++    pub(crate) async fn prepare_durable_user_response(
++        self: &std::sync::Arc<Self>,
++        request: TurnInputRequest,
++        turn_id: &str,
++        call_id: &str,
++        response: codex_protocol::request_user_input::RequestUserInputResponse,
++    ) -> CodexResult<()> {
++        let mut delivery = DurableInput::from_request(self, &request)?
++            .ok_or_else(|| CodexErr::InvalidRequest("a client message ID is required".into()))?;
++        delivery.answer_call_id = Some(call_id.into());
++        let mut reserved_turn = turn_id.to_owned();
++        if delivery.replay(self, &mut reserved_turn).await?.is_some() {
++            return Ok(());
++        }
++        let turn_state = {
++            let active = self.active_turn.lock().await;
++            match active.as_ref() {
++                Some(active) => {
++                    if active
++                        .task
++                        .as_ref()
++                        .is_none_or(|task| task.turn_context.sub_id != turn_id)
++                    {
++                        return Err(CodexErr::InvalidRequest(
++                            "the question is no longer pending in this turn".into(),
++                        ));
++                    }
++                    Some(std::sync::Arc::clone(&active.turn_state))
++                }
++                None => None,
++            }
++        };
++        if let Some(turn_state) = turn_state {
++            // Claim the waiter atomically with question validation, then release
++            // both turn locks before storage I/O. A concurrent interrupt remains
++            // possible; a closed waiter yields no delivery acknowledgement.
++            let waiter = {
++                let mut state = turn_state.lock().await;
++                if !state.has_pending_user_input(turn_id, call_id) {
++                    return Err(CodexErr::InvalidRequest(
++                        "the question is no longer pending in this turn".into(),
++                    ));
++                }
++                state
++                    .remove_pending_user_input(turn_id)
++                    .ok_or_else(|| storage("question waiter disappeared"))?
++            };
++            delivery.accept(self, turn_id, /*started*/ false).await?;
++            if let Some(pending) = self
++                .pending_deliveries
++                .lock()
++                .await
++                .get_mut(&delivery.client_id)
++            {
++                pending.answer = Some((call_id.into(), delivery.content));
++            }
++            if waiter
++                .send(crate::state::AcceptedUserInputResponse {
++                    response,
++                    acceptance_order: self.reserve_user_input_order().await,
++                })
++                .is_err()
++            {
++                self.interrupt_pending_deliveries(turn_id).await;
++                return Err(storage(
++                    "question was interrupted before receiving the answer",
++                ));
++            }
++            return Ok(());
++        }
++        let live = self
++            .live_thread_for_persistence("recover question response")
++            .map_err(storage)?;
++        let path = live
++            .local_rollout_path()
++            .await
++            .map_err(storage)?
++            .ok_or_else(|| CodexErr::InvalidRequest("question history is unavailable".into()))?;
++        let (items, _, _) = RolloutRecorder::load_rollout_items(&path).await?;
++        let mut current_turn = None;
++        let mut question_exists = false;
++        let mut answered = false;
++        for item in &items {
++            match item {
++                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
++                    current_turn = Some(event.turn_id.as_str())
++                }
++                RolloutItem::ResponseItem(envelope) => match &envelope.item {
++                    ResponseItem::FunctionCall {
++                        call_id: id, name, ..
++                    } if id == call_id
++                        && name == "request_user_input"
++                        && current_turn == Some(turn_id) =>
++                    {
++                        question_exists = true
++                    }
++                    ResponseItem::FunctionCallOutput {
++                        call_id: Some(id), ..
++                    } if id == call_id => answered = true,
++                    _ => {}
++                },
++                _ => {}
++            }
++        }
++        if !question_exists || answered {
++            return Err(CodexErr::InvalidRequest(
++                "the question is unavailable or already answered".into(),
++            ));
++        }
++        // The native process died before recording a previously admitted answer.
++        // Restore the answer in the interrupted turn's context without starting
++        // another model run or repeating tools.
++        let (context, _) = self
++            .new_turn_with_sub_id(turn_id.into(), Default::default(), Default::default())
++            .await?;
++        delivery.accept(self, turn_id, /*started*/ false).await?;
++        let output = ResponseItem::FunctionCallOutput {
++            id: None,
++            call_id: Some(call_id.into()),
++            name: None,
++            namespace: None,
++            output: codex_protocol::models::FunctionCallOutputPayload {
++                body: codex_protocol::models::FunctionCallOutputBody::Text(
++                    serde_json::to_string(&response).map_err(storage)?,
++                ),
++                success: Some(true),
++            },
++            internal_chat_message_metadata_passthrough: None,
++        };
++        self.record_conversation_items(&context, &[output]).await;
++        self.record_user_prompt_and_emit_turn_item(
++            &context,
++            &delivery.content,
++            Some(delivery.client_id.clone()),
++            None,
++            PersistContext::Standard,
++        )
++        .await;
++        self.finish_input_delivery(Some(&delivery.client_id)).await
++    }
++
++    pub(crate) async fn finish_answer_delivery(
++        &self,
++        context: &crate::session::turn_context::TurnContext,
++        call_id: Option<&str>,
++    ) -> CodexResult<()> {
++        let Some(call_id) = call_id else {
++            return Ok(());
++        };
++        let deliveries = self
++            .pending_deliveries
++            .lock()
++            .await
++            .iter()
++            .filter_map(|(client_id, pending)| {
++                pending
++                    .answer
++                    .as_ref()
++                    .filter(|(id, _)| id == call_id)
++                    .map(|(_, item)| (client_id.clone(), item.clone()))
++            })
++            .collect::<Vec<_>>();
++        for (client_id, content) in deliveries {
++            self.record_user_prompt_and_emit_turn_item(
++                context,
++                &content,
++                Some(client_id.clone()),
++                None,
++                PersistContext::Standard,
++            )
++            .await;
++            self.finish_input_delivery(Some(&client_id)).await?;
++        }
++        Ok(())
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 8ffc144..1703aa4 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -220,6 +220,7 @@ use codex_protocol::exec_output::StreamOutput;
+ 
+ mod code_mode_warning;
+ pub(crate) mod context_window;
++mod durable_input;
+ mod environment;
+ pub(crate) mod extension_metrics;
+ mod handlers;
+@@ -2971,7 +2972,7 @@ impl Session {
+             match active.as_mut() {
+                 Some(at) => {
+                     let mut ts = at.turn_state.lock().await;
+-                    ts.insert_pending_user_input(sub_id, tx_response)
++                    ts.insert_pending_user_input(sub_id, call_id.clone(), tx_response)
+                 }
+                 None => None,
+             }
+@@ -4562,7 +4563,13 @@ impl Session {
+         // Persist the user message to history, but emit the turn item from `UserInput` so
+         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
+         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
+-        let response_item = self.response_item_from_user_input(input.to_vec());
++        let mut response_item = self.response_item_from_user_input(input.to_vec());
++        if let Some(client_id) = &client_id
++            && self.pending_deliveries.lock().await.contains_key(client_id)
++            && let ResponseItem::Message { id, .. } = &mut response_item
++        {
++            *id = Some(durable_input::model_item_id(self.thread_id, client_id));
++        }
+         self.record_annotated_conversation_items(
+             turn_context,
+             vec![ResponseItemEnvelope {
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index a3e6b17..58b9ea5 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -49,6 +49,7 @@ pub(crate) struct Session {
+     /// Orders accepted settings commits and their persisted events with compaction checkpoints.
+     /// Keep this separate from `state` so storage I/O does not block runtime state access.
+     pub(super) thread_settings_persistence: Semaphore,
++    pub(super) pending_deliveries: Mutex<HashMap<String, super::durable_input::PendingDelivery>>,
+     /// Serializes rebuild/apply cycles for the running proxy; each cycle
+     /// rebuilds from the current SessionState while holding this lock.
+     pub(super) managed_network_proxy_refresh_lock: Semaphore,
+@@ -1507,6 +1508,7 @@ impl Session {
+                 agent_status,
+                 state: Mutex::new(state),
+                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
++                pending_deliveries: Mutex::new(HashMap::new()),
+                 managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
+                 features: config.features.clone(),
+                 guardian_context_mode,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 116e450..28e80fe 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6634,6 +6634,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         realtime_history: None,
+         active_turn: Mutex::new(None),
++        pending_deliveries: Default::default(),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+@@ -8941,6 +8942,7 @@ where
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         realtime_history: None,
+         active_turn: Mutex::new(None),
++        pending_deliveries: Default::default(),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 4719e1d..3c89e76 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -686,6 +686,13 @@ pub(crate) async fn run_hooks_and_record_inputs(
+     for input_item in input {
+         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
+         if hook_outcome.should_stop {
++            if let TurnInput::UserInput { client_id, .. } = input_item
++                && let Err(error) = sess.reject_input_delivery(client_id.as_deref()).await
++            {
++                sess.send_event(turn_context, EventMsg::Error(error.to_error_event(None)))
++                    .await;
++                return true;
++            }
+             blocked_input = true;
+             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
+         } else {
+@@ -700,6 +707,13 @@ pub(crate) async fn run_hooks_and_record_inputs(
+                 persist_context,
+             )
+             .await;
++            if let TurnInput::UserInput { client_id, .. } = input_item
++                && let Err(error) = sess.finish_input_delivery(client_id.as_deref()).await
++            {
++                sess.send_event(turn_context, EventMsg::Error(error.to_error_event(None)))
++                    .await;
++                return true;
++            }
+         }
+     }
+     blocked_input && !accepted_user_input
+@@ -2237,12 +2251,16 @@ async fn drain_in_flight(
+                     &envelope.item,
+                 )
+                 .await;
++                let answer_call_id = match &envelope.item {
++                    ResponseItem::FunctionCallOutput { call_id, .. } => call_id.clone(),
++                    _ => None,
++                };
+                 sess.record_annotated_conversation_items(&turn_context, vec![envelope])
+                     .await;
++                sess.finish_answer_delivery(&turn_context, answer_call_id.as_deref())
++                    .await?;
+             }
+-            Err(err) => {
+-                error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+-            }
++            Err(err) => return Err(err),
+         }
+     }
+     Ok(())
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index b064e24..963c816 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -198,8 +198,13 @@ pub(super) async fn handle(
+     session: &Arc<Session>,
+     request: TurnInputRequest,
+     mode: TurnInputMode,
+-    submission_id: String,
++    mut submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
++    if let Some(delivery) = super::durable_input::DurableInput::from_request(session, &request)?
++        && let Some(result) = delivery.replay(session, &mut submission_id).await?
++    {
++        return Ok(result);
++    }
+     match mode {
+         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
+         TurnInputMode::StartIfIdle => {
+@@ -239,6 +244,7 @@ async fn start_or_steer(
+     request: TurnInputRequest,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
++    let delivery = super::durable_input::DurableInput::from_request(session, &request)?;
+     let TurnInputRequest {
+         mut input,
+         thread_settings,
+@@ -268,8 +274,9 @@ async fn start_or_steer(
+             /*expected_turn_id*/ None,
+             settings.required_active_final_output_json_schema(),
+             responsesapi_client_metadata.clone(),
++            delivery.as_ref(),
+         )
+-        .await
++        .await?
+     {
+         Ok(turn_id) => {
+             settings.apply_steered(session, submission_id).await?;
+@@ -293,6 +300,11 @@ async fn start_or_steer(
+             if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                 turn_context.session_telemetry.user_prompt(content);
+             }
++            if let Some(delivery) = &delivery {
++                delivery
++                    .accept(session, &submission_id, /*started*/ true)
++                    .await?;
++            }
+             let mut task_input = merge_additional_context_input(session, additional_context).await;
+             if has_explicit_input {
+                 task_input.push(pending_turn_input(session, input).await);
+@@ -314,6 +326,7 @@ async fn start_if_idle(
+     submission_id: String,
+     kind: TurnStartKind,
+ ) -> CodexResult<TurnInputSubmission> {
++    let delivery = super::durable_input::DurableInput::from_request(session, &request)?;
+     let TurnInputRequest {
+         input,
+         thread_settings,
+@@ -388,6 +401,14 @@ async fn start_if_idle(
+         .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+         .await;
+ 
++    if let Some(delivery) = &delivery
++        && let Err(error) = delivery
++            .accept(session, &submission_id, /*started*/ true)
++            .await
++    {
++        session.clear_reserved_idle_turn(&turn_state).await;
++        return Err(error);
++    }
+     let mut task_input = merge_additional_context_input(session, additional_context).await;
+     match kind {
+         TurnStartKind::User => {
+@@ -427,6 +448,7 @@ async fn steer(
+     expected_turn_id: String,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
++    let delivery = super::durable_input::DurableInput::from_request(session, &request)?;
+     let TurnInputRequest {
+         mut input,
+         thread_settings,
+@@ -448,8 +470,9 @@ async fn steer(
+             Some(expected_turn_id.as_str()),
+             settings.required_active_final_output_json_schema(),
+             responsesapi_client_metadata,
++            delivery.as_ref(),
+         )
+-        .await
++        .await?
+     {
+         Ok(turn_id) => {
+             settings.apply_steered(session, submission_id).await?;
+@@ -523,42 +546,43 @@ impl Session {
+         expected_turn_id: Option<&str>,
+         required_final_output_json_schema: Option<&Value>,
+         responsesapi_client_metadata: Option<HashMap<String, String>>,
+-    ) -> Result<String, NotSubmittedReason> {
++        delivery: Option<&super::durable_input::DurableInput>,
++    ) -> CodexResult<Result<String, NotSubmittedReason>> {
+         let mut active = self.active_turn.lock().await;
+         let Some(active_turn) = active.as_mut() else {
+-            return Err(NotSubmittedReason::NoActiveTurn);
++            return Ok(Err(NotSubmittedReason::NoActiveTurn));
+         };
+ 
+         let Some(active_task) = active_turn.task.as_ref() else {
+-            return Err(NotSubmittedReason::NoActiveTurn);
++            return Ok(Err(NotSubmittedReason::NoActiveTurn));
+         };
+         let active_turn_id = &active_task.turn_context.sub_id;
+ 
+         if let Some(expected_turn_id) = expected_turn_id
+             && expected_turn_id != active_turn_id
+         {
+-            return Err(NotSubmittedReason::ExpectedTurnMismatch {
++            return Ok(Err(NotSubmittedReason::ExpectedTurnMismatch {
+                 expected: expected_turn_id.to_string(),
+                 actual: active_turn_id.clone(),
+-            });
++            }));
+         }
+ 
+         match active_task.kind {
+             crate::state::TaskKind::Regular => {}
+             crate::state::TaskKind::Review => {
+-                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
++                return Ok(Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                     turn_kind: NonSteerableTurnKind::Review,
+-                });
++                }));
+             }
+             crate::state::TaskKind::Compact => {
+-                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
++                return Ok(Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                     turn_kind: NonSteerableTurnKind::Compact,
+-                });
++                }));
+             }
+         }
+ 
+         if matches!(input, SubmittedTurnInput::UserInput { content, .. } if content.is_empty()) {
+-            return Err(NotSubmittedReason::EmptyInput);
++            return Ok(Err(NotSubmittedReason::EmptyInput));
+         }
+         // Compare JSON values directly instead of serialized schema text.
+         // Value equality ignores object key order while preserving array and
+@@ -566,7 +590,12 @@ impl Session {
+         if let Some(required_schema) = required_final_output_json_schema
+             && active_task.turn_context.final_output_json_schema.as_ref() != Some(required_schema)
+         {
+-            return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
++            return Ok(Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch));
++        }
++        if let Some(delivery) = delivery {
++            delivery
++                .accept(self, active_turn_id, /*started*/ false)
++                .await?;
+         }
+         let mut pending_input = merge_additional_context_input(self, additional_context).await;
+ 
+@@ -598,7 +627,7 @@ impl Session {
+                 pending_input,
+             )
+             .await;
+-        Ok(active_turn_id.clone())
++        Ok(Ok(active_turn_id.clone()))
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+index b03dbf7..c1dbd37 100644
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -90,7 +90,7 @@ pub(crate) struct RunningTask {
+ pub(crate) struct TurnState {
+     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+-    pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
++    pending_user_input: HashMap<String, (String, oneshot::Sender<AcceptedUserInputResponse>)>,
+     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
+     mcp_tool_approval_metadata: HashMap<String, (Option<McpInvocation>, McpToolApprovalMetadata)>,
+     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+@@ -163,16 +163,27 @@ impl TurnState {
+     pub(crate) fn insert_pending_user_input(
+         &mut self,
+         key: String,
++        call_id: String,
+         tx: oneshot::Sender<AcceptedUserInputResponse>,
+     ) -> Option<oneshot::Sender<AcceptedUserInputResponse>> {
+-        self.pending_user_input.insert(key, tx)
++        self.pending_user_input
++            .insert(key, (call_id, tx))
++            .map(|(_, sender)| sender)
++    }
++
++    pub(crate) fn has_pending_user_input(&self, key: &str, call_id: &str) -> bool {
++        self.pending_user_input
++            .get(key)
++            .is_some_and(|(id, _)| id == call_id)
+     }
+ 
+     pub(crate) fn remove_pending_user_input(
+         &mut self,
+         key: &str,
+     ) -> Option<oneshot::Sender<AcceptedUserInputResponse>> {
+-        self.pending_user_input.remove(key)
++        self.pending_user_input
++            .remove(key)
++            .map(|(_, sender)| sender)
+     }
+ 
+     pub(crate) fn insert_pending_elicitation(
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index d976a0e..5556e79 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -524,6 +524,8 @@ impl Session {
+         }
+ 
+         if let Some(turn_context) = turn_context.as_deref() {
++            self.interrupt_pending_deliveries(&turn_context.sub_id)
++                .await;
+             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
+                 .await;
+         }
+@@ -590,6 +592,8 @@ impl Session {
+         turn_context: Arc<TurnContext>,
+         task_result: SessionTaskResult,
+     ) {
++        self.interrupt_pending_deliveries(&turn_context.sub_id)
++            .await;
+         let (last_agent_message, abort_reason) = match task_result {
+             Ok(last_agent_message) => (last_agent_message, None),
+             Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input.rs b/codex-rs/core/src/tools/handlers/request_user_input.rs
+index 95b83ec..2e477d6 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input.rs
+@@ -90,7 +90,7 @@ impl RequestUserInputHandler {
+             .request_user_input(turn.as_ref(), call_id.clone(), args)
+             .await
+             .ok_or_else(|| {
+-                FunctionCallError::RespondToModel(format!(
++                FunctionCallError::Fatal(format!(
+                     "{REQUEST_USER_INPUT_TOOL_NAME} was cancelled before receiving a response"
+                 ))
+             })?;
+diff --git a/codex-rs/ext/queue/src/service.rs b/codex-rs/ext/queue/src/service.rs
+index e72f0c7..d7b02cc 100644
+--- a/codex-rs/ext/queue/src/service.rs
++++ b/codex-rs/ext/queue/src/service.rs
+@@ -265,13 +265,32 @@ impl QueuedItemService {
+     pub async fn enqueue(
+         &self,
+         thread_id: ThreadId,
+-        input: TurnInput,
++        mut input: TurnInput,
+     ) -> Result<QueuedItem, QueueServiceError> {
++        let TurnInput::UserInput { client_id, .. } = &mut input else {
++            return Err(QueueServiceError::InvalidInput);
++        };
++        let client_id = client_id.get_or_insert_with(|| Uuid::now_v7().to_string());
++        if client_id.is_empty() || client_id.len() > 512 {
++            return Err(QueueServiceError::InvalidInput);
++        }
++        let request = serde_json::to_string(&input)?;
++        if let Some(record) = self
++            .queue
++            .replay_enqueue(thread_id, request.clone())
++            .await?
++        {
++            return queued_item_from_record(record);
++        }
+         let input = prepare_queued_user_input(input).await?;
+         let payload = serde_json::to_string(&input)?;
+         let item = {
+             let _dispatch_guard = self.dispatch_guard(thread_id).await;
+-            let item = queued_item_from_record(self.queue.enqueue(thread_id, payload).await?)?;
++            let item = queued_item_from_record(
++                self.queue
++                    .enqueue_prepared(thread_id, payload, request)
++                    .await?,
++            )?;
+             self.emit_changed(thread_id);
+             item
+         };
+@@ -338,7 +357,11 @@ impl QueuedItemService {
+         queued_item_id: String,
+     ) -> Result<bool, QueueServiceError> {
+         let _dispatch_guard = self.dispatch_guard(thread_id).await;
+-        self.delete_locked(thread_id, queued_item_id).await
++        let deleted = self.queue.delete(thread_id, queued_item_id).await?;
++        if deleted {
++            self.emit_changed(thread_id);
++        }
++        Ok(deleted)
+     }
+ 
+     async fn delete_locked(
+@@ -346,7 +369,7 @@ impl QueuedItemService {
+         thread_id: ThreadId,
+         queued_item_id: String,
+     ) -> Result<bool, QueueServiceError> {
+-        let deleted = self.queue.delete(thread_id, queued_item_id).await?;
++        let deleted = self.queue.consume(thread_id, queued_item_id).await?;
+         if deleted {
+             self.emit_changed(thread_id);
+         }
+@@ -389,12 +412,14 @@ impl QueuedItemService {
+             return Err(QueueServiceError::InvalidInput);
+         };
+         let submission = thread
+-            .start_turn_if_idle(TurnInputRequest::new(input).with_trace(trace).on_start(
+-                TurnStartOptions {
+-                    turn_trigger: Some("queue".to_string()),
+-                    ..Default::default()
+-                },
+-            ))
++            .start_turn_if_idle(
++                durable_queued_request(input, &queued_item_id)?
++                    .with_trace(trace)
++                    .on_start(TurnStartOptions {
++                        turn_trigger: Some("queue".to_string()),
++                        ..Default::default()
++                    }),
++            )
+             .await?;
+         if matches!(submission, StartIfIdleSubmission::Started { .. }) {
+             self.delete_locked(thread_id, queued_item_id).await?;
+@@ -437,10 +462,12 @@ impl QueuedItemService {
+             }
+ 
+             match thread
+-                .start_turn_if_idle(TurnInputRequest::new(input).on_start(TurnStartOptions {
+-                    turn_trigger: Some("queue".to_string()),
+-                    ..Default::default()
+-                }))
++                .start_turn_if_idle(durable_queued_request(input, &queued_item_id)?.on_start(
++                    TurnStartOptions {
++                        turn_trigger: Some("queue".to_string()),
++                        ..Default::default()
++                    },
++                ))
+                 .await
+             {
+                 Ok(StartIfIdleSubmission::Started { .. }) => {
+@@ -574,3 +601,22 @@ fn queued_item_from_record(
+         input: serde_json::from_str::<TurnInput>(&record.payload)?,
+     })
+ }
++
++fn durable_queued_request(
++    mut input: TurnInput,
++    item_id: &str,
++) -> Result<TurnInputRequest, QueueServiceError> {
++    if let TurnInput::UserInput { client_id, .. } = &mut input {
++        client_id.get_or_insert_with(|| format!("queue:{item_id}"));
++    }
++    let request_json = serde_json::to_string(&input)?;
++    // The serialized input is an exact, stable fingerprint and avoids another
++    // hashing dependency in this extension.
++    let request_hash = format!("queue:{request_json}");
++    Ok(TurnInputRequest::new(input).with_durable_delivery(Some(
++        codex_protocol::turn_input::DurableTurnInput {
++            request_hash,
++            request_json,
++        },
++    )))
++}
+diff --git a/codex-rs/ext/queue/tests/queue_service.rs b/codex-rs/ext/queue/tests/queue_service.rs
+index 875dae3..87bb4e2 100644
+--- a/codex-rs/ext/queue/tests/queue_service.rs
++++ b/codex-rs/ext/queue/tests/queue_service.rs
+@@ -640,8 +640,7 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_followups()
+--> anyhow::Result<()> {
++async fn rejected_queue_messages_are_retained_until_canceled() -> anyhow::Result<()> {
+     let server = start_mock_server().await;
+     let responses = responses::mount_sse_sequence(
+         &server,
+@@ -672,16 +671,34 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
+ 
+     tokio::time::timeout(Duration::from_secs(10), async {
+         test.submit_text_turn("A").await?;
+-        for _ in 0..2 {
+-            wait_for_event_match(test.codex.as_ref(), |event| {
+-                matches!(event, EventMsg::TurnComplete(_)).then_some(())
+-            })
+-            .await;
+-        }
++        wait_for_event_match(test.codex.as_ref(), |event| {
++            matches!(event, EventMsg::TurnComplete(_)).then_some(())
++        })
++        .await;
+         anyhow::Ok(())
+     })
+     .await??;
+ 
++    let retained = queue.list(thread_id).await?;
++    assert_eq!(retained.len(), 2);
++    let rejection = queue
++        .start(test.codex.as_ref(), Some(retained[0].id.clone()), None)
++        .await
++        .expect_err("a rejected receipt must replay its rejection");
++    assert!(rejection.to_string().contains("DELIVERY_REJECTED"));
++    assert!(queue.delete(thread_id, retained[0].id.clone()).await?);
++    let StartIfIdleSubmission::Started { turn_id } = queue
++        .start(test.codex.as_ref(), Some(retained[1].id.clone()), None)
++        .await?
++    else {
++        anyhow::bail!("the following queued message did not start");
++    };
++    wait_for_event_match(test.codex.as_ref(), |event| {
++        matches!(event, EventMsg::TurnComplete(completed) if completed.turn_id == turn_id)
++            .then_some(())
++    })
++    .await;
++
+     let prompts = responses
+         .requests()
+         .into_iter()
+@@ -704,7 +721,8 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Result<()> {
++async fn explicitly_started_rejected_queue_messages_are_retained_and_cancelable()
++-> anyhow::Result<()> {
+     let server = start_mock_server().await;
+     let responses =
+         responses::mount_sse_once(&server, responses::sse_completed("unexpected-turn")).await;
+@@ -722,17 +740,28 @@ async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Re
+     );
+ 
+     let rejected = queue.enqueue(thread_id, user_input("blocked")).await?;
+-    let submission = tokio::time::timeout(
++    let error = tokio::time::timeout(
+         Duration::from_secs(10),
+-        queue.start(test.codex.as_ref(), Some(rejected.id), /*trace*/ None),
++        queue.start(
++            test.codex.as_ref(),
++            Some(rejected.id.clone()),
++            /*trace*/ None,
++        ),
+     )
+     .await?
+-    .expect("explicitly started input should be submitted");
+-    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
++    .expect_err("rejected input must not acknowledge acceptance");
++    assert!(error.to_string().contains("DELIVERY_REJECTED"));
+     wait_for_event_match(test.codex.as_ref(), |event| {
+         matches!(event, EventMsg::TurnComplete(_)).then_some(())
+     })
+     .await;
++    assert_eq!(queue.list(thread_id).await?, vec![rejected.clone()]);
++    let replay = queue
++        .start(test.codex.as_ref(), Some(rejected.id.clone()), None)
++        .await
++        .expect_err("the rejection must survive replay without rerunning hooks");
++    assert!(replay.to_string().contains("DELIVERY_REJECTED"));
++    assert!(queue.delete(thread_id, rejected.id).await?);
+     assert!(queue.list(thread_id).await?.is_empty());
+     let hook_log = std::fs::read_to_string(test.codex_home_path().join("queue_prompt_hook.log"))?;
+     assert_eq!(vec!["blocked"], hook_log.lines().collect::<Vec<_>>());

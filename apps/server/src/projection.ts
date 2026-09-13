@@ -538,7 +538,7 @@ export class AppProjection extends EventEmitter {
     const detail: ThreadDetail = {
       version: this.version,
       summary: this.toSummary(cached),
-      turns: turns.map(conversationTurn),
+      turns: turns.map((turn) => this.withDeliveryReceipts(id, conversationTurn(turn))),
       queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
       olderTurnsCursor: subagent
         ? null
@@ -560,7 +560,7 @@ export class AppProjection extends EventEmitter {
     return {
       version: this.version,
       summary: this.toSummary(cached),
-      turns: page.turns.map(conversationTurn),
+      turns: page.turns.map((turn) => this.withDeliveryReceipts(id, conversationTurn(turn))),
       queuedMessages: cloneView<QueuedMessage[]>(state.messageQueues?.[id] ?? []),
       olderTurnsCursor: page.nextCursor,
       draft: cloneView<ThreadDraft | null>(state.threadMeta[id]?.draft ?? null),
@@ -1115,7 +1115,11 @@ export class AppProjection extends EventEmitter {
         `CodexNest turn items read slow (${durationMs}ms, ${pages} pages, ${items.length} items)\n`,
       );
     }
-    return { threadId, turnId, items };
+    return {
+      threadId,
+      turnId,
+      items: items.map((item) => this.withDeliveryReceipt(threadId, turnId, item)),
+    };
   }
 
   async markUnmaterialized(threadId: string): Promise<void> {
@@ -1333,7 +1337,15 @@ export class AppProjection extends EventEmitter {
     files: Array<{ name: string; path: string }> = [],
   ): void {
     const key = activityKey(threadId, turnId, messageId);
-    if (this.activity.get(key)?.type === "userMessage") return;
+    const existing = this.activity.get(key);
+    if (existing?.type === "userMessage") {
+      const confirmed = this.withDeliveryReceipt(threadId, turnId, existing);
+      if (confirmed !== existing) {
+        this.activity.set(key, confirmed);
+        this.publishActivityUpsert(threadId, turnId, confirmed);
+      }
+      return;
+    }
     const item: ActivityItem = {
       type: "userMessage",
       id: messageId,
@@ -3157,7 +3169,35 @@ export class AppProjection extends EventEmitter {
     return !dismissedPath || (!!project && project.path.length >= dismissedPath.length);
   }
 
+  private withDeliveryReceipt(threadId: string, turnId: string, item: ActivityItem): ActivityItem {
+    if (item.type !== "userMessage") return item;
+    const receipt = this.store.view().messageReceipts?.[item.id];
+    if (
+      receipt?.deliveryVersion !== 1 ||
+      receipt.status !== "delivered" ||
+      receipt.threadId !== threadId ||
+      receipt.turnId !== turnId
+    )
+      return item;
+    return { ...item, deliveryReceipt: { version: 1, threadId, turnId, clientId: item.id } };
+  }
+
+  private withDeliveryReceipts(threadId: string, turn: TurnView): TurnView {
+    return {
+      ...turn,
+      items: turn.items.map((item) => this.withDeliveryReceipt(threadId, turn.id, item)),
+    };
+  }
+
   private publish(event: ServerEvent): void {
+    if (event.type === "activity.upserted") {
+      event = {
+        ...event,
+        item: this.withDeliveryReceipt(event.threadId, event.turnId, event.item),
+      };
+    } else if (event.type === "turn.replaced") {
+      event = { ...event, turn: this.withDeliveryReceipts(event.threadId, event.turn) };
+    }
     this.sequence += 1;
     this.emit("event", this.sequence, event);
   }

@@ -19,6 +19,7 @@ import { I18nProvider } from "./i18n";
 const connection = vi.hoisted(() => vi.fn());
 const manualNavigationIntent = vi.hoisted(() => vi.fn());
 const loadLocalDraft = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+const newSessionDrafts = vi.hoisted(() => new Map<string, object>());
 const saveLocalDraft = vi.hoisted(() =>
   vi.fn(
     async (
@@ -50,6 +51,17 @@ vi.mock("./offline-store", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   loadLocalDraft,
   saveLocalDraft,
+  loadNewSessionDraft: vi.fn(async (_settings, id: string) => newSessionDrafts.get(id) ?? null),
+  saveNewSessionDraft: vi.fn(async (_settings, projectId: string, value, preparation) => {
+    newSessionDrafts.set(
+      projectId,
+      structuredClone({ projectId, value, ...preparation, updatedAt: Date.now() }),
+    );
+    return true;
+  }),
+  deleteNewSessionDraft: vi.fn(async (_settings, id: string) => {
+    newSessionDrafts.delete(id);
+  }),
 }));
 vi.mock("./push", () => ({
   acknowledgePendingThread: vi.fn().mockResolvedValue(undefined),
@@ -89,6 +101,7 @@ const baseThread: ThreadSummary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  newSessionDrafts.clear();
   loadLocalDraft.mockReset().mockResolvedValue(null);
   vi.stubGlobal(
     "matchMedia",
@@ -277,7 +290,6 @@ describe("App routing and navigation", () => {
       "Подключено",
       "Настройки",
       "Лимиты Codex",
-      "Поиск по диалогам",
       "Добавить проект",
     ]);
     expect(controls?.nextElementSibling).toBe(modeSwitch);
@@ -618,7 +630,10 @@ describe("App routing and navigation", () => {
         await screen.findByRole("heading", { level: 1, name: "Новая задача" }),
       ).toBeInTheDocument();
       await waitFor(() =>
-        expect(api.createProjectThread).toHaveBeenCalledExactlyOnceWith("second"),
+        expect(api.createProjectThread).toHaveBeenCalledExactlyOnceWith(
+          "second",
+          expect.any(String),
+        ),
       );
       expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
     },
@@ -1177,6 +1192,33 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
   });
 
+  it.each([false, true])(
+    "opens search from an icon in the sidebar header (mobile: %s)",
+    (mobile) => {
+      mockConnection(snapshot([baseThread]));
+      if (mobile) mockMobileViewport();
+      const view = renderApp("/threads/newer");
+      if (mobile) fireEvent.click(screen.getByRole("button", { name: "Открыть список задач" }));
+
+      const search = screen.getByRole("button", { name: "Поиск по диалогам" });
+      const header = view.container.querySelector(".server-status");
+      expect(header?.lastElementChild).toBe(search);
+      expect(search.textContent).toBe("");
+      expect(search.querySelector("svg")).not.toBeNull();
+      expect(search).toHaveAttribute("title", "Поиск по диалогам");
+      expect(screen.queryByText("Поиск по диалогам")).not.toBeInTheDocument();
+      expect(within(header as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
+
+      search.focus();
+      fireEvent.click(search);
+      const dialog = screen.getByRole("dialog", { name: "Поиск по диалогам" });
+      expect(within(dialog).getByRole("textbox")).toHaveFocus();
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "Поиск по диалогам" })).not.toBeInTheDocument();
+      expect(search).toHaveFocus();
+    },
+  );
+
   it("checks for an update once after connecting and opens settings from the icon", async () => {
     const api = mockConnection(snapshot([baseThread]));
     api.checkAppUpdate.mockResolvedValue(
@@ -1196,6 +1238,9 @@ describe("App routing and navigation", () => {
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
     expect(indicator).toHaveTextContent("");
     expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
+    expect(indicator.nextElementSibling).toBe(
+      screen.getByRole("button", { name: "Поиск по диалогам" }),
+    );
 
     fireEvent.click(indicator);
     expect(await screen.findByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
@@ -1249,7 +1294,7 @@ describe("App routing and navigation", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("loads and refreshes both Codex limits only when clicked", async () => {
+  it("loads and refreshes inline Codex limits only when clicked, without opening a dialog", async () => {
     const api = mockConnection(snapshot([baseThread]));
     const primaryReset = Date.UTC(2026, 6, 28, 12, 30);
     const secondaryReset = Date.UTC(2026, 7, 3, 8);
@@ -1275,16 +1320,19 @@ describe("App routing and navigation", () => {
     expect(api.readCodexRateLimits).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Показать лимиты Codex" }));
+    expect(screen.queryByRole("dialog", { name: "Лимиты Codex" })).not.toBeInTheDocument();
     expect(
       await screen.findByText(
         `${formatter.format(primaryReset)} 80% · ${formatter.format(secondaryReset)} 62%`,
       ),
     ).toBeInTheDocument();
     expect(api.readCodexRateLimits).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "Лимиты Codex" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Обновить лимиты Codex/ }));
     expect(await screen.findByText("5 ч 0%")).toBeInTheDocument();
     expect(api.readCodexRateLimits).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("dialog", { name: "Лимиты Codex" })).not.toBeInTheDocument();
   });
 
   it("blocks concurrent limit refreshes and offers a retry after failure", async () => {
@@ -1308,6 +1356,24 @@ describe("App routing and navigation", () => {
     expect(
       await screen.findByRole("button", { name: "Повторить обновление лимитов Codex" }),
     ).toHaveTextContent("Повторить лимиты");
+    api.readCodexRateLimits.mockResolvedValueOnce({
+      primary: { usedPercent: 8, windowDurationMins: 10_080, resetsAt: null },
+      secondary: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Повторить обновление лимитов Codex" }));
+    expect(await screen.findByText("7 д 92%")).toBeInTheDocument();
+    expect(api.readCodexRateLimits).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("dialog", { name: "Лимиты Codex" })).not.toBeInTheDocument();
+  });
+
+  it("keeps unavailable limits inline when neither window is reported", async () => {
+    const api = mockConnection(snapshot([baseThread]));
+    api.readCodexRateLimits.mockResolvedValue({ primary: null, secondary: null });
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: "Показать лимиты Codex" }));
+    expect(await screen.findByText("Лимиты недоступны")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Обновить лимиты Codex/ })).toBeEnabled();
+    expect(screen.queryByRole("dialog", { name: "Лимиты Codex" })).not.toBeInTheDocument();
   });
 
   it("formats the Codex limit reset date in English when English is selected", async () => {
@@ -2887,7 +2953,9 @@ describe("App routing and navigation", () => {
     expect(screen.queryByRole("combobox", { name: "Проект" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
-    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("second"));
+    await waitFor(() =>
+      expect(api.createProjectThread).toHaveBeenCalledWith("second", expect.any(String)),
+    );
   });
 
   it("does not activate a created thread after navigating away from its preparation", async () => {
@@ -2932,9 +3000,13 @@ describe("App routing and navigation", () => {
 
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Первый" }));
-    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("first-project"));
+    await waitFor(() =>
+      expect(api.createProjectThread).toHaveBeenCalledWith("first-project", expect.any(String)),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Второй" }));
-    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledWith("second-project"));
+    await waitFor(() =>
+      expect(api.createProjectThread).toHaveBeenCalledWith("second-project", expect.any(String)),
+    );
 
     secondCreation.resolve({
       thread: {
@@ -3966,7 +4038,11 @@ describe("App routing and navigation", () => {
 
     expect(await screen.findByText("Создание недоступно")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBe(textarea);
-    expect(textarea).toHaveValue("Верни этот черновик");
+    expect(textarea).toHaveValue("");
+    expect(screen.getByText("Верни этот черновик")).toBeInTheDocument();
+    expect(newSessionDrafts.get("project")).toMatchObject({
+      submission: { input: "Верни этот черновик" },
+    });
     expect(screen.getByRole("button", { name: "Повторить" })).toBeEnabled();
     expect(api.sendReliable).not.toHaveBeenCalled();
   });

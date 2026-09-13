@@ -1,6 +1,7 @@
 import type {
   AppSnapshot,
   AsyncQuestionReference,
+  UserInputReply,
   SessionSettings,
   ThreadDetail,
   ThreadDraft,
@@ -52,6 +53,7 @@ export type LocalNewSessionDraft = {
   key: string;
   connectionKey: string;
   projectId: string;
+  clientCreationId?: string;
   value: UpdateThreadDraftRequest;
   phase?: "creating" | "transferring";
   threadId?: string | null;
@@ -86,6 +88,7 @@ export type OutboxMessage = {
   retryable?: boolean;
   accepted?: boolean;
   replyToAsyncQuestion?: AsyncQuestionReference;
+  replyToUserInput?: UserInputReply;
 };
 
 export type MessageDraftSource = { draft: UpdateThreadDraftRequest; projectId?: string };
@@ -252,6 +255,7 @@ export async function saveNewSessionDraft(
   projectId: string,
   value: UpdateThreadDraftRequest,
   preparation: {
+    clientCreationId?: string;
     phase: "creating" | "transferring";
     threadId: string | null;
     thread: ThreadSummary | null;
@@ -313,12 +317,32 @@ export async function confirmLocalDraft(
   await deleteValue(DRAFT_STORE, current.key);
 }
 
+export function outboxMessageIntent(value: OutboxMessage): string {
+  return JSON.stringify([
+    value.connectionKey,
+    value.threadId,
+    value.input,
+    value.images,
+    value.files ?? [],
+    value.goal,
+    value.replyToAsyncQuestion,
+    value.replyToUserInput,
+  ]);
+}
+
 export async function putOutboxMessage(
   message: OutboxMessage,
   source?: MessageDraftSource,
 ): Promise<boolean> {
   return writeTransaction([OUTBOX_STORE, DRAFT_STORE], (transaction) => {
-    transaction.objectStore(OUTBOX_STORE).put(message);
+    const outbox = transaction.objectStore(OUTBOX_STORE);
+    const existing = outbox.get(message.id);
+    existing.onsuccess = () => {
+      const previous = existing.result as OutboxMessage | undefined;
+      if (previous && outboxMessageIntent(previous) !== outboxMessageIntent(message))
+        transaction.abort();
+      else outbox.put(message);
+    };
     if (!source) return;
     const drafts = transaction.objectStore(DRAFT_STORE);
     const key = source.projectId
@@ -373,7 +397,16 @@ function normalizeDraft(draft: UpdateThreadDraftRequest) {
 function cachedUserMessageIds(detail: ThreadDetail): Set<string> {
   return new Set(
     detail.turns.flatMap((turn) =>
-      turn.items.filter((item) => item.type === "userMessage").map((item) => item.id),
+      turn.items
+        .filter(
+          (item) =>
+            item.type === "userMessage" &&
+            item.deliveryReceipt?.version === 1 &&
+            item.deliveryReceipt.clientId === item.id &&
+            item.deliveryReceipt.threadId === detail.summary.id &&
+            item.deliveryReceipt.turnId === turn.id,
+        )
+        .map((item) => item.id),
     ),
   );
 }

@@ -271,9 +271,13 @@ export class ApiClient {
     return this.request(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
-  createProjectThread(projectId: string): Promise<CreateProjectThreadResponse> {
+  createProjectThread(
+    projectId: string,
+    clientCreationId: string = crypto.randomUUID(),
+  ): Promise<CreateProjectThreadResponse> {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
+      body: { clientCreationId },
       retry: true,
     });
   }

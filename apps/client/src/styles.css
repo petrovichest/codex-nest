@@ -946,6 +946,7 @@
   min-height: 36px;
   display: flex;
   align-items: center;
+  gap: 6px;
   padding: 0 10px;
   color: var(--muted-strong);
   font-size: 13px;
@@ -977,7 +978,12 @@
   background: color-mix(in srgb, var(--warning-text) 14%, var(--warning));
 }
 
-.app-update-indicator svg {
+.sidebar-search-action {
+  flex: 0 0 auto;
+}
+
+.app-update-indicator svg,
+.sidebar-search-action svg {
   width: 15px;
   height: 15px;
 }
@@ -6227,6 +6233,8 @@ button.message-file:hover:not(:disabled) {
     height: var(--control-touch-height);
   }
 
+  .sidebar-search-action,
+  .app-update-indicator,
   .project-icon-action,
   .thread-branch-toggle {
     width: var(--control-touch-height);
@@ -6550,7 +6558,7 @@ button.message-file:hover:not(:disabled) {
   font-size: 0.85em;
   color: var(--muted);
 }
-/* Search and quota details share the existing dialog and neutral surface system. */
+/* Search views use the existing dialog and neutral surface system. */
 .thread-search-dialog {
   width: min(820px, calc(100vw - 32px));
   max-height: min(820px, calc(100dvh - 48px));
@@ -6659,36 +6667,6 @@ button.message-file:hover:not(:disabled) {
   overflow-wrap: anywhere;
 }
 
-.rate-limits-dialog {
-  width: min(620px, calc(100vw - 32px));
-  max-height: calc(100dvh - 48px);
-  overflow: auto;
-}
-
-.rate-limit-windows {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 20px;
-}
-
-.rate-limit-facts {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.rate-limit-facts dt {
-  color: var(--muted);
-}
-.rate-limit-facts dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 @media (max-width: 600px) {
   .thread-search-backdrop {
     padding: var(--app-safe-area-top) var(--app-safe-area-right) var(--app-safe-area-bottom)
@@ -6703,9 +6681,5 @@ button.message-file:hover:not(:disabled) {
   }
   .thread-search-results {
     flex: 1;
-  }
-  .rate-limit-windows {
-    grid-template-columns: 1fr;
-    gap: 0;
   }
 }

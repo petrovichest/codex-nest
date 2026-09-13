@@ -70,8 +70,8 @@ describe("AttentionPanel", () => {
   });
 
   it("shows user-input questions one at a time and submits all answers at the end", async () => {
-    const respond = vi.fn().mockResolvedValue(undefined);
-    connection.mockReturnValue({ api: { respond } });
+    const sendReliable = vi.fn().mockResolvedValue("pending");
+    connection.mockReturnValue({ api: { respond: vi.fn() }, sendReliable });
     render(
       <AttentionPanel
         requests={[
@@ -129,24 +129,33 @@ describe("AttentionPanel", () => {
     expect(screen.getByText("Как выбирать изображение?")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отправить ответы" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Назад" })).toBeEnabled();
-    expect(respond).not.toHaveBeenCalled();
+    expect(sendReliable).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("radio", { name: /Галерея/ }));
     fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
 
     await waitFor(() =>
-      expect(respond).toHaveBeenCalledWith("questions", {
-        kind: "userInput",
-        answers: { storage: ["На сервере"], source: ["Галерея"] },
-      }),
+      expect(sendReliable).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          clientMessageId: expect.stringMatching(/^user-input:[a-f0-9]{64}$/u),
+          replyToUserInput: {
+            turnId: "turn",
+            itemId: "item",
+            answers: { storage: ["На сервере"], source: ["Галерея"] },
+          },
+        }),
+        expect.any(Function),
+      ),
     );
   });
 
   it("supports direct unanswered navigation, clearing, and an empty final submit", async () => {
-    const respond = vi.fn().mockResolvedValue(undefined);
+    const sendReliable = vi.fn().mockResolvedValue("pending");
     const updateUserInputDraft = vi.fn();
     connection.mockReturnValue({
-      api: { respond },
+      api: { respond: vi.fn() },
+      sendReliable,
       updateUserInputDraft,
       clearUserInputDraft: vi.fn(),
     });
@@ -178,7 +187,14 @@ describe("AttentionPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Вопрос 3 из 3: Итог/ }));
     fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
     await waitFor(() =>
-      expect(respond).toHaveBeenCalledWith("questions", { kind: "userInput", answers: {} }),
+      expect(sendReliable).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          clientMessageId: expect.stringMatching(/^user-input:[a-f0-9]{64}$/u),
+          replyToUserInput: { turnId: "turn", itemId: "item", answers: {} },
+        }),
+        expect.any(Function),
+      ),
     );
   });
 
@@ -245,7 +261,7 @@ describe("AttentionPanel", () => {
   it("records a freeform answer, inserts the transcript at the cursor, and waits for submit", async () => {
     const track = { stop: vi.fn() };
     installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
-    const respond = vi.fn().mockResolvedValue(undefined);
+    const sendReliable = vi.fn().mockResolvedValue("pending");
     const updatedTimingEstimate = {
       sampleCount: 6,
       estimatedFixedProcessingMs: 1_500,
@@ -261,7 +277,7 @@ describe("AttentionPanel", () => {
         }),
     );
     const timingChanged = vi.fn();
-    connection.mockReturnValue({ api: { respond, transcribe } });
+    connection.mockReturnValue({ sendReliable, api: { transcribe } });
     render(
       <AttentionPanel
         requests={[
@@ -326,16 +342,24 @@ describe("AttentionPanel", () => {
       expect.objectContaining({ type: "audio/webm;codecs=opus" }),
       expect.any(Number),
     );
-    expect(respond).not.toHaveBeenCalled();
+    expect(sendReliable).not.toHaveBeenCalled();
     expect(timingChanged).toHaveBeenCalledWith(updatedTimingEstimate);
     expect(track.stop).toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
     await waitFor(() =>
-      expect(respond).toHaveBeenCalledWith("questions", {
-        kind: "userInput",
-        answers: { details: ["Начало голос конец"] },
-      }),
+      expect(sendReliable).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          clientMessageId: expect.stringMatching(/^user-input:[a-f0-9]{64}$/u),
+          replyToUserInput: {
+            turnId: "turn",
+            itemId: "item",
+            answers: { details: ["Начало голос конец"] },
+          },
+        }),
+        expect.any(Function),
+      ),
     );
   });
 

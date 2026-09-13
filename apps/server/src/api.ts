@@ -9,6 +9,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ApiErrorCode,
   AsyncQuestionReference,
+  UserInputReply,
   AppUpdateStatus,
   ForceRestartAccepted,
   CreateForkOperationRequest,
@@ -72,6 +73,12 @@ import type {
 } from "@codexnest/protocol";
 
 import { AttentionValidationError, type AttentionManager } from "./attention";
+import {
+  DurableDelivery,
+  DeliveryContractError,
+  requireDeliveryReceipt,
+  requireDurableReceiver,
+} from "./durable-delivery";
 import {
   AttachmentStore,
   AttachmentTooLargeError,
@@ -534,6 +541,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       });
     void (lifecycle?.track(pending, "thread title generation") ?? pending);
   };
+  const durableDelivery = new DurableDelivery(store, bridge);
+
   const startTurnUnlocked = async (
     threadId: string,
     input: string,
@@ -541,17 +550,24 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
     goal = false,
+    replyToAsyncQuestion?: AsyncQuestionReference,
   ): Promise<TurnStartResult> => {
     if (clientMessageId) {
       const receipt = store.view().messageReceipts?.[clientMessageId];
       if (receipt) {
+        if (receipt.status === "canceled") {
+          throw new MessageQueueConflictError("Message has been canceled");
+        }
         if (
           receipt.threadId !== threadId ||
-          receipt.contentHash !== messageContentHash(input, images, files, goal)
+          receipt.contentHash !==
+            messageContentHash(input, images, files, goal, replyToAsyncQuestion)
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
-        return { turnId: receipt.turnId ?? clientMessageId };
+        if (receipt.status === "delivered" && receipt.deliveryVersion === 1 && receipt.turnId) {
+          return { turnId: receipt.turnId };
+        }
       }
     }
     let summary = projection.summary(threadId);
@@ -568,7 +584,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (!automaticContinuation) stoppedTeamParents.delete(threadId);
     }
     const shouldGenerateTitle =
-      projection.isUnmaterialized(threadId) && !projection.hasExplicitName(threadId);
+      (!summary.preview.trim() || projection.isUnmaterialized(threadId)) &&
+      !projection.hasExplicitName(threadId);
     if (
       summary.settings.collaborationMode === "team" &&
       store.view().threadMeta[threadId]?.managedTeamToolsAvailable !== true
@@ -632,7 +649,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         summary = projection.upsertThread(resumed.thread, currentSummary.archived);
         assertDirectInput(summary);
       };
-      if (!projection.isUnmaterialized(threadId)) await resume();
       const startParams = {
         threadId,
         clientUserMessageId: teamMarkerId ?? clientMessageId,
@@ -649,15 +665,30 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           teamClaim ? teamContinuationContext(store, threadId, teamClaim) : undefined,
         ),
       };
+      const send = async () => {
+        const clientId = startParams.clientUserMessageId;
+        if (!clientId) return bridge.request<unknown>("turn/start", startParams);
+        const receipt = await durableDelivery.send(
+          threadId,
+          clientId,
+          messageContentHash(input, images, validatedFiles, goal, replyToAsyncQuestion),
+          "turn/start",
+          startParams,
+        );
+        return {
+          turn: { id: receipt.turnId, items: [], status: "inProgress", error: null },
+          deliveryReceipt: receipt,
+        };
+      };
       let started: unknown;
       try {
-        started = await bridge.request<unknown>("turn/start", startParams);
+        started = await send();
       } catch (error) {
         // A durable empty session can be unloaded by a daemon restart. Only this
         // explicit rejection is safe to retry without first reconciling delivery.
         if (!isThreadNotLoadedError(error)) throw error;
         await resume();
-        started = await bridge.request<unknown>("turn/start", startParams);
+        started = await send();
       }
       const turn = parseTurnStart(started);
       turnId = turn.turn.id;
@@ -665,7 +696,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (teamClaim && teamMarkerId) {
         let recoveredTurnId: string | null;
         try {
-          recoveredTurnId = await deliveredClientMessageTurnId(bridge, threadId, teamMarkerId);
+          recoveredTurnId = await deliveredClientMessageTurnId(
+            bridge,
+            store,
+            threadId,
+            teamMarkerId,
+          );
         } catch {
           // Keep the durable claim parked until bridge recovery can reconcile it.
           throw error;
@@ -683,18 +719,6 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
     }
     await projection.markMaterialized(threadId);
-    await projection.setCurrentTurn(threadId, turnId);
-    if (clientMessageId) {
-      await store.update((state) => {
-        state.messageReceipts ??= {};
-        state.messageReceipts[clientMessageId] = {
-          threadId,
-          turnId,
-          contentHash: messageContentHash(input, images, validatedFiles, goal),
-          createdAt: Date.now(),
-        };
-      });
-    }
     if (clientMessageId) {
       projection.recordUserMessage(
         threadId,
@@ -737,10 +761,20 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
     goal = false,
+    replyToAsyncQuestion?: AsyncQuestionReference,
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
-      const run = () => startTurnUnlocked(threadId, input, images, files, clientMessageId, goal);
+      const run = () =>
+        startTurnUnlocked(
+          threadId,
+          input,
+          images,
+          files,
+          clientMessageId,
+          goal,
+          replyToAsyncQuestion,
+        );
       const result =
         projection.summary(threadId)?.settings.collaborationMode === "team"
           ? withKeyLock(teamParentLocks, threadId, run)
@@ -749,75 +783,61 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     });
   };
 
-  async function findReusableProjectThread(projectId: string): Promise<ThreadSummary | null> {
-    for (const candidate of projection.emptyThreadCandidates(projectId)) {
-      const meta = store.view().threadMeta[candidate.thread.id];
-      if (meta?.managedTeamToolsAvailable !== true || meta.sessionArtifactsVersion !== 1) {
-        continue;
-      }
-      if (candidate.knownUnmaterialized) {
-        try {
-          // Empty threads are not durable in Codex until their rollout receives metadata.
-          // Validate old candidates before reusing them and materialize candidates that are
-          // still loaded but predate eager materialization below.
-          await bridge.request("thread/metadata/update", {
-            threadId: candidate.thread.id,
-            gitInfo: { sha: null },
-          });
-          return candidate.thread;
-        } catch (error) {
-          if (!isMissingRolloutError(error)) throw error;
-          await projection.removeOrphanedThread(candidate.thread.id);
-          continue;
-        }
-      }
-      const detail = await projection.readThread(candidate.thread.id);
-      if (!detail.historyError && detail.turns.length === 0 && detail.queuedMessages.length === 0) {
-        await projection.markUnmaterialized(candidate.thread.id);
-        return projection.summary(candidate.thread.id) ?? candidate.thread;
-      }
-      await projection.markMaterialized(candidate.thread.id);
-    }
-    return null;
-  }
-
-  function getOrCreateProjectThread(projectId: string): Promise<ThreadSummary> {
-    const current = projectThreadCreations.get(projectId);
+  function getOrCreateProjectThread(
+    projectId: string,
+    clientCreationId: string,
+  ): Promise<ThreadSummary> {
+    const key = `${projectId}:${clientCreationId}`;
+    const current = projectThreadCreations.get(key);
     if (current) return current;
     const request = (async () => {
-      const existing = await findReusableProjectThread(projectId);
-      if (existing) return projection.setSettings(existing.id, projection.newSessionSettings);
+      requireDurableReceiver(bridge);
+      const previous = store.view().threadCreations?.[clientCreationId];
+      if (previous && previous.projectId !== projectId)
+        throw new ProjectConflictError("Creation id has already been used");
+      if (previous?.threadId) {
+        const existing = projection.summary(previous.threadId);
+        if (existing) return existing;
+      }
       codexManager?.assertTurnsAllowed();
       const project = store.view().projects.find((candidate) => candidate.id === projectId);
       if (!project) throw new ProjectNotFoundError("Project not found");
       const settings = projection.newSessionSettings;
-      const started = parseThreadStart(
-        await bridge.request<unknown>("thread/start", {
+      if (!previous) {
+        const params = {
+          clientCreationId,
           cwd: project.path,
           ...threadSettings(settings),
           developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS,
           dynamicTools: ROOT_DYNAMIC_TOOLS,
           ...(settings.collaborationMode === "team" ? { config: teamRuntimeConfig() } : {}),
-        }),
-      );
-      projection.upsertThread(started.thread);
-      await projection.markUnmaterialized(started.thread.id);
-      await markRootToolsAvailable(store, started.thread.id);
-      // Persist the empty rollout before returning it to the client. Otherwise an app-server
-      // restart between thread/start and the first turn leaves CodexNest holding a thread id
-      // that Codex can no longer resume. Keep the local candidate first so a transient failure
-      // can retry this metadata write instead of creating a second thread.
-      await bridge.request("thread/metadata/update", {
-        threadId: started.thread.id,
-        gitInfo: { sha: null },
-      });
-      return projection.setSettings(started.thread.id, settings);
-    })().finally(() => {
-      if (projectThreadCreations.get(projectId) === request) {
-        projectThreadCreations.delete(projectId);
+        };
+        await store.update((state) => {
+          state.threadCreations ??= {};
+          state.threadCreations[clientCreationId] ??= {
+            projectId,
+            params,
+            settings,
+            threadId: null,
+          };
+        });
       }
+      const prepared = store.view().threadCreations![clientCreationId]!;
+      const response = await bridge.request<unknown>("thread/start", prepared.params);
+      const started = parseThreadStart(response);
+      requireDeliveryReceipt(response, clientCreationId, started.thread.id);
+      projection.upsertThread(started.thread);
+      await store.update((state) => {
+        state.threadCreations![clientCreationId]!.threadId = started.thread.id;
+      });
+      await markRootToolsAvailable(store, started.thread.id);
+      // The receiver persisted the empty thread before acknowledging creation.
+      // No metadata write or model turn is needed to materialize it.
+      return projection.setSettings(started.thread.id, prepared.settings ?? settings);
+    })().finally(() => {
+      if (projectThreadCreations.get(key) === request) projectThreadCreations.delete(key);
     });
-    projectThreadCreations.set(projectId, request);
+    projectThreadCreations.set(key, request);
     return request;
   }
 
@@ -986,6 +1006,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
     replyToAsyncQuestion?: AsyncQuestionReference,
+    replyToUserInput?: UserInputReply,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
     const summary = projection.summary(threadId);
@@ -1001,21 +1022,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     );
     const hasRecognizedSkills = structuredInput.some((item) => item.type === "skill");
     const userInput = replyToAsyncQuestion ? undefined : pendingUserInput(threadId, turnId);
-    if (userInput && !hasRecognizedSkills) {
-      const firstQuestion = userInput.questions[0];
-      const response: AttentionResponse = {
-        kind: "userInput",
-        answers:
-          firstQuestion && input.trim() && images.length === 0 && validatedFiles.length === 0
-            ? { [firstQuestion.id]: [input.trim()] }
-            : {},
-      };
-      const resolved = attention.resolve(userInput.id, response);
-      if (resolved) {
-        await projection.recordAttentionResponse(resolved, response);
-        if (images.length === 0 && validatedFiles.length === 0) return turnId;
-      }
-    }
+    const questionReply =
+      replyToUserInput ??
+      (userInput && !hasRecognizedSkills && userInput.itemId
+        ? {
+            turnId,
+            itemId: userInput.itemId,
+            answers:
+              userInput.questions[0] && input.trim()
+                ? { [userInput.questions[0].id]: [input.trim()] }
+                : {},
+          }
+        : undefined);
     const teamClaim =
       summary.settings.collaborationMode === "team"
         ? await claimTeamResults(store, threadId)
@@ -1034,36 +1052,71 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     let resultTurnId: string;
     try {
-      const result = parseTurnSteer(
-        await bridge.request<unknown>("turn/steer", {
-          threadId,
-          expectedTurnId: turnId,
-          clientUserMessageId: teamMarkerId ?? clientMessageId,
-          input: structuredInput,
-          ...(teamClaim
-            ? {
-                additionalContext: {
-                  "codexnest.team.results": {
-                    kind: "application",
-                    value: teamContinuationContext(store, threadId, teamClaim),
-                  },
+      const params = {
+        threadId,
+        expectedTurnId: turnId,
+        clientUserMessageId: teamMarkerId ?? clientMessageId,
+        input: structuredInput,
+        ...(questionReply
+          ? {
+              userInputResponse: {
+                itemId: questionReply.itemId,
+                response: {
+                  answers: Object.fromEntries(
+                    Object.entries(questionReply.answers).map(([id, answers]) => [id, { answers }]),
+                  ),
                 },
-              }
-            : {}),
-        }),
-      );
+              },
+            }
+          : {}),
+        ...(teamClaim
+          ? {
+              additionalContext: {
+                "codexnest.team.results": {
+                  kind: "application",
+                  value: teamContinuationContext(store, threadId, teamClaim),
+                },
+              },
+            }
+          : {}),
+      };
+      const clientId = params.clientUserMessageId;
+      const result = clientId
+        ? {
+            turnId: (
+              await durableDelivery.send(
+                threadId,
+                clientId,
+                messageContentHash(
+                  input,
+                  images,
+                  validatedFiles,
+                  false,
+                  replyToUserInput ?? replyToAsyncQuestion,
+                ),
+                "turn/steer",
+                params,
+              )
+            ).turnId!,
+          }
+        : parseTurnSteer(await bridge.request("turn/steer", params));
       if (result.turnId !== turnId) {
         app.log.warn(
           { threadId, expectedTurnId: turnId, returnedTurnId: result.turnId },
           "turn/steer returned an unexpected turn ID",
         );
       }
-      resultTurnId = turnId;
+      resultTurnId = result.turnId;
     } catch (error) {
       if (teamClaim && teamMarkerId) {
         let recoveredTurnId: string | null;
         try {
-          recoveredTurnId = await deliveredClientMessageTurnId(bridge, threadId, teamMarkerId);
+          recoveredTurnId = await deliveredClientMessageTurnId(
+            bridge,
+            store,
+            threadId,
+            teamMarkerId,
+          );
         } catch {
           throw error;
         }
@@ -1077,7 +1130,13 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         throw error;
       }
     }
-    if (projection.summary(threadId)) await projection.setCurrentTurn(threadId, resultTurnId);
+    if (questionReply && userInput && userInput.itemId === questionReply.itemId) {
+      await projection.recordAttentionResponse(userInput, {
+        kind: "userInput",
+        answers: questionReply.answers,
+      });
+      attention.expire(userInput.id);
+    }
     if (clientMessageId) {
       projection.recordUserMessage(
         threadId,
@@ -1111,6 +1170,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     files: ThreadFileAttachment[],
     clientMessageId: string | null,
     replyToAsyncQuestion?: AsyncQuestionReference,
+    replyToUserInput?: UserInputReply,
   ): Promise<string> => {
     const run = () =>
       steerTurnUnlocked(
@@ -1121,12 +1181,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         files,
         clientMessageId,
         replyToAsyncQuestion,
+        replyToUserInput,
       );
     return projection.summary(threadId)?.settings.collaborationMode === "team"
       ? withKeyLock(teamParentLocks, threadId, run)
       : run();
   };
   const queue = new MessageQueue(store, {
+    requiresDurableReceipt: true,
     paused: () => codexManager?.maintenanceActive ?? false,
     acceptsInput: (threadId) => projection.summary(threadId)?.canAcceptDirectInput !== false,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
@@ -1139,6 +1201,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.files ?? [],
         message.id,
         message.goal ?? false,
+        message.replyToAsyncQuestion,
       ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(
@@ -1149,35 +1212,32 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.files ?? [],
         message.id,
         message.replyToAsyncQuestion,
+        message.replyToUserInput,
       ),
     deliveredTurnId: async (threadId, messageId) => {
-      // This is an error/recovery path. Paginate so an older delivered message
-      // cannot be mistaken for an unsent one after a reconnect.
-      let cursor: string | null = null;
-      do {
-        const page = parseTurnsList(
-          await bridge.request<unknown>(
-            "thread/turns/list",
-            {
-              threadId,
-              cursor,
-              limit: 100,
-              sortDirection: "desc",
-              itemsView: "full",
-            },
-            30_000,
-          ),
+      const receipt = store.view().messageReceipts?.[messageId];
+      if (receipt?.threadId !== threadId || receipt.deliveryVersion !== 1) return null;
+      let delivered;
+      try {
+        delivered = await durableDelivery.replay(messageId);
+      } catch (error) {
+        if (!isThreadNotLoadedError(error)) throw error;
+        await bridge.request("thread/resume", { threadId, excludeTurns: true });
+        delivered = await durableDelivery.replay(messageId);
+      }
+      const message = store
+        .view()
+        .messageQueues?.[threadId]?.find((message) => message.id === messageId);
+      if (delivered.turnId && message)
+        projection.recordUserMessage(
+          threadId,
+          delivered.turnId,
+          messageId,
+          message.text,
+          [...(message.images ?? [])],
+          [...(message.files ?? [])],
         );
-        const delivered = page.data.find((turn) =>
-          turn.items.some((item) => item.type === "userMessage" && item.clientId === messageId),
-        );
-        if (delivered) {
-          await projection.restoreDeliveredTurn(threadId, delivered);
-          return delivered.id;
-        }
-        cursor = page.nextCursor;
-      } while (cursor !== null);
-      return null;
+      return delivered.turnId;
     },
     publish: (threadId, messages) => projection.publishQueue(threadId, messages),
   });
@@ -2353,7 +2413,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       void queue.drain(event.thread.id).catch(() => undefined);
       if (!event.thread.currentTurnId && event.thread.relation.kind === "session") {
         if (hasClaimedTeamContinuation(store, event.thread.id)) {
-          void runRecovery().catch(() => undefined);
+          // Recovery publishes thread state itself. An unresolved legacy claim
+          // must not turn that publication into an endless recovery loop.
+          if (!recoveryPromise) void runRecovery().catch(() => undefined);
         } else {
           scheduleTeamContinuation(event.thread.id);
         }
@@ -3077,16 +3139,27 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string } }>("/api/v1/projects/:id/threads", async (request, reply) => {
-    if (!store.view().projects.some((project) => project.id === request.params.id)) {
-      return apiError(reply, 404, "not_found", "Project not found");
-    }
-    const thread = await getOrCreateProjectThread(request.params.id);
-    const draft = cloneView<CreateProjectThreadResponse["draft"]>(
-      store.view().threadMeta[thread.id]?.draft ?? null,
-    );
-    return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
-  });
+  app.post<{ Params: { id: string }; Body: { clientCreationId?: string } }>(
+    "/api/v1/projects/:id/threads",
+    async (request, reply) => {
+      if (!store.view().projects.some((project) => project.id === request.params.id)) {
+        return apiError(reply, 404, "not_found", "Project not found");
+      }
+      const clientCreationId = request.body?.clientCreationId;
+      if (
+        typeof clientCreationId !== "string" ||
+        !clientCreationId.trim() ||
+        clientCreationId.length > 512
+      ) {
+        return apiError(reply, 400, "validation_failed", "A stable clientCreationId is required");
+      }
+      const thread = await getOrCreateProjectThread(request.params.id, clientCreationId);
+      const draft = cloneView<CreateProjectThreadResponse["draft"]>(
+        store.view().threadMeta[thread.id]?.draft ?? null,
+      );
+      return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
+    },
+  );
 
   app.get<{ Querystring: { q?: string; archived?: string; cursor?: string } }>(
     "/api/v1/threads/search",
@@ -4053,7 +4126,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.input,
         body.images,
         body.clientMessageId,
-        { goal: body.goal, files, replyToAsyncQuestion: body.replyToAsyncQuestion },
+        {
+          goal: body.goal,
+          files,
+          replyToAsyncQuestion: body.replyToAsyncQuestion,
+          replyToUserInput: body.replyToUserInput,
+        },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
     },
@@ -4200,6 +4278,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     "/api/v1/attention/:attentionId/respond",
     async (request, reply) => {
       const body = requireRecord<AttentionResponse>(request.body);
+      if (
+        attention.get(request.params.attentionId)?.kind === "userInput" ||
+        body.kind === "userInput"
+      ) {
+        return apiError(
+          reply,
+          409,
+          "conflict",
+          "Ответ на вопрос нужно отправить через очередь с постоянным идентификатором сообщения.",
+        );
+      }
       const resolved = attention.resolve(request.params.attentionId, body);
       if (!resolved) {
         return apiError(
@@ -4289,6 +4378,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", error.message);
     if (error instanceof ThreadHistoryConflictError)
       return apiError(reply, 409, "history_changed", error.message);
+    if (error instanceof DeliveryContractError)
+      return apiError(reply, 409, "conflict", error.message);
     if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof VoiceTranscriptionDraftConflictError) {
@@ -4862,48 +4953,27 @@ async function handleManagedTeamToolCall(
   }
 
   if (tool === "steer_task") {
-    if (task.status !== "running" || !task.childTurnId) {
-      return finish(dynamicToolError("Only a running managed task can be steered"));
-    }
     const message = requiredToolString(args, "message");
     const markerId = teamToolMarkerId(prepared!.key);
-    let resultTurnId: string | null = null;
-    if (!prepared!.created) {
-      resultTurnId = await deliveredClientMessageTurnId(bridge, task.childThreadId, markerId);
-      if (!resultTurnId) {
-        return finish(
-          dynamicToolError(
-            "The previous steer delivery is ambiguous; inspect the task before steering again",
-          ),
-        );
-      }
-    } else {
-      try {
-        resultTurnId = parseTurnSteer(
-          await bridge.request<unknown>("turn/steer", {
-            threadId: task.childThreadId,
-            expectedTurnId: task.childTurnId,
-            clientUserMessageId: markerId,
-            input: messageInput(message, []),
-          }),
-        ).turnId;
-      } catch (error) {
-        let recovered: string | null;
-        try {
-          recovered = await deliveredClientMessageTurnId(bridge, task.childThreadId, markerId);
-        } catch {
-          throw error;
-        }
-        if (!recovered) {
-          return finish(
-            dynamicToolError(
-              "The steer request was not confirmed; inspect the task before retrying",
-            ),
-          );
-        }
-        resultTurnId = recovered;
-      }
+    const sender = new DurableDelivery(store, bridge);
+    const previous = store.view().messageReceipts?.[markerId];
+    if (!previous && (task.status !== "running" || !task.childTurnId)) {
+      return finish(dynamicToolError("Only a running managed task can be steered"));
     }
+    const resultTurnId = (
+      await sender.send(
+        task.childThreadId,
+        markerId,
+        messageContentHash(message, [], [], false),
+        "turn/steer",
+        {
+          threadId: task.childThreadId,
+          expectedTurnId: task.childTurnId,
+          clientUserMessageId: markerId,
+          input: messageInput(message, []),
+        },
+      )
+    ).turnId;
     await store.update((state) => {
       const current = state.threadMeta[threadId]?.teamOrchestration?.tasks[taskId];
       if (!current || isTerminalTask(current)) return;
@@ -4958,10 +5028,17 @@ async function createManagedTeamTask(
   if (store.view().threadMeta[parent.id]?.managedTeamToolsAvailable !== true) {
     throw new ProjectConflictError("This Team session does not have managed tools");
   }
-  const started = recoveredThread
-    ? { thread: recoveredThread }
-    : parseThreadStart(
-        await bridge.request<unknown>("thread/start", {
+  const creationId = `team-child:${parent.id}:${taskId}`;
+  let child = recoveredThread;
+  if (!child) {
+    requireDurableReceiver(bridge);
+    await store.update((state) => {
+      state.threadCreations ??= {};
+      state.threadCreations[creationId] ??= {
+        projectId: `team:${parent.id}`,
+        threadId: null,
+        params: {
+          clientCreationId: creationId,
           cwd: parent.cwd,
           model: options.model,
           serviceTier: null,
@@ -4970,10 +5047,21 @@ async function createManagedTeamTask(
           developerInstructions: TEAM_CHILD_INSTRUCTIONS,
           dynamicTools: TEAM_CHILD_DYNAMIC_TOOLS,
           threadSource: childThreadSource,
-        }),
-      );
+        },
+      };
+    });
+    const response = await bridge.request(
+      "thread/start",
+      store.view().threadCreations![creationId]!.params,
+    );
+    child = parseThreadStart(response).thread;
+    requireDeliveryReceipt(response, creationId, child.id);
+    await store.update((state) => {
+      state.threadCreations![creationId]!.threadId = child!.id;
+    });
+  }
+  const started = { thread: child };
   projection.upsertThread(started.thread);
-  await projection.markUnmaterialized(started.thread.id);
   await bridge
     .request("thread/name/set", { threadId: started.thread.id, name: title })
     .catch(() => undefined);
@@ -5229,6 +5317,7 @@ async function startQueuedTeamTasks(
       const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
       if (task?.status === "queued") {
         task.status = "starting";
+        task.deliveryVersion = 1;
         task.lastActivityAt = Date.now();
       }
     });
@@ -5277,10 +5366,15 @@ async function startQueuedTeamTasks(
         },
         30_000,
       );
-      const turn = parseTurnStart(
-        await bridge.request<unknown>("turn/start", {
+      const markerId = launchTask.startMessageId ?? teamTaskStartMarkerId(launchTask.id);
+      const receipt = await new DurableDelivery(store, bridge).send(
+        launchTask.childThreadId,
+        markerId,
+        messageContentHash(launchTask.prompt, [], [], false),
+        "turn/start",
+        {
           threadId: launchTask.childThreadId,
-          clientUserMessageId: launchTask.startMessageId ?? teamTaskStartMarkerId(launchTask.id),
+          clientUserMessageId: markerId,
           input: messageInput(launchTask.prompt, []),
           ...managedChildTurnSettings(
             parent.settings,
@@ -5288,10 +5382,10 @@ async function startQueuedTeamTasks(
             launchTask,
             runtime,
           ),
-        }),
+        },
       );
+      const turn = { turn: { id: receipt.turnId! } };
       await projection.markMaterialized(launchTask.childThreadId);
-      await projection.setCurrentTurn(launchTask.childThreadId, turn.turn.id);
       await store.update((state) => {
         const task = state.threadMeta[parentThreadId]?.teamOrchestration?.tasks[queued.id];
         if (!task || task.status !== "starting") return;
@@ -5307,6 +5401,7 @@ async function startQueuedTeamTasks(
       try {
         recoveredTurnId = await deliveredClientMessageTurnId(
           bridge,
+          store,
           queued.childThreadId,
           queued.startMessageId ?? teamTaskStartMarkerId(queued.id),
         );
@@ -5636,6 +5731,7 @@ async function markTeamClaimDispatch(
           ...task.delivery,
           markerId,
           dispatchStartedAt,
+          deliveryVersion: 1,
           contextHash,
         };
       }
@@ -5644,6 +5740,7 @@ async function markTeamClaimDispatch(
           ...task.watchdog,
           markerId,
           dispatchStartedAt,
+          deliveryVersion: 1,
           contextHash,
         };
       }
@@ -5964,7 +6061,7 @@ async function reconcileTeamOrchestration(
     const parent = projection.summary(parentThreadId);
     const claimedById = new Map<
       string,
-      { results: TeamResultClaim["results"]; markerId: string | null }
+      { results: TeamResultClaim["results"]; markerId: string | null; legacyDispatch: boolean }
     >();
     for (const task of Object.values(orchestration.tasks)) {
       if (task.workspace) {
@@ -5979,6 +6076,7 @@ async function reconcileTeamOrchestration(
         const claim = claimedById.get(task.delivery.claimId) ?? {
           results: [],
           markerId: task.delivery.markerId ?? null,
+          legacyDispatch: false,
         };
         if (isTerminalTask(task) && task.terminalTurnId && task.result) {
           claim.results.push({
@@ -5991,14 +6089,21 @@ async function reconcileTeamOrchestration(
           });
         }
         claim.markerId ??= task.delivery.markerId ?? null;
+        claim.legacyDispatch ||= Boolean(
+          task.delivery.dispatchStartedAt && task.delivery.deliveryVersion !== 1,
+        );
         claimedById.set(task.delivery.claimId, claim);
       }
       if (task.watchdog?.status === "claimed" && task.watchdog.claimId) {
         const claim = claimedById.get(task.watchdog.claimId) ?? {
           results: [],
           markerId: task.watchdog.markerId ?? null,
+          legacyDispatch: false,
         };
         claim.markerId ??= task.watchdog.markerId ?? null;
+        claim.legacyDispatch ||= Boolean(
+          task.watchdog.dispatchStartedAt && task.watchdog.deliveryVersion !== 1,
+        );
         claimedById.set(task.watchdog.claimId, claim);
       }
       if (task.status !== "running" && task.status !== "starting") continue;
@@ -6008,6 +6113,7 @@ async function reconcileTeamOrchestration(
           expectedTurnId =
             (await deliveredClientMessageTurnId(
               bridge,
+              store,
               task.childThreadId,
               task.startMessageId ?? teamTaskStartMarkerId(task.id),
             )) ?? undefined;
@@ -6019,6 +6125,15 @@ async function reconcileTeamOrchestration(
           continue;
         }
         if (!expectedTurnId) {
+          if (task.deliveryVersion !== 1) {
+            projection.emit(
+              "projectionError",
+              new DeliveryContractError(
+                "Запуск старой задачи Team не подтверждён. Повторная отправка остановлена.",
+              ),
+            );
+            continue;
+          }
           await store.update((draft) => {
             const current = draft.threadMeta[parentThreadId]?.teamOrchestration?.tasks[task.id];
             if (current?.status === "starting" && !current.childTurnId) {
@@ -6142,6 +6257,18 @@ async function reconcileTeamOrchestration(
       }
     }
     for (const [claimId, claim] of claimedById) {
+      if (
+        claim.legacyDispatch &&
+        (!claim.markerId || !store.view().messageReceipts?.[claim.markerId])
+      ) {
+        projection.emit(
+          "projectionError",
+          new DeliveryContractError(
+            "Доставка старой команды Team не подтверждена. Повторная отправка остановлена.",
+          ),
+        );
+        continue;
+      }
       if (!claim.markerId) {
         await releaseTeamClaim(store, parentThreadId, claimId);
         affected.add(parentThreadId);
@@ -6150,6 +6277,7 @@ async function reconcileTeamOrchestration(
       try {
         const deliveredTurnId = await deliveredClientMessageTurnId(
           bridge,
+          store,
           parentThreadId,
           claim.markerId,
         );
@@ -6652,17 +6780,23 @@ async function findThreadBySource(bridge: CodexBridge, source: string): Promise<
 
 async function deliveredClientMessageTurnId(
   bridge: CodexBridge,
+  store: StateStore,
   threadId: string,
   markerId: string,
 ): Promise<string | null> {
-  const result = parseThreadRead(
-    await bridge.request<unknown>("thread/read", { threadId, includeTurns: true }, 30_000),
-  );
-  return (
-    result.thread.turns.find((turn) =>
-      turn.items.some((item) => item.type === "userMessage" && item.clientId === markerId),
-    )?.id ?? null
-  );
+  const saved = store.view().messageReceipts?.[markerId];
+  if (!saved) return null;
+  if (saved.threadId !== threadId || saved.deliveryVersion !== 1) {
+    throw new DeliveryContractError("Доставка старой команды Team не подтверждена Codex.");
+  }
+  const sender = new DurableDelivery(store, bridge);
+  try {
+    return (await sender.replay(markerId)).turnId;
+  } catch (error) {
+    if (!isThreadNotLoadedError(error)) throw error;
+    await bridge.request("thread/resume", { threadId, excludeTurns: true });
+    return (await sender.replay(markerId)).turnId;
+  }
 }
 
 function teamToolMarkerId(operationKey: string): string {
@@ -7574,14 +7708,21 @@ function validateQueueMessageBody(value: unknown): {
   goal: boolean;
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
+  replyToUserInput?: UserInputReply;
 } {
   const body = requireRecord<QueueMessageRequest>(value);
   if (
     Object.keys(body).some(
       (key) =>
-        !["input", "images", "files", "goal", "clientMessageId", "replyToAsyncQuestion"].includes(
-          key,
-        ),
+        ![
+          "input",
+          "images",
+          "files",
+          "goal",
+          "clientMessageId",
+          "replyToAsyncQuestion",
+          "replyToUserInput",
+        ].includes(key),
     )
   ) {
     throw new ProjectValidationError("Unknown queue field");
@@ -7590,6 +7731,7 @@ function validateQueueMessageBody(value: unknown): {
   const files = validateFiles(body.files);
   validateAttachmentPayloadSize(images, files);
   const clientMessageId = optionalClientMessageId(body.clientMessageId);
+  if (!clientMessageId) throw new ProjectValidationError("clientMessageId is required");
   if (typeof body.input !== "string" || (!body.input.trim() && !images.length && !files.length)) {
     throw new ProjectValidationError("input, images, or files are required");
   }
@@ -7601,6 +7743,25 @@ function validateQueueMessageBody(value: unknown): {
   }
   if (body.clientMessageId !== undefined && clientMessageId === null) {
     throw new ProjectValidationError("clientMessageId must not be empty");
+  }
+  let replyToUserInput: UserInputReply | undefined;
+  if (body.replyToUserInput !== undefined) {
+    const reference = requireRecord<UserInputReply>(body.replyToUserInput);
+    if (
+      !optionalClientMessageId(reference.turnId) ||
+      !optionalClientMessageId(reference.itemId) ||
+      !isRecord(reference.answers) ||
+      !clientMessageId ||
+      body.goal ||
+      body.replyToAsyncQuestion ||
+      Object.values(reference.answers).some(
+        (answers) =>
+          !Array.isArray(answers) || answers.some((answer) => typeof answer !== "string"),
+      )
+    ) {
+      throw new ProjectValidationError("Invalid user input reply");
+    }
+    replyToUserInput = reference;
   }
   let replyToAsyncQuestion: AsyncQuestionReference | undefined;
   if (body.replyToAsyncQuestion !== undefined) {
@@ -7627,6 +7788,7 @@ function validateQueueMessageBody(value: unknown): {
     goal: body.goal ?? false,
     ...(clientMessageId ? { clientMessageId } : {}),
     ...(replyToAsyncQuestion ? { replyToAsyncQuestion } : {}),
+    ...(replyToUserInput ? { replyToUserInput } : {}),
   };
 }
 
@@ -7681,10 +7843,7 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
     apiError(reply, 400, "validation_failed", "goal objective must be 1-4000 characters");
     return undefined;
   }
-  if (
-    value.clientMessageId !== undefined &&
-    optionalClientMessageId(value.clientMessageId) === null
-  ) {
+  if (optionalClientMessageId(value.clientMessageId) === null) {
     apiError(reply, 400, "validation_failed", "clientMessageId must not be empty");
     return undefined;
   }
