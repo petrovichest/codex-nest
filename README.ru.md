@@ -95,17 +95,24 @@ curl -fsSL https://github.com/petrovichest/codex-nest/releases/latest/download/i
 
 ### То же рабочее пространство на телефоне
 
-Прочитайте план и продолжите сессию, ответьте на уточнение или откройте готовый
+Откройте список сессий, чтобы переключаться между проектами и диалогами.
+Прочитайте план, продолжите сессию, ответьте на уточнение или откройте готовый
 отчёт. Здесь показан мобильный веб-интерфейс, который также используется внутри
 Android-приложения.
 
 <p align="center">
+  <a href="./docs/assets/mobile-sessions.png"><img src="./docs/assets/mobile-sessions.png" width="260" alt="Светлая тема на телефоне: открытая панель с проектами, закреплёнными и активными сессиями" /></a>
   <a href="./docs/assets/mobile-session.png"><img src="./docs/assets/mobile-session.png" width="260" alt="Светлая тема на телефоне: план, завершённая задача и поле ввода" /></a>
+</p>
+
+<p align="center"><sub>Переключайтесь между сессиями · Продолжайте диалог</sub></p>
+
+<p align="center">
   <a href="./docs/assets/mobile-question.png"><img src="./docs/assets/mobile-question.png" width="260" alt="Тёмная тема на телефоне: варианты ответа и сообщение в очереди" /></a>
   <a href="./docs/assets/mobile-report.png"><img src="./docs/assets/mobile-report.png" width="260" alt="Тёмная тема на телефоне: отчёт о поиске в просмотрщике Markdown" /></a>
 </p>
 
-<p align="center"><sub>Продолжайте диалог · Принимайте решения · Читайте результат</sub></p>
+<p align="center"><sub>Принимайте решения · Читайте результат</sub></p>
 
 ---
 

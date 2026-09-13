@@ -78,6 +78,14 @@ test("capture the documentation gallery and covers", async ({ browser }) => {
     await page.locator(".turn-activity-disclosure").scrollIntoViewIfNeeded();
   });
   await screen("mobile-session", "light", true, "session-main");
+  await screen("mobile-sessions", "light", true, "session-main", async (page) => {
+    await page.getByRole("button", { name: "Open task list", exact: true }).click();
+    const sidebar = page.locator(".sidebar.open");
+    await expect(sidebar).toBeVisible();
+    await expect(sidebar.locator('a[href="/threads/session-main"]')).toHaveClass(/\bactive\b/u);
+    await expect(sidebar.locator('a[href="/threads/session-active"]')).toBeVisible();
+    await expect(sidebar.locator('a[href="/threads/session-complete"]')).toBeVisible();
+  });
   await screen("mobile-question", "dark", true, "session-attention", async (page) => {
     await expect(page.getByText("When should the project list update?")).toBeVisible();
   });

@@ -92,16 +92,23 @@ Expand the activity log to review commands, test output and file changes.
 
 ### The same workspace on your phone
 
-Read the plan and continue the session, answer a clarification, or open the
-finished report. These are mobile web views, also used inside the Android app.
+Open the session list to switch between projects and conversations. Read the
+plan, continue the session, answer a clarification, or open the finished report.
+These are mobile web views, also used inside the Android app.
 
 <p align="center">
+  <a href="./docs/assets/mobile-sessions.png"><img src="./docs/assets/mobile-sessions.png" width="260" alt="Light mobile interface: open sidebar with projects, pinned and active sessions" /></a>
   <a href="./docs/assets/mobile-session.png"><img src="./docs/assets/mobile-session.png" width="260" alt="Light mobile interface: plan, completed task and message composer" /></a>
+</p>
+
+<p align="center"><sub>Switch between sessions · Continue the conversation</sub></p>
+
+<p align="center">
   <a href="./docs/assets/mobile-question.png"><img src="./docs/assets/mobile-question.png" width="260" alt="Dark mobile interface: clarification options and a queued message" /></a>
   <a href="./docs/assets/mobile-report.png"><img src="./docs/assets/mobile-report.png" width="260" alt="Dark mobile interface: project search report in the Markdown viewer" /></a>
 </p>
 
-<p align="center"><sub>Continue the conversation · Make a decision · Read the result</sub></p>
+<p align="center"><sub>Make a decision · Read the result</sub></p>
 
 ---
 

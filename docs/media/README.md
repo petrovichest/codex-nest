@@ -13,9 +13,10 @@ npm run docs:images -w @codexnest/client
 ```
 
 The command starts the client on `127.0.0.1:4173`, mocks HTTP and WebSocket data,
-and captures six PNGs in `docs/assets`. It uses fixed time, loaded fonts, reduced
-motion and a fresh browser context for every screen. It does not start the API
-server or invoke Codex. Unmatched network requests fail the capture.
+and captures seven PNGs in `docs/assets`, including the open mobile session list.
+It uses fixed time, loaded fonts, reduced motion and a fresh browser context for
+every screen. It does not start the API server or invoke Codex. Unmatched network
+requests fail the capture.
 
 The separate documentation suite lives in `apps/client/e2e/docs`. It reuses the
 visual fixture infrastructure without updating visual regression snapshots and
