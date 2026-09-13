@@ -4039,6 +4039,154 @@ describe("Activity", () => {
     await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "queued"));
   });
 
+  it("shows a submitted user-input response once and hides stale delivery records", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            {
+              type: "userInputResponse",
+              id: "response",
+              status: "completed",
+              entries: [
+                {
+                  header: "Положение",
+                  question: "Где разместить точку статуса?",
+                  answers: ["Перед поиском"],
+                },
+              ],
+              timestamp: 2,
+              afterItemId: "request",
+            },
+            {
+              type: "userMessage",
+              id: "user-input:delivered",
+              status: "completed",
+              text: "Где разместить точку статуса?\nПеред поиском",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
+        },
+      ],
+      queuedMessages: [
+        {
+          id: "server-confirmed-answer",
+          threadId: "thread",
+          text: "Где разместить точку статуса?\nПеред поиском",
+          createdAt: 2,
+          status: "dispatching",
+          replyToUserInput: {
+            turnId: "turn",
+            itemId: "request",
+            answers: { position: ["Перед поиском"] },
+          },
+        },
+      ],
+    });
+    context.state.optimisticMessages.thread = [
+      {
+        id: "user-input:late-optimistic-state",
+        threadId: "thread",
+        text: "Где разместить точку статуса?\nПеред поиском",
+        images: [],
+        createdAt: 3,
+        destination: "queue",
+        turnId: null,
+        serverAccepted: true,
+      },
+    ];
+
+    const view = renderThread();
+
+    expect(screen.getAllByText("Где разместить точку статуса?")).toHaveLength(1);
+    expect(screen.getAllByText("Перед поиском")).toHaveLength(1);
+    expect(view.container.querySelector('[data-message-id="user-input:delivered"]')).toBeNull();
+    expect(screen.queryByRole("region", { name: "Очередь сообщений" })).toBeNull();
+  });
+
+  it("keeps an async answer inside its question card without a second user message", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    mockThreadConnection(api, running, {
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            {
+              type: "agentMessage",
+              id: "async-question",
+              status: "completed",
+              text: "",
+              questions: [{ title: "Как проверять?", options: ["Быстро", "Подробно"] }],
+              questionKey: "stable-question",
+              delivery: "async",
+              images: [],
+              timestamp: 1,
+              phase: "commentary",
+            },
+            {
+              type: "userMessage",
+              id: "async-answer:thread:turn:stable-question",
+              status: "completed",
+              text: "Как проверять?\nПодробно",
+              images: [],
+              timestamp: 2,
+              phase: null,
+            },
+          ],
+        },
+      ],
+    });
+
+    const view = renderThread();
+
+    const questionCard = screen.getByRole("region", { name: "Вопросы Codex" });
+    expect(questionCard).toHaveTextContent("Как проверять? Подробно");
+    expect(
+      view.container.querySelector('[data-message-id="async-answer:thread:turn:stable-question"]'),
+    ).toBeNull();
+  });
+
+  it("keeps failed question replies visible and retryable", () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running);
+    context.state.optimisticMessages.thread = [
+      {
+        id: "user-input:failed",
+        threadId: "thread",
+        text: "Ответ, который не удалось доставить",
+        images: [],
+        createdAt: 1,
+        destination: "queue",
+        turnId: null,
+        deliveryError: { message: "Нет связи — повторим отправку", retryable: true },
+      },
+    ];
+
+    const view = renderThread();
+
+    expect(screen.getByRole("region", { name: "Очередь сообщений" })).toBeInTheDocument();
+    expect(screen.getByText("Нет связи — повторим отправку")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Повторить отправку" })).toBeEnabled();
+    expect(view.container.querySelector('[data-message-id="user-input:failed"]')).not.toBeNull();
+  });
+
   it("disables queue actions until optimistic messages are confirmed", () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };

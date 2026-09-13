@@ -128,6 +128,7 @@ type LocalImageLoader = (path: string) => Promise<Blob>;
 type LocalArtifactOpener = (artifact: ArtifactDescriptor, opener: HTMLButtonElement | null) => void;
 
 const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
+const QUESTION_REPLY_MESSAGE_ID_PREFIXES = ["user-input:", "async-answer:"] as const;
 
 type NewSessionPreparation = {
   active: boolean;
@@ -789,7 +790,9 @@ export function ThreadPage({
   );
   const queuedMessages = preparationRef.current.active
     ? []
-    : mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages);
+    : mergeOptimisticQueue(detail?.queuedMessages ?? [], optimisticQueuedMessages).filter(
+        (message) => !isQuestionReplyDelivery(message) || Boolean(message.deliveryError),
+      );
   const queuedShortcutMessage =
     queueAction === null && queuedMessages[0]?.confirmed && queuedMessages[0].status === "queued"
       ? queuedMessages[0]
@@ -4706,9 +4709,12 @@ export function SearchHistoryView({
     highlight.current?.scrollIntoView?.({ block: "center" });
   }, [turn, occurrence.itemId]);
   const messages =
-    turn?.items.filter(
-      (item) => item.type === "userMessage" || item.type === "agentMessage" || item.type === "plan",
-    ) ?? [];
+    turn?.items
+      .filter(
+        (item) =>
+          item.type === "userMessage" || item.type === "agentMessage" || item.type === "plan",
+      )
+      .filter(hasVisibleActivity) ?? [];
   return (
     <div className="search-history-view">
       <div className="search-history-banner" role="note">
@@ -6188,11 +6194,24 @@ function reconcileVisibleThreadSummary(
 }
 
 function hasVisibleActivity(item: ActivityItem): boolean {
+  if (item.type === "userMessage" && isQuestionReplyDelivery(item)) return false;
   if ("text" in item)
     return Boolean(
       item.text.trim() || item.images.length || (item.files?.length ?? 0) || item.questions?.length,
     );
   return true;
+}
+
+function isQuestionReplyDelivery(message: {
+  id: string;
+  replyToAsyncQuestion?: unknown;
+  replyToUserInput?: unknown;
+}): boolean {
+  return Boolean(
+    message.replyToAsyncQuestion ||
+    message.replyToUserInput ||
+    QUESTION_REPLY_MESSAGE_ID_PREFIXES.some((prefix) => message.id.startsWith(prefix)),
+  );
 }
 
 function findForkResponseId(turn: TurnView): string | null {
