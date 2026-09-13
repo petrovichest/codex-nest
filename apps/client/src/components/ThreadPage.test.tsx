@@ -3479,6 +3479,65 @@ describe("Activity", () => {
     );
   });
 
+  it.each(["saved", "failed"])(
+    "blocks message dispatch until a model change is settled: %s",
+    async (outcome) => {
+      const api = threadApi();
+      const context = mockThreadConnection(api, summary, {
+        queuedMessages: [
+          { id: "queued", threadId: "thread", text: "В очереди", createdAt: 1, status: "queued" },
+        ],
+      });
+      context.state.snapshot.models.push({
+        ...context.state.snapshot.models[0]!,
+        id: "gpt-6-astra",
+        displayName: "6astra",
+        isDefault: false,
+      });
+      let resolveSettings!: (thread: ThreadSummary) => void;
+      let rejectSettings!: (error: Error) => void;
+      api.updateThreadSettings.mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            resolveSettings = resolve;
+            rejectSettings = reject;
+          }),
+      );
+      renderThread();
+      expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeEnabled();
+      const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+      fireEvent.change(textbox, { target: { value: "Первое сообщение" } });
+      fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
+      fireEvent.click(screen.getByRole("radio", { name: "6astra" }));
+      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", { model: "gpt-6-astra" });
+      fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+
+      expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "Отправить сейчас" })).not.toBeInTheDocument();
+      fireEvent.keyDown(textbox, { key: "Enter" });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+      expect(context.sendReliable).not.toHaveBeenCalled();
+      expect(textbox).toHaveValue("Первое сообщение");
+
+      const configured = { ...summary, settings: { ...summary.settings, model: "gpt-6-astra" } };
+      await act(async () => {
+        if (outcome === "saved") resolveSettings(configured);
+        else rejectSettings(new Error("Модель недоступна"));
+      });
+      expect(context.sendReliable).not.toHaveBeenCalled();
+      expect(textbox).toHaveValue("Первое сообщение");
+      if (outcome === "failed") {
+        expect(screen.getByText("Модель недоступна")).toBeInTheDocument();
+        return;
+      }
+      expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: configured });
+      expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeEnabled();
+      fireEvent.keyDown(textbox, { key: "Enter" });
+      await waitFor(() => expect(context.sendReliable).toHaveBeenCalledOnce());
+    },
+  );
+
   it("shows native goal state and exposes pause and clear actions", async () => {
     const api = threadApi();
     api.updateGoal.mockResolvedValue({

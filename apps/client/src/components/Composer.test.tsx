@@ -336,6 +336,44 @@ describe("Composer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it.each(["Сообщение", ""])("blocks sending %j while settings are being saved", (input) => {
+    const onSubmit = vi.fn();
+    const onSendQueuedNow = vi.fn();
+    installMediaRecorder(vi.fn());
+    const speechProps = { transcriptionConfig, onTranscribe: vi.fn() };
+    const view = render(
+      <Harness
+        {...speechProps}
+        input={input}
+        settingsBusy
+        onSubmit={onSubmit}
+        onSendQueuedNow={onSendQueuedNow}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(textarea).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeDisabled();
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+    fireEvent.submit(view.container.querySelector("form")!);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSendQueuedNow).not.toHaveBeenCalled();
+
+    view.rerender(
+      <Harness
+        {...speechProps}
+        input={input}
+        onSubmit={onSubmit}
+        onSendQueuedNow={onSendQueuedNow}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(input ? onSubmit : onSendQueuedNow).toHaveBeenCalledOnce();
+  });
+
   it("submits modified Enter instead of selecting a skill suggestion", async () => {
     const onSubmit = vi.fn<(intent: ComposerSubmitIntent) => void>();
     render(<Harness cwd="/work/project" onSubmit={onSubmit} />);
@@ -1127,6 +1165,7 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 
 function Harness({
   busy = false,
+  settingsBusy = false,
   children,
   cwd,
   goalMode = false,
@@ -1153,6 +1192,7 @@ function Harness({
   voiceInputLocked = false,
 }: {
   busy?: boolean;
+  settingsBusy?: boolean;
   children?: ReactNode;
   cwd?: string;
   goalMode?: boolean;
@@ -1197,6 +1237,7 @@ function Harness({
       onSubmit={onSubmit}
       onSendQueuedNow={onSendQueuedNow}
       busy={busy}
+      settingsBusy={settingsBusy}
       cwd={cwd}
       projects={projectOptions}
       projectId={projectId}

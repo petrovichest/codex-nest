@@ -331,10 +331,16 @@ export function Composer({
     hasContent &&
     (!goalMode || Boolean(draftInput.trim())) &&
     !busy &&
+    !settingsBusy &&
     !speechBusy &&
     (!creating || Boolean(projectId));
   const canSendQueuedNow =
-    !inputUnavailable && !hasContent && !busy && !speechBusy && Boolean(onSendQueuedNow);
+    !inputUnavailable &&
+    !hasContent &&
+    !busy &&
+    !settingsBusy &&
+    !speechBusy &&
+    Boolean(onSendQueuedNow);
   const planToggleEligible =
     !running &&
     !busy &&
@@ -803,7 +809,8 @@ export function Composer({
       transcriptionStatus ||
       voiceUploadPending ||
       voiceInputLocked ||
-      busy
+      busy ||
+      settingsBusy
     ) {
       return;
     }
@@ -1475,7 +1482,7 @@ export function Composer({
                     voiceUploadPending ||
                     voiceInputLocked ||
                     Boolean(transcriptionStatus) ||
-                    (speechState === "idle" && (busy || Boolean(speechUnavailable)))
+                    (speechState === "idle" && (busy || settingsBusy || Boolean(speechUnavailable)))
                   }
                   title={speechUnavailable ?? undefined}
                   type="button"

@@ -4013,6 +4013,7 @@ describe("thread settings", () => {
     expect(startCall?.[1]).toMatchObject({
       threadId: "thread",
       clientUserMessageId: "client-started",
+      model: "gpt-b",
       collaborationMode: {
         mode: "plan",
         settings: {

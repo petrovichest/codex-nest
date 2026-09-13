@@ -3029,7 +3029,7 @@ export function ThreadPage({
   }
 
   async function sendQueuedNow(messageId: string): Promise<boolean> {
-    if (inputUnavailable) return false;
+    if (inputUnavailable || settingsBusy) return false;
     setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
@@ -3890,7 +3890,7 @@ export function ThreadPage({
                 )}
                 <QueuedMessages
                   messages={queuedMessages}
-                  canSendNow={!inputUnavailable}
+                  canSendNow={!inputUnavailable && !settingsBusy}
                   action={queueAction}
                   inTimeline
                   onRetry={(messageId) => retryReliableMessage(threadId, messageId)}
