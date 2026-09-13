@@ -84,6 +84,9 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     expect((await settings.locator("svg").boundingBox())!.x).toBe(
       (await sidebar.locator(".codex-limits svg").boundingBox())!.x,
     );
+    const settingsBox = (await settings.boundingBox())!;
+    const connectionBox = (await connection.boundingBox())!;
+    expect(connectionBox.x - (settingsBox.x + settingsBox.width)).toBe(6);
     const searchBox = (await search.boundingBox())!;
     const headerBox = (await header.boundingBox())!;
     expect(headerBox.x + headerBox.width - (searchBox.x + searchBox.width)).toBe(10);
@@ -121,6 +124,13 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
         "aria-selected",
         "true",
       );
+      if (mobile) await expect(sidebar).not.toHaveClass(/open/);
+    } else {
+      await page.mouse.click(
+        settingsBox.x + settingsBox.width - 2,
+        settingsBox.y + settingsBox.height / 2,
+      );
+      await expect(page).toHaveURL(/\/settings\?section=application$/);
       if (mobile) await expect(sidebar).not.toHaveClass(/open/);
     }
   });

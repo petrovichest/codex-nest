@@ -944,7 +944,8 @@
 
 .sidebar-settings-action {
   width: auto;
-  flex: 0 1 auto;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .server-connection {
@@ -952,7 +953,6 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  margin-left: auto;
 }
 
 .app-update-indicator {
