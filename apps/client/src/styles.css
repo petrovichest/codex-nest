@@ -3582,9 +3582,8 @@ button.message-file:hover:not(:disabled) {
 
 .composer-actions {
   flex: 0 0 auto;
-  display: grid;
+  display: flex;
   align-items: center;
-  grid-template-columns: 32px 64px 34px 34px;
   gap: var(--space-1);
 }
 
@@ -3702,7 +3701,6 @@ button.message-file:hover:not(:disabled) {
 }
 
 .model-toggle {
-  width: 150px;
   max-width: 150px;
 }
 
@@ -4004,28 +4002,6 @@ button.message-file:hover:not(:disabled) {
   background: var(--surface-muted);
 }
 
-.composer-actions > .voice-send-toggle {
-  grid-column: 1;
-  grid-row: 1;
-}
-
-.composer-actions > .microphone {
-  width: 64px;
-  min-width: 64px;
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.composer-actions > .composer-task-stop {
-  grid-column: 3;
-  grid-row: 1;
-}
-
-.composer-actions > .composer-action:last-child {
-  grid-column: 4;
-  grid-row: 1;
-}
-
 .composer-action.microphone {
   color: var(--muted-strong);
   border-color: transparent;
@@ -4040,8 +4016,8 @@ button.message-file:hover:not(:disabled) {
 }
 
 .composer-action.microphone.timing {
-  width: 64px;
-  min-width: 64px;
+  width: auto;
+  min-width: 44px;
   padding: 0 7px;
   border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: var(--radius-md);
@@ -4114,8 +4090,13 @@ button.message-file:hover:not(:disabled) {
   background: var(--surface);
 }
 
+.attention-stack + .outgoing-messages,
+.finish-thread-action + .outgoing-messages {
+  margin-top: var(--space-4);
+}
+
 .outgoing-messages .queued-messages-list {
-  gap: var(--space-3);
+  gap: var(--space-4);
   overflow: visible;
 }
 
@@ -6203,13 +6184,11 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-actions {
-    grid-template-columns: 32px 40px 32px 32px;
     gap: 0;
   }
 
-  .composer-actions > .composer-action.microphone {
-    width: 40px;
-    min-width: 40px;
+  .composer-action.microphone.timing {
+    min-width: var(--control-touch-height);
     padding-inline: 0;
   }
 
@@ -6484,7 +6463,6 @@ button.message-file:hover:not(:disabled) {
   }
 
   .model-toggle {
-    width: 60px;
     min-width: 32px;
     max-width: 60px;
     flex-shrink: 1;

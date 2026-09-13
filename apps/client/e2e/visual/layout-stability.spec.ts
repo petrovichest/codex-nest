@@ -46,6 +46,29 @@ function unchanged(before: Awaited<ReturnType<typeof geometry>>, after: typeof b
   });
 }
 
+async function expectPackedActions(page: Page) {
+  const actions = page.locator(".composer-actions");
+  const bounds = (await actions.boundingBox())!;
+  const buttons = await geometry(actions.locator(":scope > button"));
+  expect(buttons[0]!.x).toBeCloseTo(bounds.x, 1);
+  const last = buttons.at(-1)!;
+  expect(last.x + last.width).toBeCloseTo(bounds.x + bounds.width, 1);
+  for (let index = 1; index < buttons.length; index++) {
+    const previous = buttons[index - 1]!;
+    const current = buttons[index]!;
+    const gap = current.x - previous.x - previous.width;
+    expect(gap).toBeGreaterThanOrEqual(-0.1);
+    expect(gap).toBeLessThanOrEqual(4);
+    expect(current.y + current.height / 2).toBeCloseTo(previous.y + previous.height / 2, 1);
+  }
+}
+
+async function verticalGap(before: Locator, after: Locator) {
+  const first = (await before.boundingBox())!;
+  const second = (await after.boundingBox())!;
+  return second.y - first.y - first.height;
+}
+
 const messageText =
   "Одинаковое **сообщение** со ссылкой [пример](https://example.test).\n\n" +
   "Длинный текст должен целиком сохранять переносы и размеры до и после отправки. ".repeat(8);
@@ -79,11 +102,17 @@ function turn(id: string, text: string, messageId = id): TurnView {
   };
 }
 
-async function chat(page: Page, theme: "light" | "dark", text = messageText) {
+async function chat(
+  page: Page,
+  theme: "light" | "dark",
+  text = messageText,
+  options: { modelName?: string; voice?: boolean } = {},
+) {
   const summary: ThreadSummary = { ...mainThread, state: "completed", currentTurnId: null };
   const seed = structuredClone(snapshot);
   seed.attention = [];
   seed.threads = [summary];
+  if (options.modelName) seed.models[0]!.displayName = options.modelName;
   const detail: ThreadDetail = {
     summary,
     turns: [turn("original", text)],
@@ -92,6 +121,10 @@ async function chat(page: Page, theme: "light" | "dark", text = messageText) {
     queuedMessages: [{ id: "queued", threadId: summary.id, text, status: "queued", createdAt: 1 }],
   };
   await installVisualFixture(page, { theme, snapshot: seed });
+  if (options.voice === false)
+    await page.route("**/api/v1/transcriptions/config", (route) =>
+      json(route, { error: "Voice unavailable in this fixture" }, 503),
+    );
   await page.route("**/api/v1/threads/session-main", (route) => json(route, detail));
   let sequence = seed.sequence;
   let send!: (event: ServerEvent) => void;
@@ -150,7 +183,7 @@ for (const mobile of [false, true]) {
       expect(await compare(queued)).toEqual(before);
     });
 
-    test(`${mobile ? "mobile" : "desktop"} ${theme}: toolbar stays still through running and voice states`, async ({
+    test(`${mobile ? "mobile" : "desktop"} ${theme}: toolbar stays compact through running and voice states`, async ({
       page,
     }) => {
       await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
@@ -159,6 +192,7 @@ for (const mobile of [false, true]) {
         ".composer-add-image,.model-toggle,.plan-toggle,.team-toggle,.goal-toggle,.composer-actions > .microphone,.composer-actions > .composer-action:last-child",
       );
       const before = await geometry(controls);
+      await expectPackedActions(page);
       if (mobile) {
         for (const control of before) expect(control.y).toBeCloseTo(before[0]!.y, 0);
         expect((await page.locator(".composer-toolbar").boundingBox())!.height).toBeLessThanOrEqual(
@@ -172,7 +206,10 @@ for (const mobile of [false, true]) {
       await expect(
         page.getByRole("button", { name: "Остановить задачу", exact: true }),
       ).toBeVisible();
-      unchanged(before, await geometry(controls));
+      const running = await geometry(controls);
+      unchanged(before.slice(0, 5), running.slice(0, 5));
+      unchanged(before.slice(-1), running.slice(-1));
+      await expectPackedActions(page);
       await page.evaluate(() => {
         class Recorder extends EventTarget {
           static isTypeSupported() {
@@ -201,6 +238,7 @@ for (const mobile of [false, true]) {
       await expect(
         page.getByRole("button", { name: "Остановить запись", exact: true }),
       ).toBeVisible();
+      let recording: Awaited<ReturnType<typeof geometry>> | undefined;
       for (const elapsed of [9, 10, 59, 60, 599, 600]) {
         await page.evaluate(
           (time) => {
@@ -211,7 +249,11 @@ for (const mobile of [false, true]) {
         await expect(page.locator(".composer-action-timer")).toHaveText(
           `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
         );
-        unchanged(before, await geometry(controls));
+        const current = await geometry(controls);
+        if (recording && elapsed < 600) unchanged(recording, current);
+        recording = current;
+        unchanged(before.slice(-1), current.slice(-1));
+        await expectPackedActions(page);
       }
       await page.getByRole("button", { name: "Отменить запись", exact: true }).click();
       send({
@@ -229,12 +271,118 @@ for (const mobile of [false, true]) {
         },
       });
       await expect(page.locator(".composer-error")).toBeVisible();
-      unchanged(before, await geometry(controls));
+      unchanged(running, await geometry(controls));
+      await expectPackedActions(page);
       expect(
         await page.locator(".composer-options").evaluate((el) => el.scrollWidth <= el.clientWidth),
       ).toBe(true);
     });
   }
+
+  for (const voice of [false, true]) {
+    for (const modelName of ["6astra", "Model with an unusually long display name"]) {
+      test(`${mobile ? "mobile" : "desktop"}: compact ${modelName} controls with voice ${voice ? "enabled" : "unavailable"}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+        const { summary, send } = await chat(page, "light", "Проверка", { modelName, voice });
+        await expect(page.locator(".composer-actions > button")).toHaveCount(voice ? 3 : 1);
+        await expectPackedActions(page);
+        const model = page.locator(".model-toggle");
+        const modelBounds = (await model.boundingBox())!;
+        expect(modelBounds.width).toBeLessThanOrEqual(mobile ? 60 : 150);
+        if (modelName === "6astra") {
+          expect(modelBounds.width).toBeLessThan(mobile ? 60 : 100);
+          expect(
+            await model.locator("span").evaluate((el) => el.scrollWidth <= el.clientWidth),
+          ).toBe(true);
+        }
+        if (voice) {
+          const microphone = (await page.locator(".composer-actions > .microphone").boundingBox())!;
+          expect(microphone.width).toBe(mobile ? 32 : 34);
+        }
+        send({
+          type: "thread.upserted",
+          thread: { ...summary, state: "running", currentTurnId: "running" },
+        });
+        await expect(
+          page.getByRole("button", { name: "Остановить задачу", exact: true }),
+        ).toBeVisible();
+        await expectPackedActions(page);
+        send({ type: "thread.upserted", thread: summary });
+        await expect(
+          page.getByRole("button", { name: "Остановить задачу", exact: true }),
+        ).toHaveCount(0);
+        await expectPackedActions(page);
+      });
+    }
+  }
+
+  test(`${mobile ? "mobile" : "desktop"}: queue spacing after messages, questions and finish action`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    const { summary, detail, send } = await chat(page, "dark", "Короткое сообщение");
+    const queue = page.locator(".outgoing-messages");
+    const previousTurn = page.locator(".turn").last();
+    const finish = page.locator(".finish-thread-action");
+    expect(await verticalGap(previousTurn, queue)).toBe(32);
+    send({ type: "thread.upserted", thread: { ...summary, unread: true } });
+    await expect(finish).toBeVisible();
+    expect(await verticalGap(finish, queue)).toBe(16);
+    await page.route("https://images.example/queue.svg", (route) =>
+      route.fulfill({
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="120" height="90" fill="gray"/></svg>',
+      }),
+    );
+    const messages = [
+      detail.queuedMessages[0]!,
+      { ...detail.queuedMessages[0]!, id: "queued-long", text: messageText },
+      {
+        ...detail.queuedMessages[0]!,
+        id: "queued-image",
+        text: "![Пример](https://images.example/queue.svg)",
+      },
+    ];
+    send({ type: "queue.changed", threadId: summary.id, messages });
+    const cards = queue.locator(".queued-message");
+    await expect(cards).toHaveCount(3);
+    await expect(cards.last().locator("img")).toBeVisible();
+    const checkSpacing = async () => {
+      for (let index = 0; index < 3; index++) {
+        const card = cards.nth(index);
+        expect(
+          await verticalGap(card.locator(".message-body"), card.locator(".message-footer")),
+        ).toBe(5);
+        if (index > 0) expect(await verticalGap(cards.nth(index - 1), card)).toBe(16);
+      }
+    };
+    await checkSpacing();
+    await cards
+      .first()
+      .getByRole("button", { name: "Изменить сообщение в очереди", exact: true })
+      .click();
+    await expect(cards.first().getByRole("textbox")).toBeVisible();
+    await checkSpacing();
+    await cards.first().getByRole("button", { name: "Отмена", exact: true }).click();
+    send({ type: "thread.upserted", thread: summary });
+    await expect(finish).toHaveCount(0);
+    expect(await verticalGap(previousTurn, queue)).toBe(32);
+    const attention = { ...snapshot.attention[0]!, threadId: summary.id };
+    send({ type: "attention.upserted", attention });
+    const questions = page.locator(".attention-stack");
+    await expect(questions).toBeVisible();
+    expect(await verticalGap(questions, queue)).toBe(16);
+    send({ type: "attention.removed", attentionId: attention.id });
+    await expect(questions).toHaveCount(0);
+    send({ type: "thread.upserted", thread: { ...summary, unread: true } });
+    await expect(finish).toBeVisible();
+    send({ type: "queue.changed", threadId: summary.id, messages: [] });
+    await expect(queue).toHaveCount(0);
+    await expect(finish).toHaveCSS("margin-bottom", "0px");
+    await expect(finish).toHaveCSS("margin-top", "24px");
+  });
 
   test(`${mobile ? "mobile" : "desktop"}: settings and fork loading keep their controls anchored`, async ({
     page,
