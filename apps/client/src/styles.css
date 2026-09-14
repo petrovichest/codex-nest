@@ -4028,8 +4028,13 @@ button.message-file:hover:not(:disabled) {
 }
 
 @keyframes microphone-pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 15%, transparent);
+  }
+
   50% {
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 10%, transparent);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--danger) 40%, transparent);
   }
 }
 
@@ -6191,7 +6196,7 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-actions {
-    gap: 0;
+    gap: var(--space-0-5);
   }
 
   .composer-action.microphone.timing {

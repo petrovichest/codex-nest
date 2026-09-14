@@ -452,6 +452,7 @@ export type VisualFixtureOptions = {
   forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
   forkLineage?: boolean;
   notificationPrompt?: boolean;
+  reducedMotion?: "reduce" | "no-preference";
   sidebarSide?: "left" | "right";
   theme: "light" | "dark";
   voiceFailure?: boolean;
@@ -465,6 +466,7 @@ export async function installVisualFixture(
     forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
+    reducedMotion = "reduce",
     sidebarSide = "left",
     snapshot: suppliedSnapshot,
     theme,
@@ -498,10 +500,11 @@ export async function installVisualFixture(
         ],
       }
     : sidebarSnapshot;
-  await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+  await page.emulateMedia({ colorScheme: theme, reducedMotion });
   await page.addInitScript(
     ({
       connected: seedConnection,
+      disableMotion,
       fixedNow,
       notificationPrompt: showPrompt,
       serverOrigin,
@@ -550,11 +553,14 @@ export async function installVisualFixture(
           "*,*::before,*::after{animation-delay:0s!important;animation-duration:0s!important;transition-delay:0s!important;transition-duration:0s!important;scroll-behavior:auto!important}";
         document.head.append(style);
       };
-      if (document.head) reduceMotion();
-      else document.addEventListener("DOMContentLoaded", reduceMotion, { once: true });
+      if (disableMotion) {
+        if (document.head) reduceMotion();
+        else document.addEventListener("DOMContentLoaded", reduceMotion, { once: true });
+      }
     },
     {
       connected,
+      disableMotion: reducedMotion === "reduce",
       fixedNow: FIXED_NOW,
       notificationPrompt,
       serverOrigin: SERVER_ORIGIN,

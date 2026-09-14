@@ -57,7 +57,7 @@ async function expectPackedActions(page: Page) {
     const previous = buttons[index - 1]!;
     const current = buttons[index]!;
     const gap = current.x - previous.x - previous.width;
-    expect(gap).toBeGreaterThanOrEqual(-0.1);
+    expect(gap).toBeGreaterThanOrEqual(2);
     expect(gap).toBeLessThanOrEqual(4);
     expect(current.y + current.height / 2).toBeCloseTo(previous.y + previous.height / 2, 1);
   }
@@ -67,6 +67,32 @@ async function verticalGap(before: Locator, after: Locator) {
   const first = (await before.boundingBox())!;
   const second = (await after.boundingBox())!;
   return second.y - first.y - first.height;
+}
+
+async function mockRecorder(page: Page) {
+  await page.evaluate(() => {
+    class Recorder extends EventTarget {
+      static isTypeSupported() {
+        return true;
+      }
+      state = "inactive";
+      mimeType = "audio/webm";
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.state = "inactive";
+        this.dispatchEvent(new Event("stop"));
+      }
+    }
+    Object.defineProperty(window, "MediaRecorder", { configurable: true, value: Recorder });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+      },
+    });
+  });
 }
 
 const messageText =
@@ -106,7 +132,11 @@ async function chat(
   page: Page,
   theme: "light" | "dark",
   text = messageText,
-  options: { modelName?: string; voice?: boolean } = {},
+  options: {
+    modelName?: string;
+    voice?: boolean;
+    reducedMotion?: "reduce" | "no-preference";
+  } = {},
 ) {
   const summary: ThreadSummary = { ...mainThread, state: "completed", currentTurnId: null };
   const seed = structuredClone(snapshot);
@@ -120,7 +150,7 @@ async function chat(
     draft: null,
     queuedMessages: [{ id: "queued", threadId: summary.id, text, status: "queued", createdAt: 1 }],
   };
-  await installVisualFixture(page, { theme, snapshot: seed });
+  await installVisualFixture(page, { theme, snapshot: seed, reducedMotion: options.reducedMotion });
   if (options.voice === false)
     await page.route("**/api/v1/transcriptions/config", (route) =>
       json(route, { error: "Voice unavailable in this fixture" }, 503),
@@ -210,29 +240,7 @@ for (const mobile of [false, true]) {
       unchanged(before.slice(0, 5), running.slice(0, 5));
       unchanged(before.slice(-1), running.slice(-1));
       await expectPackedActions(page);
-      await page.evaluate(() => {
-        class Recorder extends EventTarget {
-          static isTypeSupported() {
-            return true;
-          }
-          state = "inactive";
-          mimeType = "audio/webm";
-          start() {
-            this.state = "recording";
-          }
-          stop() {
-            this.state = "inactive";
-            this.dispatchEvent(new Event("stop"));
-          }
-        }
-        Object.defineProperty(window, "MediaRecorder", { configurable: true, value: Recorder });
-        Object.defineProperty(navigator, "mediaDevices", {
-          configurable: true,
-          value: {
-            getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
-          },
-        });
-      });
+      await mockRecorder(page);
       const now = await page.evaluate(() => Date.now());
       await page.getByRole("button", { name: "Начать запись", exact: true }).click();
       await expect(
@@ -552,6 +560,105 @@ test.describe("compact mobile controls", () => {
     await page.keyboard.press("Escape");
     expect(await title.boundingBox()).toEqual(before);
   });
+});
+
+test.describe("recording paint bounds", () => {
+  test.use({ hasTouch: true });
+
+  for (const theme of ["light", "dark"] as const) {
+    for (const width of [320, 360, 390, 412, 820, 821]) {
+      test(`recording paint at ${width}px in ${theme}`, async ({ browserName, page }) => {
+        await page.setViewportSize({ width, height: 520 });
+        const { summary, send } = await chat(page, theme, "Проверка", {
+          modelName: "5.6sol",
+          reducedMotion: "no-preference",
+        });
+        await page.getByRole("button", { name: "Включить автоотправку голосового ввода" }).click();
+        await mockRecorder(page);
+        const now = await page.evaluate(() => Date.now());
+        await page.getByRole("button", { name: "Начать запись", exact: true }).click();
+        const microphone = page.getByRole("button", { name: "Остановить запись", exact: true });
+        await expect(microphone).toBeVisible();
+        await page.evaluate((time) => {
+          Date.now = () => time;
+        }, now + 6000);
+        await expect(page.locator(".composer-action-timer")).toHaveText("0:06");
+        expect(
+          await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
+        ).toBe(false);
+        await expect(page.locator("style[data-visual-test-motion]")).toHaveCount(0);
+
+        for (const running of [false, true]) {
+          if (running) {
+            send({
+              type: "thread.upserted",
+              thread: { ...summary, state: "running", currentTurnId: "running" },
+            });
+            await expect(
+              page.getByRole("button", { name: "Остановить задачу", exact: true }),
+            ).toBeVisible();
+          }
+          const toolbar = (await page.locator(".composer-toolbar").boundingBox())!;
+          const controls = page.locator(
+            ".composer-add-image,.settings-picker > button,.composer-actions > button",
+          );
+          const before = await geometry(controls);
+          expect(before).toHaveLength(running ? 9 : 8);
+          for (const [index, button] of before.entries()) {
+            expect(button.width).toBeGreaterThanOrEqual(32);
+            expect(button.height).toBeGreaterThanOrEqual(32);
+            expect(button.x).toBeGreaterThanOrEqual(toolbar.x);
+            expect(button.x + button.width).toBeLessThanOrEqual(toolbar.x + toolbar.width);
+            expect(button.y + button.height / 2).toBeCloseTo(
+              before[0]!.y + before[0]!.height / 2,
+              0,
+            );
+            if (index > 0)
+              expect(
+                button.x - before[index - 1]!.x - before[index - 1]!.width,
+              ).toBeGreaterThanOrEqual(-0.1);
+          }
+          await expectPackedActions(page);
+          // Pause the real CSS animation at multiple points, including its maximum extent.
+          for (const time of [0, 350, 700, 1050, 1399]) {
+            const shadow = await microphone.evaluate((element, time) => {
+              const animation = element
+                .getAnimations()
+                .find(
+                  (animation) => (animation as CSSAnimation).animationName === "microphone-pulse",
+                );
+              if (!animation) throw new Error("Recording animation must be enabled in this test");
+              animation.pause();
+              animation.currentTime = time;
+              return getComputedStyle(element).boxShadow;
+            }, time);
+            // Ignore commas inside color functions, then check every shadow layer.
+            for (const layer of shadow.replace(/\([^)]*\)/g, "").split(",")) {
+              expect(layer).toContain("inset");
+            }
+            await expect(microphone).toHaveCSS("transform", "none");
+            unchanged(before, await geometry(controls));
+            // Pixel baselines are Chromium-only; geometry and motion run in both engines.
+            if (time === 700 && width === 390 && browserName === "chromium") {
+              await expect(page.locator(".composer-box")).toHaveScreenshot(
+                `recording-${theme}-${running ? "running" : "idle"}.png`,
+                { animations: "allow" },
+              );
+            }
+          }
+        }
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        await expect(microphone).toHaveCSS("animation-name", "none");
+        expect(
+          await microphone.evaluate((element) => getComputedStyle(element).boxShadow),
+        ).toContain("inset");
+        await expectPackedActions(page);
+        await page.getByRole("button", { name: "Отменить запись", exact: true }).click();
+        await expect(page.locator(".composer-action-timer")).toHaveCount(0);
+        await expectPackedActions(page);
+      });
+    }
+  }
 });
 
 test("image loading and retry keep preview frames and following content stationary", async ({
