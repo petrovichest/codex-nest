@@ -55,6 +55,7 @@ export type OptimisticMessage = {
   turnId: string | null;
   deliveryError?: QueuedMessage["deliveryError"];
   serverAccepted?: boolean;
+  dismissUserInput?: QueuedMessage["dismissUserInput"];
 };
 
 export type ClientAction =

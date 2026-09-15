@@ -154,6 +154,7 @@ export class ApiClient {
       selectionEnd: number;
       draftUpdatedAt: number | null;
       clientUploadId: string;
+      dismissUserInput?: QueuedMessage["dismissUserInput"];
     },
   ): Promise<VoiceTranscriptionJob | null> {
     const query = new URLSearchParams({
@@ -163,6 +164,9 @@ export class ApiClient {
       draftUpdatedAt: options.draftUpdatedAt === null ? "none" : String(options.draftUpdatedAt),
       clientUploadId: options.clientUploadId,
     });
+    if (options.dismissUserInput) {
+      query.set("dismissUserInput", JSON.stringify(options.dismissUserInput));
+    }
     return this.request(
       `/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions?${query}`,
       {

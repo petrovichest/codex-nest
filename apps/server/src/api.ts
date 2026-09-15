@@ -546,6 +546,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     goal = false,
     replyToAsyncQuestion?: AsyncQuestionReference,
+    dismissUserInput?: AsyncQuestionReference,
   ): Promise<TurnStartResult> => {
     if (clientMessageId) {
       const receipt = store.view().messageReceipts?.[clientMessageId];
@@ -556,7 +557,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         if (
           receipt.threadId !== threadId ||
           receipt.contentHash !==
-            messageContentHash(input, images, files, goal, replyToAsyncQuestion)
+            messageContentHash(input, images, files, goal, replyToAsyncQuestion, dismissUserInput)
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
@@ -666,7 +667,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const receipt = await durableDelivery.send(
           threadId,
           clientId,
-          messageContentHash(input, images, validatedFiles, goal, replyToAsyncQuestion),
+          messageContentHash(
+            input,
+            images,
+            validatedFiles,
+            goal,
+            replyToAsyncQuestion,
+            dismissUserInput,
+          ),
           "turn/start",
           startParams,
         );
@@ -757,6 +765,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     goal = false,
     replyToAsyncQuestion?: AsyncQuestionReference,
+    dismissUserInput?: AsyncQuestionReference,
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
@@ -769,6 +778,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           clientMessageId,
           goal,
           replyToAsyncQuestion,
+          dismissUserInput,
         );
       const result =
         projection.summary(threadId)?.settings.collaborationMode === "team"
@@ -995,11 +1005,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }),
   });
 
-  const pendingUserInput = (threadId: string, turnId: string) => {
+  const pendingUserInput = (
+    threadId: string,
+    turnId: string,
+    reference?: AsyncQuestionReference,
+  ) => {
     for (const request of attention.list()) {
       if (
         request.kind === "userInput" &&
-        request.isBlocking !== false &&
+        (reference
+          ? request.itemId === reference.itemId && request.turnId === reference.turnId
+          : request.isBlocking !== false) &&
         request.threadId === threadId &&
         request.turnId === turnId
       ) {
@@ -1018,6 +1034,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     replyToAsyncQuestion?: AsyncQuestionReference,
     replyToUserInput?: UserInputReply,
+    dismissUserInput?: AsyncQuestionReference,
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
     const summary = projection.summary(threadId);
@@ -1031,18 +1048,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       validatedFiles,
       false,
     );
-    const hasRecognizedSkills = structuredInput.some((item) => item.type === "skill");
-    const userInput = replyToAsyncQuestion ? undefined : pendingUserInput(threadId, turnId);
+    const userInput = replyToAsyncQuestion
+      ? undefined
+      : pendingUserInput(threadId, turnId, replyToUserInput ?? dismissUserInput);
     const questionReply =
       replyToUserInput ??
-      (userInput && !hasRecognizedSkills && userInput.itemId
+      (userInput?.itemId
         ? {
             turnId,
             itemId: userInput.itemId,
-            answers:
-              userInput.questions[0] && input.trim()
-                ? { [userInput.questions[0].id]: [input.trim()] }
-                : {},
+            answers: {},
           }
         : undefined);
     const teamClaim =
@@ -1104,6 +1119,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
                   validatedFiles,
                   false,
                   replyToUserInput ?? replyToAsyncQuestion,
+                  dismissUserInput,
                 ),
                 "turn/steer",
                 params,
@@ -1118,6 +1134,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
                         kind: "userInput",
                         answers: questionReply.answers,
                       };
+                      // Accept the instruction before retiring the question, so a
+                      // rejected steer leaves the form available for a retry.
+                      if (!replyToUserInput) {
+                        const steered = await bridge.request("turn/steer", params);
+                        const resolved = attention.resolve(userInput.id, response);
+                        if (resolved)
+                          await projection.recordAttentionResponse(resolved, response, false);
+                        return steered;
+                      }
                       const resolved = attention.resolve(userInput.id, response);
                       if (!resolved) throw new RpcError(-32602, "Вопрос больше не ожидает ответа.");
                       await projection.recordAttentionResponse(resolved, response);
@@ -1165,10 +1190,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       userInput &&
       userInput.itemId === questionReply.itemId
     ) {
-      await projection.recordAttentionResponse(userInput, {
-        kind: "userInput",
-        answers: questionReply.answers,
-      });
+      await projection.recordAttentionResponse(
+        userInput,
+        { kind: "userInput", answers: questionReply.answers },
+        Boolean(replyToUserInput),
+      );
       attention.expire(userInput.id);
     }
     if (clientMessageId) {
@@ -1205,6 +1231,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     clientMessageId: string | null,
     replyToAsyncQuestion?: AsyncQuestionReference,
     replyToUserInput?: UserInputReply,
+    dismissUserInput?: AsyncQuestionReference,
   ): Promise<string> => {
     const run = () =>
       steerTurnUnlocked(
@@ -1216,6 +1243,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         clientMessageId,
         replyToAsyncQuestion,
         replyToUserInput,
+        dismissUserInput,
       );
     return projection.summary(threadId)?.settings.collaborationMode === "team"
       ? withKeyLock(teamParentLocks, threadId, run)
@@ -1238,6 +1266,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.id,
         message.goal ?? false,
         message.replyToAsyncQuestion,
+        message.dismissUserInput,
       ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(
@@ -1249,6 +1278,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.id,
         message.replyToAsyncQuestion,
         message.replyToUserInput,
+        message.dismissUserInput,
       ),
     deliveredTurnId: async (threadId, messageId) => {
       const receipt = store.view().messageReceipts?.[messageId];
@@ -2789,6 +2819,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       selectionEnd?: string;
       draftUpdatedAt?: string;
       clientUploadId?: string;
+      dismissUserInput?: string;
     };
     Body: Buffer;
   }>(
@@ -2812,6 +2843,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       if (!["draft", "send", "queue", "steer"].includes(request.query.mode ?? "")) {
         return apiError(reply, 400, "validation_failed", "Voice input mode is invalid");
+      }
+      let dismissUserInput: AsyncQuestionReference | undefined;
+      if (request.query.dismissUserInput !== undefined) {
+        try {
+          dismissUserInput = validateDismissUserInput(JSON.parse(request.query.dismissUserInput));
+        } catch {
+          return apiError(reply, 400, "validation_failed", "Invalid user input dismissal");
+        }
+        if (request.query.mode === "draft") {
+          return apiError(reply, 400, "validation_failed", "A draft cannot dismiss questions");
+        }
       }
       const clientUploadId =
         request.query.clientUploadId === undefined
@@ -2862,6 +2904,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         ...(clientUploadId ? { clientUploadId } : {}),
         threadId: request.params.id,
         mode: request.query.mode as VoiceTranscriptionMode,
+        ...(dismissUserInput ? { dismissUserInput } : {}),
         audio: request.body,
         contentType: normalizedType,
         audioDurationMs,
@@ -4167,6 +4210,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           files,
           replyToAsyncQuestion: body.replyToAsyncQuestion,
           replyToUserInput: body.replyToUserInput,
+          dismissUserInput: body.dismissUserInput,
         },
       );
       return reply.code(202).send(message satisfies QueuedMessage);
@@ -7744,6 +7788,7 @@ function validateQueueMessageBody(value: unknown): {
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
+  dismissUserInput?: AsyncQuestionReference;
 } {
   const body = requireRecord<QueueMessageRequest>(value);
   if (
@@ -7757,6 +7802,7 @@ function validateQueueMessageBody(value: unknown): {
           "clientMessageId",
           "replyToAsyncQuestion",
           "replyToUserInput",
+          "dismissUserInput",
         ].includes(key),
     )
   ) {
@@ -7780,6 +7826,10 @@ function validateQueueMessageBody(value: unknown): {
     throw new ProjectValidationError("clientMessageId must not be empty");
   }
   let replyToUserInput: UserInputReply | undefined;
+  const dismissUserInput = validateDismissUserInput(body.dismissUserInput);
+  if (dismissUserInput && (body.replyToUserInput || body.replyToAsyncQuestion)) {
+    throw new ProjectValidationError("Cannot answer and dismiss a question together");
+  }
   if (body.replyToUserInput !== undefined) {
     const reference = requireRecord<UserInputReply>(body.replyToUserInput);
     if (
@@ -7824,7 +7874,21 @@ function validateQueueMessageBody(value: unknown): {
     ...(clientMessageId ? { clientMessageId } : {}),
     ...(replyToAsyncQuestion ? { replyToAsyncQuestion } : {}),
     ...(replyToUserInput ? { replyToUserInput } : {}),
+    ...(dismissUserInput ? { dismissUserInput } : {}),
   };
+}
+
+function validateDismissUserInput(value: unknown): AsyncQuestionReference | undefined {
+  if (value === undefined) return undefined;
+  const reference = requireRecord<AsyncQuestionReference>(value);
+  if (
+    Object.keys(reference).some((key) => key !== "turnId" && key !== "itemId") ||
+    !optionalClientMessageId(reference.turnId) ||
+    !optionalClientMessageId(reference.itemId)
+  ) {
+    throw new ProjectValidationError("Invalid user input dismissal");
+  }
+  return { turnId: reference.turnId, itemId: reference.itemId };
 }
 
 async function readForkTurn(

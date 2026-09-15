@@ -89,6 +89,7 @@ export type OutboxMessage = {
   accepted?: boolean;
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
+  dismissUserInput?: AsyncQuestionReference;
 };
 
 export type MessageDraftSource = { draft: UpdateThreadDraftRequest; projectId?: string };
@@ -100,6 +101,7 @@ export type PendingVoiceRecording = {
   audio: Blob;
   durationMs: number;
   mode: VoiceTranscriptionMode;
+  dismissUserInput?: AsyncQuestionReference;
   selectionStart: number;
   selectionEnd: number;
   draftUpdatedAt: number | null;
@@ -327,6 +329,7 @@ export function outboxMessageIntent(value: OutboxMessage): string {
     value.goal,
     value.replyToAsyncQuestion,
     value.replyToUserInput,
+    value.dismissUserInput,
   ]);
 }
 

@@ -1257,6 +1257,7 @@ export class AppProjection extends EventEmitter {
   async recordAttentionResponse(
     request: AttentionRequest,
     response: AttentionResponse,
+    recordAnswers = true,
   ): Promise<void> {
     if (
       request.kind !== "userInput" ||
@@ -1264,6 +1265,10 @@ export class AppProjection extends EventEmitter {
       !request.threadId ||
       !request.turnId
     ) {
+      return;
+    }
+    if (!recordAnswers) {
+      await this.clearUserInputDraft(request);
       return;
     }
     this.flushActivityDeltas(request.threadId, request.turnId);
@@ -4323,6 +4328,7 @@ function publicVoiceTranscription(job: VoiceTranscriptionState): VoiceTranscript
     audioDurationMs: job.audioDurationMs,
     estimatedTotalSeconds: job.estimatedTotalSeconds,
     error: job.error,
+    ...(job.dismissUserInput ? { dismissUserInput: job.dismissUserInput } : {}),
   };
 }
 

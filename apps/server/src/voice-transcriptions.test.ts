@@ -17,6 +17,66 @@ afterEach(async () => {
 });
 
 describe("VoiceTranscriptionManager", () => {
+  it("preserves the original question reference through durable audio and transcript delivery", async () => {
+    const { store } = await createStore("");
+    let finish!: (text: string) => void;
+    const transcribe = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const queue = queueMock(store);
+    const projection = projectionMock();
+    const manager = new VoiceTranscriptionManager({
+      store,
+      queue,
+      projection,
+      transcription: { transcribe },
+    });
+    const dismissUserInput = { turnId: "original-turn", itemId: "original-question" };
+    try {
+      const job = await manager.accept({
+        threadId: "thread",
+        clientUploadId: "voice-dismissal",
+        mode: "queue",
+        dismissUserInput,
+        audio: Buffer.from("audio"),
+        contentType: "audio/webm",
+        audioDurationMs: 1000,
+        estimatedTotalSeconds: 1,
+        selectionStart: 0,
+        selectionEnd: 0,
+        expectedDraftUpdatedAt: store.view().threadMeta.thread!.draft?.updatedAt ?? null,
+        timingProfile: null,
+      });
+      expect(job).toMatchObject({ dismissUserInput });
+      await vi.waitFor(() => expect(transcribe).toHaveBeenCalledOnce());
+      const reopened = new StateStore(store.path);
+      await reopened.load();
+      expect(reopened.view().voiceTranscriptions?.thread).toMatchObject({ dismissUserInput });
+      finish("Новое указание");
+      await vi.waitFor(() =>
+        expect(queue.enqueue).toHaveBeenCalledWith(
+          "thread",
+          "Новое указание",
+          [],
+          "voice-dismissal",
+          expect.objectContaining({ dismissUserInput }),
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(projection.removeVoiceTranscription).toHaveBeenCalledWith(
+          "thread",
+          "voice-dismissal",
+          "send",
+        ),
+      );
+    } finally {
+      manager.stop();
+    }
+  });
+
   it("acknowledges durable audio before transcription and inserts the result into the draft", async () => {
     const { store, directory } = await createStore("Начало конец");
     let resolveTranscript: ((value: string) => void) | undefined;

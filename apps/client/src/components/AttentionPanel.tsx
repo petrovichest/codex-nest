@@ -27,11 +27,13 @@ import {
 
 export function AttentionPanel({
   requests,
+  hiddenRequestIds = [],
   transcriptionConfig = null,
   transcriptionProvider = null,
   onTranscriptionTimingEstimateChange,
 }: {
   requests: AttentionRequest[];
+  hiddenRequestIds?: readonly string[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
@@ -39,10 +41,15 @@ export function AttentionPanel({
   const { t } = useI18n();
   if (!requests.length) return null;
   return (
-    <section className="attention-stack" aria-label={t("Требуется внимание")}>
+    <section
+      className="attention-stack"
+      aria-label={t("Требуется внимание")}
+      hidden={requests.every((request) => hiddenRequestIds.includes(request.id))}
+    >
       {requests.map((request) => (
         <AttentionCard
           request={request}
+          hidden={hiddenRequestIds.includes(request.id)}
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
           onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
@@ -55,11 +62,13 @@ export function AttentionPanel({
 
 function AttentionCard({
   request,
+  hidden,
   transcriptionConfig,
   transcriptionProvider,
   onTranscriptionTimingEstimateChange,
 }: {
   request: AttentionRequest;
+  hidden: boolean;
   transcriptionConfig: TranscriptionConfigResponse | null;
   transcriptionProvider: TranscriptionProvider | null;
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
@@ -121,7 +130,10 @@ function AttentionCard({
   }
 
   return (
-    <article className="attention-card">
+    <article
+      className={`attention-card${request.kind === "userInput" ? " user-input-card" : ""}`}
+      hidden={hidden}
+    >
       <div className="attention-heading">
         <AlertIcon />
         {request.kind === "userInput" && request.isBlocking === false
@@ -661,36 +673,38 @@ function UserInputForm({
       )}
       {question && (
         <>
-          <div className="user-input-progress">
-            {t("Вопрос {{current}} из {{total}}", {
-              current: questionIndex + 1,
-              total: request.questions.length,
-            })}
+          <div className="user-input-overview">
+            <div className="user-input-progress">
+              {t("Вопрос {{current}} из {{total}}", {
+                current: questionIndex + 1,
+                total: request.questions.length,
+              })}
+            </div>
+            <nav className="user-input-steps" aria-label={t("Навигация по вопросам")}>
+              {request.questions.map((candidate, index) => {
+                const answered = Boolean(answers[candidate.id]?.[0]?.trim());
+                const current = index === questionIndex;
+                return (
+                  <button
+                    aria-current={current ? "step" : undefined}
+                    aria-label={t("Вопрос {{current}} из {{total}}: {{header}}{{answered}}", {
+                      current: index + 1,
+                      total: request.questions.length,
+                      header: candidate.header,
+                      answered: answered ? t(", есть ответ") : t(", без ответа"),
+                    })}
+                    className={`${current ? "current" : ""}${answered ? " answered" : ""}`}
+                    disabled={busy || speechBusy}
+                    key={candidate.id}
+                    type="button"
+                    onClick={() => navigateTo(index)}
+                  >
+                    {index + 1}
+                  </button>
+                );
+              })}
+            </nav>
           </div>
-          <nav className="user-input-steps" aria-label={t("Навигация по вопросам")}>
-            {request.questions.map((candidate, index) => {
-              const answered = Boolean(answers[candidate.id]?.[0]?.trim());
-              const current = index === questionIndex;
-              return (
-                <button
-                  aria-current={current ? "step" : undefined}
-                  aria-label={t("Вопрос {{current}} из {{total}}: {{header}}{{answered}}", {
-                    current: index + 1,
-                    total: request.questions.length,
-                    header: candidate.header,
-                    answered: answered ? t(", есть ответ") : t(", без ответа"),
-                  })}
-                  className={`${current ? "current" : ""}${answered ? " answered" : ""}`}
-                  disabled={busy || speechBusy}
-                  key={candidate.id}
-                  type="button"
-                  onClick={() => navigateTo(index)}
-                >
-                  {index + 1}
-                </button>
-              );
-            })}
-          </nav>
           <fieldset key={question.id}>
             <legend>{question.header}</legend>
             <p>{question.question}</p>
@@ -712,12 +726,17 @@ function UserInputForm({
             ))}
             {(question.isOther || !question.options) && (
               <>
+                <label
+                  className="user-input-freeform-label"
+                  htmlFor={`${request.id}-${question.id}-answer`}
+                >
+                  {t("Свой ответ")}
+                </label>
                 <div className="user-input-freeform">
                   <input
                     ref={answerInputRef}
-                    aria-label={t("Свой ответ")}
+                    id={`${request.id}-${question.id}-answer`}
                     type={question.isSecret ? "password" : "text"}
-                    placeholder={t("Свой ответ")}
                     value={freeformAnswer}
                     onChange={(event) => updateAnswer(question.id, event.target.value, "debounced")}
                     onSelect={captureAnswerSelection}

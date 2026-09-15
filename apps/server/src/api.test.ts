@@ -4119,12 +4119,11 @@ describe("thread settings", () => {
         "turn/steer",
         expect.objectContaining({
           clientUserMessageId: "client-user-input",
+          input: [expect.objectContaining({ text: "Закрывать автоматически" })],
           userInputResponse: {
             itemId: "question",
             response: {
-              answers: {
-                transition: { answers: ["Закрывать автоматически"] },
-              },
+              answers: {},
             },
           },
         }),
@@ -4137,15 +4136,9 @@ describe("thread settings", () => {
     expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
       steersBeforeUserInput + 1,
     );
-    expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn).toContainEqual(
+    expect(store.snapshot().threadMeta.thread?.timelineArtifacts?.turn ?? []).not.toContainEqual(
       expect.objectContaining({
         type: "userInputResponse",
-        entries: [
-          expect.objectContaining({
-            question: "Что делать с раскрытой веткой?",
-            answers: ["Закрывать автоматически"],
-          }),
-        ],
       }),
     );
     const repeatedUserInputSend = await app.inject({
@@ -7624,6 +7617,30 @@ async function createSkillsHarness() {
   };
 }
 
+function dismissibleQuestion(itemId: string, isBlocking = true): ServerRequest {
+  return {
+    method: "item/tool/requestUserInput",
+    id: 901,
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      itemId,
+      isBlocking,
+      autoResolutionMs: null,
+      questions: [
+        {
+          id: "choice",
+          header: "Choice",
+          question: "Which?",
+          isOther: true,
+          isSecret: false,
+          options: null,
+        },
+      ],
+    },
+  } as ServerRequest;
+}
+
 async function createForkHarness(deliveryVersion: number | undefined = 1) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-fork-api-test-"));
   directories.push(directory);
@@ -7691,6 +7708,168 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
 }
 
 describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
+  it.each([true, false])(
+    "dismisses a question (blocking=%s) and delivers the new instruction once",
+    async (isBlocking) => {
+      const { app, bridge, headers, store, projection, attention } =
+        await createForkHarness(deliveryVersion);
+      try {
+        await projection.setCurrentTurn("thread", "turn");
+        const respond = vi.fn();
+        const pending = attention.receive(dismissibleQuestion("question", isBlocking), {
+          respond,
+        } as unknown as JsonlTransport);
+        if (pending.kind !== "userInput") throw new Error("Expected question");
+        await projection.updateUserInputDraft(pending, {
+          answers: { choice: ["Unsent answer"] },
+          currentQuestionId: "choice",
+        });
+        const request = {
+          method: "POST" as const,
+          url: "/api/v1/threads/thread/queue",
+          headers,
+          payload: {
+            input: "Use my new instructions",
+            clientMessageId: "dismiss-question",
+            dismissUserInput: { turnId: "turn", itemId: "question" },
+          },
+        };
+        expect((await app.inject(request)).statusCode).toBe(202);
+        await vi.waitFor(() =>
+          expect(store.view().messageReceipts?.["dismiss-question"]?.turnId).toBe("turn"),
+        );
+        await vi.waitFor(() => expect(attention.get(pending.id)).toBeUndefined());
+        expect(store.view().threadMeta.thread?.userInputDrafts ?? {}).toEqual({});
+        expect(store.view().threadMeta.thread?.timelineArtifacts?.turn ?? []).not.toContainEqual(
+          expect.objectContaining({ type: "userInputResponse" }),
+        );
+        expect((await app.inject(request)).statusCode).toBe(202);
+        const steers = bridge.request.mock.calls.filter(([method]) => method === "turn/steer");
+        expect(steers).toHaveLength(1);
+        expect(steers[0]?.[1]).toMatchObject({
+          input: [expect.objectContaining({ text: "Use my new instructions" })],
+        });
+        if (deliveryVersion === 1) {
+          expect(steers[0]?.[1]).toHaveProperty("userInputResponse", {
+            itemId: "question",
+            response: { answers: {} },
+          });
+          expect(respond).not.toHaveBeenCalled();
+        } else {
+          expect(respond).toHaveBeenCalledExactlyOnceWith(901, { answers: {} });
+        }
+        expect(
+          (
+            await app.inject({
+              ...request,
+              payload: {
+                ...request.payload,
+                dismissUserInput: { turnId: "turn", itemId: "different" },
+              },
+            })
+          ).statusCode,
+        ).toBe(409);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it("leaves a newer question open when a delayed dismissal arrives", async () => {
+    const { app, bridge, headers, store, projection, attention } =
+      await createForkHarness(deliveryVersion);
+    try {
+      await projection.setCurrentTurn("thread", "turn");
+      const respond = vi.fn();
+      const newer = attention.receive(dismissibleQuestion("new-question"), {
+        respond,
+      } as unknown as JsonlTransport);
+      const payload = {
+        input: "Delayed voice transcript",
+        clientMessageId: "delayed-voice",
+        dismissUserInput: { turnId: "old-turn", itemId: "old-question" },
+      };
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/v1/threads/thread/queue",
+            headers,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.view().messageReceipts?.["delayed-voice"]?.turnId).toBe("turn"),
+      );
+      expect(attention.get(newer.id)).toBeDefined();
+      expect(respond).not.toHaveBeenCalled();
+      const steer = bridge.request.mock.calls.find(([method]) => method === "turn/steer");
+      expect(steer?.[1]).not.toHaveProperty("userInputResponse");
+      for (const invalid of [
+        null,
+        {},
+        { turnId: "turn", itemId: 5 },
+        { turnId: "turn", itemId: "question", extra: true },
+      ]) {
+        expect(
+          (
+            await app.inject({
+              method: "POST",
+              url: "/api/v1/threads/thread/queue",
+              headers,
+              payload: { ...payload, dismissUserInput: invalid },
+            })
+          ).statusCode,
+        ).toBe(400);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps the question and its draft after a rejected dismissal", async () => {
+    const { app, bridge, headers, store, projection, attention } =
+      await createForkHarness(deliveryVersion);
+    try {
+      await projection.setCurrentTurn("thread", "turn");
+      const respond = vi.fn();
+      const pending = attention.receive(dismissibleQuestion("question"), {
+        respond,
+      } as unknown as JsonlTransport);
+      if (pending.kind !== "userInput") throw new Error("Expected question");
+      await projection.updateUserInputDraft(pending, {
+        answers: { choice: ["Keep this draft"] },
+        currentQuestionId: "choice",
+      });
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params) => {
+        if (method === "turn/steer") throw new RpcError(-32602, "Rejected before delivery");
+        return original(method, params);
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: {
+          input: "New instructions",
+          clientMessageId: "rejected-dismissal",
+          dismissUserInput: { turnId: "turn", itemId: "question" },
+        },
+      });
+      await vi.waitFor(() =>
+        expect(store.view().messageQueues?.thread?.[0]?.deliveryError).toBeDefined(),
+      );
+      expect(attention.get(pending.id)).toBeDefined();
+      expect(respond).not.toHaveBeenCalled();
+      expect(Object.values(store.view().threadMeta.thread?.userInputDrafts ?? {})).toContainEqual(
+        expect.objectContaining({ answers: { choice: ["Keep this draft"] } }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it("creates a session once, persists it, and steers an active turn", async () => {
     const { app, bridge, headers, store } = await createForkHarness(deliveryVersion);
     try {

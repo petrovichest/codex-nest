@@ -63,6 +63,7 @@ export class MessageQueue {
       completeVoiceTranscriptionId?: string;
       replyToAsyncQuestion?: AsyncQuestionReference;
       replyToUserInput?: UserInputReply;
+      dismissUserInput?: AsyncQuestionReference;
     } = {},
   ): Promise<QueuedMessage> {
     const message: QueuedMessage = {
@@ -76,6 +77,7 @@ export class MessageQueue {
         ? { replyToAsyncQuestion: options.replyToAsyncQuestion }
         : {}),
       ...(options.replyToUserInput ? { replyToUserInput: options.replyToUserInput } : {}),
+      ...(options.dismissUserInput ? { dismissUserInput: options.dismissUserInput } : {}),
       createdAt: Date.now(),
       status: "queued",
     };
@@ -85,6 +87,7 @@ export class MessageQueue {
       message.files ?? [],
       !!message.goal,
       message.replyToUserInput ?? message.replyToAsyncQuestion,
+      message.dismissUserInput,
     );
     let stored = message;
     await this.store.update((state) => {
@@ -136,6 +139,7 @@ export class MessageQueue {
             existing.files ?? [],
             !!existing.goal,
             existing.replyToUserInput ?? existing.replyToAsyncQuestion,
+            existing.dismissUserInput,
           ) !== contentHash ||
           JSON.stringify(existing.replyToAsyncQuestion) !==
             JSON.stringify(message.replyToAsyncQuestion)
@@ -248,6 +252,7 @@ export class MessageQueue {
             current.files ?? [],
             !!current.goal,
             current.replyToUserInput ?? current.replyToAsyncQuestion,
+            current.dismissUserInput,
           ),
           status: "canceled",
           createdAt: Date.now(),
@@ -270,7 +275,13 @@ export class MessageQueue {
       if (messages.some((message) => message.status === "dispatching")) return;
       const active = this.delivery.currentTurnId(threadId) !== null;
       const message = active
-        ? messages.find((candidate) => candidate.replyToAsyncQuestion || candidate.replyToUserInput)
+        ? messages.find(
+            (candidate) =>
+              candidate.deliveryError?.retryable !== false &&
+              (candidate.replyToAsyncQuestion ||
+                candidate.replyToUserInput ||
+                candidate.dismissUserInput),
+          )
         : messages[0];
       if (!message || message.status !== "queued" || message.deliveryError?.retryable === false)
         return;
@@ -278,9 +289,11 @@ export class MessageQueue {
       await this.dispatch(
         threadId,
         message,
-        Boolean(message.replyToAsyncQuestion || message.replyToUserInput),
+        Boolean(
+          message.replyToAsyncQuestion || message.replyToUserInput || message.dismissUserInput,
+        ),
       );
-      if (message.replyToAsyncQuestion || message.replyToUserInput)
+      if (message.replyToAsyncQuestion || message.replyToUserInput || message.dismissUserInput)
         void this.drain(threadId).catch(() => undefined);
     });
   }
@@ -410,7 +423,7 @@ export class MessageQueue {
         throw error;
       }
       if (
-        message.replyToAsyncQuestion &&
+        (message.replyToAsyncQuestion || message.dismissUserInput) &&
         activeTurnId &&
         (activeTurnId !== this.delivery.currentTurnId(threadId) ||
           (error instanceof RpcError && /no active turn|turn.*mismatch/i.test(error.message)))
@@ -481,6 +494,7 @@ export class MessageQueue {
             deliveredMessage.files ?? [],
             !!deliveredMessage.goal,
             deliveredMessage.replyToUserInput ?? deliveredMessage.replyToAsyncQuestion,
+            deliveredMessage.dismissUserInput,
           ),
           createdAt: Date.now(),
         };
@@ -561,15 +575,18 @@ export function messageContentHash(
   files: readonly ThreadFileAttachment[],
   goal: boolean,
   reply?: unknown,
+  dismissUserInput?: AsyncQuestionReference,
 ): string {
   return createHash("sha256")
     .update(
       JSON.stringify(
-        reply !== undefined
-          ? [text.trim(), images, files, goal, reply]
-          : files.length
-            ? [text.trim(), images, files, goal]
-            : [text.trim(), images, goal],
+        dismissUserInput
+          ? [text.trim(), images, files, goal, reply ?? null, { dismissUserInput }]
+          : reply !== undefined
+            ? [text.trim(), images, files, goal, reply]
+            : files.length
+              ? [text.trim(), images, files, goal]
+              : [text.trim(), images, goal],
       ),
     )
     .digest("hex");

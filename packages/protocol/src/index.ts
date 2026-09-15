@@ -83,6 +83,7 @@ export type VoiceTranscriptionJob = {
   audioDurationMs: number;
   estimatedTotalSeconds: number | null;
   error: string | null;
+  dismissUserInput?: AsyncQuestionReference;
 };
 
 export type GitChangesSummary = {
@@ -345,6 +346,7 @@ export type QueuedMessage = {
   deliveryError?: { message: string; retryable: boolean };
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
+  dismissUserInput?: AsyncQuestionReference;
 };
 
 export type TurnPlanStep = {
@@ -1333,6 +1335,7 @@ export type QueueMessageRequest = {
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
+  dismissUserInput?: AsyncQuestionReference;
 };
 
 export type UpdateQueuedMessageRequest = {

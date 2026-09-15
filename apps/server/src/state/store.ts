@@ -309,6 +309,7 @@ export interface VoiceTranscriptionState {
   id: string;
   threadId: string;
   mode: VoiceTranscriptionMode;
+  dismissUserInput?: QueuedMessage["dismissUserInput"];
   status: VoiceTranscriptionStatus;
   createdAt: number;
   startedAt: number | null;
@@ -2049,6 +2050,7 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     (value.files === undefined ||
       (Array.isArray(value.files) && value.files.every(isStoredFileAttachment))) &&
     (value.goal === undefined || typeof value.goal === "boolean") &&
+    (value.dismissUserInput === undefined || isUserInputReference(value.dismissUserInput)) &&
     (value.deliveryVersion === undefined || value.deliveryVersion === 1) &&
     (value.replyToUserInput === undefined ||
       (isRecord(value.replyToUserInput) &&
@@ -2075,6 +2077,15 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
   );
 }
 
+function isUserInputReference(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["turnId", "itemId"]) &&
+    isBoundedString(value.turnId, 200) &&
+    isBoundedString(value.itemId, 200)
+  );
+}
+
 function isVoiceTranscription(value: unknown, threadId: string): value is VoiceTranscriptionState {
   if (
     !isRecord(value) ||
@@ -2082,6 +2093,8 @@ function isVoiceTranscription(value: unknown, threadId: string): value is VoiceT
     !value.id ||
     value.threadId !== threadId ||
     !["draft", "send", "queue", "steer"].includes(String(value.mode)) ||
+    (value.dismissUserInput !== undefined &&
+      (value.mode === "draft" || !isUserInputReference(value.dismissUserInput))) ||
     !["queued", "transcribing", "applying", "failed"].includes(String(value.status)) ||
     typeof value.createdAt !== "number" ||
     !Number.isFinite(value.createdAt) ||

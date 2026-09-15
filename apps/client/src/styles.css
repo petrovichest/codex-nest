@@ -4086,7 +4086,10 @@ button.message-file:hover:not(:disabled) {
   background: var(--surface);
 }
 
-.attention-stack + .outgoing-messages,
+.attention-stack:not([hidden]) + .outgoing-messages,
+.voice-transcription-message + .outgoing-messages,
+.voice-transcription-message + .attention-stack[hidden] + .outgoing-messages,
+.voice-transcription-message + .attention-stack:not([hidden]),
 .finish-thread-action + .outgoing-messages {
   margin-top: var(--space-4);
 }
@@ -4805,6 +4808,11 @@ button.message-file:hover:not(:disabled) {
   margin: 0;
 }
 
+.attention-stack[hidden],
+.attention-card[hidden] {
+  display: none;
+}
+
 .attention-card {
   padding: var(--space-4);
   border: 1px solid color-mix(in srgb, var(--warning-text) 30%, var(--line));
@@ -4852,32 +4860,44 @@ button.message-file:hover:not(:disabled) {
   color: var(--muted);
 }
 
+.user-input-overview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
 .user-input-progress {
   color: var(--muted);
   font-size: var(--text-small);
   font-weight: var(--weight-semibold);
+  white-space: nowrap;
 }
 
 .user-input-steps {
   display: flex;
   gap: var(--space-2);
-  margin-top: var(--space-2);
-  padding: var(--space-0-5) 1px var(--space-1);
+  min-width: 0;
+  padding: var(--space-1);
   overflow-x: auto;
   scrollbar-width: thin;
 }
 
 .user-input-steps button {
-  width: 30px;
-  min-width: 30px;
-  height: 30px;
+  flex: 0 0 auto;
+  width: var(--control-height);
+  min-width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
   padding: 0;
   border-color: var(--line-strong);
-  border-radius: 999px;
+  border-radius: 50%;
   color: var(--muted);
   background: color-mix(in srgb, var(--surface) 78%, transparent);
   font-size: var(--text-small);
   font-weight: var(--weight-bold);
+  line-height: 1;
 }
 
 .user-input-steps button.answered {
@@ -4896,6 +4916,44 @@ button.message-file:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.user-input-card fieldset {
+  min-width: 0;
+}
+
+.user-input-card legend {
+  padding: 0 var(--space-1);
+  font-size: var(--text-small);
+  font-weight: var(--weight-semibold);
+  color: var(--muted-strong);
+}
+
+.user-input-card .check {
+  align-items: flex-start;
+  padding: var(--space-1-5) 0;
+  line-height: var(--leading-copy);
+}
+
+.user-input-card .check input {
+  flex: 0 0 auto;
+  min-height: 0;
+  margin-top: var(--space-1);
+}
+
+.user-input-card .check span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.user-input-card .check small {
+  margin-top: var(--space-1);
+  font-size: var(--text-small);
+}
+
+.user-input-freeform-label {
+  margin: var(--space-2) 0 var(--space-1-5);
+  font-size: var(--text-small);
 }
 
 .user-input-freeform > input {
@@ -4926,6 +4984,7 @@ button.message-file:hover:not(:disabled) {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .user-input-navigation {
@@ -6074,6 +6133,17 @@ button.message-file:hover:not(:disabled) {
   .attention-stack {
     width: 100%;
     margin: 0;
+  }
+
+  .user-input-steps button {
+    width: var(--control-touch-height);
+    min-width: var(--control-touch-height);
+    height: var(--control-touch-height);
+    min-height: var(--control-touch-height);
+  }
+
+  .user-input-freeform > input {
+    font-size: var(--text-input);
   }
 
   .session-inspector {

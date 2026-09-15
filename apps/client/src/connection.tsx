@@ -107,6 +107,9 @@ interface ConnectionContextValue {
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
   pendingVoiceRecordingThreadIds: readonly string[];
   pendingVoiceRecordingErrors: Readonly<Record<string, string>>;
+  pendingVoiceInputDismissals: Readonly<
+    Record<string, NonNullable<QueueMessageRequest["dismissUserInput"]>>
+  >;
   retryPendingVoiceRecording(recording: VoiceRecordingRecovery): Promise<void>;
   updateUserInputDraft(
     attentionId: string,
@@ -138,6 +141,9 @@ export function ConnectionProvider({
   const [pendingVoiceRecordingErrors, setPendingVoiceRecordingErrors] = useState<
     Record<string, string>
   >({});
+  const [pendingVoiceInputDismissals, setPendingVoiceInputDismissals] = useState<
+    Record<string, NonNullable<QueueMessageRequest["dismissUserInput"]>>
+  >({});
   const [appActive, setAppActive] = useState(() => document.visibilityState === "visible");
   const generationRef = useRef(0);
   const connectionEpoch = useRef(0);
@@ -167,7 +173,10 @@ export function ConnectionProvider({
   const lastMessageTime = useRef(0);
   const recoveredVoiceRecordingIds = useRef(new Set<string>());
   const pendingVoiceRecordings = useRef(
-    new Map<string, Pick<PendingVoiceRecording, "threadId" | "lastError">>(),
+    new Map<
+      string,
+      Pick<PendingVoiceRecording, "threadId" | "lastError" | "dismissUserInput" | "mode">
+    >(),
   );
   const voiceRecoveryDrain = useRef<Promise<void> | null>(null);
   const voiceRecoveryRetryTimer = useRef<number | undefined>(undefined);
@@ -247,6 +256,7 @@ export function ConnectionProvider({
               destination: "queue",
               turnId: null,
               serverAccepted: message.accepted === true,
+              ...(message.dismissUserInput ? { dismissUserInput: message.dismissUserInput } : {}),
               ...(message.lastError
                 ? {
                     deliveryError: {
@@ -663,6 +673,9 @@ export function ConnectionProvider({
                     ...(message.replyToUserInput
                       ? { replyToUserInput: message.replyToUserInput }
                       : {}),
+                    ...(message.dismissUserInput
+                      ? { dismissUserInput: message.dismissUserInput }
+                      : {}),
                   });
                   record.message = {
                     ...message,
@@ -684,6 +697,9 @@ export function ConnectionProvider({
                       destination: "queue",
                       turnId: null,
                       serverAccepted: true,
+                      ...(message.dismissUserInput
+                        ? { dismissUserInput: message.dismissUserInput }
+                        : {}),
                     },
                   });
                   await acknowledgeOutboxMessage(record.message);
@@ -754,6 +770,7 @@ export function ConnectionProvider({
         goal: body.goal ?? false,
         ...(body.replyToAsyncQuestion ? { replyToAsyncQuestion: body.replyToAsyncQuestion } : {}),
         ...(body.replyToUserInput ? { replyToUserInput: body.replyToUserInput } : {}),
+        ...(body.dismissUserInput ? { dismissUserInput: body.dismissUserInput } : {}),
         createdAt: (lastMessageTime.current = Math.max(Date.now(), lastMessageTime.current + 1)),
         attempts: 0,
         lastError: null,
@@ -815,21 +832,33 @@ export function ConnectionProvider({
   const publishPendingVoiceRecordingThreads = useCallback(() => {
     const threadIds = new Set<string>();
     const errors: Record<string, string> = {};
+    const dismissals: Record<string, NonNullable<QueueMessageRequest["dismissUserInput"]>> = {};
     for (const recording of pendingVoiceRecordings.current.values()) {
       threadIds.add(recording.threadId);
       if (recording.lastError && errors[recording.threadId] === undefined) {
         errors[recording.threadId] = recording.lastError;
       }
+      if (!recording.lastError && recording.mode !== "draft" && recording.dismissUserInput) {
+        dismissals[recording.threadId] = recording.dismissUserInput;
+      }
     }
     setPendingVoiceRecordingThreadIds([...threadIds]);
     setPendingVoiceRecordingErrors(errors);
+    setPendingVoiceInputDismissals(dismissals);
   }, []);
 
   const trackPendingVoiceRecording = useCallback(
-    (recording: Pick<PendingVoiceRecording, "id" | "threadId" | "lastError">) => {
+    (
+      recording: Pick<
+        PendingVoiceRecording,
+        "id" | "threadId" | "lastError" | "dismissUserInput" | "mode"
+      >,
+    ) => {
       pendingVoiceRecordings.current.set(recording.id, {
         threadId: recording.threadId,
         lastError: recording.lastError,
+        dismissUserInput: recording.dismissUserInput,
+        mode: recording.mode,
       });
       publishPendingVoiceRecordingThreads();
     },
@@ -847,6 +876,7 @@ export function ConnectionProvider({
   const uploadVoiceRecording = useCallback(
     async (recording: PendingVoiceRecording): Promise<void> => {
       let prepared = recording;
+      trackPendingVoiceRecording({ ...recording, lastError: null });
       try {
         if (!Object.prototype.hasOwnProperty.call(prepared, "serverDraftUpdatedAt")) {
           const savedDraft = await api.updateThreadDraft(prepared.threadId, prepared.draft, {
@@ -873,6 +903,9 @@ export function ConnectionProvider({
           selectionEnd: prepared.selectionEnd,
           draftUpdatedAt: prepared.serverDraftUpdatedAt ?? null,
           clientUploadId: prepared.id,
+          ...(prepared.mode !== "draft" && prepared.dismissUserInput
+            ? { dismissUserInput: prepared.dismissUserInput }
+            : {}),
         });
         if (accepted) dispatch({ type: "voice.accepted", job: accepted });
         await deletePendingVoiceRecording(prepared.id);
@@ -1153,6 +1186,8 @@ export function ConnectionProvider({
           pendingVoiceRecordings.current.set(recording.id, {
             threadId: recording.threadId,
             lastError: recording.lastError,
+            dismissUserInput: recording.dismissUserInput,
+            mode: recording.mode,
           });
         }
         publishPendingVoiceRecordingThreads();
@@ -1360,6 +1395,7 @@ export function ConnectionProvider({
       queueVoiceRecording,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,
+      pendingVoiceInputDismissals,
       retryPendingVoiceRecording,
       updateUserInputDraft,
       flushUserInputDraft,
@@ -1383,6 +1419,7 @@ export function ConnectionProvider({
       queueVoiceRecording,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,
+      pendingVoiceInputDismissals,
       retryPendingVoiceRecording,
       updateUserInputDraft,
       flushUserInputDraft,

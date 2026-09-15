@@ -195,6 +195,7 @@ type GoalAwareOptimisticMessage = OptimisticMessage & {
 type VoiceUploadState = {
   mode: VoiceTranscriptionMode;
   startedAt: number;
+  dismissUserInput?: QueuedMessage["dismissUserInput"];
 };
 
 type VoiceProgress = {
@@ -511,6 +512,7 @@ export function ThreadPage({
     queueVoiceRecording,
     pendingVoiceRecordingThreadIds = [],
     pendingVoiceRecordingErrors = {},
+    pendingVoiceInputDismissals = {},
     retryPendingVoiceRecording = async () => undefined,
   } = useConnection();
   const activeThreadIdRef = useRef(threadId);
@@ -774,6 +776,15 @@ export function ThreadPage({
     () => state.snapshot?.attention?.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
+  function userInputToDismiss(targetThreadId: string): QueuedMessage["dismissUserInput"] {
+    const request = state.snapshot?.attention?.find(
+      (item) =>
+        item.threadId === targetThreadId && item.kind === "userInput" && item.turnId && item.itemId,
+    );
+    return request?.turnId && request.itemId
+      ? { turnId: request.turnId, itemId: request.itemId }
+      : undefined;
+  }
   const goal = state.goals?.[threadId];
   const voiceJob =
     state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
@@ -798,6 +809,26 @@ export function ThreadPage({
     queueAction === null && queuedMessages[0]?.confirmed && queuedMessages[0].status === "queued"
       ? queuedMessages[0]
       : null;
+  const dismissalReferences = [
+    ...queuedMessages
+      .filter((message) => message.deliveryError?.retryable !== false)
+      .map((message) => message.dismissUserInput),
+    voiceUpload?.mode !== "draft" ? voiceUpload?.dismissUserInput : undefined,
+    activeVoiceJob?.mode !== "draft" && !activeVoiceJob?.error
+      ? activeVoiceJob?.dismissUserInput
+      : undefined,
+    pendingVoiceInputDismissals[threadId],
+  ];
+  const hiddenAttentionIds = attention
+    .filter(
+      (request) =>
+        request.kind === "userInput" &&
+        dismissalReferences.some(
+          (reference) =>
+            reference && reference.turnId === request.turnId && reference.itemId === request.itemId,
+        ),
+    )
+    .map((request) => request.id);
   const activeMessageFingerprints = new Set<string>();
   const addActiveMessage = (identity: SubmittedMessageIdentity) => {
     activeMessageFingerprints.add(submittedMessageFingerprint(identity));
@@ -1696,9 +1727,11 @@ export function ThreadPage({
     ) {
       throw new Error(t("Codex временно не принимает сообщения"));
     }
+    const dismissUserInput =
+      uploadMode !== "draft" ? userInputToDismiss(targetThreadId) : undefined;
     setVoiceUploads((current) => ({
       ...current,
-      [targetThreadId]: { mode: uploadMode, startedAt: Date.now() },
+      [targetThreadId]: { mode: uploadMode, startedAt: Date.now(), dismissUserInput },
     }));
     const uploadId = recording.id;
     localVoiceJobIdsRef.current.add(uploadId);
@@ -1715,6 +1748,7 @@ export function ThreadPage({
         audio: recording.audio,
         durationMs: recording.durationMs,
         mode: uploadMode,
+        ...(dismissUserInput ? { dismissUserInput } : {}),
         selectionStart: recording.selection.start,
         selectionEnd: recording.selection.end,
         draftUpdatedAt: expectedDraftUpdatedAt,
@@ -2524,6 +2558,7 @@ export function ThreadPage({
     }
     const submittedEditRevision = composerEditRevisionRef.current;
     const clientMessageId = createClientMessageId();
+    const dismissUserInput = userInputToDismiss(targetThreadId);
     const submittedIdentity: SubmittedMessageIdentity = {
       text: submittedInput,
       images: submittedDraft.images.map((image) => image.url),
@@ -2542,6 +2577,7 @@ export function ThreadPage({
       createdAt: Date.now(),
       destination: "queue",
       turnId: null,
+      ...(dismissUserInput ? { dismissUserInput } : {}),
     };
     let deliveryCommitted = false;
     const commitDelivery = () => {
@@ -2568,6 +2604,7 @@ export function ThreadPage({
           ...(submittedDraft.files?.length ? { files: submittedDraft.files } : {}),
           ...(submittedDraft.goalMode ? { goal: true } : {}),
           clientMessageId,
+          ...(dismissUserInput ? { dismissUserInput } : {}),
         },
         commitDelivery,
         { draft: submittedDraft },
@@ -3870,6 +3907,7 @@ export function ThreadPage({
                     )}
                     <AttentionPanel
                       requests={attention}
+                      hiddenRequestIds={hiddenAttentionIds}
                       transcriptionConfig={transcriptionConfig}
                       transcriptionProvider={transcriptionProvider}
                       onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
@@ -4296,6 +4334,7 @@ function mergeOptimisticQueue(
         ...(message.images.length ? { images: message.images } : {}),
         ...(message.files?.length ? { files: message.files } : {}),
         ...(message.deliveryError ? { deliveryError: message.deliveryError } : {}),
+        ...(message.dismissUserInput ? { dismissUserInput: message.dismissUserInput } : {}),
         createdAt: message.createdAt,
         status: "queued" as const,
         confirmed: false,

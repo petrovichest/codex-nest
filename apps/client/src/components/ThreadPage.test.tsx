@@ -4174,6 +4174,94 @@ describe("Activity", () => {
     expect(screen.queryByRole("region", { name: "Очередь сообщений" })).toBeNull();
   });
 
+  it("hides a dismissed form on text commit and restores its inputs on delivery failure", async () => {
+    const api = threadApi();
+    const request = pendingInputRequest();
+    const running = { ...summary, state: "needsAttention" as const, currentTurnId: "turn" };
+    const context = mockThreadConnection(api, running, { attention: [request] });
+    context.dispatch.mockImplementation((action) => {
+      if (action.type === "optimistic.add")
+        context.state.optimisticMessages.thread = [action.message];
+    });
+    const view = renderThread();
+    fireEvent.click(screen.getByRole("button", { name: /Вопрос 2 из 2:/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Свой ответ" }), {
+      target: { value: "Сохранить мой ответ" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Направить текущую задачу" }), {
+      target: { value: "Новое указание" },
+    });
+    expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Добавить в очередь" }));
+    await waitFor(() =>
+      expect(api.enqueue).toHaveBeenCalledWith(
+        "thread",
+        expect.objectContaining({
+          input: "Новое указание",
+          dismissUserInput: { turnId: "turn", itemId: "question" },
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Требуется внимание" })).toBeNull(),
+    );
+    expect(view.container.querySelector(".attention-stack")).toHaveAttribute("hidden");
+    expect(api.enqueue.mock.calls[0]?.[1]).not.toHaveProperty("replyToUserInput");
+    context.state.optimisticMessages.thread![0]!.deliveryError = {
+      message: "Не удалось доставить",
+      retryable: false,
+    };
+    view.rerender(threadRoute());
+    expect(screen.getByRole("textbox", { name: "Свой ответ" })).toHaveValue("Сохранить мой ответ");
+    expect(screen.getByRole("button", { name: /Вопрос 2 из 2:/ })).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
+  it("hides only the referenced form across queue reloads and keeps approvals visible", () => {
+    const oldQuestion = pendingInputRequest();
+    const newQuestion = { ...pendingInputRequest("new-question"), id: "new-attention" };
+    const approval: AttentionRequest = {
+      id: "approval",
+      kind: "fileChangeApproval",
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "files",
+      createdAt: 2,
+      reason: null,
+      grantRoot: null,
+      canAcceptForSession: true,
+    };
+    const context = mockThreadConnection(
+      threadApi(),
+      { ...summary, state: "needsAttention", currentTurnId: "turn" },
+      {
+        attention: [oldQuestion, newQuestion, approval],
+        queuedMessages: [
+          {
+            id: "message",
+            threadId: "thread",
+            text: "Новое указание",
+            createdAt: 3,
+            status: "queued",
+            dismissUserInput: { turnId: "turn", itemId: "question" },
+          },
+        ],
+      },
+    );
+    const view = renderThread();
+    expect(view.container.querySelectorAll(".attention-card[hidden]")).toHaveLength(1);
+    expect(screen.getAllByRole("textbox", { name: "Свой ответ" })).toHaveLength(1);
+    expect(view.container.querySelectorAll(".attention-card:not([hidden])")).toHaveLength(2);
+    view.unmount();
+    const reopened = renderThread();
+    expect(reopened.container.querySelectorAll(".attention-card[hidden]")).toHaveLength(1);
+    context.state.details.thread.queuedMessages = [];
+    reopened.rerender(threadRoute());
+    expect(screen.getAllByRole("textbox", { name: "Свой ответ" })).toHaveLength(2);
+  });
+
   it("keeps an async answer inside its question card without a second user message", () => {
     const api = threadApi();
     const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
@@ -5208,6 +5296,78 @@ describe("Activity", () => {
     );
   });
 
+  it("hides questions during voice upload and restores the same form after an upload error", async () => {
+    installMediaRecorder(
+      async () => ({ getTracks: () => [{ stop: vi.fn() }] }) as unknown as MediaStream,
+    );
+    const api = threadApi();
+    let rejectUpload!: (error: Error) => void;
+    api.createVoiceTranscription.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectUpload = reject;
+        }),
+    );
+    const context = mockThreadConnection(
+      api,
+      { ...summary, state: "needsAttention", currentTurnId: "turn" },
+      { attention: [pendingInputRequest()] },
+    );
+    const view = render(voiceThreadRoute());
+    fireEvent.change(screen.getByRole("textbox", { name: "Свой ответ" }), {
+      target: { value: "Несохранённый ответ" },
+    });
+    const composer = within(view.container.querySelector(".composer")! as HTMLElement);
+    fireEvent.click(composer.getByRole("button", { name: "Начать запись" }));
+    await composer.findByRole("button", { name: "Остановить запись" });
+    expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeVisible();
+    fireEvent.click(composer.getByRole("button", { name: "Остановить запись" }));
+    await waitFor(() =>
+      expect(context.queueVoiceRecording).toHaveBeenCalledWith(
+        expect.objectContaining({ dismissUserInput: { turnId: "turn", itemId: "question" } }),
+      ),
+    );
+    expect(screen.queryByRole("region", { name: "Требуется внимание" })).toBeNull();
+    await act(async () => rejectUpload(new Error("Upload failed")));
+    expect(screen.getByRole("textbox", { name: "Свой ответ" })).toHaveValue("Несохранённый ответ");
+  });
+
+  it.each(["failed", "cancelled", "draft"])("restores questions for a %s voice job", (outcome) => {
+    const context = mockThreadConnection(
+      threadApi(),
+      { ...summary, state: "needsAttention", currentTurnId: "turn" },
+      { attention: [pendingInputRequest()] },
+    );
+    const job: VoiceTranscriptionJob = {
+      id: "voice",
+      threadId: "thread",
+      mode: "queue",
+      status: "transcribing",
+      createdAt: 2,
+      startedAt: 2,
+      audioDurationMs: 1000,
+      estimatedTotalSeconds: null,
+      error: null,
+      dismissUserInput: { turnId: "turn", itemId: "question" },
+    };
+    context.state.snapshot.voiceTranscriptions = [job];
+    const view = render(voiceThreadRoute());
+    expect(screen.queryByRole("region", { name: "Требуется внимание" })).toBeNull();
+    context.state.snapshot.voiceTranscriptions =
+      outcome === "cancelled"
+        ? []
+        : [
+            {
+              ...job,
+              ...(outcome === "failed"
+                ? { status: "failed" as const, error: "No speech" }
+                : { mode: "draft" as const }),
+            },
+          ];
+    view.rerender(voiceThreadRoute());
+    expect(screen.getByRole("region", { name: "Требуется внимание" })).toBeVisible();
+  });
+
   it("blocks for a remote voice job without presenting it as a local recording", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     context.state.snapshot.voiceTranscriptions = [
@@ -5417,6 +5577,28 @@ describe("Activity", () => {
     expect(context.refreshDetail).toHaveBeenCalledWith("thread", { force: true });
   });
 });
+
+function pendingInputRequest(
+  itemId = "question",
+): Extract<AttentionRequest, { kind: "userInput" }> {
+  return {
+    id: "attention",
+    threadId: "thread",
+    turnId: "turn",
+    itemId,
+    createdAt: 1,
+    kind: "userInput",
+    autoResolutionMs: null,
+    questions: ["Первый", "Второй"].map((header, index) => ({
+      id: `question-${index}`,
+      header,
+      question: `${header} вопрос?`,
+      isOther: true,
+      isSecret: false,
+      options: null,
+    })),
+  };
+}
 
 function renderThread(state?: Record<string, unknown>) {
   return render(threadRoute(state));

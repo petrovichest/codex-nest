@@ -148,7 +148,7 @@ describe("ConnectionProvider", () => {
   it("commits a reliable message as soon as its outbox record is durable", async () => {
     const stored = deferred<boolean>();
     const accepted = deferred<Response>();
-    const fetchMock = vi.fn(() => accepted.promise);
+    const fetchMock = vi.fn<typeof fetch>(() => accepted.promise);
     putOutboxMessage.mockReturnValueOnce(stored.promise);
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -162,7 +162,11 @@ describe("ConnectionProvider", () => {
 
     const delivery = controls!.sendReliable(
       "thread",
-      { input: "Не потерять", clientMessageId: "message" },
+      {
+        input: "Не потерять",
+        clientMessageId: "message",
+        dismissUserInput: { turnId: "turn", itemId: "question" },
+      },
       committed,
     );
     expect(committed).not.toHaveBeenCalled();
@@ -172,6 +176,12 @@ describe("ConnectionProvider", () => {
 
     expect(committed).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(putOutboxMessage.mock.calls[0]?.[0]).toMatchObject({
+      dismissUserInput: { turnId: "turn", itemId: "question" },
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+      dismissUserInput: { turnId: "turn", itemId: "question" },
+    });
     expect(deleteOutboxMessage).not.toHaveBeenCalled();
 
     accepted.resolve(
@@ -446,42 +456,51 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
-  it("uploads a persisted voice recording after reload and deletes it only after acceptance", async () => {
-    listPendingVoiceRecordings.mockResolvedValue([
-      {
-        id: "stale-recording",
-        connectionKey: "saved-connection",
-        threadId: "thread",
-        audio: new Blob(["audio"], { type: "audio/webm" }),
-        durationMs: 1_000,
-        mode: "draft",
-        selectionStart: 0,
-        selectionEnd: 0,
-        draftUpdatedAt: null,
-        draft: { input: "", images: [], goalMode: false, annotations: [] },
-        localDraftUpdatedAt: 1,
-        serverDraftUpdatedAt: null,
-        createdAt: 1,
-        attempts: 1,
-        lastError: "offline",
-      },
-    ]);
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("WebSocket", FakeWebSocket);
+  it.each(["draft", "queue"] as const)(
+    "uploads a persisted %s voice recording after reload and deletes it only after acceptance",
+    async (mode) => {
+      const dismissUserInput = { turnId: "original-turn", itemId: "original-question" };
+      listPendingVoiceRecordings.mockResolvedValue([
+        {
+          id: "stale-recording",
+          connectionKey: "saved-connection",
+          threadId: "thread",
+          audio: new Blob(["audio"], { type: "audio/webm" }),
+          durationMs: 1_000,
+          mode,
+          ...(mode === "queue" ? { dismissUserInput } : {}),
+          selectionStart: 0,
+          selectionEnd: 0,
+          draftUpdatedAt: null,
+          draft: { input: "", images: [], goalMode: false, annotations: [] },
+          localDraftUpdatedAt: 1,
+          serverDraftUpdatedAt: null,
+          createdAt: 1,
+          attempts: 1,
+          lastError: "offline",
+        },
+      ]);
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("WebSocket", FakeWebSocket);
 
-    const view = render(
-      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
-        <span>ready</span>
-      </ConnectionProvider>,
-    );
+      const view = render(
+        <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+          <span>ready</span>
+        </ConnectionProvider>,
+      );
 
-    await waitFor(() =>
-      expect(deletePendingVoiceRecording).toHaveBeenCalledWith("stale-recording"),
-    );
-    expect(fetchMock).toHaveBeenCalledOnce();
-    view.unmount();
-  });
+      await waitFor(() =>
+        expect(deletePendingVoiceRecording).toHaveBeenCalledWith("stale-recording"),
+      );
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const url = fetchMock.mock.calls[0]![0] as URL;
+      expect(url.searchParams.get("dismissUserInput")).toBe(
+        mode === "queue" ? JSON.stringify(dismissUserInput) : null,
+      );
+      view.unmount();
+    },
+  );
 
   it("keeps a recovered recording without endlessly retrying a stale draft conflict", async () => {
     listPendingVoiceRecordings.mockResolvedValue([

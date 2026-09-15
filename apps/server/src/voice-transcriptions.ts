@@ -31,6 +31,7 @@ type AcceptVoiceTranscription = {
   clientUploadId?: string;
   threadId: string;
   mode: VoiceTranscriptionMode;
+  dismissUserInput?: VoiceTranscriptionJob["dismissUserInput"];
   audio: Buffer;
   contentType: "audio/webm" | "audio/mp4";
   audioDurationMs: number;
@@ -181,6 +182,7 @@ export class VoiceTranscriptionManager {
       id,
       threadId: input.threadId,
       mode: input.mode,
+      ...(input.dismissUserInput ? { dismissUserInput: input.dismissUserInput } : {}),
       status: "queued",
       createdAt: Date.now(),
       startedAt: null,
@@ -402,6 +404,7 @@ export class VoiceTranscriptionManager {
       {
         goal: inserted.goalMode,
         completeVoiceTranscriptionId: job.id,
+        ...(job.dismissUserInput ? { dismissUserInput: job.dismissUserInput } : {}),
       },
     );
     await this.options.store.update((state) => {
@@ -505,6 +508,7 @@ export function publicJob(job: VoiceTranscriptionState): VoiceTranscriptionJob {
     audioDurationMs: job.audioDurationMs,
     estimatedTotalSeconds: job.estimatedTotalSeconds,
     error: job.error,
+    ...(job.dismissUserInput ? { dismissUserInput: job.dismissUserInput } : {}),
   };
 }
 

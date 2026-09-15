@@ -22,6 +22,52 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("delivers an explicit answer after a permanently rejected dismissal", async () => {
+    const { queue, store, delivery } = await setup("turn");
+    delivery.paused.mockReturnValue(true);
+    await queue.enqueue("thread", "Rejected guidance", [], "dismissal", {
+      dismissUserInput: { turnId: "turn", itemId: "question" },
+    });
+    await store.update((state) => {
+      state.messageQueues!.thread![0]!.deliveryError = { message: "Rejected", retryable: false };
+    });
+    await queue.enqueue("thread", "Answer from the restored form", [], "answer", {
+      replyToUserInput: { turnId: "turn", itemId: "question", answers: { choice: ["First"] } },
+    });
+    delivery.paused.mockReturnValue(false);
+    await queue.drain("thread");
+    expect(delivery.steer).toHaveBeenCalledExactlyOnceWith(
+      "thread",
+      "turn",
+      expect.objectContaining({ id: "answer" }),
+    );
+    expect(queue.list("thread").map((message) => message.id)).toEqual(["dismissal"]);
+  });
+
+  it("recovers a dismissal into the current turn without losing its original question identity", async () => {
+    const { queue, store, delivery } = await setup("new-turn");
+    delivery.paused.mockReturnValue(true);
+    const dismissUserInput = { turnId: "old-turn", itemId: "old-question" };
+    await queue.enqueue("thread", "New instruction", [], "dismissal", { dismissUserInput });
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    const recovered = new MessageQueue(reopened, delivery);
+    queues.push(recovered);
+    delivery.paused.mockReturnValue(false);
+    await recovered.recover();
+    expect(delivery.steer).toHaveBeenCalledExactlyOnceWith(
+      "thread",
+      "new-turn",
+      expect.objectContaining({ id: "dismissal", dismissUserInput }),
+    );
+    await expect(
+      recovered.enqueue("thread", "New instruction", [], "dismissal", {
+        dismissUserInput: { turnId: "new-turn", itemId: "new-question" },
+      }),
+    ).rejects.toThrow("Message id has already been used");
+    expect(recovered.list("thread")).toEqual([]);
+  });
+
   it("recovers messages blocked before dispatch by the incompatible-build regression", async () => {
     const { queue, store, delivery } = await setup("active");
     const image = "data:image/png;base64,aGVsbG8=";
