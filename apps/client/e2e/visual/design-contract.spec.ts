@@ -127,9 +127,11 @@ for (const theme of ["light", "dark"] as const) {
       }
       const header = page.locator(".workspace-header");
       const bounds = (await header.boundingBox())!;
+      expect(bounds.height).toBe(44);
+      await expect(header.locator("h1")).toHaveCSS("font-weight", "400");
+      await expect(header.locator("h1")).toHaveCSS("font-size", mobile ? "14px" : "16px");
       if (mobile) {
         expect(bounds.y).toBe(42);
-        expect(bounds.height).toBe(64);
         expect(bounds.x).toBe(24);
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 20);
       }

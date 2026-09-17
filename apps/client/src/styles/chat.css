@@ -44,6 +44,39 @@
   box-shadow: var(--chat-shadow);
 }
 
+/* The pending-fork screen keeps its in-flow header and status banner. */
+.thread-workspace:not(.pending-fork-workspace) {
+  --chat-header-height: 44px;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .workspace-header {
+  height: var(--chat-header-height);
+  min-height: var(--chat-header-height);
+  margin-top: 8px;
+  border-radius: 999px;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .workspace-title {
+  flex: 1;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .workspace-title > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+  min-width: 0;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .workspace-title p {
+  max-width: 40%;
+  margin: 0;
+}
+
 /* One state rule per control family: role selectors below only supply colors.
    The neutral reset also beats legacy hover rules on touch and disabled controls. */
 .thread-workspace
@@ -673,6 +706,47 @@
   .thread-workspace .timeline {
     padding-top: 22px;
     padding-inline: 12px;
+  }
+
+  /* Only the rounded header paints over the transcript. The scroll viewport
+     starts at the safe area, so cards keep moving behind the header's corners. */
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane {
+    padding-top: var(--app-safe-area-top);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-header {
+    position: absolute;
+    z-index: 40;
+    top: calc(8px + var(--app-safe-area-top));
+    right: calc(8px + var(--app-safe-area-right));
+    left: calc(8px + var(--app-safe-area-left));
+    margin: 0;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title > div:last-child {
+    display: block;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+    max-width: 100%;
+    line-height: 18px;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title p {
+    max-width: 100%;
+    line-height: 14px;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
+    scroll-padding-top: calc(8px + var(--chat-header-height) + 8px);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .timeline {
+    padding-top: calc(8px + var(--chat-header-height) + 22px);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .fork-children-popover {
+    top: calc(var(--app-safe-area-top) + 8px + var(--chat-header-height) + 8px);
   }
 
   .thread-workspace .message.userMessage {
