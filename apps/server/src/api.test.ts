@@ -4014,6 +4014,14 @@ describe("thread settings", () => {
       threadId: "thread",
       clientUserMessageId: "client-started",
       model: "gpt-b",
+      additionalContext: {
+        "codexnest.plan": {
+          kind: "application",
+          value: expect.stringMatching(
+            /Follow the built-in Plan mode instructions.*incorporate all agreed clarifications.*one full replacement <proposed_plan> block.*even if the plan itself is unchanged.*questions remain unresolved.*do not present an incomplete plan/s,
+          ),
+        },
+      },
       collaborationMode: {
         mode: "plan",
         settings: {

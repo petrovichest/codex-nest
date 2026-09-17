@@ -739,6 +739,9 @@ const ENGLISH: Record<string, string> = {
   "Да, реализуй этот план": "Yes, implement this plan",
   "Да, реализуй этот план в режиме цели": "Yes, implement this plan in goal mode",
   "Да, реализуй этот план в режиме оркестратора": "Yes, implement this plan in orchestrator mode",
+  "План ещё не обновлён после уточнений":
+    "The plan has not yet been updated after your clarifications",
+  "План не завершён": "The plan is incomplete",
   "Действия с задачей": "Task actions",
   "Для доступа к микрофону откройте CodexNest по HTTPS":
     "Open CodexNest over HTTPS to access the microphone",
@@ -770,6 +773,7 @@ const ENGLISH: Record<string, string> = {
   "Изображение {{number}}": "Image {{number}}",
   "Изображение {{current}} из {{total}}": "Image {{current}} of {{total}}",
   Изображения: "Images",
+  Таблица: "Table",
   Файлы: "Files",
   "Использованы инструменты": "Tools used",
   "Идёт распознавание в другой сессии": "A recording is being transcribed in another session",

@@ -281,6 +281,7 @@ describe("Activity", () => {
     );
 
     expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Таблица" })).toHaveAttribute("tabindex", "0");
     expect(screen.getByRole("columnheader", { name: "Поле" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "" })).toBeChecked();
     expect(view.container.querySelector(".markdown-table-scroll")).not.toBeNull();
@@ -3825,6 +3826,183 @@ describe("Activity", () => {
     );
   });
 
+  it("moves the latest plan below the whole discussion and restores its position outside Plan mode", () => {
+    const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
+    const planTurn = completedPlanDetail().turns![0]!;
+    const context = mockThreadConnection(threadApi(), planThread, {
+      turns: [{ ...planTurn, items: [...planTurn.items, ...completedAgentTurn().items] }],
+    });
+    const view = renderThread();
+    const plan = screen.getByText("Сделать").closest("article")!;
+    const tail = plan.closest(".latest-plan")!;
+    expect(tail.parentElement!.lastElementChild).toBe(tail);
+    expect(screen.getAllByText("Сделать")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
+    expect(
+      screen.getByText("Готовый фрагмент ответа").compareDocumentPosition(plan) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    context.state.snapshot.threads = [summary];
+    context.state.details.thread = { ...context.state.details.thread, summary };
+    view.rerender(threadRoute());
+
+    expect(screen.queryByRole("button", { name: "Да, реализуй этот план" })).toBeNull();
+    expect(screen.getByText("Сделать").closest("[data-turn-id]")).toHaveAttribute(
+      "data-turn-id",
+      "plan-turn",
+    );
+    expect(
+      screen
+        .getByText("Сделать")
+        .compareDocumentPosition(screen.getByText("Готовый фрагмент ответа")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("keeps an old plan at the tail but blocks all implementation choices after a clarification", () => {
+    const api = threadApi();
+    const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
+    const planTurn = completedPlanDetail().turns![0]!;
+    const clarification: ActivityItem = {
+      type: "userMessage",
+      id: "clarification",
+      status: "completed",
+      text: "Добавь прогрев соединений",
+      images: [],
+      timestamp: 3,
+      phase: null,
+    };
+    const followup = {
+      ...completedAgentTurn(),
+      items: [clarification, ...completedAgentTurn().items],
+    };
+    const context = mockThreadConnection(api, planThread, { turns: [planTurn, followup] });
+    const view = renderThread();
+
+    const tail = screen.getByText("Сделать").closest(".latest-plan")!;
+    expect(tail.parentElement!.lastElementChild).toBe(tail);
+    expect(screen.getByText("План ещё не обновлён после уточнений")).toBeVisible();
+    for (const button of tail.querySelectorAll(".implement-plan")) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
+    expect(api.startTurn).not.toHaveBeenCalled();
+
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [
+        planTurn,
+        {
+          ...followup,
+          items: [
+            ...followup.items,
+            { ...planTurn.items[0]!, id: "revised-plan", text: "План с прогревом соединений" },
+          ],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+
+    expect(screen.queryByText("План ещё не обновлён после уточнений")).toBeNull();
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
+    expect(screen.getByText("Сделать").closest(".latest-plan")).toBeNull();
+    expect(screen.getAllByText("План с прогревом соединений")).toHaveLength(1);
+    const revisedTail = screen.getByText("План с прогревом соединений").closest(".latest-plan")!;
+    expect(revisedTail.parentElement!.lastElementChild).toBe(revisedTail);
+    expect(screen.getAllByRole("button", { name: "Да, реализуй этот план" })).toHaveLength(1);
+
+    view.unmount();
+    renderThread();
+    expect(screen.getByText("План с прогревом соединений").closest(".latest-plan")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
+  });
+
+  it.each(["userMessage", "userInputResponse"] as const)(
+    "blocks a plan followed by a %s in the same turn",
+    (type) => {
+      const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
+      const planTurn = completedPlanDetail().turns![0]!;
+      const reply: ActivityItem =
+        type === "userMessage"
+          ? {
+              type,
+              id: "reply",
+              status: "completed",
+              text: "Используем два прокси",
+              images: [],
+              timestamp: 3,
+              phase: null,
+            }
+          : {
+              type,
+              id: "reply",
+              status: "completed",
+              timestamp: 3,
+              afterItemId: "plan",
+              entries: [{ header: "Прокси", question: "Сколько?", answers: ["Два"] }],
+            };
+      mockThreadConnection(threadApi(), planThread, {
+        turns: [{ ...planTurn, items: [...planTurn.items, reply, ...completedAgentTurn().items] }],
+      });
+      renderThread();
+
+      expect(screen.getByText("План ещё не обновлён после уточнений")).toBeVisible();
+      expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    },
+  );
+
+  it("keeps a streaming plan at the tail and enables it only after successful turn completion", () => {
+    const planTurn = completedPlanDetail().turns![0]!;
+    const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
+    const running = { ...planThread, state: "running" as const, currentTurnId: planTurn.id };
+    const context = mockThreadConnection(threadApi(), running, {
+      turns: [
+        {
+          ...planTurn,
+          status: "inProgress",
+          items: [{ ...planTurn.items[0]!, status: "inProgress" }],
+        },
+      ],
+    });
+    const view = renderThread();
+    expect(screen.getByText("Сделать").closest(".latest-plan")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [{ ...planTurn, status: "inProgress" }],
+    };
+    view.rerender(threadRoute());
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+
+    context.state.snapshot.threads = [planThread];
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      summary: planThread,
+      turns: [planTurn],
+    };
+    view.rerender(threadRoute());
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
+  });
+
+  it.each(["interrupted", "failed"] as const)("does not accept a plan from a %s turn", (status) => {
+    const planThread = {
+      ...summary,
+      state: status,
+      settings: { collaborationMode: "plan" as const },
+    };
+    const planTurn = completedPlanDetail().turns![0]!;
+    mockThreadConnection(threadApi(), planThread, { turns: [{ ...planTurn, status }] });
+    renderThread();
+
+    expect(screen.getByText("План не завершён")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Запустить в режиме цели" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Запустить в режиме оркестратора" })).toBeDisabled();
+  });
+
   it("lets only one completed-plan implementation button start at a time", async () => {
     const api = threadApi();
     const planThread = {
@@ -3880,7 +4058,7 @@ describe("Activity", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Да, реализуй этот план" }));
 
-    expect(await screen.findByText("Это сообщение уже отправлено")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
     expect(api.startTurn).not.toHaveBeenCalled();
   });
@@ -5817,7 +5995,7 @@ function installMediaRecorder(getUserMedia: () => Promise<MediaStream>) {
   });
 }
 
-function completedPlanDetail(): NonNullable<Parameters<typeof mockThreadConnection>[2]> {
+function completedPlanDetail() {
   return {
     turns: [
       {
@@ -5840,7 +6018,7 @@ function completedPlanDetail(): NonNullable<Parameters<typeof mockThreadConnecti
         ],
       },
     ],
-  };
+  } satisfies NonNullable<Parameters<typeof mockThreadConnection>[2]>;
 }
 
 function threadApi() {

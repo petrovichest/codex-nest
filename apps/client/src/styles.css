@@ -3227,6 +3227,15 @@ button.message-file:hover:not(:disabled) {
   overflow-wrap: anywhere;
 }
 
+.latest-plan {
+  margin-top: var(--space-6);
+}
+
+.latest-plan > [role="status"] {
+  color: var(--muted);
+  font-size: var(--text-small);
+}
+
 .implement-plan-actions {
   display: flex;
   flex-wrap: wrap;

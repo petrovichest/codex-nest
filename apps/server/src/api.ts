@@ -219,6 +219,12 @@ const TEAM_CONTINUATION_MARKER_TEXT =
   "Continue CodexNest Team orchestration using the attached managed-task results.";
 const TEAM_SESSION_UPGRADE_MESSAGE =
   "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.";
+const PLAN_MODE_CONTEXT = [
+  "This session is in CodexNest Plan mode. Follow the built-in Plan mode instructions.",
+  "When the user continues discussing an already proposed plan, incorporate all agreed clarifications into the complete current plan.",
+  "Once the discussion is resolved, end your final response with one full replacement <proposed_plan> block, even if the plan itself is unchanged. Do not merely describe changes or promise to update the plan.",
+  "If material questions remain unresolved, continue clarifying and do not present an incomplete plan as ready for implementation.",
+].join(" ");
 const TEAM_MODE_CONTEXT = [
   "This session is in CodexNest Team mode. You are the root agent and may perform any part of the user's task directly, including inspecting, analyzing, editing, and testing code.",
   "Managed tasks are event-driven: when a child finishes, CodexNest automatically delivers its result and resumes this parent session.",
@@ -7512,8 +7518,18 @@ function turnSettings(
       },
     },
     additionalContext:
-      settings.collaborationMode === "team" || continuationContext
+      settings.collaborationMode === "team" ||
+      settings.collaborationMode === "plan" ||
+      continuationContext
         ? {
+            ...(settings.collaborationMode === "plan"
+              ? {
+                  "codexnest.plan": {
+                    kind: "application",
+                    value: PLAN_MODE_CONTEXT,
+                  },
+                }
+              : {}),
             ...(settings.collaborationMode === "team"
               ? {
                   "codexnest.team": {

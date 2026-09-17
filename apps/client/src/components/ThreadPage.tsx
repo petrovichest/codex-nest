@@ -888,6 +888,13 @@ export function ThreadPage({
     }
   }
   activeMessageFingerprintsRef.current = activeMessageFingerprints;
+  const latestPlan = useMemo(
+    () =>
+      !isSubagent && summary?.settings.collaborationMode === "plan"
+        ? findLatestPlan(detail?.turns)
+        : null,
+    [detail?.turns, isSubagent, summary?.settings.collaborationMode],
+  );
   const groupedTurnActivities = useMemo(
     () =>
       new Map(
@@ -897,13 +904,15 @@ export function ThreadPage({
               turn.id,
               groupActivities(
                 activitiesForThreadDisplay(turn.items, isSubagent).filter(
-                  (item) => !isTechnicalActivity(item),
+                  (item) =>
+                    !isTechnicalActivity(item) &&
+                    !(turn.id === latestPlan?.turn.id && item.id === latestPlan.item.id),
                 ),
               ),
             ] as const,
         ),
       ),
-    [detail?.turns, isSubagent],
+    [detail?.turns, isSubagent, latestPlan],
   );
   const technicalTurnActivities = useMemo(
     () =>
@@ -960,7 +969,6 @@ export function ThreadPage({
     }
     return actions;
   }, [detail?.turns, forkFromTurnEvent, isSubagent]);
-  const completedLatestPlanId = useMemo(() => findLatestCompletedPlan(detail), [detail]);
   const latestAnnotatableId = useMemo(
     () => findLatestAnnotatable(detail, summary?.currentTurnId ?? null),
     [detail, summary?.currentTurnId],
@@ -3018,6 +3026,7 @@ export function ThreadPage({
       setError(t("Это сообщение уже отправлено"));
       return;
     }
+    if (planAcceptanceDisabled) return;
     const clientMessageId = createClientMessageId();
     const messageClaimKey = claimSubmittedMessage(
       { text: implementationMessage, images: [], files: [], goal: goalMode },
@@ -3394,13 +3403,30 @@ export function ThreadPage({
     !autoVoiceProgress &&
     (preparationRef.current.active || emptyCreatedWorkspace);
   const showNewSessionChrome = preparationRef.current.active || showEmptySessionHero;
-  const latestPlanId =
-    !workspaceSummary.currentTurnId && workspaceSummary.settings.collaborationMode === "plan"
-      ? completedLatestPlanId
-      : null;
   const latestPlanHasAnnotations = Boolean(
-    latestPlanId && annotations.some((annotation) => annotation.messageId === latestPlanId),
+    latestPlan && annotations.some((annotation) => annotation.messageId === latestPlan.item.id),
   );
+  const planAcceptanceDisabled =
+    busy ||
+    settingsBusy ||
+    !latestPlan?.ready ||
+    Boolean(workspaceSummary.currentTurnId) ||
+    workspaceSummary.state === "running" ||
+    attention.length > 0 ||
+    optimisticMessages.length > 0 ||
+    (detail?.queuedMessages.length ?? 0) > 0 ||
+    latestPlanHasAnnotations;
+  const planNotice =
+    latestPlan && !workspaceSummary.currentTurnId && latestPlan.turn.status !== "inProgress"
+      ? latestPlan.needsUpdate
+        ? t("План ещё не обновлён после уточнений")
+        : !latestPlan.ready
+          ? t("План не завершён")
+          : null
+      : null;
+  const planAcceptanceTitle = latestPlanHasAnnotations
+    ? t("Сначала отправьте или удалите аннотации к плану")
+    : (planNotice ?? undefined);
   const browserSwitchLocked =
     Boolean(workspaceSummary.currentTurnId) ||
     workspaceSummary.state === "running" ||
@@ -3844,51 +3870,6 @@ export function ThreadPage({
                                   onUpdateAnnotation={updateAnnotationEvent}
                                   onDeleteAnnotation={deleteAnnotationEvent}
                                 />
-                                {!isSubagent && entry.id === latestPlanId && (
-                                  <div className="implement-plan-actions">
-                                    <button
-                                      className="implement-plan"
-                                      disabled={busy || latestPlanHasAnnotations}
-                                      title={
-                                        latestPlanHasAnnotations
-                                          ? t("Сначала отправьте или удалите аннотации к плану")
-                                          : undefined
-                                      }
-                                      type="button"
-                                      onClick={() => void implementPlan("default")}
-                                    >
-                                      {t("Да, реализуй этот план")}
-                                    </button>
-                                    <button
-                                      className="implement-plan goal"
-                                      disabled={busy || latestPlanHasAnnotations}
-                                      title={
-                                        latestPlanHasAnnotations
-                                          ? t("Сначала отправьте или удалите аннотации к плану")
-                                          : undefined
-                                      }
-                                      type="button"
-                                      onClick={() => void implementPlan("goal")}
-                                    >
-                                      <TargetIcon />
-                                      {t("Запустить в режиме цели")}
-                                    </button>
-                                    <button
-                                      className="implement-plan orchestrator"
-                                      disabled={busy || latestPlanHasAnnotations}
-                                      title={
-                                        latestPlanHasAnnotations
-                                          ? t("Сначала отправьте или удалите аннотации к плану")
-                                          : undefined
-                                      }
-                                      type="button"
-                                      onClick={() => void implementPlan("team")}
-                                    >
-                                      <TeamIcon />
-                                      {t("Запустить в режиме оркестратора")}
-                                    </button>
-                                  </div>
-                                )}
                               </div>
                             ),
                           )}
@@ -3998,6 +3979,66 @@ export function ThreadPage({
                   onUpdate={updateQueued}
                   onDelete={deleteQueued}
                 />
+                {!searchTarget && latestPlan && (
+                  <div className="latest-plan">
+                    <MemoizedActivity
+                      key={`${latestPlan.turn.id}:${latestPlan.item.id}`}
+                      item={latestPlan.item}
+                      threadId={threadId}
+                      turnId={latestPlan.turn.id}
+                      cwd={workspaceSummary.cwd}
+                      onDownload={downloadFile}
+                      onOpenArtifact={openLinkedArtifact}
+                      onLoadImage={loadLocalImage}
+                      forkAction={
+                        latestPlan.item.id ===
+                        completedTurnForkActions.get(latestPlan.turn.id)?.responseId
+                          ? completedTurnForkActions.get(latestPlan.turn.id)?.action
+                          : undefined
+                      }
+                      annotations={annotations}
+                      annotationEnabled={
+                        !busy && !workspaceSummary.currentTurnId && latestPlan.ready
+                      }
+                      annotationBusy={busy}
+                      onCreateAnnotation={createAnnotationEvent}
+                      onUpdateAnnotation={updateAnnotationEvent}
+                      onDeleteAnnotation={deleteAnnotationEvent}
+                    />
+                    {planNotice && <p role="status">{planNotice}</p>}
+                    <div className="implement-plan-actions">
+                      <button
+                        className="implement-plan"
+                        disabled={planAcceptanceDisabled}
+                        title={planAcceptanceTitle}
+                        type="button"
+                        onClick={() => void implementPlan("default")}
+                      >
+                        {t("Да, реализуй этот план")}
+                      </button>
+                      <button
+                        className="implement-plan goal"
+                        disabled={planAcceptanceDisabled}
+                        title={planAcceptanceTitle}
+                        type="button"
+                        onClick={() => void implementPlan("goal")}
+                      >
+                        <TargetIcon />
+                        {t("Запустить в режиме цели")}
+                      </button>
+                      <button
+                        className="implement-plan orchestrator"
+                        disabled={planAcceptanceDisabled}
+                        title={planAcceptanceTitle}
+                        type="button"
+                        onClick={() => void implementPlan("team")}
+                      >
+                        <TeamIcon />
+                        {t("Запустить в режиме оркестратора")}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </section>
@@ -4388,8 +4429,9 @@ function createClientMessageId(): string {
 }
 
 function MarkdownTable({ children }: { children?: React.ReactNode }) {
+  const { t } = useI18n();
   return (
-    <div className="markdown-table-scroll">
+    <div className="markdown-table-scroll" role="region" aria-label={t("Таблица")} tabIndex={0}>
       <table>{children}</table>
     </div>
   );
@@ -6618,13 +6660,26 @@ function orchestrationWorkspaceIntegrationLabel(status: string, t: Translate): s
   }
 }
 
-function findLatestCompletedPlan(detail?: ThreadDetail): string | null {
-  const turn = detail?.turns.at(-1);
-  if (!turn || turn.status === "inProgress") return null;
-  return (
-    [...turn.items].reverse().find((item) => item.type === "plan" && item.status === "completed")
-      ?.id ?? null
-  );
+function findLatestPlan(turns: TurnView[] = []) {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = turns[turnIndex]!;
+    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = turn.items[itemIndex]!;
+      if (item.type !== "plan" || !item.text.trim()) continue;
+      const needsUpdate =
+        turnIndex !== turns.length - 1 ||
+        turn.items
+          .slice(itemIndex + 1)
+          .some((later) => later.type === "userMessage" || later.type === "userInputResponse");
+      return {
+        item,
+        turn,
+        needsUpdate,
+        ready: !needsUpdate && turn.status === "completed" && item.status === "completed",
+      };
+    }
+  }
+  return null;
 }
 
 function findLatestAnnotatable(
