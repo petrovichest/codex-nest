@@ -74,7 +74,7 @@ async function openLongPlan(page: Page, theme: "light" | "dark") {
   await waitForVisualReady(page);
 }
 
-for (const width of [320, 390]) {
+for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
   for (const theme of ["light", "dark"] as const) {
     test(`${width}px ${theme}: cards scroll behind the rounded header without a straight cut`, async ({
       page,
@@ -82,6 +82,7 @@ for (const width of [320, 390]) {
     }) => {
       await page.setViewportSize({ width, height: 844 });
       await openLongPlan(page, theme);
+      const mobile = width <= 820;
       const safeTop = width === 390 ? 34 : 0;
       await page.addStyleTag({ content: `:root { --app-safe-area-top: ${safeTop}px; }` });
       const header = page.locator(".workspace-header");
@@ -97,35 +98,74 @@ for (const width of [320, 390]) {
         element.scrollTop = 0;
       });
       const firstMessage = (await page.locator('[data-message-id="header-user"]').boundingBox())!;
-      expect(firstMessage.y).toBeGreaterThanOrEqual(bounds.y + bounds.height + 22);
+      expect(firstMessage.y).toBeCloseTo(bounds.y + bounds.height + (mobile ? 22 : 28), 0);
 
       await scroll.evaluate((element) => {
         const card = element.querySelector(".message.plan")!;
         element.scrollTop += card.getBoundingClientRect().top + 200;
       });
       const card = (await plan.boundingBox())!;
-      expect(card.y).toBeLessThan(safeTop);
+      expect(card.y).toBeLessThan(bounds.y);
       expect(card.y + card.height).toBeGreaterThan(bounds.y + bounds.height + 100);
       expect(await header.boundingBox()).toEqual(bounds);
-      const layers = await page.evaluate(
-        ({ headerBounds, cardX, safeTop }) => {
-          const at = (x: number, y: number) => document.elementFromPoint(x, y);
-          return {
-            // The card remains visible just outside the header's lower-left curve.
-            corner: !!at(cardX + 1, headerBounds.y + headerBounds.height - 2)?.closest(
-              ".message.plan",
-            ),
-            center: !!at(headerBounds.x + headerBounds.width / 2, headerBounds.y + 22)?.closest(
-              ".workspace-header",
-            ),
-            statusBar: safeTop > 0 && !!at(cardX + 1, safeTop - 1)?.closest(".conversation-scroll"),
-          };
-        },
-        { headerBounds: bounds, cardX: card.x, safeTop },
-      );
-      expect(layers).toEqual({ corner: true, center: true, statusBar: false });
-      if (browserName === "chromium") {
+      const checkLayers = async () =>
+        page.evaluate(
+          ({ headerBounds, cardBounds, safeTop }) => {
+            const at = (x: number, y: number) => document.elementFromPoint(x, y);
+            const left = Math.max(cardBounds.x, headerBounds.x) + 1;
+            const right =
+              Math.min(cardBounds.x + cardBounds.width, headerBounds.x + headerBounds.width) - 1;
+            return {
+              // Both curves reveal the card; an in-flow header fails these checks.
+              leftCorner: !!at(left, headerBounds.y + headerBounds.height - 2)?.closest(
+                ".message.plan",
+              ),
+              rightCorner: !!at(right, headerBounds.y + headerBounds.height - 2)?.closest(
+                ".message.plan",
+              ),
+              center: !!at(headerBounds.x + headerBounds.width / 2, headerBounds.y + 22)?.closest(
+                ".workspace-header",
+              ),
+              statusBar: safeTop > 0 && !!at(left, safeTop - 1)?.closest(".conversation-scroll"),
+            };
+          },
+          {
+            headerBounds: (await header.boundingBox())!,
+            cardBounds: (await plan.boundingBox())!,
+            safeTop,
+          },
+        );
+      const expectedLayers = {
+        leftCorner: true,
+        rightCorner: true,
+        center: true,
+        statusBar: false,
+      };
+      expect(await checkLayers()).toEqual(expectedLayers);
+      if (browserName === "chromium" && [320, 390, 821, 1440].includes(width)) {
         await expect(page).toHaveScreenshot(`chat-header-scrolled-${width}-${theme}.png`);
+      }
+
+      // A desktop inspector can narrow the conversation without changing the
+      // viewport breakpoint. The overlay must still match the composer and card.
+      if (!mobile) {
+        await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
+        const narrowed = (await header.boundingBox())!;
+        const composer = (await page.locator(".composer-box").boundingBox())!;
+        expect(narrowed.x).toBeCloseTo(composer.x, 1);
+        expect(narrowed.width).toBeCloseTo(composer.width, 1);
+        if (width >= 1280) {
+          await scroll.evaluate((element) => {
+            element.scrollTop +=
+              element.querySelector(".message.plan")!.getBoundingClientRect().top + 200;
+          });
+          expect(await checkLayers()).toEqual(expectedLayers);
+        }
+        await page
+          .getByRole("complementary", { name: "Сведения о задаче", exact: true })
+          .getByRole("button", { name: "Закрыть сведения", exact: true })
+          .click();
+        expect(await header.boundingBox()).toEqual(bounds);
       }
 
       // Native scrollIntoView and keyboard focus must reveal a target below the overlay.
@@ -140,14 +180,31 @@ for (const width of [320, 390]) {
       await link.focus();
       await expect(link).toBeFocused();
       expect((await link.boundingBox())!.y).toBeGreaterThan(bounds.y + bounds.height);
+      // A wide layout may reach the end of the history before the link reaches
+      // the top inset. Account for that clamp and integer scroll offsets.
+      const remainingScroll = await scroll.evaluate(
+        (element) => element.scrollHeight - element.clientHeight - element.scrollTop,
+      );
+      const expectedLinkTop = Math.max(
+        bounds.y + bounds.height + 8,
+        (await link.boundingBox())!.y - remainingScroll,
+      );
       await link.evaluate((element) => element.scrollIntoView({ block: "start" }));
-      expect((await link.boundingBox())!.y).toBeCloseTo(bounds.y + bounds.height + 8, 0);
+      expect(Math.abs((await link.boundingBox())!.y - expectedLinkTop)).toBeLessThan(1);
 
       const forkTrigger = page.getByLabel("Показать ответвления: 1");
       await forkTrigger.click();
       const popover = page.locator(".fork-children-popover");
       await expect(popover).toBeVisible();
-      expect((await popover.boundingBox())!.y).toBe(bounds.y + bounds.height + 8);
+      const popoverBounds = (await popover.boundingBox())!;
+      if (mobile) expect(popoverBounds.y).toBe(bounds.y + bounds.height + 8);
+      else expect(popoverBounds.y).toBeGreaterThanOrEqual(bounds.y + bounds.height);
+      expect(
+        await popover.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(rect.x + 12, rect.y + 12));
+        }),
+      ).toBe(true);
       await expect(popover.getByRole("link")).toBeInViewport();
       await forkTrigger.click();
       await page.getByRole("button", { name: "Показать сведения", exact: true }).click();

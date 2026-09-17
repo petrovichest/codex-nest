@@ -50,12 +50,26 @@
 }
 
 .thread-workspace:not(.pending-fork-workspace) .workspace-header {
+  /* Keep the scroll viewport behind the rounded header at every breakpoint. */
+  position: absolute;
+  z-index: 40;
+  top: 8px;
+  right: 0;
+  left: 0;
   /* Match the visible composer bubble, inside its 880px padded container. */
   width: min(832px, calc(100% - 2 * var(--space-6)));
   height: var(--chat-header-height);
   min-height: var(--chat-header-height);
-  margin: 8px auto 0;
+  margin: 0 auto;
   border-radius: 999px;
+}
+
+.thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
+  scroll-padding-top: calc(8px + var(--chat-header-height) + 8px);
+}
+
+.thread-workspace:not(.pending-fork-workspace) .timeline {
+  padding-top: calc(8px + var(--chat-header-height) + 28px);
 }
 
 .thread-workspace:not(.pending-fork-workspace) .workspace-title {
@@ -760,8 +774,6 @@
   }
 
   .thread-workspace:not(.pending-fork-workspace) .workspace-header {
-    position: absolute;
-    z-index: 40;
     top: calc(8px + var(--app-safe-area-top));
     right: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-right)));
     left: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-left)));
@@ -776,10 +788,6 @@
   .thread-workspace:not(.pending-fork-workspace) .workspace-title :is(h1, p) {
     max-width: 100%;
     line-height: 18px;
-  }
-
-  .thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
-    scroll-padding-top: calc(8px + var(--chat-header-height) + 8px);
   }
 
   .thread-workspace:not(.pending-fork-workspace) .timeline {
