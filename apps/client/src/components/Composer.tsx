@@ -838,6 +838,7 @@ export function Composer({
       transcriptionStatus ||
       voiceUploadPending ||
       voiceInputLocked ||
+      inputUnavailable ||
       busy ||
       settingsBusy
     ) {
@@ -1501,7 +1502,8 @@ export function Composer({
                     voiceUploadPending ||
                     voiceInputLocked ||
                     Boolean(transcriptionStatus) ||
-                    (speechState === "idle" && (busy || settingsBusy || Boolean(speechUnavailable)))
+                    (speechState === "idle" &&
+                      (inputUnavailable || busy || settingsBusy || Boolean(speechUnavailable)))
                   }
                   title={speechUnavailable ?? undefined}
                   type="button"

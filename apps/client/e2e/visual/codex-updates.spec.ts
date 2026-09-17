@@ -297,6 +297,8 @@ for (const mobile of [false, true]) {
     expect(historyReads.length).toBeLessThanOrEqual(2);
     await expect(page.getByText("Текущий ответ", { exact: true })).toHaveCount(0);
     const composer = page.getByRole("textbox", { name: "Сообщение для Codex" });
+    await expect(composer).toBeEditable();
+    await expect(page.getByRole("button", { name: "Начать запись", exact: true })).toBeDisabled();
     await composer.fill("Черновик остаётся доступным");
     await expect(page.getByRole("button", { name: "Отправить", exact: true })).toBeDisabled();
     await page.screenshot({ path: testInfo.outputPath("history-target.png") });

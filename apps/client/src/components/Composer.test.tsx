@@ -114,11 +114,15 @@ beforeEach(() => {
 });
 
 describe("Composer", () => {
-  it("keeps the draft editable but disables send until direct input becomes available", () => {
+  it("keeps the draft editable but disables send and recording until direct input is available", () => {
+    installMediaRecorder(async () => ({ getTracks: () => [] }) as unknown as MediaStream);
     const onSubmit = vi.fn();
     const props = {
       input: "Черновик",
       onInput: vi.fn(),
+      transcriptionConfig,
+      transcriptionProvider: transcriptionConfig.provider,
+      onRecordingReady: vi.fn(),
       images: [],
       onImagesChange: vi.fn(),
       onSubmit,
@@ -132,6 +136,8 @@ describe("Composer", () => {
     const view = render(<Composer {...props} inputUnavailable />);
     const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
     expect(textbox).toBeEnabled();
+    expect(textbox).not.toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeDisabled();
     fireEvent.change(textbox, { target: { value: "Исправленный черновик" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
@@ -139,6 +145,7 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     expect(screen.getByText("В Codex: native · high")).toBeInTheDocument();
     view.rerender(<Composer {...props} inputUnavailable={false} />);
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
     expect(textbox).toHaveValue("Исправленный черновик");
     expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
     view.rerender(

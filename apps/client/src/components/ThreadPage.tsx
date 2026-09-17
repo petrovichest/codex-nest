@@ -4014,7 +4014,7 @@ export function ThreadPage({
             transcriptionConfig={transcriptionConfig}
             transcriptionProvider={transcriptionProvider}
             voiceUploadPending={Boolean(voiceUpload)}
-            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload) || inputUnavailable}
+            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
             onCancelVoiceTranscription={
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
