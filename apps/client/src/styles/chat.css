@@ -5,6 +5,8 @@
   --chat-user: #f1f3ed;
   --chat-active: #eceee8;
   --chat-inset: #eef0e9;
+  --chat-control-hover: color-mix(in srgb, var(--chat-active) 90%, var(--text-strong));
+  --chat-control-pressed: color-mix(in srgb, var(--chat-active) 84%, var(--text-strong));
   --chat-shadow: 0 12px 32px rgb(39 50 26 / 9%), 0 3px 12px rgb(39 50 26 / 4%);
   --chat-inner-shadow: 0 5px 18px rgb(39 50 26 / 7%), 0 1px 5px rgb(39 50 26 / 4%);
   --chat-check: #e1e6da;
@@ -42,6 +44,8 @@
   box-shadow: var(--chat-shadow);
 }
 
+/* One state rule per control family: role selectors below only supply colors.
+   The neutral reset also beats legacy hover rules on touch and disabled controls. */
 .thread-workspace
   :is(
     .workspace-header,
@@ -51,39 +55,55 @@
     .input-availability-notice
   )
   :is(button, summary),
-.chat-dialog button {
+.thread-workspace :is(.new-session-retry, .team-session-upgrade, .scroll-to-bottom),
+.chat-dialog button,
+.chat-image-viewer .image-viewer-control {
+  --chat-button-rest: transparent;
+  --chat-button-hover: var(--chat-active);
+  --chat-button-pressed: var(--chat-control-hover);
   border-color: transparent;
   border-radius: 999px;
-  background: transparent;
+  background: var(--chat-button-rest);
   box-shadow: none;
   font-weight: 400;
-}
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
 
-.thread-workspace
-  :is(
-    .workspace-header,
-    .timeline,
-    .session-inspector,
-    .artifact-viewer,
-    .input-availability-notice
-  )
-  button:not(:disabled):hover,
-.thread-workspace :is(.workspace-header, .timeline) summary:hover,
-.chat-dialog button:not(:disabled):hover {
-  border-color: transparent;
-  background: var(--chat-active);
+  &:is(:hover, :active, :disabled, [aria-disabled="true"]) {
+    border-color: transparent;
+    background: var(--chat-button-rest);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled, [aria-disabled="true"]) {
+      background: var(--chat-button-hover);
+    }
+  }
+
+  &:active:not(:disabled, [aria-disabled="true"]) {
+    background: var(--chat-button-pressed);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
 }
 
 .thread-workspace :is(.timeline, .session-inspector) button.primary,
 .thread-workspace .timeline :is(.implement-plan, .annotation-editor-save),
 .chat-dialog button.primary {
+  --chat-button-rest: var(--chat-active);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
-  background: var(--chat-active);
 }
 
-.thread-workspace .timeline button.danger,
-.thread-workspace .timeline .annotation-editor-delete,
+.thread-workspace .timeline :is(button.danger, .annotation-editor-delete),
 .chat-dialog button.danger {
+  --chat-button-hover: var(--danger-soft);
+  --chat-button-pressed: color-mix(in srgb, var(--danger-soft) 90%, var(--danger));
   color: var(--danger);
 }
 
@@ -92,8 +112,11 @@
   border-radius: 50%;
 }
 
-.thread-workspace .workspace-header .browser-session-status {
-  background: var(--chat-active);
+.thread-workspace .workspace-header button[aria-pressed="true"],
+.thread-workspace .workspace-header details[open] > summary {
+  --chat-button-rest: var(--chat-active);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
 }
 
 .thread-workspace .timeline {
@@ -117,8 +140,8 @@
   margin-top: 24px;
 }
 
-/* A decorative grid item spans each response, without reparenting its live
-   messages or clipping forms, focus rings and annotation popovers. */
+/* Keep live messages and forms in their stable grid slots. Only explicit
+   content cards paint a surface; ordinary response pieces stay on the canvas. */
 .thread-workspace :is(.turn-entry, .turn-response-tail, .turn-pending-messages) {
   grid-column: 1;
   position: relative;
@@ -127,25 +150,15 @@
 
 .thread-workspace .response-piece {
   min-width: 0;
-  padding: 0 var(--chat-padding) 18px;
+  padding: 0 0 24px;
 }
 
 .thread-workspace .response-surface {
-  grid-column: 1;
-  z-index: 0;
-  min-width: 0;
-  border-radius: var(--chat-radius);
-  background: var(--chat-surface);
-  box-shadow: var(--chat-shadow);
-  pointer-events: none;
-}
-
-.thread-workspace .response-start {
-  padding-top: var(--chat-padding);
+  display: none;
 }
 
 .thread-workspace .response-end {
-  padding-bottom: var(--chat-padding);
+  padding-bottom: 0;
 }
 
 .thread-workspace .response-piece:has(.annotation-editor, .selection-actions) {
@@ -195,21 +208,15 @@
     .message.plan,
     .orchestration-notice
   ) {
-  padding: 16px;
+  padding: var(--chat-padding);
   border: 0;
-  border-radius: var(--chat-radius-card);
+  border-radius: var(--chat-radius);
   background: var(--chat-surface);
-  box-shadow: var(--chat-inner-shadow);
+  box-shadow: var(--chat-shadow);
 }
 
 .thread-workspace .turn-response-tail > .attention-stack {
   margin: 0;
-}
-
-.thread-workspace .timeline .turn-response-tail .attention-card {
-  padding: 0;
-  background: transparent;
-  box-shadow: none;
 }
 
 .thread-workspace .timeline .attention-heading {
@@ -286,8 +293,10 @@
 }
 
 .thread-workspace .timeline .user-input-steps button:is(.current, .answered) {
+  --chat-button-rest: var(--chat-active);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
-  background: var(--chat-active);
 }
 
 .thread-workspace .timeline .user-input-actions {
@@ -305,8 +314,10 @@
 }
 
 .thread-workspace .timeline .user-input-voice-actions .recording {
+  --chat-button-rest: var(--danger-soft);
+  --chat-button-hover: color-mix(in srgb, var(--danger-soft) 90%, var(--danger));
+  --chat-button-pressed: color-mix(in srgb, var(--danger-soft) 84%, var(--danger));
   color: var(--danger);
-  background: var(--danger-soft);
 }
 
 .thread-workspace .timeline :is(input[type="checkbox"], input[type="radio"]) {
@@ -390,6 +401,25 @@
   background: var(--chat-inset);
 }
 
+.thread-workspace .timeline .markdown-code-block {
+  margin: 18px 0;
+  border-radius: var(--chat-radius-compact);
+  background: var(--chat-surface);
+  box-shadow: var(--chat-shadow);
+}
+
+.thread-workspace .timeline .markdown-code-block pre {
+  padding: 18px 52px 18px 20px;
+  border-radius: var(--chat-radius-compact);
+  background: transparent;
+}
+
+.thread-workspace .timeline .markdown-code-copy {
+  top: 10px;
+  right: 10px;
+  border-radius: 50%;
+}
+
 .thread-workspace .timeline .selection-actions {
   border-radius: 999px;
   background: var(--chat-surface);
@@ -397,14 +427,22 @@
 }
 
 .thread-workspace .timeline .annotation-marker {
-  background: var(--chat-active);
+  --chat-button-rest: var(--chat-active);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
   box-shadow: var(--chat-inner-shadow);
 }
 
 .thread-workspace .timeline :is(.message-file, .markdown-image-state) {
+  --chat-button-rest: var(--chat-active);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
   border: 0;
   border-radius: var(--chat-radius-card);
+}
+
+.thread-workspace .timeline .markdown-image-state:not(button) {
   background: var(--chat-active);
 }
 
@@ -440,11 +478,8 @@
   border-radius: var(--chat-radius-control);
 }
 
-.thread-workspace .new-session-retry {
-  border-color: transparent;
-  border-radius: 999px;
-  background: var(--chat-active);
-  font-weight: 400;
+.thread-workspace .team-session-upgrade {
+  color: var(--text-strong);
 }
 
 .thread-workspace .timeline .queued-message-actions .icon-button {
@@ -463,11 +498,8 @@
   font-weight: 400;
 }
 
-.thread-workspace .scroll-to-bottom {
-  border-color: transparent;
+.thread-workspace button.scroll-to-bottom {
   border-radius: 50%;
-  background: var(--chat-surface);
-  box-shadow: var(--chat-shadow);
 }
 
 .thread-workspace :is(.action-menu-popover, .fork-children-popover) {
@@ -503,14 +535,25 @@
 }
 
 .thread-workspace .inspector-tabs button.active {
+  --chat-button-rest: var(--chat-surface);
+  --chat-button-hover: var(--chat-control-hover);
+  --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
-  background: var(--chat-surface);
   box-shadow: var(--chat-inner-shadow);
 }
 
 .thread-workspace
   :is(.inspector-list, .inspector-list > div, .inspector-path, .inspector-artifact-item) {
   border: 0;
+}
+
+.thread-workspace button.inspector-artifact-download {
+  align-self: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border-radius: 50%;
 }
 
 .thread-workspace .inspector-path code {
@@ -595,7 +638,10 @@
   background: var(--danger-soft);
 }
 
-.chat-image-viewer .image-viewer-control {
+.chat-image-viewer button.image-viewer-control {
+  --chat-button-rest: rgb(18 18 18 / 68%);
+  --chat-button-hover: rgb(38 38 38 / 88%);
+  --chat-button-pressed: rgb(54 54 54 / 94%);
   border: 0;
   border-radius: 50%;
 }
@@ -638,6 +684,10 @@
     border-radius: var(--chat-radius-compact);
   }
 
+  .thread-workspace .timeline .markdown-code-block pre {
+    padding: 16px 46px 16px 16px;
+  }
+
   .thread-workspace .timeline .attention-card h3 {
     font-size: 17px;
   }
@@ -661,7 +711,6 @@
     content: none;
   }
 
-  .thread-workspace .response-surface,
   .thread-workspace .timeline :is(.attention-card, .async-question-card, .plan-checklist),
   .chat-dialog.dialog-surface {
     outline: 1px solid CanvasText;

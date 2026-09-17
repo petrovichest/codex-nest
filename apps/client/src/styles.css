@@ -2928,11 +2928,6 @@ button.message-file:hover:not(:disabled) {
   color: var(--accent-text);
 }
 
-.annotation-editor-save:hover:not(:disabled) {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--accent) 86%, var(--bg));
-}
-
 .annotation-editor-delete {
   border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
   background: var(--danger-soft);
@@ -3243,12 +3238,6 @@ button.message-file:hover:not(:disabled) {
   border-color: transparent;
   background: var(--surface-muted);
   color: var(--text);
-}
-
-.implement-plan.goal,
-.implement-plan.orchestrator {
-  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
-  color: var(--accent);
 }
 
 .finish-thread-action {
@@ -4370,11 +4359,6 @@ button.message-file:hover:not(:disabled) {
   box-shadow: var(--shadow);
 }
 
-.scroll-to-bottom:hover:not(:disabled) {
-  border-color: var(--muted);
-  background: var(--surface-muted);
-}
-
 .scroll-to-bottom svg {
   width: 18px;
   height: 18px;
@@ -4779,7 +4763,6 @@ button.message-file:hover:not(:disabled) {
   min-width: 40px;
   min-height: 58px;
   padding: 0;
-  border-left: 1px solid var(--color-line) !important;
   color: var(--color-muted-strong);
 }
 
