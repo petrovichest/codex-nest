@@ -173,7 +173,7 @@ test.describe("CodexNest redesign visual contract", () => {
       await expect(disclosure).toBeVisible();
       await expect(disclosure).toHaveScreenshot("11-desktop-dark-activity-closed.png");
 
-      await disclosure.locator("summary").click();
+      await disclosure.getByRole("button", { name: "Технические детали" }).click();
       await expect(disclosure.getByText("Рассуждение")).toBeVisible();
       await expect(disclosure.getByText("npm test -- --runInBand")).toBeVisible();
       await expect(disclosure).toHaveScreenshot("12-desktop-dark-activity-open.png");

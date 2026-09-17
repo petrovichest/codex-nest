@@ -628,17 +628,17 @@ describe("Activity", () => {
     });
     renderThread();
 
-    const groupSummary = screen.getByLabelText("Технические детали");
-    const group = groupSummary.closest("details")!;
+    const toggle = screen.getByRole("button", { name: "Технические детали" });
+    const group = toggle.closest<HTMLElement>(".turn-activity-disclosure")!;
 
-    expect(group).not.toHaveAttribute("open");
-    expect(screen.getByText("Готово за 0с").closest("summary")).toBe(groupSummary);
-    expect(groupSummary).not.toHaveTextContent("Ошибка");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Готово за 0с").closest("button")).toBe(toggle);
+    expect(toggle).not.toHaveTextContent("Ошибка");
     expect(within(group).queryByText("ошибка")).toBeNull();
 
-    fireEvent.click(groupSummary);
-    fireEvent(group, new Event("toggle"));
+    fireEvent.click(toggle);
 
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(within(group).getByText("ошибка")).toBeVisible();
   });
 
@@ -671,12 +671,12 @@ describe("Activity", () => {
     renderThread();
 
     expect(context.loadTurnItems).not.toHaveBeenCalled();
-    const summaryRow = screen.getByLabelText("Технические детали");
-    expect(screen.getByText("Готово за 0с").closest("summary")).toBe(summaryRow);
-    fireEvent.click(summaryRow);
+    const toggle = screen.getByRole("button", { name: "Технические детали" });
+    expect(screen.getByText("Готово за 0с").closest("button")).toBe(toggle);
+    fireEvent.click(toggle);
     await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledWith("thread", "turn"));
-    fireEvent.click(summaryRow);
-    fireEvent.click(summaryRow);
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
     expect(context.loadTurnItems).toHaveBeenCalledTimes(1);
   });
 
@@ -814,9 +814,8 @@ describe("Activity", () => {
       ],
     });
     const view = renderThread();
-    const disclosure = screen.getByLabelText("Технические детали").closest("details")!;
-    disclosure.open = true;
-    fireEvent(disclosure, new Event("toggle"));
+    const toggle = screen.getByRole("button", { name: "Технические детали" });
+    fireEvent.click(toggle);
     expect(screen.getByText("npm test")).toBeInTheDocument();
 
     const currentTurn = context.state.details.thread.turns[0]!;
@@ -840,7 +839,7 @@ describe("Activity", () => {
     };
     view.rerender(threadRoute());
 
-    expect(disclosure).toHaveAttribute("open");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Проверка окружения")).toBeInTheDocument();
   });
 

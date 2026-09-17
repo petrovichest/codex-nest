@@ -101,6 +101,7 @@ export function Composer({
   input,
   onInput,
   onDraftFlush,
+  onLayoutChange,
   images,
   onImagesChange,
   files = [],
@@ -156,6 +157,7 @@ export function Composer({
   input: string;
   onInput(value: string): void;
   onDraftFlush?(): void;
+  onLayoutChange?(): void;
   images: ComposerImage[];
   onImagesChange(value: ComposerImage[], attachmentScope?: number): void;
   files?: ThreadFileAttachment[];
@@ -210,6 +212,7 @@ export function Composer({
 }) {
   const { language, t } = useI18n();
   const creating = projects !== undefined;
+  const formRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [draftInput, setDraftInput] = useState(input);
   const draftInputRef = useRef(input);
@@ -267,6 +270,7 @@ export function Composer({
     onFilesChange,
     onUploadFiles,
     onInput,
+    onLayoutChange,
     onPendingAttachmentsChange,
     onRecordingReady,
     preserveRecordingOnSessionChange,
@@ -286,6 +290,7 @@ export function Composer({
     onFilesChange,
     onUploadFiles,
     onInput,
+    onLayoutChange,
     onPendingAttachmentsChange,
     onRecordingReady,
     preserveRecordingOnSessionChange,
@@ -301,6 +306,42 @@ export function Composer({
     activeRecording.transcribe = onTranscribe;
     activeRecording.preserveOnSessionChange = preserveRecordingOnSessionChange;
   }, [onRecordingReady, onTranscribe, preserveRecordingOnSessionChange, sessionIdentity]);
+
+  useLayoutEffect(() => {
+    const composer = formRef.current;
+    const pane = composer?.closest<HTMLElement>(".conversation-pane");
+    const scroll = pane?.querySelector<HTMLElement>(".conversation-scroll");
+    if (!composer || !pane || !scroll) return;
+    let previousHeight = -1;
+    const updateHeight = (height: number) => {
+      const nextHeight = Math.ceil(height);
+      if (nextHeight === previousHeight) return false;
+      previousHeight = nextHeight;
+      pane.style.setProperty("--composer-overlay-height", `${nextHeight}px`);
+      return true;
+    };
+    updateHeight(composer.getBoundingClientRect().height);
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver((entries) => {
+            const entry = entries.find((candidate) => candidate.target === composer);
+            const heightChanged = entry
+              ? updateHeight(
+                  entry.borderBoxSize?.[0]?.blockSize ?? composer.getBoundingClientRect().height,
+                )
+              : false;
+            if (heightChanged || entries.some((candidate) => candidate.target === scroll)) {
+              latestPropsRef.current.onLayoutChange?.();
+            }
+          });
+    observer?.observe(composer, { box: "border-box" });
+    observer?.observe(scroll);
+    return () => {
+      observer?.disconnect();
+      pane.style.removeProperty("--composer-overlay-height");
+    };
+  }, []);
   const [viewer, setViewer] = useState<{ index: number; opener: HTMLElement } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -1202,6 +1243,7 @@ export function Composer({
 
   return (
     <form
+      ref={formRef}
       className={`composer${keyboardOpen ? " keyboard-open" : ""}`}
       onSubmit={(event) => {
         event.preventDefault();

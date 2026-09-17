@@ -173,6 +173,106 @@ async function chat(
   return { summary, detail, send: (event: ServerEvent) => send(event) };
 }
 
+for (const width of [320, 390, 1440]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`floating composer at ${width}px in ${theme}: overlay, resizing and scroll position`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: width < 610 ? 844 : 1000 });
+      const { send } = await chat(page, theme, messageText.repeat(4));
+      const scroll = page.locator(".conversation-scroll");
+      const composer = page.locator(".composer");
+      const bubble = page.locator(".composer-box");
+      const input = bubble.locator("textarea");
+      const queue = page.locator(".outgoing-messages");
+      const distanceFromTail = () =>
+        scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+      const expectMeasured = () =>
+        expect
+          .poll(() =>
+            composer.evaluate((el) =>
+              Math.abs(
+                parseFloat(getComputedStyle(el).getPropertyValue("--composer-overlay-height")) -
+                  Math.ceil(el.getBoundingClientRect().height),
+              ),
+            ),
+          )
+          .toBeLessThan(1);
+      const expectTailVisible = async () => {
+        await expectMeasured();
+        await expect.poll(distanceFromTail).toBeLessThanOrEqual(1);
+        expect(await verticalGap(queue, bubble)).toBeGreaterThanOrEqual(15);
+      };
+      await expectTailVisible();
+      const original = (await bubble.boundingBox())!;
+      const viewport = (await scroll.boundingBox())!;
+      expect(viewport.y + viewport.height).toBeGreaterThan(original.y + original.height);
+      expect(
+        await page.evaluate(
+          ({ x, y }) => Boolean(document.elementFromPoint(x, y)?.closest(".conversation-scroll")),
+          { x: original.x + original.width / 2, y: original.y + original.height + 6 },
+        ),
+      ).toBe(true);
+
+      await page.mouse.move(original.x + original.width / 2, original.y + original.height + 6);
+      await page.mouse.wheel(0, -400);
+      await expect(
+        page.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
+      ).toBeVisible();
+      await expect.poll(distanceFromTail).toBeGreaterThan(300);
+      // Read the existing turn, above the queue where newly arrived turns are inserted.
+      await scroll.evaluate((el) => {
+        el.scrollTop = 100;
+      });
+      await expect.poll(() => scroll.evaluate((el) => el.scrollTop)).toBe(100);
+      const readingTop = await scroll.evaluate((el) => el.scrollTop);
+      unchanged([original], await geometry(bubble));
+
+      await input.fill("Длинный ввод\n".repeat(12));
+      await expectMeasured();
+      expect((await bubble.boundingBox())!.height).toBeGreaterThan(original.height);
+      expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(readingTop, 0);
+      const readingMessage = scroll.locator(".turn").first();
+      const readingGeometry = await geometry(readingMessage);
+      send({
+        type: "turn.replaced",
+        threadId: mainThread.id,
+        turn: turn("arrived", "Новое сообщение во время чтения истории"),
+      });
+      await expect(
+        page.getByText("Новое сообщение во время чтения истории", { exact: true }),
+      ).toHaveCount(1);
+      unchanged(readingGeometry, await geometry(readingMessage));
+      await expect.poll(distanceFromTail).toBeGreaterThan(300);
+
+      await page.getByRole("button", { name: "Прокрутить к последнему сообщению" }).click();
+      await expectTailVisible();
+      await input.fill("");
+      await expectTailVisible();
+      await composer.locator('input[type="file"]').setInputFiles({
+        name: "preview.png",
+        mimeType: "image/png",
+        buffer: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      });
+      await expect(page.locator(".composer-attachments")).toBeVisible();
+      await expectTailVisible();
+      await page
+        .getByRole("button", { name: "Удалить изображение preview.png", exact: true })
+        .click();
+      await expect(page.locator(".composer-attachments")).toHaveCount(0);
+      await expectTailVisible();
+
+      await input.focus();
+      await page.setViewportSize({ width, height: 520 });
+      await expectTailVisible();
+      await expectPackedActions(page);
+    });
+  }
+}
+
 for (const mobile of [false, true]) {
   for (const theme of ["light", "dark"] as const) {
     test(`${mobile ? "mobile" : "desktop"} ${theme}: queue typography and delivery geometry`, async ({

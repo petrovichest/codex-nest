@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, matchPath, Navigate, useLocation, useNavigate, useParams } from "react-router";
@@ -2236,6 +2245,10 @@ export function ThreadPage({
     setShowScrollToBottom(true);
   }
 
+  const handleComposerLayoutChange = useCallback(() => {
+    if (!searchTarget && followsTail.current) scrollToEnd(scrollRef.current);
+  }, [searchTarget]);
+
   useLayoutEffect(() => {
     if (searchTarget) return;
     if (initialScrollThread.current === threadId) return;
@@ -3959,6 +3972,7 @@ export function ThreadPage({
           </div>
         ) : (
           <Composer
+            onLayoutChange={handleComposerLayoutChange}
             inputUnavailable={inputUnavailable}
             codexSettings={workspaceSummary.codexSettings}
             autoFocus={
@@ -5643,6 +5657,7 @@ function TurnActivityDisclosure({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const loadAttempted = useRef(false);
+  const journalId = useId();
   const visibleItems = items.filter(hasVisibleActivity);
 
   const load = useCallback(() => {
@@ -5664,38 +5679,42 @@ function TurnActivityDisclosure({
     return <TurnActivityStatus turn={turn} active={active} />;
   }
   return (
-    <details
-      className="turn-activity-disclosure"
-      open={open}
-      onToggle={(event) => {
-        const nextOpen = event.currentTarget.open;
-        setOpen(nextOpen);
-        if (nextOpen) load();
-      }}
-    >
-      <summary aria-busy={loading || undefined} aria-label={t("Технические детали")}>
-        <TurnActivityStatus turn={turn} active={active} loading={loading} nested />
-      </summary>
-      {open && (
-        <div className="turn-activity-journal">
-          {error && (
-            <button type="button" className="history-retry" onClick={load}>
-              {t("Повторить загрузку технических деталей")}
-            </button>
-          )}
-          {loaded &&
-            visibleItems.map((item) => (
-              <MemoizedActivity
-                item={item}
-                cwd={cwd}
-                onDownload={onDownload}
-                onOpenArtifact={onOpenArtifact}
-                key={item.id}
-              />
-            ))}
-        </div>
-      )}
-    </details>
+    <div className="turn-activity-disclosure">
+      <TurnActivityStatus
+        turn={turn}
+        active={active}
+        loading={loading}
+        disclosure={{
+          open,
+          journalId,
+          onToggle: () => {
+            setOpen(!open);
+            if (!open) load();
+          },
+        }}
+      />
+      <div className="turn-activity-journal" id={journalId} hidden={!open}>
+        {open && (
+          <>
+            {error && (
+              <button type="button" className="history-retry" onClick={load}>
+                {t("Повторить загрузку технических деталей")}
+              </button>
+            )}
+            {loaded &&
+              visibleItems.map((item) => (
+                <MemoizedActivity
+                  item={item}
+                  cwd={cwd}
+                  onDownload={onDownload}
+                  onOpenArtifact={onOpenArtifact}
+                  key={item.id}
+                />
+              ))}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -6090,13 +6109,13 @@ function TurnActivityStatus({
   progress = turn?.progress,
   active = turn?.status === "inProgress",
   loading = false,
-  nested = false,
+  disclosure,
 }: {
   turn?: TurnView;
   progress?: TurnProgress;
   active?: boolean;
   loading?: boolean;
-  nested?: boolean;
+  disclosure?: { open: boolean; journalId: string; onToggle(): void };
 }) {
   const { language, t } = useI18n();
   const isActive = active;
@@ -6130,20 +6149,35 @@ function TurnActivityStatus({
           <StopIcon />
         )}
       </span>
-      <span className="turn-activity-copy">
-        <span className="turn-activity-phase" role={isActive ? "status" : undefined}>
-          {label}
-        </span>
-        {isActive && startedAt !== null && (
-          <span className="turn-activity-duration" aria-live="off">
-            {elapsed}
-          </span>
-        )}
+      <span className="turn-activity-phase" role={isActive ? "status" : undefined}>
+        {label}
       </span>
     </>
   );
-  if (nested) return <span className="turn-activity-row">{content}</span>;
-  return <div className="turn-activity-row turn-activity-static">{content}</div>;
+  return (
+    <div className={`turn-activity-row${disclosure ? "" : " turn-activity-static"}`}>
+      {disclosure ? (
+        <button
+          type="button"
+          className="turn-activity-copy turn-activity-toggle"
+          aria-label={t("Технические детали")}
+          aria-expanded={disclosure.open}
+          aria-controls={disclosure.journalId}
+          aria-busy={loading || undefined}
+          onClick={disclosure.onToggle}
+        >
+          {content}
+        </button>
+      ) : (
+        <span className="turn-activity-copy">{content}</span>
+      )}
+      {isActive && startedAt !== null && (
+        <span className="turn-activity-duration" aria-live="off">
+          {elapsed}
+        </span>
+      )}
+    </div>
+  );
 }
 
 function turnOutcomeLabel(

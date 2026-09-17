@@ -68,7 +68,7 @@ test("capture the documentation gallery and covers", async ({ browser }) => {
     await expect(page.getByText("Also check the empty state on a narrow screen.")).toBeVisible();
   });
   await screen("desktop-activity", "dark", false, "session-main", async (page) => {
-    await page.locator(".turn-activity-disclosure > summary").click();
+    await page.locator(".turn-activity-toggle").click();
     await page.locator(".activity-card > summary").filter({ hasText: "npm test" }).click();
     await page
       .locator(".activity-card > summary")
