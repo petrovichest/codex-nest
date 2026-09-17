@@ -1,10 +1,11 @@
+import type * as CapacitorCore from "@capacitor/core";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Activity } from "./ThreadPage";
 
 const native = vi.hoisted(() => ({ isNativePlatform: vi.fn(() => false), open: vi.fn() }));
 vi.mock("@capacitor/core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@capacitor/core")>();
+  const actual = await importOriginal<typeof CapacitorCore>();
   return {
     ...actual,
     Capacitor: { ...actual.Capacitor, isNativePlatform: native.isNativePlatform },
