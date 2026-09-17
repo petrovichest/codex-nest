@@ -758,9 +758,7 @@ test.describe("recording paint bounds", () => {
   }
 });
 
-test("image loading and retry keep preview frames and following content stationary", async ({
-  page,
-}) => {
+test("image loading and retry stay compact, then fit the image proportions", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1800 });
   const image = deferred();
   let failImage = true;
@@ -796,9 +794,12 @@ test("image loading and retry keep preview frames and following content stationa
         ),
     )
     .toBe(true);
-  unchanged(before, await geometry(frames));
-  unchanged(following, await geometry(paragraphs));
-  for (const frame of before) expect(frame.width / frame.height).toBeCloseTo(4 / 3, 2);
+  await expect(page.locator(".markdown-image-preview.is-loading")).toHaveCount(0);
+  for (const frame of await geometry(frames)) {
+    expect(frame.width).toBe(80);
+    expect(frame.height).toBe(240);
+  }
+  for (const frame of before) expect(frame.height).toBeLessThanOrEqual(80);
 });
 
 for (const mobile of [false, true]) {

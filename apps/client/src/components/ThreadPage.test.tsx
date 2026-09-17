@@ -1412,7 +1412,9 @@ describe("Activity", () => {
       "src",
       "blob:https://codex.home.arpa/chart",
     );
-
+    expect(preview).toBeDisabled();
+    fireEvent.load(screen.getByRole("img", { name: "График" }));
+    expect(preview).toBeEnabled();
     fireEvent.click(preview);
     expect(await screen.findByRole("dialog", { name: "Просмотр изображений" })).toBeInTheDocument();
     expect(api.createDownload).toHaveBeenCalledTimes(1);
@@ -1573,18 +1575,19 @@ describe("Activity", () => {
   });
 
   it.each([
-    ["disabled", "Включить браузер", "Включить браузер", "false"],
-    ["disconnected", "Браузер включён", "Выключить браузер", "true"],
-    ["connected", "Браузер подключён", "Выключить браузер", "true"],
+    ["disabled", "Включить браузер", "false"],
+    ["disconnected", "Выключить браузер", "true"],
+    ["connected", "Выключить браузер", "true"],
   ] as const)(
     "shows the %s browser state as a single accessible header button",
-    (browserStatus, visibleLabel, accessibleLabel, pressed) => {
+    (browserStatus, accessibleLabel, pressed) => {
       const api = threadApi();
       mockThreadConnection(api, { ...summary, browserStatus });
       renderThread();
 
       const button = screen.getByRole("button", { name: accessibleLabel });
-      expect(button).toHaveTextContent(visibleLabel);
+      expect(button.textContent).toBe("");
+      expect(button).toHaveClass("icon-button");
       expect(button).toHaveAttribute("aria-pressed", pressed);
       expect(button).toHaveClass(`browser-session-status-${browserStatus}`);
       expect(button).toHaveAttribute("title", accessibleLabel);
@@ -1610,7 +1613,7 @@ describe("Activity", () => {
     expect(api.updateThread).toHaveBeenCalledWith("thread", { browserEnabled: true });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute("aria-busy", "true");
-    expect(button).toHaveTextContent("Включить браузер");
+    expect(button).toHaveAccessibleName("Включить браузер");
     expect(context.dispatch).not.toHaveBeenCalled();
 
     await act(async () => resolveUpdate?.(updatedThread));

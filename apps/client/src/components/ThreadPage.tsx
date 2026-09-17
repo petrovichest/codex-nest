@@ -2237,6 +2237,18 @@ export function ThreadPage({
     if (!searchTarget && followsTail.current) scrollToEnd(scrollRef.current);
   }, [searchTarget]);
 
+  useEffect(() => {
+    const timeline = scrollRef.current?.querySelector(".timeline");
+    if (!timeline || searchTarget || typeof ResizeObserver === "undefined") return;
+    // Images can finish loading without a new thread event. Keep following the
+    // tail in that case; native scroll anchoring preserves the reader above it.
+    const observer = new ResizeObserver(() => {
+      if (followsTail.current) scrollToEnd(scrollRef.current);
+    });
+    observer.observe(timeline);
+    return () => observer.disconnect();
+  }, [detail?.summary.id, searchTarget, threadId]);
+
   useLayoutEffect(() => {
     if (searchTarget) return;
     if (initialScrollThread.current === threadId) return;
@@ -3566,20 +3578,13 @@ export function ThreadPage({
                     aria-busy={browserUpdating || undefined}
                     aria-label={browserSwitchLabel}
                     aria-pressed={browserEnabled}
-                    className={`browser-session-status browser-session-status-${workspaceSummary.browserStatus}`}
+                    className={`icon-button browser-session-status browser-session-status-${workspaceSummary.browserStatus}`}
                     disabled={browserUpdating || browserSwitchLocked}
                     onClick={() => void toggleBrowserAccess()}
                     title={browserSwitchTitle}
                     type="button"
                   >
                     <BrowserIcon />
-                    <span>
-                      {workspaceSummary.browserStatus === "connected"
-                        ? t("Браузер подключён")
-                        : workspaceSummary.browserStatus === "disconnected"
-                          ? t("Браузер включён")
-                          : t("Включить браузер")}
-                    </span>
                   </button>
                 )}
                 {!isSubagent && (
@@ -4463,12 +4468,14 @@ function MarkdownImage({
   const descriptor = path ? artifactDescriptor(path) : null;
   const localPath = descriptor?.kind === "image" ? path : null;
   const [attempt, setAttempt] = useState(0);
+  const [loaded, setLoaded] = useState(false);
   const [state, setState] = useState<
     { status: "loading" } | { status: "failed" } | { status: "ready"; source: string }
   >({ status: "loading" });
   const [viewer, setViewer] = useState<HTMLButtonElement | null>(null);
 
   useEffect(() => {
+    setLoaded(false);
     if (!localPath || !onLoadImage) {
       setState({ status: "ready", source: src ?? "" });
       return;
@@ -4520,14 +4527,23 @@ function MarkdownImage({
     <>
       <button
         type="button"
-        className="markdown-image-preview"
+        className={`markdown-image-preview${loaded ? "" : " is-loading"}`}
         aria-label={t("Открыть изображение {{name}}", { name: label })}
+        aria-busy={!loaded}
+        disabled={!loaded}
         onClick={(event) => setViewer(event.currentTarget)}
       >
+        {!loaded && (
+          <span role="status" className="markdown-image-loading-label">
+            <span className="spinner small" />
+            {t("Загружаем изображение…")}
+          </span>
+        )}
         <img
           src={state.source}
           alt={alt}
           title={title}
+          onLoad={() => setLoaded(true)}
           onError={() => setState({ status: "failed" })}
         />
       </button>
@@ -5230,12 +5246,12 @@ type SelectionDraft = AnnotationPosition & {
   quote: string;
   startOffset: number;
   endOffset: number;
-  editorTop: number;
+  anchorTop: number;
 };
 
 type AnnotationEditor =
   | ({ mode: "new" } & SelectionDraft)
-  | ({ mode: "existing"; annotationId: string } & AnnotationPosition);
+  | ({ mode: "existing"; annotationId: string; anchorTop: number } & AnnotationPosition);
 
 function numberedAnnotations(
   annotations: PendingAnnotation[],
@@ -5330,16 +5346,12 @@ function AnnotatableMarkdownContent({
     const rect = safeRangeRect(range, content);
     const surfaceRect = surface.getBoundingClientRect();
     const selectionTop = rect.bottom - surfaceRect.top + 8;
-    const editorTop =
-      rect.bottom + 112 < window.innerHeight
-        ? rect.bottom - surfaceRect.top + 8
-        : rect.top - surfaceRect.top - 112;
     setSelectionDraft({
       quote,
       ...offsets,
       left: clampPopoverLeft(rect.left + rect.width / 2 - surfaceRect.left, surface.clientWidth),
       top: selectionTop,
-      editorTop,
+      anchorTop: rect.top - surfaceRect.top,
     });
   }, [editor, enabled]);
 
@@ -5398,6 +5410,67 @@ function AnnotatableMarkdownContent({
     if (readOnly) setEditor(null);
   }, [readOnly]);
 
+  const positionEditor = useCallback(() => {
+    const form = editorRef.current;
+    const surface = surfaceRef.current;
+    if (!editor || !form || !surface) return;
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const scrollBounds = surface.closest(".conversation-scroll")?.getBoundingClientRect();
+    const left = Math.max(viewportLeft, scrollBounds?.left ?? viewportLeft) + 16;
+    const right =
+      Math.min(viewportLeft + viewportWidth, scrollBounds?.right ?? viewportLeft + viewportWidth) -
+      16;
+    const top = Math.max(viewportTop, scrollBounds?.top ?? viewportTop) + 16;
+    const bottom =
+      Math.min(viewportTop + viewportHeight, scrollBounds?.bottom ?? viewportTop + viewportHeight) -
+      16;
+    form.style.maxWidth = `${Math.max(0, right - left)}px`;
+    const field = form.querySelector("textarea");
+    if (field) field.style.maxHeight = `${Math.max(56, Math.min(176, bottom - top - 24))}px`;
+    const bounds = surface.getBoundingClientRect();
+    const formBounds = form.getBoundingClientRect();
+    const center = bounds.left + editor.left;
+    form.style.left = `${Math.max(left + formBounds.width / 2, Math.min(center, right - formBounds.width / 2)) - bounds.left}px`;
+    const below = bounds.top + editor.top;
+    const above = bounds.top + editor.anchorTop - formBounds.height - 8;
+    const preferred = below + formBounds.height <= bottom ? below : above;
+    form.style.top = `${Math.max(top, Math.min(preferred, bottom - formBounds.height)) - bounds.top}px`;
+  }, [editor]);
+
+  const resizeEditor = useCallback(() => {
+    const field = editorRef.current?.querySelector("textarea");
+    if (!field) return;
+    positionEditor();
+    const scrollTop = field.scrollTop;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+    field.scrollTop = scrollTop;
+    positionEditor();
+  }, [positionEditor]);
+
+  useLayoutEffect(() => {
+    resizeEditor();
+  }, [comment, resizeEditor]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", resizeEditor);
+    document.addEventListener("scroll", positionEditor, true);
+    viewport?.addEventListener("resize", resizeEditor);
+    viewport?.addEventListener("scroll", positionEditor);
+    return () => {
+      window.removeEventListener("resize", resizeEditor);
+      document.removeEventListener("scroll", positionEditor, true);
+      viewport?.removeEventListener("resize", resizeEditor);
+      viewport?.removeEventListener("scroll", positionEditor);
+    };
+  }, [editor, positionEditor, resizeEditor]);
+
   useEffect(() => {
     if (!editor) return;
     function closeOutside(event: PointerEvent) {
@@ -5453,8 +5526,6 @@ function AnnotatableMarkdownContent({
     setEditor({
       mode: "new",
       ...selectionDraft,
-      left: clampEditorLeft(selectionDraft.left, surfaceRef.current?.clientWidth ?? 0),
-      top: selectionDraft.editorTop,
     });
     setSelectionDraft(null);
     window.getSelection()?.removeAllRanges();
@@ -5462,14 +5533,13 @@ function AnnotatableMarkdownContent({
 
   function openExistingEditor(item: NumberedAnnotation) {
     const position = markerPositions[item.annotation.id] ?? { left: 0, top: 0 };
-    const surface = surfaceRef.current;
-    const markerViewportTop = (surface?.getBoundingClientRect().top ?? 0) + position.top;
     setComment(item.annotation.comment);
     setEditor({
       mode: "existing",
       annotationId: item.annotation.id,
-      left: clampEditorLeft(position.left, surface?.clientWidth ?? 0),
-      top: markerViewportTop + 112 < window.innerHeight ? position.top + 28 : position.top - 112,
+      left: position.left,
+      top: position.top + 28,
+      anchorTop: position.top,
     });
     setSelectionDraft(null);
   }
@@ -5549,17 +5619,10 @@ function AnnotatableMarkdownContent({
           />
           <div className="annotation-editor-actions">
             <button
-              className="annotation-editor-save"
-              type="submit"
-              aria-label={t("Сохранить аннотацию")}
-              disabled={!comment.trim()}
-            >
-              <SendIcon />
-            </button>
-            <button
               className="annotation-editor-delete"
               type="button"
               aria-label={t("Удалить аннотацию")}
+              title={t("Удалить аннотацию")}
               onClick={() => {
                 if (!editedAnnotation || onDelete?.(editedAnnotation.annotation.id)) {
                   setEditor(null);
@@ -5567,6 +5630,15 @@ function AnnotatableMarkdownContent({
               }}
             >
               <TrashIcon />
+            </button>
+            <button
+              className="annotation-editor-save"
+              type="submit"
+              aria-label={t("Сохранить аннотацию")}
+              title={t("Сохранить аннотацию")}
+              disabled={!comment.trim()}
+            >
+              <SendIcon />
             </button>
           </div>
         </form>
@@ -5584,12 +5656,6 @@ function safeRangeRect(range: Range, fallback: HTMLElement): DOMRect {
 function clampPopoverLeft(left: number, width: number): number {
   if (width <= 0) return Math.max(0, left);
   return Math.max(76, Math.min(left, width - 76));
-}
-
-function clampEditorLeft(left: number, width: number): number {
-  if (width <= 0) return Math.max(0, left);
-  const halfWidth = Math.min(160, width / 2);
-  return Math.max(halfWidth, Math.min(left, width - halfWidth));
 }
 
 function ActivityGroup({

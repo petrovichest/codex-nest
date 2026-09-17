@@ -50,9 +50,11 @@
 }
 
 .thread-workspace:not(.pending-fork-workspace) .workspace-header {
+  /* Match the visible composer bubble, inside its 880px padded container. */
+  width: min(832px, calc(100% - 2 * var(--space-6)));
   height: var(--chat-header-height);
   min-height: var(--chat-header-height);
-  margin-top: 8px;
+  margin: 8px auto 0;
   border-radius: 999px;
 }
 
@@ -66,8 +68,9 @@
   gap: 10px;
 }
 
-.thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+.thread-workspace:not(.pending-fork-workspace) .workspace-title :is(h1, p) {
   min-width: 0;
+  font-size: var(--text-ui);
   font-weight: 400;
   line-height: 20px;
 }
@@ -125,7 +128,7 @@
 }
 
 .thread-workspace :is(.timeline, .session-inspector) button.primary,
-.thread-workspace .timeline :is(.implement-plan, .annotation-editor-save),
+.thread-workspace .timeline .implement-plan,
 .chat-dialog button.primary {
   --chat-button-rest: var(--chat-active);
   --chat-button-hover: var(--chat-control-hover);
@@ -133,7 +136,7 @@
   color: var(--text-strong);
 }
 
-.thread-workspace .timeline :is(button.danger, .annotation-editor-delete),
+.thread-workspace .timeline button.danger,
 .chat-dialog button.danger {
   --chat-button-hover: var(--danger-soft);
   --chat-button-pressed: color-mix(in srgb, var(--danger-soft) 90%, var(--danger));
@@ -296,7 +299,7 @@
 
 .thread-workspace
   .timeline
-  :is(.attention-card, .async-question-card, .queued-message-editor, .annotation-editor)
+  :is(.attention-card, .async-question-card, .queued-message-editor)
   :is(input:not([type="radio"], [type="checkbox"]), textarea, select),
 .chat-dialog :is(input:not([type="radio"], [type="checkbox"]), textarea, select) {
   border-color: transparent;
@@ -428,10 +431,51 @@
 }
 
 .thread-workspace :is(.timeline, .artifact-document) :is(pre, .markdown-code-block),
-.thread-workspace .timeline :is(.annotation-editor, .selection-actions) {
+.thread-workspace .timeline .selection-actions {
   border: 0;
   border-radius: var(--chat-radius-control);
   background: var(--chat-inset);
+}
+
+.thread-workspace .timeline .annotation-editor {
+  border: 0;
+  border-radius: var(--chat-radius-compact);
+  background: var(--chat-surface);
+  box-shadow: var(--chat-shadow);
+}
+
+.thread-workspace .timeline .annotation-editor:focus-within {
+  box-shadow:
+    var(--chat-shadow),
+    0 0 14px 1px color-mix(in srgb, var(--muted) 12%, transparent);
+}
+
+.thread-workspace .timeline .annotation-editor textarea {
+  border: 0;
+  border-radius: var(--chat-radius-control);
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+}
+
+.thread-workspace .timeline .annotation-editor-save {
+  color: var(--text-strong);
+}
+
+.thread-workspace .timeline .annotation-editor-delete {
+  --chat-button-hover: var(--danger-soft);
+  --chat-button-pressed: color-mix(in srgb, var(--danger-soft) 90%, var(--danger));
+  color: var(--muted);
+
+  &:is(:hover, :active):not(:disabled) {
+    color: var(--danger);
+  }
+}
+
+@media (forced-colors: active) {
+  .thread-workspace .timeline .annotation-editor:focus-within {
+    outline: 2px solid Highlight;
+  }
 }
 
 .thread-workspace .timeline .markdown-code-block {
@@ -711,6 +755,7 @@
   /* Only the rounded header paints over the transcript. The scroll viewport
      starts at the safe area, so cards keep moving behind the header's corners. */
   .thread-workspace:not(.pending-fork-workspace) .conversation-pane {
+    --chat-header-gutter: var(--space-3);
     padding-top: var(--app-safe-area-top);
   }
 
@@ -718,8 +763,9 @@
     position: absolute;
     z-index: 40;
     top: calc(8px + var(--app-safe-area-top));
-    right: calc(8px + var(--app-safe-area-right));
-    left: calc(8px + var(--app-safe-area-left));
+    right: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-right)));
+    left: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-left)));
+    width: auto;
     margin: 0;
   }
 
@@ -727,14 +773,9 @@
     display: block;
   }
 
-  .thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title :is(h1, p) {
     max-width: 100%;
     line-height: 18px;
-  }
-
-  .thread-workspace:not(.pending-fork-workspace) .workspace-title p {
-    max-width: 100%;
-    line-height: 14px;
   }
 
   .thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
@@ -773,6 +814,12 @@
   .thread-workspace :is(.session-inspector, .artifact-viewer),
   .chat-dialog.dialog-surface {
     border-radius: var(--chat-radius-compact);
+  }
+}
+
+@media (max-width: 359px) {
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane {
+    --chat-header-gutter: var(--space-2);
   }
 }
 

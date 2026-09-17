@@ -1781,31 +1781,7 @@
 }
 
 .browser-session-status {
-  width: 142px;
-  flex: 0 0 142px;
-  overflow: hidden;
-  height: var(--control-touch-height);
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-right: 5px;
-  padding: 0 9px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-surface) 88%, var(--color-canvas));
   color: var(--muted-strong);
-  font-size: var(--text-small);
-  white-space: nowrap;
-}
-
-.browser-session-status > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.browser-session-status > svg {
-  width: 15px;
-  height: 15px;
 }
 
 .browser-session-status-connected > svg {
@@ -2538,8 +2514,8 @@
 }
 
 .markdown-image-preview {
-  aspect-ratio: 4 / 3;
-  width: min(100%, 720px);
+  width: fit-content;
+  max-width: min(100%, 720px);
   min-width: 0;
   min-height: 0;
   display: block;
@@ -2558,18 +2534,21 @@
 }
 
 .markdown-image-preview img {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(480px, 65dvh);
   display: block;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  background: transparent;
   object-fit: contain;
 }
 
-.markdown-image-state {
+.markdown-image-state,
+.markdown-image-preview.is-loading {
   width: min(100%, 720px);
-  aspect-ratio: 4 / 3;
+  min-height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2583,12 +2562,28 @@
   font-size: var(--text-label);
 }
 
+.markdown-image-preview.is-loading {
+  position: relative;
+}
+
+.markdown-image-loading-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.markdown-image-preview.is-loading img {
+  position: absolute;
+  visibility: hidden;
+}
+
 .markdown-image-retry {
   cursor: pointer;
 }
 
 .message-images {
   display: grid;
+  align-items: start;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 9px;
   width: min(100%, 560px);
@@ -2596,10 +2591,10 @@
 }
 
 .message-image-preview {
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
   min-height: 0;
-  aspect-ratio: 4 / 3;
   display: block;
   overflow: hidden;
   padding: 0;
@@ -2615,12 +2610,14 @@
 }
 
 .message-images img {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(480px, 65dvh);
   display: block;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  background: transparent;
   object-fit: contain;
 }
 
@@ -2881,11 +2878,11 @@ button.message-file:hover:not(:disabled) {
 }
 
 .annotation-editor {
-  width: min(320px, calc(100vw - 32px));
+  width: min(360px, calc(100vw - 32px));
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2);
+  padding: var(--space-3);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
@@ -2893,33 +2890,38 @@ button.message-file:hover:not(:disabled) {
 
 .annotation-editor textarea {
   min-width: 0;
-  min-height: 48px;
-  max-height: 112px;
+  min-height: 56px;
+  max-height: 176px;
   flex: 1;
-  padding: var(--space-2) var(--space-2-5);
-  resize: vertical;
+  padding: 4px 8px;
+  resize: none;
+  scrollbar-width: thin;
   color: var(--text);
-  font-size: var(--text-ui);
+  font-size: var(--text-input);
+  font-weight: 400;
+  line-height: 24px;
 }
 
 .annotation-editor-actions {
   display: flex;
+  flex: none;
+  flex-direction: column;
   align-items: center;
-  gap: var(--space-1-5);
+  gap: var(--space-1);
 }
 
 .annotation-editor-actions button {
-  width: var(--control-height);
-  min-width: var(--control-height);
-  height: var(--control-height);
-  min-height: var(--control-height);
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   padding: 0;
   border-radius: 50%;
 }
 
 .annotation-editor-actions svg {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
 }
 
 .annotation-editor-save {
@@ -6040,18 +6042,6 @@ button.message-file:hover:not(:disabled) {
     max-width: min(48vw, 270px);
   }
 
-  .browser-session-status {
-    width: var(--control-height);
-    flex-basis: 34px;
-    gap: 3px;
-    margin-right: var(--space-0-5);
-    padding-left: var(--space-2);
-  }
-
-  .browser-session-status > span {
-    display: none;
-  }
-
   .timeline {
     padding: var(--space-6) var(--space-3)
       calc(var(--composer-overlay-height, var(--space-5)) + var(--space-4));
@@ -6383,13 +6373,6 @@ button.message-file:hover:not(:disabled) {
     height: var(--control-touch-height);
     min-height: var(--control-touch-height);
     margin-block: 0;
-  }
-
-  .annotation-editor-actions button {
-    width: var(--control-touch-height);
-    min-width: var(--control-touch-height);
-    height: var(--control-touch-height);
-    min-height: var(--control-touch-height);
   }
 
   .annotation-marker::before {

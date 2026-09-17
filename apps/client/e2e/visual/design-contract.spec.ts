@@ -114,22 +114,50 @@ for (const theme of ["light", "dark"] as const) {
     page,
   }) => {
     await installVisualFixture(page, { theme });
-    for (const width of [320, 390, 768, 1440]) {
+    for (const width of [320, 359, 390, 768, 820, 821, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/threads/session-attention");
       await waitForVisualReady(page);
       const mobile = width <= 820;
+      const header = page.locator(".workspace-header");
+      const expectAligned = async () => {
+        const panel = (await header.boundingBox())!;
+        const composer = (await page.locator(".composer-box").boundingBox())!;
+        expect(panel.x).toBeCloseTo(composer.x, 1);
+        expect(panel.width).toBeCloseTo(composer.width, 1);
+      };
+      await expectAligned();
+      if (!mobile) {
+        await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
+        await expectAligned();
+        await page
+          .getByRole("complementary", { name: "Сведения о задаче", exact: true })
+          .getByRole("button", { name: "Закрыть сведения", exact: true })
+          .click();
+      }
       if (mobile) {
         await page.addStyleTag({
           content:
             ":root { --app-safe-area-top: 34px !important; --app-safe-area-left: 16px !important; --app-safe-area-right: 12px !important; }",
         });
       }
-      const header = page.locator(".workspace-header");
       const bounds = (await header.boundingBox())!;
       expect(bounds.height).toBe(44);
-      await expect(header.locator("h1")).toHaveCSS("font-weight", "400");
-      await expect(header.locator("h1")).toHaveCSS("font-size", mobile ? "14px" : "16px");
+      for (const text of await header.locator("h1, p").all()) {
+        await expect(text).toHaveCSS("font-weight", "400");
+        await expect(text).toHaveCSS("font-size", "14px");
+        await expect(text).toHaveCSS("line-height", mobile ? "18px" : "20px");
+      }
+      const browser = header.locator(".browser-session-status");
+      const refresh = header.locator(".session-refresh");
+      const buttonBounds = (await browser.boundingBox())!;
+      const refreshBounds = (await refresh.boundingBox())!;
+      expect(buttonBounds.width).toBe(refreshBounds.width);
+      expect(buttonBounds.height).toBe(refreshBounds.height);
+      expect((await browser.locator("svg").boundingBox())!.width).toBe(
+        (await refresh.locator("svg").boundingBox())!.width,
+      );
+      await expect(browser).toHaveText("");
       if (mobile) {
         expect(bounds.y).toBe(42);
         expect(bounds.x).toBe(24);
