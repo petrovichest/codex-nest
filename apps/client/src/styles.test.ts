@@ -20,7 +20,7 @@ describe("shared surface radii", () => {
   for (const file of globSync(["apps/client/src/**/*.css", "apps/extension/src/**/*.css"], {
     cwd: root,
   }).sort()) {
-    it(`${file} uses the shared scale or explicit optical geometry`, () => {
+    it(`${file} uses the shared scale or explicit component geometry`, () => {
       const css = readFileSync(resolve(root, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
       const violations: string[] = [];
       for (const block of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
@@ -28,6 +28,8 @@ describe("shared surface radii", () => {
         for (const declaration of block[2]!.matchAll(/\bborder(?:-[\w-]+)?-radius:\s*([^;]+);/g)) {
           const value = declaration[1]!.trim();
           if (opticalRadii.get(selector) === value) continue;
+          // The floating composer has its own desktop and mobile bubble geometry.
+          if (selector === ".composer-box" && ["30px", "24px"].includes(value)) continue;
           const remaining = value
             .replace(/var\(--radius-(?:sm|md|lg)\)/g, "")
             .replace(/\b(?:0|50%|999px)(?=\s|$)/g, "")
