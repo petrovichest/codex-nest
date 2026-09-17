@@ -537,6 +537,126 @@
   background: var(--chat-active);
 }
 
+.thread-workspace .timeline .gallery-image-link {
+  display: inline;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  color: var(--color-lapis);
+}
+
+.gallery-image-link svg {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 5px;
+  vertical-align: -0.12em;
+}
+
+.message-image-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.thread-workspace .timeline button.gallery-thumbnail {
+  position: relative;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: min(320px, 100%);
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--chat-radius-card);
+  overflow: hidden;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.gallery-thumbnail img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: var(--chat-radius-card);
+}
+
+.thread-workspace .timeline button.gallery-thumbnail:is(.is-loading, .is-failed) {
+  width: 200px;
+  min-height: 64px;
+  padding: 12px;
+  background: var(--chat-active);
+  color: var(--muted-strong);
+  cursor: pointer;
+}
+
+.gallery-thumbnail.is-loading img {
+  position: absolute;
+  visibility: hidden;
+}
+
+.gallery-thumbnail > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: var(--text-label);
+}
+
+@media (hover: hover) {
+  .thread-workspace .timeline button.gallery-thumbnail.is-ready:hover {
+    filter: brightness(0.92);
+  }
+}
+
+.thread-workspace .timeline button.gallery-thumbnail.is-ready:active {
+  filter: brightness(0.84);
+}
+
+.image-viewer-download {
+  top: max(12px, var(--app-safe-area-top));
+  right: calc(max(12px, var(--app-safe-area-right)) + var(--control-height) + 8px);
+}
+
+.image-viewer-status,
+.image-viewer-error,
+.chat-image-viewer .image-viewer-retry {
+  color: white;
+  font: inherit;
+}
+
+.image-viewer-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-image-viewer .image-viewer-retry {
+  max-width: 70%;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: var(--chat-radius-card);
+  background: rgb(255 255 255 / 12%);
+}
+
+.image-viewer-error {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  left: 16px;
+  text-align: center;
+}
+
 .thread-workspace
   .timeline
   :is(
@@ -744,6 +864,14 @@
 }
 
 @media (max-width: 820px) {
+  .image-viewer-download {
+    right: calc(max(12px, var(--app-safe-area-right)) + var(--control-touch-height) + 8px);
+  }
+
+  .gallery-thumbnail img {
+    max-height: 160px;
+  }
+
   .thread-workspace {
     --chat-radius: var(--chat-radius-compact);
     --chat-padding: 16px;

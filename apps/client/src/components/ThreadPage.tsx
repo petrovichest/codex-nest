@@ -113,6 +113,12 @@ import {
 } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import {
+  GalleryImageLink,
+  MessageImageGallery,
+  MessageImageProvider,
+  useMessageImageGallery,
+} from "./MessageImageGallery";
+import {
   type ArtifactLoadState,
   type GitChangesView,
   type InspectorTab,
@@ -4406,32 +4412,25 @@ function MarkdownContent({
     () => ({
       pre: CopyableCodeBlock,
       table: MarkdownTable,
-      a({ href, children, title }) {
-        const path = cwd ? localDownloadPath(href, cwd) : null;
-        const artifact = path ? artifactDescriptor(path) : null;
-        return path && artifact && onOpenArtifact ? (
-          <PreviewLink
-            path={path}
+      a({ href, children, title, node }) {
+        return (
+          <MarkdownLink
+            href={href}
             title={title}
-            artifact={artifact}
+            cwd={cwd}
             onDownload={onDownload}
             onOpenArtifact={onOpenArtifact}
+            containsImage={node?.children.some(
+              (child) => child.type === "element" && child.tagName === "img",
+            )}
           >
             {children}
-          </PreviewLink>
-        ) : path && onDownload ? (
-          <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
-            {children}
-          </DownloadLink>
-        ) : (
-          <a href={href} title={title}>
-            {children}
-          </a>
+          </MarkdownLink>
         );
       },
       img({ src, alt, title }) {
         return (
-          <MarkdownImage
+          <MarkdownImageContent
             src={src}
             alt={alt ?? ""}
             title={title}
@@ -4447,6 +4446,74 @@ function MarkdownContent({
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {text}
     </ReactMarkdown>
+  );
+}
+
+function MarkdownLink({
+  href,
+  children,
+  title,
+  cwd,
+  onDownload,
+  onOpenArtifact,
+  containsImage,
+}: {
+  href?: string;
+  children?: React.ReactNode;
+  title?: string;
+  cwd?: string;
+  containsImage?: boolean;
+  onDownload?(path: string): Promise<void>;
+  onOpenArtifact?: LocalArtifactOpener;
+}) {
+  const gallery = useMessageImageGallery();
+  if (gallery && containsImage) return <>{children}</>;
+  const image = gallery?.find(href);
+  if (image)
+    return (
+      <GalleryImageLink image={image} title={title}>
+        {children}
+      </GalleryImageLink>
+    );
+  const path = cwd ? localDownloadPath(href, cwd) : null;
+  const artifact = path ? artifactDescriptor(path) : null;
+  return path && artifact && onOpenArtifact ? (
+    <PreviewLink
+      path={path}
+      title={title}
+      artifact={artifact}
+      onDownload={onDownload}
+      onOpenArtifact={onOpenArtifact}
+    >
+      {children}
+    </PreviewLink>
+  ) : path && onDownload ? (
+    <DownloadLink href={href!} path={path} title={title} onDownload={onDownload}>
+      {children}
+    </DownloadLink>
+  ) : (
+    <a href={href} title={title}>
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImageContent(props: {
+  src?: string;
+  alt: string;
+  title?: string;
+  cwd?: string;
+  onLoadImage?: LocalImageLoader;
+}) {
+  const gallery = useMessageImageGallery();
+  if (!gallery) return <MarkdownImage {...props} />;
+  const image = gallery.find(props.src, true);
+  return image ? (
+    <GalleryImageLink image={image} title={props.title}>
+      {props.alt}
+    </GalleryImageLink>
+  ) : (
+    <span>{props.alt}</span>
   );
 }
 
@@ -4895,7 +4962,7 @@ export function Activity({
   if (!hasVisibleActivity(item)) return null;
   if (item.type === "userMessage" || item.type === "agentMessage") {
     const messageAnnotations = numberedAnnotations(annotations, item.id);
-    return (
+    const content = (
       <article
         className={`message ${item.type}`}
         data-message-id={item.type === "userMessage" ? item.id : undefined}
@@ -4927,7 +4994,11 @@ export function Activity({
                 onLoadImage={onLoadImage}
               />
             ))}
-          {item.images.length > 0 && <MessageImages images={item.images} />}
+          {item.type === "agentMessage" ? (
+            <MessageImageGallery />
+          ) : (
+            item.images.length > 0 && <MessageImages images={item.images} />
+          )}
           {(item.files?.length ?? 0) > 0 && (
             <MessageFiles files={item.files ?? []} onDownload={onDownload} />
           )}
@@ -4953,6 +5024,19 @@ export function Activity({
         />
       </article>
     );
+    return item.type === "agentMessage" ? (
+      <MessageImageProvider
+        text={item.text}
+        images={item.images}
+        cwd={cwd}
+        onLoadImage={onLoadImage}
+        onDownload={onDownload}
+      >
+        {content}
+      </MessageImageProvider>
+    ) : (
+      content
+    );
   }
   if (item.type === "reasoning") {
     return (
@@ -4970,32 +5054,41 @@ export function Activity({
   if (item.type === "plan") {
     const messageAnnotations = numberedAnnotations(annotations, item.id);
     return (
-      <article className="message plan">
-        <div className="message-body">
-          <div className="activity-label">{t("План")}</div>
-          <AnnotatableMarkdownContent
+      <MessageImageProvider
+        text={item.text}
+        images={item.images}
+        cwd={cwd}
+        onLoadImage={onLoadImage}
+        onDownload={onDownload}
+      >
+        <article className="message plan">
+          <div className="message-body">
+            <div className="activity-label">{t("План")}</div>
+            <AnnotatableMarkdownContent
+              text={item.text}
+              messageId={item.id}
+              source="plan"
+              cwd={cwd}
+              onDownload={onDownload}
+              onOpenArtifact={onOpenArtifact}
+              onLoadImage={onLoadImage}
+              annotations={messageAnnotations}
+              enabled={annotationEnabled}
+              readOnly={annotationBusy}
+              onCreate={onCreateAnnotation}
+              onUpdate={onUpdateAnnotation}
+              onDelete={onDeleteAnnotation}
+            />
+            <MessageImageGallery />
+          </div>
+          <MessageFooter
             text={item.text}
-            messageId={item.id}
-            source="plan"
-            cwd={cwd}
-            onDownload={onDownload}
-            onOpenArtifact={onOpenArtifact}
-            onLoadImage={onLoadImage}
-            annotations={messageAnnotations}
-            enabled={annotationEnabled}
-            readOnly={annotationBusy}
-            onCreate={onCreateAnnotation}
-            onUpdate={onUpdateAnnotation}
-            onDelete={onDeleteAnnotation}
+            timestamp={item.timestamp}
+            forkAction={forkAction}
+            markdown
           />
-        </div>
-        <MessageFooter
-          text={item.text}
-          timestamp={item.timestamp}
-          forkAction={forkAction}
-          markdown
-        />
-      </article>
+        </article>
+      </MessageImageProvider>
     );
   }
   if (item.type === "userInputResponse") {

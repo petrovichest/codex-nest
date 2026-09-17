@@ -1405,7 +1405,10 @@ describe("Activity", () => {
       "https://codex.home.arpa/downloads/ticket/chart.png",
     );
     expect(fetchMock.mock.calls[0]![1]).toEqual({ cache: "no-store" });
-    const preview = await screen.findByRole("button", { name: "Открыть изображение График" });
+    const preview = await within(screen.getByRole("group", { name: "Изображения" })).findByRole(
+      "button",
+      { name: "Открыть изображение График" },
+    );
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).not.toHaveBeenCalled();
     expect(screen.getByRole("img", { name: "График" })).toHaveAttribute(

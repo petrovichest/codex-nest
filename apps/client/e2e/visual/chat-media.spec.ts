@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { resolve } from "node:path";
 import type { ThreadDetail } from "@codexnest/protocol";
 import { installVisualFixture, snapshot, waitForVisualReady } from "./fixtures";
 
@@ -71,6 +72,93 @@ async function openChat(page: Page, theme: "light" | "dark", text: string, image
 
 function imageSource(width: number, height: number) {
   return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#697760"/><path d="M0 0L${width} ${height}M0 ${height}L${width} 0" stroke="#ced8c7" stroke-width="4"/></svg>`)}`;
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [320, 390, 820, 821, 1440]) {
+    test(`image gallery at ${width}px in ${theme}: links, wrapping and shared viewer`, async ({
+      page,
+      browserName,
+    }) => {
+      await page.setViewportSize({ width, height: 844 });
+      const titles = ["Узкая панель", "Широкая панель", "Горизонтальная панель"];
+      await page.route("https://image.test/*.png", (route) => {
+        const i = Number(new URL(route.request().url()).pathname[1]);
+        const panel = [
+          { x: 120, y: 80, w: 64, h: 260 },
+          { x: 68, y: 180, w: 180, h: 150 },
+          { x: 60, y: 200, w: 200, h: 110 },
+        ][i]!;
+        return route.fulfill({
+          contentType: "image/svg+xml",
+          headers: { "access-control-allow-origin": "*" },
+          body: `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="500"><rect width="300" height="500" fill="#eeede7"/><path d="M0 390h300v110H0z" fill="#b9ad98"/><rect x="${panel.x}" y="${panel.y}" width="${panel.w}" height="${panel.h}" rx="3" fill="#b79f7e"/><path d="M95 244h104m-88 44h90" stroke="#e8dfcb" stroke-width="9"/><rect x="53" y="346" width="199" height="12" rx="3" fill="#424840"/><path d="M66 358v89m174-89v89" stroke="#424840" stroke-width="6"/><rect x="112" y="304" width="90" height="40" rx="3" fill="#616c60"/><circle cx="88" cy="224" r="12" fill="#798969"/></svg>`,
+        });
+      });
+      await openChat(
+        page,
+        theme,
+        "Подготовил три варианта размещения панели:\n\n" +
+          titles.map((title, i) => `- [${title}](https://image.test/${i}.png)`).join("\n") +
+          "\n\nВсе варианты можно рассмотреть крупнее.\n\n![Широкая панель](https://image.test/1.png)",
+        ["https://image.test/0.png"],
+      );
+      const gallery = page.locator(".message-image-gallery");
+      await expect(gallery.locator(".is-ready")).toHaveCount(3);
+      await expect(page.locator(".message-markdown img")).toHaveCount(0);
+      expect((await gallery.boundingBox())!.y).toBeGreaterThan(
+        (await page.locator(".message-markdown").boundingBox())!.y,
+      );
+      expect(
+        await page
+          .locator(".conversation-scroll")
+          .evaluate((el) => el.scrollWidth <= el.clientWidth),
+      ).toBe(true);
+      const tiles = await gallery.locator("button").evaluateAll((elements) =>
+        elements.map((el) => ({
+          x: el.getBoundingClientRect().x,
+          y: el.getBoundingClientRect().y,
+          height: el.getBoundingClientRect().height,
+        })),
+      );
+      expect(tiles[0]!.height).toBe(width <= 820 ? 160 : 200);
+      if (width === 320) expect(tiles[2]!.y).toBeGreaterThan(tiles[0]!.y);
+      if (browserName === "chromium" && [390, 1440].includes(width)) {
+        await expect(page).toHaveScreenshot(`image-gallery-${width}-${theme}.png`);
+        if (process.env.UPDATE_GALLERY_DOCS)
+          await page.screenshot({
+            path: resolve(
+              import.meta.dirname,
+              `../../../../docs/assets/chat-gallery-${width}-${theme}.png`,
+            ),
+            animations: "disabled",
+          });
+      }
+      const opener = page
+        .locator(".message-markdown")
+        .getByRole("button", { name: "Открыть изображение Широкая панель", exact: true })
+        .first();
+      await opener.click();
+      const viewer = page.getByRole("dialog", { name: "Просмотр изображений" });
+      await expect(viewer.getByText("Изображение 2 из 3")).toBeVisible();
+      await page.keyboard.press("ArrowRight");
+      await expect(viewer.getByAltText(titles[2]!)).toBeVisible();
+      await expect(viewer.getByRole("button", { name: "Следующее изображение" })).toBeDisabled();
+      const download = page.waitForEvent("download");
+      await viewer.getByRole("button", { name: `Скачать ${titles[2]}` }).click();
+      expect(await (await download).failure()).toBeNull();
+      await page.keyboard.press("Escape");
+      await expect(opener).toBeFocused();
+      const thumbnail = gallery.getByRole("button", {
+        name: "Открыть изображение Широкая панель",
+        exact: true,
+      });
+      await thumbnail.click();
+      await expect(viewer.getByText("Изображение 2 из 3")).toBeVisible();
+      await viewer.getByRole("button", { name: "Закрыть", exact: true }).click();
+      await expect(thumbnail).toBeFocused();
+    });
+  }
 }
 
 for (const theme of ["light", "dark"] as const) {
@@ -171,8 +259,8 @@ for (const theme of ["light", "dark"] as const) {
           .join("\n\n"),
         sources,
       );
-      await expect(page.locator(".markdown-image-preview.is-loading")).toHaveCount(0);
-      const frames = page.locator(".markdown-image-preview,.message-image-preview");
+      await expect(page.locator(".gallery-thumbnail.is-loading")).toHaveCount(0);
+      const frames = page.locator(".gallery-thumbnail");
       await expect(frames).toHaveCount(8);
       const dimensions = await frames.evaluateAll((elements) =>
         elements.map((el) => {
@@ -190,7 +278,7 @@ for (const theme of ["light", "dark"] as const) {
         expect(Math.abs(frame.width - image.width)).toBeLessThan(1);
         expect(Math.abs(frame.height - image.height)).toBeLessThan(1);
         expect(image.width / image.height).toBeCloseTo(natural.width / natural.height, 2);
-        expect(image.height).toBeLessThanOrEqual(480);
+        expect(image.height).toBeLessThanOrEqual(width <= 820 ? 160 : 200);
         expect(image.width).toBeLessThanOrEqual(natural.width);
         expect(image.height).toBeLessThanOrEqual(natural.height);
       }
@@ -199,7 +287,7 @@ for (const theme of ["light", "dark"] as const) {
           .locator(".conversation-scroll")
           .evaluate((el) => el.scrollWidth <= el.clientWidth),
       ).toBe(true);
-      const opener = page.getByRole("button", {
+      const opener = page.locator(".message-markdown").getByRole("button", {
         name: "Открыть изображение Превью 0",
         exact: true,
       });
@@ -248,7 +336,7 @@ for (const readingAbove of [false, true]) {
     }
     const before = (await anchor.boundingBox())!.y;
     finish();
-    await expect(page.locator(".markdown-image-preview.is-loading")).toHaveCount(0);
+    await expect(page.locator(".gallery-thumbnail.is-loading")).toHaveCount(0);
     if (readingAbove) {
       await expect
         .poll(async () => Math.abs((await anchor.boundingBox())!.y - before))

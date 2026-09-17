@@ -302,6 +302,14 @@ export const FileIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const ImageIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x="3" y="3" width="18" height="18" rx="4" />
+    <circle cx="15.5" cy="8.5" r="1.5" />
+    <path d="m3 16 5-5 10 10" />
+  </Icon>
+);
+
 export const ToolIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94Z" />

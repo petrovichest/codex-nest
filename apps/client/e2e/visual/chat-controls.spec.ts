@@ -237,7 +237,10 @@ for (const theme of ["light", "dark"] as const) {
     await expect(download).toHaveCSS("height", "32px");
     await expect(download).toHaveCSS("border-radius", "50%");
     await page.goto("/threads/session-attention");
-    await expect(page.locator(".attention-card")).toBeVisible();
+    // Snapshot attention arrives before history. Wait for its final placement
+    // in the loaded turn, not the temporary standalone form that gets replaced.
+    await expect(page.locator(".turn-response-tail .attention-card")).toBeVisible();
+    await waitForVisualReady(page);
     await expect(page.locator(".attention-card")).not.toHaveCSS("box-shadow", "none");
     await expectFeedback(page, page.locator(".attention-card button.primary"), true);
     await expectFeedback(
