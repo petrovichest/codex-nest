@@ -4458,6 +4458,10 @@ button.message-file:hover:not(:disabled) {
   display: none;
 }
 
+.session-inspector:has(.inspector-tabs) > :is(.inspector-heading, .inspector-tabs) {
+  flex-shrink: 0;
+}
+
 .subagent-readonly {
   min-height: 58px;
   flex: 0 0 auto;
@@ -6205,6 +6209,10 @@ button.message-file:hover:not(:disabled) {
     border: 1px solid var(--color-line);
     border-radius: var(--radius-lg);
     box-shadow: var(--elevation-overlay);
+  }
+
+  .session-inspector:has(.inspector-tabs) {
+    height: min(82dvh, 680px);
   }
 
   .inspector-heading {

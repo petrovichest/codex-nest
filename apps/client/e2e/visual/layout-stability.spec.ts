@@ -1,5 +1,11 @@
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
-import type { ServerEvent, ThreadDetail, ThreadSummary, TurnView } from "@codexnest/protocol";
+import type {
+  ServerEvent,
+  ThreadArtifactsResponse,
+  ThreadDetail,
+  ThreadSummary,
+  TurnView,
+} from "@codexnest/protocol";
 import {
   DESKTOP_VIEWPORT,
   PHONE_VIEWPORT,
@@ -45,6 +51,138 @@ function unchanged(before: Awaited<ReturnType<typeof geometry>>, after: typeof b
     }
   });
 }
+
+for (const viewport of [
+  { width: 320, height: 568 },
+  PHONE_VIEWPORT,
+  { width: 740, height: 360 },
+  { width: 1024, height: 768 },
+  DESKTOP_VIEWPORT,
+]) {
+  test(`session inspector at ${viewport.width}px keeps controls stationary across artifact states`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await installVisualFixture(page, { theme: viewport.width === 320 ? "light" : "dark" });
+    const inspector = page.getByRole("complementary", { name: "Сведения о задаче" });
+    const chrome = inspector.locator(
+      ":scope,.inspector-heading,.inspector-heading button,.inspector-tabs,[role=tab]",
+    );
+    const overview = inspector.getByRole("tab", { name: "Обзор", exact: true });
+    const artifacts = inspector.getByRole("tab", { name: /^Артефакты/u });
+    const endpoint = "**/api/v1/threads/session-main/artifacts";
+
+    for (const state of ["empty", "unavailable", "error", "populated"] as const) {
+      await test.step(state, async () => {
+        const loading = deferred();
+        let fail = state === "error";
+        const response: ThreadArtifactsResponse = {
+          capability: state === "unavailable" ? "unavailable" : "explicit",
+          artifacts:
+            state === "populated"
+              ? Array.from({ length: 30 }, (_, index) => ({
+                  id: `artifact-${index}`,
+                  label: `Отчёт ${index}`,
+                  path: `/work/codex-nest/reports/report-${index}.md`,
+                  relativePath: `reports/report-${index}.md`,
+                  fileName: `report-${index}.md`,
+                  turnId: "turn-main",
+                  createdAt: mainThread.updatedAt,
+                }))
+              : [],
+        };
+        const handler = async (route: Route) => {
+          if (route.request().method() === "OPTIONS") return route.fallback();
+          await loading.promise;
+          return fail ? json(route, { error: "Fixture failure" }, 500) : json(route, response);
+        };
+        await page.route(endpoint, handler);
+        try {
+          await page.goto("/threads/session-main");
+          await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
+          await expect(inspector.getByText("3 файла", { exact: true })).toBeVisible();
+          await waitForVisualReady(page);
+          const before = await geometry(chrome);
+          expect(before).toHaveLength(6);
+          const checkGeometry = async () => {
+            await waitForVisualReady(page);
+            unchanged(before, await geometry(chrome));
+          };
+
+          await artifacts.click();
+          await expect(inspector.getByRole("status")).toBeVisible();
+          await checkGeometry();
+          loading.resolve();
+
+          if (state === "error") {
+            await expect(inspector.getByRole("alert")).toBeVisible();
+            await checkGeometry();
+            fail = false;
+            await inspector.getByRole("button", { name: "Повторить", exact: true }).click();
+          }
+          if (state === "populated") {
+            await expect(inspector.locator(".inspector-artifact-item")).toHaveCount(30);
+          } else {
+            await expect(
+              inspector.getByText(
+                state === "unavailable"
+                  ? "Артефакты недоступны для этой сессии"
+                  : "В этой сессии пока нет артефактов",
+                { exact: true },
+              ),
+            ).toBeVisible();
+          }
+          await checkGeometry();
+
+          if (state === "populated") {
+            const panel = inspector.getByRole("tabpanel");
+            await panel.evaluate((element) => {
+              element.scrollTop = element.scrollHeight;
+            });
+            expect(await panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+            await expect(
+              inspector.getByRole("button", { name: "Открыть report-29.md" }),
+            ).toBeInViewport();
+            await expect(
+              inspector.getByRole("button", { name: "Закрыть сведения" }),
+            ).toBeInViewport();
+            await expect(overview).toBeInViewport();
+            await expect(artifacts).toBeInViewport();
+            await checkGeometry();
+          }
+
+          await overview.click();
+          await expect(inspector.getByText("Рабочая папка", { exact: true })).toBeAttached();
+          await checkGeometry();
+        } finally {
+          loading.resolve();
+          await page.unroute(endpoint, handler);
+        }
+      });
+    }
+  });
+}
+
+test("new session inspector keeps its compact mobile height", async ({ page }) => {
+  await page.setViewportSize(PHONE_VIEWPORT);
+  await installVisualFixture(page, { theme: "dark" });
+  await page.goto("/threads/session-main");
+  await page.getByRole("button", { name: "Открыть список задач", exact: true }).click();
+  await page.getByRole("button", { name: "Создать новую сессию в проекте CodexNest" }).click();
+  await expect(page).toHaveURL(/\/new\?/u);
+  await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
+  const inspector = page.getByRole("complementary", { name: "Сведения о новой задаче" });
+  await expect(
+    inspector.getByText("Задача будет создана после отправки первого сообщения."),
+  ).toBeVisible();
+  await waitForVisualReady(page);
+  expect((await inspector.boundingBox())!.height).toBeLessThan(
+    Math.min(PHONE_VIEWPORT.height * 0.82, 680),
+  );
+  expect(
+    await inspector.locator(".inspector-panel").evaluate((el) => el.scrollHeight - el.clientHeight),
+  ).toBeLessThanOrEqual(1);
+});
 
 async function expectPackedActions(page: Page) {
   const actions = page.locator(".composer-actions");
