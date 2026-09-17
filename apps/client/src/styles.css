@@ -3588,10 +3588,18 @@ button.message-file:hover:not(:disabled) {
 }
 
 .composer-actions {
+  --composer-action-size: var(--control-height);
+  --composer-action-surface: #eceee8;
+  --composer-action-active: #dce0d6;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-1);
+}
+
+:root[data-resolved-theme="dark"] .composer-actions {
+  --composer-action-surface: #363a33;
+  --composer-action-active: #4d5446;
 }
 
 .project-picker {
@@ -4034,6 +4042,45 @@ button.message-file:hover:not(:disabled) {
 
 .composer-action.microphone.timing:disabled {
   opacity: 1;
+}
+
+.composer-actions > .composer-action,
+.composer-actions > .voice-send-toggle {
+  width: var(--composer-action-size);
+  min-width: var(--composer-action-size);
+  height: var(--composer-action-size);
+  min-height: var(--composer-action-size);
+  border: 0;
+  border-radius: 50%;
+  background: var(--composer-action-background, var(--composer-action-surface));
+}
+
+.composer-actions > .voice-send-toggle.active {
+  --composer-action-background: var(--composer-action-active);
+  color: var(--text-strong);
+  box-shadow: none;
+}
+
+.composer-actions > .send {
+  --composer-action-background: var(--accent);
+}
+
+.composer-actions > .microphone.recording,
+.composer-actions > .microphone.timing {
+  --composer-action-background: color-mix(in srgb, var(--danger) 12%, transparent);
+  background: var(--composer-action-background);
+}
+
+.composer-actions > .microphone.timing {
+  border-radius: 999px;
+}
+
+.composer-actions > :is(.composer-action, .voice-send-toggle):hover:not(:disabled, .send) {
+  background: color-mix(
+    in srgb,
+    var(--text) 7%,
+    var(--composer-action-background, var(--composer-action-surface))
+  );
 }
 
 .composer-action-timer {
@@ -6283,6 +6330,7 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-actions {
+    --composer-action-size: var(--control-touch-height);
     gap: var(--space-0-5);
   }
 
