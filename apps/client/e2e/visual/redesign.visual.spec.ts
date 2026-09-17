@@ -86,8 +86,8 @@ test.describe("CodexNest redesign visual contract", () => {
           width: checkbox.width,
         };
       });
-    expect(checklistMarker.width).toBe(16);
-    expect(checklistMarker.height).toBe(16);
+    expect(checklistMarker.width).toBe(20);
+    expect(checklistMarker.height).toBe(20);
     expect(Math.abs(checklistMarker.centerOffset)).toBeLessThanOrEqual(2);
     await expect(page).toHaveScreenshot("02-desktop-dark-session.png", { fullPage: true });
     if (browserName === "chromium") await expectA11yClean(page, "desktop session");
@@ -297,7 +297,7 @@ test.describe("CodexNest redesign visual contract", () => {
       await page.getByRole("button", { name: "Создать ответвление отсюда" }).click();
       const dialog = page.getByRole("dialog", { name: "Создать ветку" });
       await expect(dialog.getByText("Считаем…").first()).toBeVisible();
-      await expect(dialog).toHaveCSS("border-bottom-left-radius", "0px");
+      await expect(dialog).toHaveCSS("border-bottom-left-radius", "24px");
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,

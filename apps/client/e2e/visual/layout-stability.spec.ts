@@ -432,7 +432,7 @@ for (const mobile of [false, true]) {
     const queue = page.locator(".outgoing-messages");
     const previousTurn = page.locator(".turn").last();
     const finish = page.locator(".finish-thread-action");
-    expect(await verticalGap(previousTurn, queue)).toBe(32);
+    expect(await verticalGap(previousTurn, queue)).toBe(24);
     send({ type: "thread.upserted", thread: { ...summary, unread: true } });
     await expect(finish).toBeVisible();
     expect(await verticalGap(finish, queue)).toBe(16);
@@ -460,7 +460,7 @@ for (const mobile of [false, true]) {
         const card = cards.nth(index);
         expect(
           await verticalGap(card.locator(".message-body"), card.locator(".message-footer")),
-        ).toBe(5);
+        ).toBe(7);
         if (index > 0) expect(await verticalGap(cards.nth(index - 1), card)).toBe(16);
       }
     };
@@ -474,7 +474,7 @@ for (const mobile of [false, true]) {
     await cards.first().getByRole("button", { name: "Отмена", exact: true }).click();
     send({ type: "thread.upserted", thread: summary });
     await expect(finish).toHaveCount(0);
-    expect(await verticalGap(previousTurn, queue)).toBe(32);
+    expect(await verticalGap(previousTurn, queue)).toBe(24);
     const attention = { ...snapshot.attention[0]!, threadId: summary.id };
     send({ type: "attention.upserted", attention });
     const questions = page.locator(".attention-stack");

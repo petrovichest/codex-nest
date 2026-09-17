@@ -55,8 +55,11 @@ for (const width of [320, 390, 610, 1440]) {
           const body = (await dialog.locator(".fork-dialog-body").boundingBox())!;
           const choices = (await dialog.locator(".fork-mode-options").boundingBox())!;
           const actions = (await dialog.locator(".fork-dialog-actions").boundingBox())!;
-          const contentEnd = Math.min(body.y + body.height, choices.y + choices.height);
-          expect(actions.y - contentEnd).toBeCloseTo(16, 0);
+          expect(actions.y - (body.y + body.height)).toBeCloseTo(16, 0);
+          if (choices.y + choices.height <= body.y + body.height) {
+            // Breathing room keeps the last card's shadow inside the scroll viewport.
+            expect(body.y + body.height - (choices.y + choices.height)).toBeCloseTo(12, 0);
+          }
         };
         await expectCompact();
         release();
@@ -107,7 +110,60 @@ for (const width of [320, 390, 610, 1440]) {
 }
 
 for (const theme of ["light", "dark"] as const) {
-  test(`${theme}: neutral native controls preserve semantic progress colors`, async ({ page }) => {
+  test(`${theme}: floating chat fits narrow screens and respects display insets`, async ({
+    page,
+  }) => {
+    await installVisualFixture(page, { theme });
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/threads/session-attention");
+      await waitForVisualReady(page);
+      const mobile = width <= 820;
+      if (mobile) {
+        await page.addStyleTag({
+          content:
+            ":root { --app-safe-area-top: 34px !important; --app-safe-area-left: 16px !important; --app-safe-area-right: 12px !important; }",
+        });
+      }
+      const header = page.locator(".workspace-header");
+      const bounds = (await header.boundingBox())!;
+      if (mobile) {
+        expect(bounds.y).toBe(42);
+        expect(bounds.height).toBe(64);
+        expect(bounds.x).toBe(24);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 20);
+      }
+      const actions = await header
+        .locator(
+          ".workspace-title > button, .workspace-actions > button, .workspace-actions > details > summary",
+        )
+        .evaluateAll((elements) =>
+          elements
+            .filter((element) => element.getClientRects().length)
+            .map((element) => {
+              const { left, right, top, bottom } = element.getBoundingClientRect();
+              return { left, right, top, bottom };
+            }),
+        );
+      for (const action of actions) {
+        expect(action.left).toBeGreaterThanOrEqual(bounds.x);
+        expect(action.right).toBeLessThanOrEqual(bounds.x + bounds.width);
+        expect(action.top).toBeGreaterThanOrEqual(bounds.y);
+        expect(action.bottom).toBeLessThanOrEqual(bounds.y + bounds.height);
+      }
+      expect(
+        await page
+          .locator(".conversation-scroll")
+          .evaluate((element) => element.scrollWidth <= element.clientWidth),
+      ).toBe(true);
+      await expect(page.locator(".user-input-freeform-label")).toHaveCSS("font-weight", "400");
+      await expect(page.locator(".attention-card button.primary")).toHaveCSS("font-weight", "400");
+    }
+  });
+
+  test(`${theme}: settings keep native controls and chat uses soft checkboxes`, async ({
+    page,
+  }) => {
     await installVisualFixture(page, { theme });
     await page.goto("/settings?section=application");
     const checkbox = page.getByRole("checkbox").first();
@@ -119,9 +175,14 @@ for (const theme of ["light", "dark"] as const) {
     await checkbox.focus();
     await expect(checkbox).toHaveCSS("outline-style", "solid");
     await page.goto("/threads/session-main");
-    await expect(page.locator('.plan-checklist input[type="checkbox"]').first()).toHaveCSS(
-      "accent-color",
-      theme === "light" ? "rgb(43, 162, 76)" : "rgb(90, 200, 120)",
+    const completedStep = page.locator('.plan-checklist input[type="checkbox"]:checked').first();
+    await expect(completedStep).toHaveCSS("appearance", "none");
+    await expect(completedStep).toHaveCSS("border-radius", "7px");
+    await expect(completedStep).toHaveCSS(
+      "background-color",
+      theme === "light" ? "rgb(225, 230, 218)" : "rgb(59, 69, 53)",
     );
+    await page.emulateMedia({ forcedColors: "active" });
+    await expect(completedStep).toHaveCSS("appearance", "auto");
   });
 }

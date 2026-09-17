@@ -55,7 +55,7 @@ export function ImageViewer({
 
   return createPortal(
     <div
-      className="image-viewer-backdrop"
+      className="image-viewer-backdrop chat-image-viewer"
       role="dialog"
       aria-modal="true"
       aria-label={t("Просмотр изображений")}

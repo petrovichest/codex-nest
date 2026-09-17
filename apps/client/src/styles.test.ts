@@ -32,6 +32,7 @@ describe("shared surface radii", () => {
           if (selector === ".composer-box" && ["30px", "24px"].includes(value)) continue;
           const remaining = value
             .replace(/var\(--radius-(?:sm|md|lg)\)/g, "")
+            .replace(/var\(--chat-radius(?:-(?:control|card|surface|compact|checkbox))?\)/g, "")
             .replace(/\b(?:0|50%|999px)(?=\s|$)/g, "")
             .trim();
           if (remaining) violations.push(`${selector}: ${value}`);

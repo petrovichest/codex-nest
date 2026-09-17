@@ -31,12 +31,14 @@ export function AttentionPanel({
   transcriptionConfig = null,
   transcriptionProvider = null,
   onTranscriptionTimingEstimateChange,
+  onInteract,
 }: {
   requests: AttentionRequest[];
   hiddenRequestIds?: readonly string[];
   transcriptionConfig?: TranscriptionConfigResponse | null;
   transcriptionProvider?: TranscriptionProvider | null;
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
+  onInteract?(requestId: string): void;
 }) {
   const { t } = useI18n();
   if (!requests.length) return null;
@@ -53,6 +55,7 @@ export function AttentionPanel({
           transcriptionConfig={transcriptionConfig}
           transcriptionProvider={transcriptionProvider}
           onTranscriptionTimingEstimateChange={onTranscriptionTimingEstimateChange}
+          onInteract={onInteract}
           key={request.id}
         />
       ))}
@@ -66,12 +69,14 @@ function AttentionCard({
   transcriptionConfig,
   transcriptionProvider,
   onTranscriptionTimingEstimateChange,
+  onInteract,
 }: {
   request: AttentionRequest;
   hidden: boolean;
   transcriptionConfig: TranscriptionConfigResponse | null;
   transcriptionProvider: TranscriptionProvider | null;
   onTranscriptionTimingEstimateChange?(estimate: TranscriptionTimingEstimate): void;
+  onInteract?(requestId: string): void;
 }) {
   const connection = useConnection();
   const { api } = connection;
@@ -133,6 +138,8 @@ function AttentionCard({
     <article
       className={`attention-card${request.kind === "userInput" ? " user-input-card" : ""}`}
       hidden={hidden}
+      onFocusCapture={() => onInteract?.(request.id)}
+      onPointerDownCapture={() => onInteract?.(request.id)}
     >
       <div className="attention-heading">
         <AlertIcon />

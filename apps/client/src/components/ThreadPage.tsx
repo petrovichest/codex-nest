@@ -772,6 +772,13 @@ export function ThreadPage({
     () => state.snapshot?.attention?.filter((item) => item.threadId === threadId) ?? [],
     [state.snapshot?.attention, threadId],
   );
+  // Keep an interacted-with standalone form in place until it is answered.
+  // A late history response must not reparent it and discard input or focus.
+  const standaloneAttentionIds = useRef(new Set<string>());
+  const attentionIds = new Set(attention.map((request) => request.id));
+  for (const id of standaloneAttentionIds.current) {
+    if (!attentionIds.has(id)) standaloneAttentionIds.current.delete(id);
+  }
   function userInputToDismiss(targetThreadId: string): QueuedMessage["dismissUserInput"] {
     const request = state.snapshot?.attention?.find(
       (item) =>
@@ -3763,28 +3770,40 @@ export function ThreadPage({
                           (!message.turnId && workspaceSummary.currentTurnId === turn.id),
                       );
                       const active = workspaceSummary.currentTurnId === turn.id;
+                      const pendingRows = turnOptimisticMessages.length ? 1 : 0;
                       return (
-                        <div className="turn" key={turn.id}>
-                          {turnOptimisticMessages.map((message) => (
-                            <Activity
-                              item={optimisticActivity(message)}
-                              cwd={workspaceSummary.cwd}
-                              onDownload={downloadFile}
-                              onOpenArtifact={openLinkedArtifact}
-                              key={message.id}
-                            />
-                          ))}
-                          {entries.map((entry) =>
+                        <div className="turn" data-turn-id={turn.id} key={turn.id}>
+                          {turnOptimisticMessages.length > 0 && (
+                            <div className="turn-pending-messages" style={{ gridRow: 1 }}>
+                              {turnOptimisticMessages.map((message) => (
+                                <Activity
+                                  item={optimisticActivity(message)}
+                                  cwd={workspaceSummary.cwd}
+                                  onDownload={downloadFile}
+                                  onOpenArtifact={openLinkedArtifact}
+                                  key={message.id}
+                                />
+                              ))}
+                            </div>
+                          )}
+                          {entries.map((entry, index) =>
                             Array.isArray(entry) ? (
-                              <MemoizedActivityGroup
-                                items={entry}
-                                cwd={workspaceSummary.cwd}
-                                onDownload={downloadFile}
-                                onOpenArtifact={openLinkedArtifact}
+                              <div
+                                className={responsePieceClass(entries, index)}
+                                style={{ gridRow: index + pendingRows + 1 }}
                                 key={entry.map((item) => item.id).join(":")}
-                              />
+                              >
+                                <MemoizedActivityGroup
+                                  items={entry}
+                                  cwd={workspaceSummary.cwd}
+                                  onDownload={downloadFile}
+                                  onOpenArtifact={openLinkedArtifact}
+                                />
+                              </div>
                             ) : (
                               <div
+                                className={responsePieceClass(entries, index)}
+                                style={{ gridRow: index + pendingRows + 1 }}
                                 key={
                                   "questionKey" in entry
                                     ? (entry.questionKey ?? entry.id)
@@ -3862,17 +3881,45 @@ export function ThreadPage({
                               </div>
                             ),
                           )}
-                          <TurnActivityDisclosure
-                            turn={turn}
-                            active={active}
-                            items={technicalItems}
-                            loaded={turn.itemsLoaded !== false}
-                            interactive={!isSubagent}
-                            onLoad={() => loadTurnItems(threadId, turn.id)}
-                            cwd={workspaceSummary.cwd}
-                            onDownload={downloadFile}
-                            onOpenArtifact={openLinkedArtifact}
-                          />
+                          <div
+                            className={`turn-response-tail response-piece response-end${!entries.length || isUserEntry(entries.at(-1)) ? " response-start" : ""}`}
+                            style={{ gridRow: entries.length + pendingRows + 1 }}
+                          >
+                            <AttentionPanel
+                              requests={attention.filter(
+                                (request) =>
+                                  request.turnId === turn.id &&
+                                  !standaloneAttentionIds.current.has(request.id),
+                              )}
+                              hiddenRequestIds={hiddenAttentionIds}
+                              transcriptionConfig={transcriptionConfig}
+                              transcriptionProvider={transcriptionProvider}
+                              onTranscriptionTimingEstimateChange={
+                                onTranscriptionTimingEstimateChange
+                              }
+                            />
+                            <TurnActivityDisclosure
+                              turn={turn}
+                              active={active}
+                              items={technicalItems}
+                              loaded={turn.itemsLoaded !== false}
+                              interactive={!isSubagent}
+                              onLoad={() => loadTurnItems(threadId, turn.id)}
+                              cwd={workspaceSummary.cwd}
+                              onDownload={downloadFile}
+                              onOpenArtifact={openLinkedArtifact}
+                            />
+                          </div>
+                          {responseSurfaceRows(entries).map(([start, end]) => (
+                            <div
+                              className="response-surface"
+                              aria-hidden="true"
+                              style={{
+                                gridRow: `${start + pendingRows + 1} / ${end + pendingRows + 1}`,
+                              }}
+                              key={`surface:${start}`}
+                            />
+                          ))}
                         </div>
                       );
                     })}
@@ -3900,7 +3947,12 @@ export function ThreadPage({
                       <VoiceTranscriptionBubble progress={autoVoiceProgress} />
                     )}
                     <AttentionPanel
-                      requests={attention}
+                      requests={attention.filter(
+                        (request) =>
+                          standaloneAttentionIds.current.has(request.id) ||
+                          !detail?.turns.some((turn) => turn.id === request.turnId),
+                      )}
+                      onInteract={(id) => standaloneAttentionIds.current.add(id)}
                       hiddenRequestIds={hiddenAttentionIds}
                       transcriptionConfig={transcriptionConfig}
                       transcriptionProvider={transcriptionProvider}
@@ -6199,6 +6251,41 @@ function formatDuration(durationMs: number, language: UiLanguage = "ru"): string
   return minutes ? `${minutes}м ${seconds % 60}с` : `${seconds}с`;
 }
 
+function isUserEntry(entry: ActivityItem | ActivityItem[] | undefined): boolean {
+  return Boolean(
+    entry &&
+    !Array.isArray(entry) &&
+    (entry.type === "userMessage" || entry.type === "userInputResponse"),
+  );
+}
+
+// Style adjacent pieces as one surface without reparenting live messages or forms.
+// Their keys and DOM nodes survive streaming, question updates and user steering.
+function responsePieceClass(entries: Array<ActivityItem | ActivityItem[]>, index: number): string {
+  if (isUserEntry(entries[index])) return "turn-entry user-entry";
+  const start = index === 0 || isUserEntry(entries[index - 1]);
+  const end = isUserEntry(entries[index + 1]);
+  return `turn-entry response-piece${start ? " response-start" : ""}${end ? " response-end" : ""}`;
+}
+
+function responseSurfaceRows(
+  entries: Array<ActivityItem | ActivityItem[]>,
+): Array<[number, number]> {
+  const rows: Array<[number, number]> = [];
+  let start: number | null = null;
+  // The final row contains the stable question forms and activity disclosure.
+  for (let index = 0; index <= entries.length; index++) {
+    if (isUserEntry(entries[index])) {
+      if (start !== null) rows.push([start, index]);
+      start = null;
+    } else {
+      start ??= index;
+    }
+  }
+  if (start !== null) rows.push([start, entries.length + 1]);
+  return rows;
+}
+
 function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityItem[]> {
   const result: Array<ActivityItem | ActivityItem[]> = [];
   const questionOccurrences = new Map<string, number>();
@@ -6466,7 +6553,7 @@ function RenameDialog({
   return (
     <Dialog
       titleId="rename-dialog-title"
-      className="compact"
+      className="compact chat-dialog"
       closeOnBackdrop
       closeOnEscape
       initialFocusRef={inputRef}

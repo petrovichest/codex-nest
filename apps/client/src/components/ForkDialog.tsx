@@ -112,7 +112,7 @@ export function ForkDialog({
   return (
     <Dialog
       titleId="fork-dialog-title"
-      className="fork-dialog"
+      className="fork-dialog chat-dialog"
       backdropClassName="fork-dialog-backdrop"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}

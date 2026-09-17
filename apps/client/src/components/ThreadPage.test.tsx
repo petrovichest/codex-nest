@@ -4437,6 +4437,113 @@ describe("Activity", () => {
     expect(document.querySelector(".turn-progress")).toBeNull();
   });
 
+  it("keeps response order, question focus and draft when steering splits a live response", async () => {
+    const api = threadApi();
+    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+    const message = (
+      type: "agentMessage" | "userMessage",
+      id: string,
+      text: string,
+    ): ActivityItem => ({
+      type,
+      id,
+      text,
+      images: [],
+      status: "completed",
+      timestamp: 1,
+      phase: type === "agentMessage" ? "commentary" : null,
+    });
+    const context = mockThreadConnection(api, running, {
+      attention: [pendingInputRequest()],
+      turns: [
+        {
+          id: "turn",
+          status: "inProgress",
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+          progress: progress(),
+          items: [
+            message("userMessage", "user", "Начни работу"),
+            message("agentMessage", "agent", "Первый шаг"),
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+    const input = screen.getByRole("textbox", { name: "Свой ответ" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Сохранить мой ответ" } });
+    input.focus();
+    input.setSelectionRange(4, 9);
+    const originalMessage = screen.getByText("Первый шаг").closest("article");
+    expect(view.container.querySelectorAll(".response-surface")).toHaveLength(1);
+    expect(input.closest(".turn")?.getAttribute("data-turn-id")).toBe("turn");
+
+    const detail = context.state.details.thread;
+    context.state.details.thread = {
+      ...detail,
+      turns: [
+        {
+          ...detail.turns[0]!,
+          items: [
+            ...detail.turns[0]!.items,
+            message("userMessage", "steer", "И ещё пожелание"),
+            message("agentMessage", "next", "Продолжаю с уточнением"),
+          ],
+        },
+      ],
+    };
+    view.rerender(threadRoute());
+
+    expect(screen.getByRole("textbox", { name: "Свой ответ" })).toBe(input);
+    expect(input).toHaveValue("Сохранить мой ответ");
+    expect(input).toHaveFocus();
+    expect([input.selectionStart, input.selectionEnd]).toEqual([4, 9]);
+    expect(screen.getByText("Первый шаг").closest("article")).toBe(originalMessage);
+    expect(view.container.querySelectorAll(".response-surface")).toHaveLength(2);
+    expect(originalMessage!.parentElement).toHaveClass("response-start", "response-end");
+    expect(screen.getByText("Продолжаю с уточнением").closest(".response-piece")).toHaveClass(
+      "response-start",
+    );
+    expect(
+      Array.from(
+        view.container.querySelectorAll(".turn .message-body"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["Начни работу", "Первый шаг", "И ещё пожелание", "Продолжаю с уточнением"]);
+
+    const updated = context.state.details.thread;
+    context.state.details.thread = { ...updated, turns: [completedAgentTurn(), ...updated.turns] };
+    view.rerender(threadRoute());
+    expect(screen.getByRole("textbox", { name: "Свой ответ" })).toBe(input);
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("Сохранить мой ответ");
+    await act(async () => undefined);
+  });
+
+  it("keeps a question draft and selection when its history arrives after the form", () => {
+    const api = threadApi();
+    const context = mockThreadConnection(api, summary, { attention: [pendingInputRequest()] });
+    const view = renderThread();
+    const input = screen.getByRole("textbox", { name: "Свой ответ" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Ещё не отправленный ответ" } });
+    input.focus();
+    input.setSelectionRange(5, 12);
+    expect(input.closest(".turn")).toBeNull();
+
+    context.state.details.thread = {
+      ...context.state.details.thread,
+      turns: [{ ...completedAgentTurn(), id: "turn" }],
+    };
+    view.rerender(threadRoute());
+
+    expect(screen.getByRole("textbox", { name: "Свой ответ" })).toBe(input);
+    expect(input).toHaveValue("Ещё не отправленный ответ");
+    expect(input).toHaveFocus();
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 12]);
+    expect(input.closest(".turn")).toBeNull();
+  });
+
   it("shows a final checklist above its separate final answer", () => {
     const api = threadApi();
     const completed = { ...summary, state: "completed" as const };
@@ -4527,7 +4634,7 @@ describe("Activity", () => {
     const view = renderThread();
 
     expect(screen.queryByRole("button", { name: "Копировать сообщение" })).toBeNull();
-    expect(view.container.querySelector(".turn > div:empty")).toBeNull();
+    expect(view.container.querySelector('.turn > div:not([aria-hidden="true"]):empty')).toBeNull();
     expect(screen.queryByLabelText("Технические детали")).toBeNull();
     expect(view.container.querySelector(".turn-activity-static")).not.toBeNull();
   });

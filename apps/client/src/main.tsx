@@ -10,6 +10,7 @@ import { loadConnectionSettings, type ConnectionSettings } from "./storage";
 import "./styles/tokens.css";
 import "./styles/primitives.css";
 import "./styles.css";
+import "./styles/chat.css";
 
 function Root() {
   const [settings, setSettings] = useState<ConnectionSettings | null | undefined>(undefined);
