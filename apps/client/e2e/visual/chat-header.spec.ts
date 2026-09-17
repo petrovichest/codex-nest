@@ -95,14 +95,22 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       await openLongPlan(page, theme);
       const mobile = width <= 820;
       const safeTop = width === 390 ? 34 : 0;
-      await page.addStyleTag({ content: `:root { --app-safe-area-top: ${safeTop}px; }` });
+      const safeBottom = width === 390 ? 24 : 0;
+      // Exercise the same inset variables supplied by Android's SystemBars bridge.
+      await page.addStyleTag({
+        content: `:root { --safe-area-inset-top: ${safeTop}px; --safe-area-inset-bottom: ${safeBottom}px; }`,
+      });
       const header = page.locator(".workspace-header");
       const scroll = page.locator(".conversation-scroll");
       const plan = page.locator(".message.plan");
       const bounds = (await header.boundingBox())!;
       expect(bounds.height).toBe(44);
-      expect(bounds.y).toBe(safeTop + 8);
+      expect(bounds.y).toBe(safeTop + (mobile ? 0 : 8));
       expect((await scroll.boundingBox())!.y).toBe(safeTop);
+      if (mobile) {
+        const composer = (await page.locator(".composer-box").boundingBox())!;
+        expect(composer.y + composer.height).toBe(844 - safeBottom);
+      }
 
       await scroll.evaluate((element) => {
         element.dispatchEvent(new WheelEvent("wheel", { deltaY: -500, bubbles: true }));
@@ -230,12 +238,20 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       await expect(page.getByRole("dialog")).toHaveCount(0);
 
       // A keyboard-sized viewport keeps the header fixed and leaves the composer reachable.
-      await page.setViewportSize({ width, height: 460 });
       await page.locator(".composer textarea").focus();
+      await page.setViewportSize({ width, height: 460 });
+      await expect(page.locator(".composer")).toHaveClass(/keyboard-open/);
       expect(await header.boundingBox()).toEqual(bounds);
       const composer = (await page.locator(".composer-box").boundingBox())!;
       expect(composer.y).toBeGreaterThan(bounds.y + bounds.height);
       expect(composer.y + composer.height).toBeLessThanOrEqual(460);
+      if (mobile) {
+        expect(composer.y + composer.height).toBe(460);
+        await page.setViewportSize({ width, height: 844 });
+        await expect(page.locator(".composer")).not.toHaveClass(/keyboard-open/);
+        const restored = (await page.locator(".composer-box").boundingBox())!;
+        expect(restored.y + restored.height).toBe(844 - safeBottom);
+      }
     });
   }
 }

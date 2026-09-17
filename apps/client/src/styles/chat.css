@@ -924,14 +924,14 @@
 
   .thread-workspace .workspace-header {
     gap: 6px;
-    margin: calc(8px + var(--app-safe-area-top)) calc(8px + var(--app-safe-area-right)) 0
+    margin: var(--app-safe-area-top) calc(8px + var(--app-safe-area-right)) 0
       calc(8px + var(--app-safe-area-left));
     padding: 0 10px;
     border-radius: var(--chat-radius-compact);
   }
 
   .thread-workspace .fork-children-popover {
-    top: calc(80px + var(--app-safe-area-top));
+    top: calc(72px + var(--app-safe-area-top));
   }
 
   .thread-workspace .timeline {
@@ -947,7 +947,7 @@
   }
 
   .thread-workspace:not(.pending-fork-workspace) .workspace-header {
-    top: calc(8px + var(--app-safe-area-top));
+    top: var(--app-safe-area-top);
     right: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-right)));
     left: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-left)));
     width: auto;
@@ -964,11 +964,15 @@
   }
 
   .thread-workspace:not(.pending-fork-workspace) .timeline {
-    padding-top: calc(8px + var(--chat-header-height) + 22px);
+    padding-top: calc(var(--chat-header-height) + 22px);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
+    scroll-padding-top: calc(var(--chat-header-height) + 8px);
   }
 
   .thread-workspace:not(.pending-fork-workspace) .fork-children-popover {
-    top: calc(var(--app-safe-area-top) + 8px + var(--chat-header-height) + 8px);
+    top: calc(var(--app-safe-area-top) + var(--chat-header-height) + 8px);
   }
 
   .thread-workspace .message.userMessage {

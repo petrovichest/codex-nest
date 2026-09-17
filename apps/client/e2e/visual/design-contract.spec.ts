@@ -159,7 +159,7 @@ for (const theme of ["light", "dark"] as const) {
       );
       await expect(browser).toHaveText("");
       if (mobile) {
-        expect(bounds.y).toBe(42);
+        expect(bounds.y).toBe(34);
         expect(bounds.x).toBe(24);
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 20);
       }
@@ -188,6 +188,18 @@ for (const theme of ["light", "dark"] as const) {
       ).toBe(true);
       await expect(page.locator(".user-input-freeform-label")).toHaveCSS("font-weight", "400");
       await expect(page.locator(".attention-card button.primary")).toHaveCSS("font-weight", "400");
+      if (mobile) {
+        await page.goto("/new?projectId=project-nest");
+        await waitForVisualReady(page);
+        for (const inset of [0, 34]) {
+          await page.addStyleTag({
+            content: `:root { --safe-area-inset-top: ${inset}px; --safe-area-inset-bottom: ${inset}px; }`,
+          });
+          expect((await header.boundingBox())!.y).toBe(inset);
+          const composer = (await page.locator(".composer-box").boundingBox())!;
+          expect(composer.y + composer.height).toBe(900 - inset);
+        }
+      }
     }
   });
 

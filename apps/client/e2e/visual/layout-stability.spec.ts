@@ -354,15 +354,24 @@ for (const width of [320, 390, 1440]) {
       await expectTailVisible();
       const original = (await bubble.boundingBox())!;
       const viewport = (await scroll.boundingBox())!;
-      expect(viewport.y + viewport.height).toBeGreaterThan(original.y + original.height);
+      const mobile = width <= 820;
+      if (mobile) {
+        expect(viewport.y + viewport.height).toBe(original.y + original.height);
+      } else {
+        expect(viewport.y + viewport.height).toBeGreaterThan(original.y + original.height);
+      }
+      // Mobile has no bottom gap; the side gutter still exposes the scroll viewport.
+      const scrollPoint = mobile
+        ? { x: original.x / 2, y: original.y + original.height / 2 }
+        : { x: original.x + original.width / 2, y: original.y + original.height + 6 };
       expect(
         await page.evaluate(
           ({ x, y }) => Boolean(document.elementFromPoint(x, y)?.closest(".conversation-scroll")),
-          { x: original.x + original.width / 2, y: original.y + original.height + 6 },
+          scrollPoint,
         ),
       ).toBe(true);
 
-      await page.mouse.move(original.x + original.width / 2, original.y + original.height + 6);
+      await page.mouse.move(scrollPoint.x, scrollPoint.y);
       await page.mouse.wheel(0, -400);
       await expect(
         page.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
