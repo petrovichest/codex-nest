@@ -64,9 +64,19 @@ async function expectPackedActions(page: Page) {
 }
 
 async function verticalGap(before: Locator, after: Locator) {
-  const first = (await before.boundingBox())!;
-  const second = (await after.boundingBox())!;
-  return second.y - first.y - first.height;
+  const next = await after.elementHandle();
+  try {
+    // Image loading can scroll the viewport between two separate boundingBox calls.
+    // Measure both elements in the same browser task to keep their coordinates aligned.
+    return await before.evaluate((element, following) => {
+      if (!following) throw new Error("Missing following element");
+      const first = element.getBoundingClientRect();
+      const second = following.getBoundingClientRect();
+      return second.y - first.y - first.height;
+    }, next);
+  } finally {
+    await next?.dispose();
+  }
 }
 
 async function mockRecorder(page: Page) {
