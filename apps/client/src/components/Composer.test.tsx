@@ -611,22 +611,11 @@ describe("Composer", () => {
     );
   });
 
-  it("renders voice auto-send as a compact remembered toggle", () => {
-    render(<Harness transcriptionConfig={transcriptionConfig} />);
-    const toggle = screen.getByRole("button", {
-      name: "Включить автоотправку голосового ввода",
-    });
-
-    expect(toggle).toHaveAttribute("aria-pressed", "false");
-    expect(toggle).toHaveClass("voice-send-toggle");
-    expect(toggle.querySelectorAll("svg")).toHaveLength(1);
-
-    fireEvent.click(toggle);
-    expect(
-      screen.getByRole("button", {
-        name: "Выключить автоотправку голосового ввода",
-      }),
-    ).toHaveAttribute("aria-pressed", "true");
+  it("shows the microphone without an auto-send toggle", () => {
+    installMediaRecorder(async () => ({ getTracks: () => [] }) as unknown as MediaStream);
+    render(<Harness transcriptionConfig={transcriptionConfig} onRecordingReady={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /автоотправку/ })).not.toBeInTheDocument();
   });
 
   it("uses native field sizing without scheduling JavaScript measurement", () => {
@@ -869,11 +858,8 @@ describe("Composer", () => {
     fireEvent.pointerDown(start);
     fireEvent.click(start);
     const stop = await screen.findByRole("button", { name: "Остановить запись" });
-    expect(within(stop).getByText("0:00")).toBeInTheDocument();
+    expect(within(stop).getByText("0")).toBeInTheDocument();
     expect(stop).toHaveClass("timing");
-    expect(
-      screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
-    ).toBeDisabled();
     expect(textarea).toHaveAttribute("readonly");
     expect(screen.queryByRole("button", { name: "Отправить" })).toBeNull();
     expect(screen.getByRole("button", { name: "Отменить запись" })).toBeEnabled();
@@ -891,7 +877,7 @@ describe("Composer", () => {
 
     fireEvent.click(stop);
     const transcribing = await screen.findByRole("button", { name: "Распознаём запись" });
-    expect(within(transcribing).getByText("0:00")).toBeInTheDocument();
+    expect(within(transcribing).getByText("0")).toBeInTheDocument();
     expect(transcribing).toHaveClass("timing");
     await act(async () => resolveTranscription?.("голос"));
     await waitFor(() => expect(textarea).toHaveValue("Начало голос новое конец"));
@@ -910,9 +896,7 @@ describe("Composer", () => {
         onTranscribe={onTranscribe}
       />,
     );
-    expect(
-      screen.getByRole("button", { name: "Включить автоотправку голосового ввода" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
     expect(textarea).toHaveValue("Начало голос новое конец");
   });
 
@@ -1090,7 +1074,7 @@ describe("Composer", () => {
     );
 
     expect(
-      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("≈0:08"),
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("≈8"),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "На сервере · распознаём · осталось ≈ 0:08",
@@ -1111,7 +1095,7 @@ describe("Composer", () => {
       />,
     );
     expect(
-      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("+0:03"),
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("+3"),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "На сервере · распознаём · дольше прогноза на 0:03",
@@ -1128,7 +1112,7 @@ describe("Composer", () => {
       />,
     );
     expect(
-      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("0:04"),
+      within(screen.getByRole("button", { name: "Распознаём запись" })).getByText("4"),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("На сервере · распознаём · прошло 0:04");
 
@@ -1145,7 +1129,7 @@ describe("Composer", () => {
     );
     expect(
       within(screen.getByRole("button", { name: "Запись на сервере · можно закрыть" })).getByText(
-        "0:04",
+        "4",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("На сервере · ожидание 0:04");
@@ -1244,7 +1228,6 @@ function Harness({
   const [images, setImages] = useState<ComposerImage[]>(initialImages);
   const [projectId, setProjectId] = useState(initialProjectId);
   const [settings, setSettings] = useState<SessionSettings>(initialSettings);
-  const [voiceMode, setVoiceMode] = useState<"draft" | "send">("draft");
   return (
     <Composer
       input={controlledInput ?? input}
@@ -1285,8 +1268,6 @@ function Harness({
       onTranscribe={onTranscribe}
       onRecordingReady={onRecordingReady}
       preserveRecordingOnSessionChange={preserveRecordingOnSessionChange}
-      voiceMode={voiceMode}
-      onVoiceModeChange={setVoiceMode}
       voiceInputLocked={voiceInputLocked}
       transcriptionStatus={transcriptionStatus}
       sessionIdentity={sessionIdentity}

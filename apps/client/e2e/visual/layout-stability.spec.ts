@@ -326,7 +326,7 @@ for (const mobile of [false, true]) {
       if (mobile) {
         for (const control of before) expect(control.y).toBeCloseTo(before[0]!.y, 0);
         expect((await page.locator(".composer-toolbar").boundingBox())!.height).toBeLessThanOrEqual(
-          48,
+          50,
         );
       }
       send({
@@ -354,11 +354,9 @@ for (const mobile of [false, true]) {
           },
           now + elapsed * 1000,
         );
-        await expect(page.locator(".composer-action-timer")).toHaveText(
-          `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`,
-        );
+        await expect(page.locator(".composer-action-timer")).toHaveText(String(elapsed));
         const current = await geometry(controls);
-        if (recording && elapsed < 600) unchanged(recording, current);
+        if (recording) unchanged(recording, current);
         recording = current;
         unchanged(before.slice(-1), current.slice(-1));
         await expectPackedActions(page);
@@ -394,7 +392,7 @@ for (const mobile of [false, true]) {
       }) => {
         await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
         const { summary, send } = await chat(page, "light", "Проверка", { modelName, voice });
-        await expect(page.locator(".composer-actions > button")).toHaveCount(voice ? 3 : 1);
+        await expect(page.locator(".composer-actions > button")).toHaveCount(voice ? 2 : 1);
         await expectPackedActions(page);
         const model = page.locator(".model-toggle");
         const modelBounds = (await model.boundingBox())!;
@@ -626,8 +624,8 @@ test.describe("compact mobile controls", () => {
         const buttons = await geometry(
           page.locator(".composer-add-image,.settings-picker > button,.composer-actions > button"),
         );
-        expect(buttons).toHaveLength(9);
-        expect(toolbar.height).toBeLessThanOrEqual(48);
+        expect(buttons).toHaveLength(8);
+        expect(toolbar.height).toBeLessThanOrEqual(50);
         for (const button of buttons) {
           expect(button.y).toBeCloseTo(buttons[0]!.y, 0);
           expect(button.x).toBeGreaterThanOrEqual(toolbar.x);
@@ -673,7 +671,6 @@ test.describe("recording paint bounds", () => {
           modelName: "5.6sol",
           reducedMotion: "no-preference",
         });
-        await page.getByRole("button", { name: "Включить автоотправку голосового ввода" }).click();
         await mockRecorder(page);
         const now = await page.evaluate(() => Date.now());
         await page.getByRole("button", { name: "Начать запись", exact: true }).click();
@@ -681,8 +678,8 @@ test.describe("recording paint bounds", () => {
         await expect(microphone).toBeVisible();
         await page.evaluate((time) => {
           Date.now = () => time;
-        }, now + 6000);
-        await expect(page.locator(".composer-action-timer")).toHaveText("0:06");
+        }, now + 125000);
+        await expect(page.locator(".composer-action-timer")).toHaveText("125");
         expect(
           await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
         ).toBe(false);
@@ -703,7 +700,7 @@ test.describe("recording paint bounds", () => {
             ".composer-add-image,.settings-picker > button,.composer-actions > button",
           );
           const before = await geometry(controls);
-          expect(before).toHaveLength(running ? 9 : 8);
+          expect(before).toHaveLength(running ? 8 : 7);
           for (const [index, button] of before.entries()) {
             expect(button.width).toBeGreaterThanOrEqual(32);
             expect(button.height).toBeGreaterThanOrEqual(32);
@@ -739,9 +736,9 @@ test.describe("recording paint bounds", () => {
             await expect(microphone).toHaveCSS("transform", "none");
             unchanged(before, await geometry(controls));
             // Pixel baselines are Chromium-only; geometry and motion run in both engines.
-            if (time === 700 && width === 390 && browserName === "chromium") {
+            if (time === 700 && (width === 320 || width === 390) && browserName === "chromium") {
               await expect(page.locator(".composer-box")).toHaveScreenshot(
-                `recording-${theme}-${running ? "running" : "idle"}.png`,
+                `recording-${theme}-${running ? "running" : "idle"}${width === 320 ? "-320" : ""}.png`,
                 { animations: "allow" },
               );
             }

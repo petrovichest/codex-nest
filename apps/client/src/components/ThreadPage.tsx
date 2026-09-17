@@ -35,7 +35,6 @@ import type {
   UpdateThreadDraftRequest,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
-  VoiceInputMode,
   VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
@@ -406,7 +405,6 @@ function pendingThreadSummary(project: Project, settings: SessionSettings): Thre
   };
 }
 
-const VOICE_INPUT_MODE_KEY = "codexnest.voiceInputMode";
 const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const TAIL_FOLLOW_THRESHOLD_PX = 120;
 const SCROLL_GESTURE_THRESHOLD_PX = 6;
@@ -449,16 +447,8 @@ function forkChildStateLabel(state: ThreadState, t: Translate): string {
   }
 }
 
-function readVoiceInputMode(): VoiceInputMode {
-  return localStorage.getItem(VOICE_INPUT_MODE_KEY) === "send" ? "send" : "draft";
-}
-
-function resolveVoiceTranscriptionMode(
-  preference: VoiceInputMode,
-  currentTurnId: string | null,
-): VoiceTranscriptionMode {
-  if (!currentTurnId) return preference;
-  return preference === "send" ? "steer" : "queue";
+function resolveVoiceTranscriptionMode(currentTurnId: string | null): VoiceTranscriptionMode {
+  return currentTurnId ? "steer" : "send";
 }
 
 export function ThreadPage({
@@ -689,9 +679,6 @@ export function ThreadPage({
   const [error, setError] = useState<string | null>(null);
   const [teamUpgradeRequired, setTeamUpgradeRequired] = useState(false);
   const [threadMissing, setThreadMissing] = useState(false);
-  const [voiceMode, setVoiceMode] = useState<VoiceInputMode>(readVoiceInputMode);
-  const voiceModeRef = useRef(voiceMode);
-  voiceModeRef.current = voiceMode;
   const currentTurnIdRef = useRef(summary?.currentTurnId ?? null);
   currentTurnIdRef.current = summary?.currentTurnId ?? null;
   const [voiceUploads, setVoiceUploads] = useState<Record<string, VoiceUploadState>>({});
@@ -1724,9 +1711,7 @@ export function ThreadPage({
     context?: VoiceRecordingContext,
   ): Promise<void> {
     if (!transcriptionProvider || activeVoiceJob || voiceUploads[targetThreadId]) return;
-    const uploadMode =
-      context?.mode ??
-      resolveVoiceTranscriptionMode(voiceModeRef.current, currentTurnIdRef.current);
+    const uploadMode = context?.mode ?? resolveVoiceTranscriptionMode(currentTurnIdRef.current);
     if (
       uploadMode !== "draft" &&
       (
@@ -2001,10 +1986,6 @@ export function ThreadPage({
     const timer = window.setInterval(updateElapsed, 250);
     return () => window.clearInterval(timer);
   }, [activeVoiceJob, voiceUpload]);
-
-  useEffect(() => {
-    localStorage.setItem(VOICE_INPUT_MODE_KEY, voiceMode);
-  }, [voiceMode]);
 
   useEffect(() => {
     if (!voiceRemoval || handledVoiceRemovalsRef.current.has(voiceRemoval.jobId)) {
@@ -3414,7 +3395,7 @@ export function ThreadPage({
         draftUpdatedAt: savedDraftUpdatedAtRef.current.has(threadId)
           ? savedDraftUpdatedAtRef.current.get(threadId)!
           : (state.details[threadId]?.draft?.updatedAt ?? null),
-        mode: resolveVoiceTranscriptionMode(voiceModeRef.current, currentTurnIdRef.current),
+        mode: resolveVoiceTranscriptionMode(currentTurnIdRef.current),
       };
   const hasPendingVoiceRecording = pendingVoiceRecordingThreadIds.includes(threadId);
   const pendingVoiceRecordingError = pendingVoiceRecordingErrors[threadId] ?? null;
@@ -4032,33 +4013,15 @@ export function ThreadPage({
             }
             transcriptionConfig={transcriptionConfig}
             transcriptionProvider={transcriptionProvider}
-            voiceMode={voiceMode}
-            onVoiceModeChange={setVoiceMode}
             voiceUploadPending={Boolean(voiceUpload)}
-            voiceInputLocked={
-              Boolean(activeVoiceJob || voiceUpload) || (inputUnavailable && voiceMode === "send")
-            }
+            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload) || inputUnavailable}
             onCancelVoiceTranscription={
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
             voiceCancellationPending={voiceCancellationPending}
-            onTranscribe={
-              preparationRef.current.active && voiceMode !== "send"
-                ? async (audio, durationMs) => {
-                    if (!transcriptionProvider) {
-                      throw new Error(t("Распознавание речи не настроено"));
-                    }
-                    const response = await api.transcribe(audio, durationMs);
-                    onTranscriptionTimingEstimateChange?.(response.timingEstimate);
-                    return response.text;
-                  }
-                : undefined
-            }
             onRecordingReady={
               preparationRef.current.active
-                ? voiceMode === "send"
-                  ? beginPreparedTranscription
-                  : undefined
+                ? beginPreparedTranscription
                 : backgroundVoiceContext
                   ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
                   : undefined

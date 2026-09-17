@@ -5110,7 +5110,7 @@ describe("Activity", () => {
     await waitFor(() => expect(context.retryPendingVoiceRecording).toHaveBeenCalledOnce());
     expect(context.retryPendingVoiceRecording).toHaveBeenCalledWith({
       threadId: "thread",
-      mode: "draft",
+      mode: "send",
       draft: expect.objectContaining({ input: "Текущий черновик" }),
       draftUpdatedAt: expect.any(Number),
     });
@@ -5164,12 +5164,6 @@ describe("Activity", () => {
       name: "Сообщение для Codex",
     })) as HTMLTextAreaElement;
     await waitFor(() => expect(textarea).toHaveValue("Начало конец"));
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Включить автоотправку голосового ввода",
-      }),
-    );
-    expect(localStorage.getItem("codexnest.voiceInputMode")).toBe("send");
     textarea.setSelectionRange(7, 7);
     fireEvent.select(textarea);
     fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
@@ -5213,13 +5207,14 @@ describe("Activity", () => {
   });
 
   it.each([
-    { running: false, autoSend: false, expectedMode: "draft", chatProgress: false },
-    { running: false, autoSend: true, expectedMode: "send", chatProgress: true },
-    { running: true, autoSend: false, expectedMode: "queue", chatProgress: true },
-    { running: true, autoSend: true, expectedMode: "steer", chatProgress: true },
+    { running: false, storedMode: "draft", expectedMode: "send" },
+    { running: false, storedMode: "send", expectedMode: "send" },
+    { running: true, storedMode: "draft", expectedMode: "steer" },
+    { running: true, storedMode: "send", expectedMode: "steer" },
   ] as const)(
-    "routes voice to $expectedMode when running=$running and autoSend=$autoSend",
-    async ({ running, autoSend, expectedMode, chatProgress }) => {
+    "routes voice to $expectedMode when running=$running with legacy preference=$storedMode",
+    async ({ running, storedMode, expectedMode }) => {
+      localStorage.setItem("codexnest.voiceInputMode", storedMode);
       installMediaRecorder(async () => {
         return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
       });
@@ -5245,13 +5240,6 @@ describe("Activity", () => {
           }),
         ).toHaveValue("Черновик"),
       );
-      if (autoSend) {
-        fireEvent.click(
-          screen.getByRole("button", {
-            name: "Включить автоотправку голосового ввода",
-          }),
-        );
-      }
 
       fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
       fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
@@ -5263,9 +5251,7 @@ describe("Activity", () => {
           expect.objectContaining({ mode: expectedMode }),
         ),
       );
-      expect(Boolean(view.container.querySelector(".voice-transcription-message"))).toBe(
-        chatProgress,
-      );
+      expect(Boolean(view.container.querySelector(".voice-transcription-message"))).toBe(true);
     },
   );
 
@@ -5290,7 +5276,7 @@ describe("Activity", () => {
       expect(api.createVoiceTranscription).toHaveBeenCalledWith(
         "thread",
         expect.any(Blob),
-        expect.objectContaining({ mode: "queue" }),
+        expect.objectContaining({ mode: "steer" }),
       ),
     );
   });

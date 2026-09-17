@@ -870,8 +870,6 @@ const ENGLISH: Record<string, string> = {
   "Распознать и отправить": "Transcribe and send",
   "Режим голосового ввода": "Voice input mode",
   "Вставить в поле": "Insert into input",
-  "Включить автоотправку голосового ввода": "Enable voice input auto-send",
-  "Выключить автоотправку голосового ввода": "Disable voice input auto-send",
   "Готовим отправку": "Preparing to send",
   "На сервере · готовим результат": "On the server · preparing the result",
   "На сервере · {{status}}": "On the server · {{status}}",

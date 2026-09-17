@@ -3988,7 +3988,7 @@ describe("App routing and navigation", () => {
     expect(textarea).toHaveValue("Черновик A\n\nНовый черновик B");
   });
 
-  it("keeps an early auto-send recording pending until the created thread activates", async () => {
+  it("auto-sends an early recording after thread creation despite a legacy draft preference", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
     });
@@ -4015,7 +4015,7 @@ describe("App routing and navigation", () => {
         estimatedProcessingMsPerAudioSecond: null,
       },
     });
-    localStorage.setItem("codexnest.voiceInputMode", "send");
+    localStorage.setItem("codexnest.voiceInputMode", "draft");
 
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));

@@ -21,21 +21,12 @@ import type {
   TranscriptionProvider,
   UpdateThreadGoalRequest,
   UpdateThreadSettingsRequest,
-  VoiceInputMode,
   VoiceTranscriptionStatus,
 } from "@codexnest/protocol";
 
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
 import { useSkillsCatalog } from "../useSkillsCatalog";
-import {
-  FileIcon,
-  MicrophoneIcon,
-  PlusIcon,
-  SendIcon,
-  StopIcon,
-  VoiceSendIcon,
-  XIcon,
-} from "./Icons";
+import { FileIcon, MicrophoneIcon, PlusIcon, SendIcon, StopIcon, XIcon } from "./Icons";
 import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
 import {
@@ -139,8 +130,6 @@ export function Composer({
   onTranscribe,
   onRecordingReady,
   preserveRecordingOnSessionChange = false,
-  voiceMode,
-  onVoiceModeChange,
   voiceUploadPending = false,
   voiceInputLocked = false,
   onCancelVoiceTranscription,
@@ -195,8 +184,6 @@ export function Composer({
   onTranscribe?(audio: Blob, durationMs: number): Promise<string>;
   onRecordingReady?(recording: ComposerRecording): Promise<void>;
   preserveRecordingOnSessionChange?: boolean;
-  voiceMode?: VoiceInputMode;
-  onVoiceModeChange?(mode: VoiceInputMode): void;
   voiceUploadPending?: boolean;
   voiceInputLocked?: boolean;
   onCancelVoiceTranscription?(): void;
@@ -422,7 +409,7 @@ export function Composer({
     : null;
   const transcriptionTimerText = transcriptionStatus
     ? remoteTranscriptionStatus === "uploading" || remoteTranscriptionStatus === "queued"
-      ? formatRecordingTime(transcriptionStatus.elapsedSeconds)
+      ? formatTimerSeconds(transcriptionStatus.elapsedSeconds)
       : remoteTranscriptionStatus === "transcribing"
         ? formatTranscriptionTimer(
             transcriptionStatus.elapsedSeconds,
@@ -430,12 +417,10 @@ export function Composer({
           )
         : null
     : speechState === "transcribing"
-      ? formatRecordingTime(transcribingSeconds)
-      : speechState === "uploading" && voiceMode !== "send"
-        ? formatRecordingTime(transcribingSeconds)
-        : null;
+      ? formatTimerSeconds(transcribingSeconds)
+      : null;
   const speechTimerText =
-    speechState === "recording" ? formatRecordingTime(recordingSeconds) : transcriptionTimerText;
+    speechState === "recording" ? formatTimerSeconds(recordingSeconds) : transcriptionTimerText;
   const speechStatusText =
     speechState === "recording"
       ? t("Запись {{time}}", { time: formatRecordingTime(recordingSeconds) })
@@ -1485,27 +1470,6 @@ export function Composer({
           <div className="composer-actions">
             {transcriptionConfig && (
               <>
-                {voiceMode && onVoiceModeChange && (
-                  <button
-                    aria-label={
-                      voiceMode === "send"
-                        ? t("Выключить автоотправку голосового ввода")
-                        : t("Включить автоотправку голосового ввода")
-                    }
-                    aria-pressed={voiceMode === "send"}
-                    className={`setting-control voice-send-toggle${voiceMode === "send" ? " active" : ""}`}
-                    disabled={busy || speechBusy}
-                    title={
-                      voiceMode === "send"
-                        ? t("Выключить автоотправку голосового ввода")
-                        : t("Включить автоотправку голосового ввода")
-                    }
-                    type="button"
-                    onClick={() => onVoiceModeChange(voiceMode === "send" ? "draft" : "send")}
-                  >
-                    <VoiceSendIcon />
-                  </button>
-                )}
                 <button
                   aria-label={
                     speechState === "recording"
@@ -1803,15 +1767,19 @@ function formatTranscriptionStatus(
   });
 }
 
+function formatTimerSeconds(seconds: number): string {
+  return String(Math.max(0, Math.floor(seconds)));
+}
+
 function formatTranscriptionTimer(
   elapsedSeconds: number,
   estimatedTotalSeconds: number | null,
 ): string {
-  if (estimatedTotalSeconds === null) return formatRecordingTime(elapsedSeconds);
+  if (estimatedTotalSeconds === null) return formatTimerSeconds(elapsedSeconds);
   if (elapsedSeconds <= estimatedTotalSeconds) {
-    return `≈${formatRecordingTime(estimatedTotalSeconds - elapsedSeconds)}`;
+    return `≈${formatTimerSeconds(estimatedTotalSeconds - elapsedSeconds)}`;
   }
-  return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
+  return `+${formatTimerSeconds(elapsedSeconds - estimatedTotalSeconds)}`;
 }
 
 function inlineImageBytes(url: string): number {
