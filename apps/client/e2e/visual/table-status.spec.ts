@@ -154,15 +154,26 @@ for (const theme of ["light", "dark"] as const) {
             });
         }
         await status.hover();
-        await expect(status).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(status).toHaveCSS(
+          "background-color",
+          theme === "light" ? "rgb(248, 249, 246)" : "rgb(36, 39, 34)",
+        );
+        await expect(status).not.toHaveCSS("box-shadow", "none");
         const hovered = await status.evaluate((el) => getComputedStyle(el).backgroundColor);
         await page.mouse.down();
         await expect(status).not.toHaveCSS("background-color", hovered);
+        await expect(status).toHaveCSS("box-shadow", /inset/);
         await page.mouse.up();
         await expect(status).toHaveAttribute("aria-expanded", "true");
         await expect(page.locator(".turn-activity-journal")).toBeVisible();
         await status.press("Enter");
         await expect(page.locator(".turn-activity-journal")).toBeHidden();
+        await page.mouse.move(0, 0);
+        await status.press("Tab");
+        await status.focus();
+        await expect(status).toBeFocused();
+        await expect(status).toHaveCSS("outline-style", "solid");
+        await expect(status).not.toHaveCSS("box-shadow", "none");
         await wide.focus();
         await expect(wide).toHaveCSS("outline-style", "solid");
         const overflows = await wide.evaluate((el) => el.scrollWidth > el.clientWidth);

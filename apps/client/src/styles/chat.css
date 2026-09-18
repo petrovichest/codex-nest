@@ -149,9 +149,20 @@
 }
 
 .thread-workspace .timeline .implement-plan {
+  color: var(--text-strong);
+}
+
+.thread-workspace
+  .timeline
+  :is(
+    .implement-plan,
+    .user-input-card button,
+    .async-question-card button,
+    .turn-activity-toggle
+  ) {
+  --chat-button-rest: transparent;
   --chat-button-hover: var(--color-floating);
   --chat-button-pressed: var(--chat-active);
-  color: var(--text-strong);
   transition:
     background-color var(--motion-fast) var(--motion-ease),
     box-shadow var(--motion-fast) var(--motion-ease),
@@ -182,7 +193,12 @@
 :root[data-resolved-theme="dark"]
   .thread-workspace
   .timeline
-  .implement-plan:active:not(:disabled, [aria-disabled="true"]) {
+  :is(
+    .implement-plan,
+    .user-input-card button,
+    .async-question-card button,
+    .turn-activity-toggle
+  ):active:not(:disabled, [aria-disabled="true"]) {
   box-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
 }
 
@@ -323,6 +339,11 @@
   margin: 0;
 }
 
+.thread-workspace .timeline :is(.user-input-card, .async-question-card) {
+  --chat-surface: var(--color-floating);
+  --chat-inset: var(--color-floating);
+}
+
 .thread-workspace .timeline .attention-heading {
   color: var(--muted);
   font-size: var(--text-caption);
@@ -445,22 +466,41 @@
   background: var(--chat-inset);
 }
 
+.thread-workspace .timeline :is(.user-input-freeform, .async-question-card textarea) {
+  box-shadow: var(--chat-shadow);
+}
+
+.thread-workspace .timeline .user-input-freeform:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.thread-workspace .timeline .user-input-freeform input:focus-visible {
+  outline: none;
+}
+
 .thread-workspace .timeline .user-input-freeform input {
   background: transparent;
 }
 
 .thread-workspace .timeline .user-input-steps {
   gap: 4px;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
 .thread-workspace .timeline .user-input-steps button {
   border-radius: 50%;
+  color: var(--muted);
 }
 
-.thread-workspace .timeline .user-input-steps button:is(.current, .answered) {
-  --chat-button-rest: var(--chat-active);
-  --chat-button-hover: var(--chat-control-hover);
-  --chat-button-pressed: var(--chat-control-pressed);
+.thread-workspace .timeline .user-input-steps button.answered {
+  color: var(--text-strong);
+}
+
+.thread-workspace .timeline .user-input-steps button.current {
+  --chat-button-rest: var(--color-floating);
+  box-shadow: var(--chat-shadow);
   color: var(--text-strong);
 }
 

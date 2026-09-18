@@ -114,7 +114,15 @@ test("async replies preserve the composer and survive acceptance and history rel
   const composer = page.getByRole("textbox", { name: "Направить текущую задачу" });
   await expect(composer).toHaveValue("Мой основной черновик");
   const card = page.getByRole("region", { name: "Вопросы Codex" });
+  await expect(card).toHaveCSS("background-color", "rgb(36, 39, 34)");
+  await expect(card.getByRole("button", { name: "Ответить", exact: true })).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
   await expect(card.getByRole("radio", { name: "Профильные тесты" })).toBeChecked();
+  await card.getByRole("radio", { name: "Свой ответ" }).check();
+  await expect(card.getByRole("textbox")).toHaveCSS("background-color", "rgb(36, 39, 34)");
+  await expect(card.getByRole("textbox")).not.toHaveCSS("box-shadow", "none");
   await card.getByRole("radio", { name: "Полный набор проверок" }).check();
   await page.screenshot({ path: testInfo.outputPath("async-questions-mobile.png") });
   await card.getByRole("button", { name: "Ответить", exact: true }).click();

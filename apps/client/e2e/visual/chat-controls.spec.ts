@@ -147,7 +147,7 @@ for (const theme of ["light", "dark"] as const) {
       await openChat(page, theme);
       await expect(page.locator(".implement-plan").first()).toHaveCSS(
         "transition-duration",
-        "0.12s, 0.12s, 0.12s",
+        "0.12s, 0.12s, 0.12s, 0.12s",
       );
       await page.emulateMedia({ reducedMotion: "reduce" });
       expect(
@@ -168,7 +168,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.locator(".message.plan")).not.toHaveCSS("box-shadow", "none");
       await expect(page.locator(".markdown-code-block")).not.toHaveCSS("box-shadow", "none");
       for (const button of await page.locator(".implement-plan").all())
-        await expectFeedback(page, button, true);
+        await expectFeedback(page, button);
       const browser = page.locator(".browser-session-status");
       await expect(browser).toHaveAttribute("aria-pressed", "false");
       await expectFeedback(page, browser);
@@ -242,7 +242,7 @@ for (const theme of ["light", "dark"] as const) {
     await expect(page.locator(".turn-response-tail .attention-card")).toBeVisible();
     await waitForVisualReady(page);
     await expect(page.locator(".attention-card")).not.toHaveCSS("box-shadow", "none");
-    await expectFeedback(page, page.locator(".attention-card button.primary"), true);
+    await expectFeedback(page, page.locator(".attention-card button.primary"));
     await expectFeedback(
       page,
       page.getByRole("button", { name: "Удалить сообщение из очереди", exact: true }),

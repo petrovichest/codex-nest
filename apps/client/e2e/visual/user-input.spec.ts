@@ -139,6 +139,18 @@ for (const theme of ["light", "dark"] as const) {
         await expect(activity).toContainText(waitingLabel);
         const steps = panel.locator(".user-input-steps button");
         await expect(steps).toHaveCount(3);
+        const floating = theme === "light" ? "rgb(248, 249, 246)" : "rgb(36, 39, 34)";
+        await expect(panel.locator(".user-input-card")).toHaveCSS("background-color", floating);
+        await expect(panel.locator(".user-input-freeform")).toHaveCSS("background-color", floating);
+        await expect(panel.locator(".user-input-freeform")).not.toHaveCSS("box-shadow", "none");
+        await expect(steps.first()).toHaveCSS("background-color", floating);
+        await expect(steps.first()).not.toHaveCSS("box-shadow", "none");
+        await expect(steps.nth(1)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(panel.locator(".user-input-steps")).toHaveCSS("overflow", "visible");
+        await panel.getByRole("radio").first().check();
+        const selected = panel.locator(".check:has(input:checked)");
+        await expect(selected).toHaveCSS("background-color", floating);
+        await expect(selected).not.toHaveCSS("box-shadow", "none");
         for (const step of await steps.all()) {
           const box = (await step.boundingBox())!;
           expect(box.width).toBe(width <= 820 ? 32 : 34);
@@ -147,11 +159,16 @@ for (const theme of ["light", "dark"] as const) {
         }
         await steps.nth(1).click();
         await expect(steps.nth(1)).toHaveAttribute("aria-current", "step");
+        await expect(steps.first()).toHaveClass(/answered/);
+        await expect(steps.first()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(steps.first()).toHaveCSS("box-shadow", "none");
+        await expect(steps.nth(1)).not.toHaveCSS("box-shadow", "none");
         await page.keyboard.press("Tab");
         await page.keyboard.press("Shift+Tab");
         await expect(steps.nth(1)).toHaveCSS("outline-style", "solid");
         const input = panel.locator(".user-input-freeform input");
         await input.fill("Сохранённый ответ");
+        await expect(panel.locator(".user-input-freeform")).toHaveCSS("outline-style", "solid");
         await expect(input).toHaveAccessibleName(language === "ru" ? "Свой ответ" : "Your answer");
         const gap = async (before: string, after: string) => {
           const first = (await page.locator(before).boundingBox())!;
