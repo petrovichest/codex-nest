@@ -130,6 +130,14 @@ for (const theme of ["light", "dark"] as const)
       const sent = page.locator('[data-message-id="sent-paste"]');
       const card = sent.locator(".paste-card");
       const bubble = sent.locator(".message-body");
+      const surface = theme === "light" ? "rgb(248, 249, 246)" : "rgb(36, 39, 34)";
+      await expect(page.locator(".composer-box")).toHaveCSS("background-color", surface);
+      await expect(page.locator(".composer .paste-card")).toHaveCSS("background-color", surface);
+      await expect(card).toHaveCSS("background-color", surface);
+      for (const pasteCard of [card, page.locator(".composer .paste-card")]) {
+        await expect(pasteCard).toHaveCSS("border-radius", "20px");
+        await expect(pasteCard.locator(".paste-card-toggle")).toHaveCSS("border-radius", "16px");
+      }
       expect(await card.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(
         await bubble.evaluate((el) => getComputedStyle(el).backgroundColor),
       );

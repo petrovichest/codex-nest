@@ -12,10 +12,11 @@
   width: min(100%, 620px);
 }
 .paste-card {
+  --chat-surface: var(--color-floating);
   min-width: 0;
   width: 100%;
   border-radius: var(--chat-radius-card);
-  background: var(--chat-user);
+  background: var(--color-floating);
   box-shadow: var(--chat-shadow);
   color: var(--text-strong);
 }
@@ -24,7 +25,7 @@
   align-items: center;
   padding: 4px 10px 4px 4px;
 }
-.paste-card-toggle {
+.paste-card .paste-card-header > .paste-card-toggle {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -32,7 +33,7 @@
   min-width: 0;
   padding: 12px;
   border: 0;
-  border-radius: var(--chat-radius-card);
+  border-radius: var(--chat-radius-control);
   background: transparent;
   color: inherit;
   font: 400 15px/1.5 var(--font-ui);

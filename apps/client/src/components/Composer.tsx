@@ -482,8 +482,24 @@ export function Composer({
   }, [draftInput, nativeFieldSizing]);
 
   useEffect(() => {
-    if (!nativeFieldSizing) scheduleTextareaResize();
-    return cancelTextareaResize;
+    if (nativeFieldSizing) return;
+    scheduleTextareaResize();
+    const textarea = textareaRef.current;
+    let previousWidth: number | undefined;
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver((entries) => {
+            const width = entries[0]?.contentRect.width;
+            if (width === undefined || width === previousWidth) return;
+            previousWidth = width;
+            scheduleTextareaResize();
+          });
+    if (textarea) observer?.observe(textarea);
+    return () => {
+      observer?.disconnect();
+      cancelTextareaResize();
+    };
   }, [nativeFieldSizing, sessionIdentity]);
 
   useLayoutEffect(() => {
@@ -1227,7 +1243,7 @@ export function Composer({
       if (!textarea) return;
       textarea.style.height = "auto";
       const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = `${Math.min(Math.max(scrollHeight, 52), 190)}px`;
+      textarea.style.height = `${Math.min(scrollHeight, 190)}px`;
       textarea.style.overflowY = scrollHeight > 190 ? "auto" : "hidden";
     });
   }
@@ -1382,7 +1398,7 @@ export function Composer({
           ref={textareaRef}
           autoFocus={autoFocus}
           aria-label={running ? t("Направить текущую задачу") : t("Сообщение для Codex")}
-          rows={2}
+          rows={1}
           maxLength={goalMode ? 4_000 : undefined}
           readOnly={speechBusy}
           aria-busy={speechBusy}

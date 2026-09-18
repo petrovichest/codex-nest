@@ -633,7 +633,7 @@ describe("Composer", () => {
     const textarea = screen.getByRole("textbox", {
       name: "Сообщение для Codex",
     }) as HTMLTextAreaElement;
-    expect(textarea).toHaveAttribute("rows", "2");
+    expect(textarea).toHaveAttribute("rows", "1");
 
     const scrollHeight = vi.fn(() => 240);
     Object.defineProperty(textarea, "scrollHeight", { configurable: true, get: scrollHeight });
@@ -668,11 +668,11 @@ describe("Composer", () => {
     expect(scrollHeight).toHaveBeenCalledOnce();
     expect(textarea).toHaveStyle({ height: "190px", overflowY: "auto" });
 
-    measuredHeight = 52;
+    measuredHeight = 40;
     fireEvent.change(textarea, { target: { value: "Короткое" } });
     act(() => frames.runNext());
     expect(scrollHeight).toHaveBeenCalledTimes(2);
-    expect(textarea).toHaveStyle({ height: "52px", overflowY: "hidden" });
+    expect(textarea).toHaveStyle({ height: "40px", overflowY: "hidden" });
 
     fireEvent.change(textarea, { target: { value: "Ожидает замера" } });
     const staleFrame = frames.pending()[0]!;

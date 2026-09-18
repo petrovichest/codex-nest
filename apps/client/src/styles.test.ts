@@ -26,8 +26,8 @@ describe("shared surface radii", () => {
         for (const declaration of block[2]!.matchAll(/\bborder(?:-[\w-]+)?-radius:\s*([^;]+);/g)) {
           const value = declaration[1]!.trim();
           if (opticalRadii.get(selector) === value) continue;
-          // The floating composer has its own desktop and mobile bubble geometry.
-          if (selector === ".composer-box" && ["30px", "24px"].includes(value)) continue;
+          // The composer keeps its existing compact mobile radius.
+          if (selector === ".composer-box" && value === "24px") continue;
           const remaining = value
             .replace(/var\(--radius-(?:sm|md|lg)\)/g, "")
             .replace(/var\(--chat-radius(?:-(?:control|card|surface|compact|checkbox))?\)/g, "")

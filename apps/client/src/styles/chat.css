@@ -1,8 +1,8 @@
-/* Chat surfaces follow the composer. Keep these tokens and controls scoped so
-   the composer, navigation and settings retain their existing presentation. */
+/* User content shares the floating surface. Other chat surfaces and controls
+   keep their local roles until their own design-kit migration. */
 :is(.thread-workspace, .chat-dialog, .chat-image-viewer) {
   --chat-surface: #f8f9f6;
-  --chat-user: #f1f3ed;
+  --chat-user: var(--color-floating);
   --chat-active: #eceee8;
   --chat-inset: #eef0e9;
   --chat-control-hover: color-mix(in srgb, var(--chat-active) 90%, var(--text-strong));
@@ -22,7 +22,6 @@
 
 :root[data-resolved-theme="dark"] :is(.thread-workspace, .chat-dialog, .chat-image-viewer) {
   --chat-surface: #292c28;
-  --chat-user: #2d312a;
   --chat-active: #363a33;
   --chat-inset: #30342e;
   --chat-shadow: 0 12px 34px rgb(0 0 0 / 27%), 0 3px 14px rgb(0 0 0 / 10%);

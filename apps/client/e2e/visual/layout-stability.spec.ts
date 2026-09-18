@@ -218,7 +218,7 @@ async function verticalGap(before: Locator, after: Locator) {
 }
 
 async function mockRecorder(page: Page) {
-  await page.evaluate(() => {
+  await page.addInitScript(() => {
     class Recorder extends EventTarget {
       static isTypeSupported() {
         return true;
@@ -474,6 +474,7 @@ for (const mobile of [false, true]) {
       page,
     }) => {
       await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+      await mockRecorder(page);
       const { summary, send } = await chat(page, theme, "Проверка");
       const controls = page.locator(
         ".composer-add-image,.model-toggle,.plan-toggle,.team-toggle,.goal-toggle,.composer-actions > .microphone,.composer-actions > .composer-action:last-child",
@@ -497,7 +498,6 @@ for (const mobile of [false, true]) {
       unchanged(before.slice(0, 5), running.slice(0, 5));
       unchanged(before.slice(-1), running.slice(-1));
       await expectPackedActions(page);
-      await mockRecorder(page);
       const now = await page.evaluate(() => Date.now());
       await page.getByRole("button", { name: "Начать запись", exact: true }).click();
       await expect(
@@ -845,11 +845,11 @@ test.describe("recording paint bounds", () => {
     for (const width of [320, 360, 390, 412, 820, 821]) {
       test(`recording paint at ${width}px in ${theme}`, async ({ browserName, page }) => {
         await page.setViewportSize({ width, height: 520 });
+        await mockRecorder(page);
         const { summary, send } = await chat(page, theme, "Проверка", {
           modelName: "5.6sol",
           reducedMotion: "no-preference",
         });
-        await mockRecorder(page);
         const now = await page.evaluate(() => Date.now());
         await page.getByRole("button", { name: "Начать запись", exact: true }).click();
         const microphone = page.getByRole("button", { name: "Остановить запись", exact: true });

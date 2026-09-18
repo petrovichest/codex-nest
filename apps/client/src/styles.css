@@ -49,7 +49,7 @@
 }
 
 .sidebar {
-  --sidebar-panel: #f8f9f6;
+  --sidebar-panel: var(--color-floating);
   --sidebar-panel-shadow: 0 24px 52px rgb(39 50 26 / 19%), 0 5px 14px rgb(39 50 26 / 8%);
   --sidebar-surface: #f8f9f6;
   --sidebar-control-active: #eceee8;
@@ -80,7 +80,6 @@
 }
 
 :root[data-resolved-theme="dark"] .sidebar {
-  --sidebar-panel: #242722;
   --sidebar-panel-shadow: 0 24px 52px rgb(0 0 0 / 48%), 0 5px 14px rgb(0 0 0 / 26%);
   --sidebar-surface: #292c28;
   --sidebar-control-active: #363a33;
@@ -3488,10 +3487,14 @@ button.message-file:hover:not(:disabled) {
   font-size: var(--text-label);
 }
 
-.composer {
-  --composer-surface: #f8f9f6;
+:is(.composer, .model-settings-popup) {
+  --composer-surface: var(--color-floating);
   --composer-control-active: #eceee8;
   --composer-shadow: 0 12px 32px rgb(39 50 26 / 9%), 0 3px 12px rgb(39 50 26 / 4%);
+  --composer-pressed-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
+}
+
+.composer {
   position: absolute;
   inset-inline: 0;
   bottom: 0;
@@ -3504,10 +3507,10 @@ button.message-file:hover:not(:disabled) {
   pointer-events: none;
 }
 
-:root[data-resolved-theme="dark"] .composer {
-  --composer-surface: #292c28;
+:root[data-resolved-theme="dark"] :is(.composer, .model-settings-popup) {
   --composer-control-active: #363a33;
   --composer-shadow: 0 12px 34px rgb(0 0 0 / 27%), 0 3px 14px rgb(0 0 0 / 10%);
+  --composer-pressed-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
 }
 
 .composer > * {
@@ -3526,7 +3529,7 @@ button.message-file:hover:not(:disabled) {
   position: relative;
   overflow: visible;
   border: 1px solid transparent;
-  border-radius: 30px;
+  border-radius: var(--chat-radius-surface);
   background: var(--composer-surface);
   box-shadow: var(--composer-shadow);
   transition: box-shadow var(--motion-fast) var(--motion-ease);
@@ -3550,8 +3553,8 @@ button.message-file:hover:not(:disabled) {
   padding: 5px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--surface-raised);
-  box-shadow: var(--elevation-overlay);
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
 }
 
 .skill-autocomplete > button {
@@ -3569,9 +3572,9 @@ button.message-file:hover:not(:disabled) {
   text-align: left;
 }
 
-.skill-autocomplete > button.active,
-.skill-autocomplete > button:hover {
-  background: var(--surface-muted);
+.skill-autocomplete > button.active {
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
 }
 
 .skill-autocomplete > button > span {
@@ -3615,17 +3618,25 @@ button.message-file:hover:not(:disabled) {
 }
 
 .composer-box textarea {
-  min-height: 52px;
+  min-height: 0;
   max-height: 190px;
   height: auto;
   field-sizing: content;
   margin: 0;
-  padding: var(--space-3) var(--space-4) var(--space-1);
+  padding: var(--space-4) var(--space-5) 0;
   border: 0;
   outline: 0;
   background: transparent;
-  font-size: var(--text-message);
+  font-size: var(--text-input);
+  line-height: var(--leading-copy);
   overflow-y: auto;
+}
+
+.composer-box textarea:placeholder-shown {
+  /* Preserve typed spaces in WebKit while keeping a long placeholder on one line. */
+  white-space: pre;
+  text-overflow: ellipsis;
+  overflow-x: hidden;
 }
 
 .composer-toolbar {
@@ -3634,7 +3645,7 @@ button.message-file:hover:not(:disabled) {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2) var(--space-2);
+  padding: var(--space-1) var(--space-3) var(--space-3);
 }
 
 .composer-options {
@@ -3673,8 +3684,9 @@ button.message-file:hover:not(:disabled) {
   height: var(--control-touch-height);
   padding: 0 25px 0 9px;
   border-color: transparent;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
+  border-radius: 999px;
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
   color: var(--muted-strong);
   font-size: var(--text-small);
 }
@@ -3778,9 +3790,11 @@ button.message-file:hover:not(:disabled) {
   max-width: 150px;
 }
 
-.model-settings-popup {
+.dialog-surface.model-settings-popup {
   width: min(540px, 100%);
   gap: 19px;
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
 }
 
 .model-settings-section {
@@ -3812,7 +3826,7 @@ button.message-file:hover:not(:disabled) {
   gap: var(--space-3);
   padding: 9px 11px;
   border-color: var(--line);
-  background: var(--surface-muted);
+  background: transparent;
   color: var(--text);
   text-align: left;
 }
@@ -3823,7 +3837,8 @@ button.message-file:hover:not(:disabled) {
 
 .model-settings-option.active {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface-muted));
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
 }
 
 .model-settings-option > span {
@@ -3852,7 +3867,7 @@ button.message-file:hover:not(:disabled) {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
-  color: var(--accent-text);
+  color: var(--text-strong);
   opacity: 0;
 }
 
@@ -3886,8 +3901,8 @@ button.message-file:hover:not(:disabled) {
   padding: 15px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow);
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
 }
 
 .goal-popover-heading {
@@ -3928,6 +3943,42 @@ button.message-file:hover:not(:disabled) {
   min-height: 31px;
   padding: 0 var(--space-2-5);
   font-size: var(--text-small);
+}
+
+:is(.composer .skill-autocomplete, .composer .goal-popover, .model-settings-popup) button {
+  --composer-button-rest: transparent;
+  --composer-button-shadow: none;
+  border-color: transparent;
+  background: var(--composer-button-rest);
+  box-shadow: var(--composer-button-shadow);
+
+  &.active {
+    --composer-button-rest: var(--composer-surface);
+    --composer-button-shadow: var(--composer-shadow);
+  }
+
+  &:is(:hover, :active, :disabled) {
+    border-color: transparent;
+    background: var(--composer-button-rest);
+    box-shadow: var(--composer-button-shadow);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background: var(--composer-surface);
+      box-shadow: var(--composer-shadow);
+    }
+  }
+
+  &:focus-visible {
+    background: var(--composer-surface);
+    box-shadow: var(--composer-shadow);
+  }
+
+  &:active:not(:disabled) {
+    background: var(--composer-control-active);
+    box-shadow: var(--composer-pressed-shadow);
+  }
 }
 
 .composer-add-image {
@@ -3979,7 +4030,7 @@ button.message-file:hover:not(:disabled) {
   padding: var(--space-2) 28px var(--space-2) 9px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  background: var(--composer-surface);
 }
 
 .composer-file-summary svg {
@@ -4018,7 +4069,7 @@ button.message-file:hover:not(:disabled) {
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  background: var(--composer-surface);
   cursor: zoom-in;
 }
 
@@ -4039,7 +4090,7 @@ button.message-file:hover:not(:disabled) {
   height: 23px;
   min-height: 23px;
   padding: 0;
-  border: 2px solid var(--surface-raised);
+  border: 2px solid var(--composer-surface);
   border-radius: 50%;
   background: var(--text-strong);
   color: var(--bg);
@@ -4112,21 +4163,52 @@ button.message-file:hover:not(:disabled) {
 }
 
 .composer-toolbar :is(.setting-control, .composer-add-image, .composer-action) {
+  --composer-button-rest: transparent;
+  --composer-button-shadow: none;
   border: 0;
   border-radius: 999px;
-  background: transparent;
+  background: var(--composer-button-rest);
   color: var(--muted-strong);
-  box-shadow: none;
+  box-shadow: var(--composer-button-shadow);
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
+
+  &:is(:hover, :active):not(:disabled) {
+    background: var(--composer-button-rest);
+    box-shadow: var(--composer-button-shadow);
+  }
 }
 
 .composer-toolbar :is(.setting-control.active, .setting-control[aria-expanded="true"]) {
-  background: var(--composer-control-active);
+  --composer-button-rest: var(--composer-surface);
+  --composer-button-shadow: var(--composer-shadow);
   color: var(--text-strong);
 }
 
 .composer-toolbar
-  :is(.setting-control, .composer-add-image, .composer-action):is(:hover, :active):not(:disabled) {
+  :is(.setting-control, .composer-add-image, .composer-action):is(
+    :focus-visible,
+    :has(:where(select):focus-visible)
+  ):not(:disabled) {
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
+}
+
+@media (hover: hover) {
+  .composer-toolbar
+    :is(.setting-control, .composer-add-image, .composer-action):hover:not(:disabled) {
+    background: var(--composer-surface);
+    box-shadow: var(--composer-shadow);
+  }
+}
+
+.composer-toolbar
+  :is(.setting-control, .composer-add-image, .composer-action):active:not(:disabled) {
   background: var(--composer-control-active);
+  box-shadow: var(--composer-pressed-shadow);
 }
 
 .composer-actions > .send,
@@ -4146,8 +4228,16 @@ button.message-file:hover:not(:disabled) {
   color: var(--danger);
 }
 
-.composer-actions > .microphone:is(.recording, .timing):hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 18%, transparent);
+.composer-toolbar .composer-actions > .microphone:is(.recording, .timing) {
+  /* Recording keeps its semantic fill and inward pulse, including hover/focus. */
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  box-shadow: none;
+}
+
+@media (hover: hover) {
+  .composer-toolbar .composer-actions > .microphone:is(.recording, .timing):hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+  }
 }
 
 .composer-action-timer {
@@ -6238,8 +6328,7 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer-box textarea {
-    min-height: 52px;
-    font-size: var(--text-input);
+    padding: var(--space-3) var(--space-4) 0;
   }
 
   .composer-hint {
@@ -6410,7 +6499,7 @@ button.message-file:hover:not(:disabled) {
 
   .composer-toolbar {
     gap: var(--space-0-5);
-    padding: var(--space-1-5) var(--space-3) var(--space-3);
+    padding: var(--space-1) var(--space-2) var(--space-3);
   }
 
   .composer-options {
@@ -6745,6 +6834,12 @@ button.message-file:hover:not(:disabled) {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .composer-box,
+  .composer-toolbar :is(.setting-control, .composer-add-image, .composer-action),
+  :is(.composer .skill-autocomplete, .composer .goal-popover, .model-settings-popup) button {
+    transition: none;
+  }
+
   .dialog-backdrop,
   .dialog-surface {
     animation: none;
@@ -6769,7 +6864,7 @@ button.message-file:hover:not(:disabled) {
     border-top-color: var(--status-running);
   }
 
-  .composer-action.microphone.recording {
+  .composer-toolbar .composer-actions > .microphone.recording {
     box-shadow: inset 0 0 0 1px var(--color-danger);
   }
 }

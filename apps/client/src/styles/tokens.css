@@ -35,6 +35,7 @@
   --leading-message: 1.6;
 
   --color-canvas: #ffffff;
+  --color-floating: #f8f9f6;
   --color-surface: #ffffff;
   --color-recessed: #f4f4f2;
   --color-sidebar: #eef0e9;
@@ -116,6 +117,7 @@
 :root[data-resolved-theme="dark"] {
   color-scheme: dark;
   --color-canvas: #171817;
+  --color-floating: #242722;
   --color-surface: #1f201f;
   --color-recessed: #252725;
   --color-sidebar: #20231f;
