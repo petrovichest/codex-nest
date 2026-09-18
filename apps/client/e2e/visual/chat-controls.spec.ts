@@ -278,6 +278,18 @@ for (const theme of ["light", "dark"] as const) {
         }
         expect(await background(button)).toBe(idle);
       }
+      await page.goto("/threads/session-attention");
+      const option = page.locator(".turn-response-tail .user-input-card .check").nth(1);
+      await expect(option).toBeVisible();
+      await option.hover();
+      await expect(option).toHaveCSS("background-color", transparent);
+      await expect(option).toHaveCSS("box-shadow", "none");
+      await page.mouse.down();
+      await expect(option).toHaveCSS("box-shadow", /inset/);
+      await page.mouse.move(0, 0);
+      await page.mouse.up();
+      await expect(option).toHaveCSS("background-color", transparent);
+      await expect(option).toHaveCSS("box-shadow", "none");
     } finally {
       await context.close();
     }

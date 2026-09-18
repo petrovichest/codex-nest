@@ -124,6 +124,15 @@ test("async replies preserve the composer and survive acceptance and history rel
   await expect(card.getByRole("textbox")).toHaveCSS("background-color", "rgb(36, 39, 34)");
   await expect(card.getByRole("textbox")).not.toHaveCSS("box-shadow", "none");
   await card.getByRole("radio", { name: "Полный набор проверок" }).check();
+  const option = card.locator(".check").first();
+  await option.hover();
+  await expect(option).toHaveCSS("background-color", "rgb(36, 39, 34)");
+  await expect(option).not.toHaveCSS("box-shadow", "none");
+  await card.locator("fieldset").evaluate((el: HTMLFieldSetElement) => (el.disabled = true));
+  await expect(option).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(option).toHaveCSS("box-shadow", "none");
+  await card.locator("fieldset").evaluate((el: HTMLFieldSetElement) => (el.disabled = false));
+  await page.mouse.move(0, 0);
   await page.screenshot({ path: testInfo.outputPath("async-questions-mobile.png") });
   await card.getByRole("button", { name: "Ответить", exact: true }).click();
   await expect.poll(() => requests.length).toBe(1);

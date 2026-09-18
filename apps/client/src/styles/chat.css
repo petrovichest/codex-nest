@@ -422,6 +422,51 @@
   box-shadow: var(--chat-inner-shadow);
 }
 
+.thread-workspace .timeline :is(.user-input-card, .async-question-card) .check {
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+
+  &:has(input:enabled) {
+    cursor: pointer;
+  }
+
+  @media (hover: hover) {
+    &:has(input:enabled):hover {
+      background: var(--chat-surface);
+      box-shadow: var(--chat-shadow);
+    }
+  }
+
+  &:has(input:enabled:focus-visible) {
+    background: var(--chat-surface);
+    box-shadow: var(--chat-shadow);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &:has(input:enabled):active {
+    background: var(--chat-active);
+    box-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
+  }
+
+  input:focus-visible {
+    outline: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+}
+
+:root[data-resolved-theme="dark"]
+  .thread-workspace
+  .timeline
+  :is(.user-input-card, .async-question-card)
+  .check:has(input:enabled):active {
+  box-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
+}
+
 .thread-workspace
   .timeline
   :is(.attention-card, .async-question-card)
