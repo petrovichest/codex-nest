@@ -104,13 +104,17 @@ async function expectFeedback(page: Page, button: Locator, filled = false) {
   const bounds = await button.boundingBox();
   await button.hover();
   const hover = await background(button);
-  expect(hover).not.toBe(idle);
+  // Selection already has the same floating surface as hover.
+  if (filled) expect(hover).toBe(idle);
+  else expect(hover).not.toBe(idle);
+  await expect(button).not.toHaveCSS("box-shadow", "none");
   await expectNoBorder(button);
   await page.mouse.down();
   try {
     const pressed = await background(button);
     expect(pressed).not.toBe(idle);
     expect(pressed).not.toBe(hover);
+    await expect(button).toHaveCSS("box-shadow", /inset/);
     expect(await button.boundingBox()).toEqual(bounds);
     await expectNoBorder(button);
   } finally {
@@ -225,7 +229,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.locator(".thread-action-menu > summary").click();
     await expectFeedback(page, page.getByRole("button", { name: "Переименовать", exact: true }));
     await page.getByRole("button", { name: "Переименовать", exact: true }).click();
-    await expectFeedback(page, page.locator(".chat-dialog button.primary"), true);
+    await expectFeedback(page, page.locator(".chat-dialog button.primary"));
     await expectFeedback(page, page.locator(".chat-dialog .icon-button"));
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
@@ -233,8 +237,8 @@ for (const theme of ["light", "dark"] as const) {
     await page.getByRole("tab", { name: /Артефакты/ }).click();
     const download = page.locator(".inspector-artifact-download");
     await expectFeedback(page, download);
-    await expect(download).toHaveCSS("width", "32px");
-    await expect(download).toHaveCSS("height", "32px");
+    await expect(download).toHaveCSS("width", "36px");
+    await expect(download).toHaveCSS("height", "36px");
     await expect(download).toHaveCSS("border-radius", "50%");
     await page.goto("/threads/session-attention");
     // Snapshot attention arrives before history. Wait for its final placement

@@ -36,10 +36,10 @@
 
   --color-canvas: #ffffff;
   --color-floating: #f8f9f6;
-  --color-surface: #ffffff;
-  --color-recessed: #f4f4f2;
-  --color-sidebar: #eef0e9;
-  --color-raised: #ffffff;
+  --color-surface: var(--color-floating);
+  --color-recessed: var(--color-floating);
+  --color-sidebar: var(--color-floating);
+  --color-raised: var(--color-floating);
   --color-ink: #292a29;
   --color-ink-strong: #181918;
   --color-muted: #6a6c67;
@@ -77,9 +77,18 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --chat-radius-surface: 28px;
+  --chat-radius-card: 20px;
+  --chat-radius-compact: 24px;
   --control-height: 34px;
   --control-touch-height: 32px;
-  --elevation-overlay: 0 10px 32px rgb(28 30 27 / 9%), 0 1px 3px rgb(28 30 27 / 7%);
+  --sidebar-panel-shadow: 0 24px 52px rgb(39 50 26 / 19%), 0 5px 14px rgb(39 50 26 / 8%);
+  --sidebar-surface-shadow: 0 12px 32px rgb(39 50 26 / 9%), 0 3px 12px rgb(39 50 26 / 4%);
+  --sidebar-control-active: #eceee8;
+  --sidebar-pressed-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
+  --chat-inner-shadow: 0 5px 18px rgb(39 50 26 / 7%), 0 1px 5px rgb(39 50 26 / 4%);
+  --elevation-overlay: var(--sidebar-surface-shadow);
+  /* ChevronDownIcon geometry; the indicator keeps native select interaction. */
+  --select-indicator: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23646660' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 4.1 4.1a2 2 0 0 0 2.8 0l4.1-4.1'/%3E%3C/svg%3E");
   --motion-fast: 120ms;
   --motion-standard: 180ms;
   --motion-ease: cubic-bezier(0.2, 0, 0, 1);
@@ -118,10 +127,6 @@
   color-scheme: dark;
   --color-canvas: #171817;
   --color-floating: #242722;
-  --color-surface: #1f201f;
-  --color-recessed: #252725;
-  --color-sidebar: #20231f;
-  --color-raised: #282a28;
   --color-ink: #e9eae7;
   --color-ink-strong: #f7f8f5;
   --color-muted: #92958f;
@@ -144,5 +149,10 @@
   --status-complete: #5ac878;
   --status-failed: #ef6a70;
   --status-interrupted: #9974db;
-  --elevation-overlay: 0 14px 42px rgb(0 0 0 / 30%), 0 1px 3px rgb(0 0 0 / 24%);
+  --sidebar-panel-shadow: 0 24px 52px rgb(0 0 0 / 48%), 0 5px 14px rgb(0 0 0 / 26%);
+  --sidebar-surface-shadow: 0 12px 34px rgb(0 0 0 / 27%), 0 3px 14px rgb(0 0 0 / 10%);
+  --sidebar-control-active: #363a33;
+  --sidebar-pressed-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
+  --chat-inner-shadow: 0 6px 20px rgb(0 0 0 / 26%), 0 1px 6px rgb(0 0 0 / 16%);
+  --select-indicator: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b1b4ae' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 4.1 4.1a2 2 0 0 0 2.8 0l4.1-4.1'/%3E%3C/svg%3E");
 }

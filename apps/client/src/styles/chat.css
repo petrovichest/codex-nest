@@ -1,14 +1,12 @@
-/* User content shares the floating surface. Other chat surfaces and controls
-   keep their local roles until their own design-kit migration. */
+/* Chat uses the same surfaces and interaction elevations as the navigation. */
 :is(.thread-workspace, .chat-dialog, .chat-image-viewer) {
-  --chat-surface: #f8f9f6;
+  --chat-surface: var(--color-floating);
   --chat-user: var(--color-floating);
   --chat-active: #eceee8;
-  --chat-inset: #eef0e9;
-  --chat-control-hover: color-mix(in srgb, var(--chat-active) 90%, var(--text-strong));
-  --chat-control-pressed: color-mix(in srgb, var(--chat-active) 84%, var(--text-strong));
-  --chat-shadow: 0 12px 32px rgb(39 50 26 / 9%), 0 3px 12px rgb(39 50 26 / 4%);
-  --chat-inner-shadow: 0 5px 18px rgb(39 50 26 / 7%), 0 1px 5px rgb(39 50 26 / 4%);
+  --chat-inset: var(--color-floating);
+  --chat-control-hover: var(--color-floating);
+  --chat-control-pressed: var(--sidebar-control-active);
+  --chat-shadow: var(--sidebar-surface-shadow);
   --chat-check: #e1e6da;
   --chat-check-ink: #54664a;
   --chat-check-empty: #ecefe7;
@@ -21,11 +19,9 @@
 }
 
 :root[data-resolved-theme="dark"] :is(.thread-workspace, .chat-dialog, .chat-image-viewer) {
-  --chat-surface: #292c28;
+  --chat-surface: var(--color-floating);
   --chat-active: #363a33;
-  --chat-inset: #30342e;
-  --chat-shadow: 0 12px 34px rgb(0 0 0 / 27%), 0 3px 14px rgb(0 0 0 / 10%);
-  --chat-inner-shadow: 0 6px 20px rgb(0 0 0 / 26%), 0 1px 6px rgb(0 0 0 / 16%);
+  --chat-inset: var(--color-floating);
   --chat-check: #3b4535;
   --chat-check-ink: #c2d0b7;
   --chat-check-empty: #32372f;
@@ -108,31 +104,40 @@
 .chat-dialog button,
 .chat-image-viewer .image-viewer-control {
   --chat-button-rest: transparent;
-  --chat-button-hover: var(--chat-active);
-  --chat-button-pressed: var(--chat-control-hover);
+  --chat-button-hover: var(--color-floating);
+  --chat-button-pressed: var(--sidebar-control-active);
   border-color: transparent;
   border-radius: 999px;
   background: var(--chat-button-rest);
-  box-shadow: none;
+  box-shadow: var(--chat-button-shadow, none);
   font-weight: 400;
   transition:
     background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
     color var(--motion-fast) var(--motion-ease),
     opacity var(--motion-fast) var(--motion-ease);
 
   &:is(:hover, :active, :disabled, [aria-disabled="true"]) {
     border-color: transparent;
     background: var(--chat-button-rest);
+    box-shadow: var(--chat-button-shadow, none);
   }
 
   @media (hover: hover) {
     &:hover:not(:disabled, [aria-disabled="true"]) {
       background: var(--chat-button-hover);
+      box-shadow: var(--chat-shadow);
     }
+  }
+
+  &:focus-visible:not(:disabled, [aria-disabled="true"]) {
+    background: var(--chat-button-hover);
+    box-shadow: var(--chat-shadow);
   }
 
   &:active:not(:disabled, [aria-disabled="true"]) {
     background: var(--chat-button-pressed);
+    box-shadow: var(--sidebar-pressed-shadow);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -142,7 +147,7 @@
 
 .thread-workspace :is(.timeline, .session-inspector) button.primary,
 .chat-dialog button.primary {
-  --chat-button-rest: var(--chat-active);
+  --chat-button-rest: transparent;
   --chat-button-hover: var(--chat-control-hover);
   --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
@@ -216,7 +221,8 @@
 
 .thread-workspace .workspace-header button[aria-pressed="true"],
 .thread-workspace .workspace-header details[open] > summary {
-  --chat-button-rest: var(--chat-active);
+  --chat-button-rest: var(--color-floating);
+  --chat-button-shadow: var(--chat-shadow);
   --chat-button-hover: var(--chat-control-hover);
   --chat-button-pressed: var(--chat-control-pressed);
 }
@@ -473,8 +479,8 @@
   :is(input:not([type="radio"], [type="checkbox"]), textarea, select),
 .chat-dialog :is(input:not([type="radio"], [type="checkbox"]), textarea, select) {
   border-color: transparent;
-  border-radius: var(--chat-radius-control);
-  background: var(--chat-inset);
+  border-radius: 999px;
+  background-color: var(--color-floating);
   font-weight: 400;
 }
 
@@ -562,6 +568,7 @@
 
 .thread-workspace .timeline .user-input-freeform input {
   background: transparent;
+  box-shadow: none;
 }
 
 .thread-workspace .timeline .user-input-steps {
@@ -804,7 +811,8 @@
 }
 
 .thread-workspace .timeline .annotation-marker {
-  --chat-button-rest: var(--chat-active);
+  --chat-button-rest: var(--color-floating);
+  --chat-button-shadow: var(--chat-shadow);
   --chat-button-hover: var(--chat-control-hover);
   --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
@@ -812,7 +820,8 @@
 }
 
 .thread-workspace .timeline :is(.message-file, .markdown-image-state) {
-  --chat-button-rest: var(--chat-active);
+  --chat-button-rest: var(--color-floating);
+  --chat-button-shadow: var(--chat-shadow);
   --chat-button-hover: var(--chat-control-hover);
   --chat-button-pressed: var(--chat-control-pressed);
   border: 0;
@@ -820,7 +829,8 @@
 }
 
 .thread-workspace .timeline .markdown-image-state:not(button) {
-  background: var(--chat-active);
+  background: var(--color-floating);
+  box-shadow: var(--chat-inner-shadow);
 }
 
 .thread-workspace .timeline .gallery-image-link {
@@ -881,7 +891,8 @@
   width: 200px;
   min-height: 64px;
   padding: 12px;
-  background: var(--chat-active);
+  background: var(--color-floating);
+  box-shadow: var(--chat-inner-shadow);
   color: var(--muted-strong);
   cursor: pointer;
 }
@@ -1162,14 +1173,15 @@
 
 .thread-workspace .artifact-viewer-file-icon {
   border-radius: 50%;
-  background: var(--chat-active);
+  background: var(--color-floating);
+  box-shadow: var(--chat-inner-shadow);
 }
 
 .chat-dialog.dialog-surface {
   border: 0;
   border-radius: var(--chat-radius-surface);
   background: var(--chat-surface);
-  box-shadow: var(--chat-shadow);
+  box-shadow: var(--sidebar-panel-shadow);
 }
 
 .chat-dialog .fork-dialog-body {
@@ -1196,6 +1208,22 @@
 .chat-dialog .fork-mode-card.selected {
   border-color: transparent;
   background: var(--chat-surface);
+  box-shadow: var(--chat-shadow);
+}
+
+@media (hover: hover) {
+  .chat-dialog .fork-mode-card:hover:not(:has(input:disabled)) {
+    box-shadow: var(--chat-shadow);
+  }
+}
+
+.chat-dialog .fork-mode-card:has(input:focus-visible) {
+  box-shadow: var(--chat-shadow);
+}
+
+.chat-dialog .fork-mode-card:active:not(:has(input:disabled)) {
+  background: var(--sidebar-control-active);
+  box-shadow: var(--sidebar-pressed-shadow);
 }
 
 .chat-dialog .fork-mode-metrics small {
@@ -1205,7 +1233,7 @@
 .chat-dialog :is(.fork-source-icon, .fork-mode-control, .fork-mode-badge) {
   border: 0;
   border-radius: 999px;
-  background: var(--chat-active);
+  background: var(--color-floating);
   font-weight: 400;
 }
 
@@ -1442,4 +1470,9 @@
   .chat-dialog.dialog-surface {
     outline: 1px solid CanvasText;
   }
+}
+
+.thread-workspace .timeline :is(.attention-card, .async-question-card) textarea,
+.chat-dialog textarea {
+  border-radius: var(--chat-radius-card);
 }

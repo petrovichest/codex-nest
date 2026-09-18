@@ -1,4 +1,5 @@
 @import "../../client/src/styles/tokens.css";
+@import "../../client/src/styles/controls.css";
 
 :root {
   --canvas: var(--color-canvas);
@@ -24,7 +25,7 @@ body {
   margin: 0;
   font-family: var(--font-ui);
   color: var(--ink);
-  background: var(--canvas);
+  background: var(--color-canvas);
   border-left: 3px solid var(--muted);
   transition: border-color var(--motion-fast) var(--motion-ease);
 }
@@ -77,8 +78,11 @@ select:focus-visible {
   height: var(--extension-header-height);
   display: flex;
   align-items: center;
-  padding: 0 var(--extension-inset);
-  border-bottom: 1px solid var(--line);
+  padding: 0 var(--space-3);
+  margin: var(--space-2);
+  border-radius: var(--chat-radius-surface);
+  background: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
 }
 
 .wordmark {
@@ -103,18 +107,13 @@ select:focus-visible {
   margin-left: auto;
   padding: var(--space-1-5) var(--space-2);
   color: var(--accent);
-  background: var(--accent-soft);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
   font-size: var(--extension-text-caption);
   font-weight: var(--weight-action);
   line-height: 1;
   white-space: nowrap;
-}
-
-.open-panel-button:hover:not(:disabled) {
-  color: var(--color-ink-strong);
-  border-color: var(--color-muted);
 }
 
 .nest-logo {
@@ -127,6 +126,10 @@ select:focus-visible {
 .setup,
 .sessions {
   padding: 18px var(--extension-inset) var(--space-4);
+  margin: var(--space-2);
+  border-radius: var(--chat-radius-surface);
+  background: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
 }
 
 h1,
@@ -168,16 +171,12 @@ h1 {
   height: var(--extension-field-height);
   padding: 0 var(--space-2-5);
   color: var(--ink);
-  background: var(--canvas);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  border-radius: 999px;
   font-size: var(--extension-text-body);
   font-weight: 470;
-}
-
-.field input:hover,
-.field select:hover {
-  border-color: var(--color-muted);
+  background-color: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
 }
 
 .compact-field {
@@ -189,32 +188,25 @@ h1 {
 .danger-button,
 .icon-button {
   min-height: var(--extension-button-height);
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   font-size: var(--text-small);
   font-weight: var(--weight-action);
+  border: 1px solid transparent;
 }
 
 .primary-button {
   width: 100%;
   padding: 0 13px;
-  color: var(--color-lapis-contrast);
-  background: var(--color-lapis);
-  border: 1px solid var(--color-lapis);
-}
-
-.primary-button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-lapis) 86%, var(--color-ink));
+  color: var(--color-ink-strong);
+  background: transparent;
+  border: 1px solid transparent;
 }
 
 .secondary-button {
   padding: 0 11px;
   color: var(--ink);
-  background: var(--canvas);
-  border: 1px solid var(--line-strong);
-}
-
-.secondary-button:hover:not(:disabled) {
-  background: var(--recessed);
+  background: transparent;
+  border: 1px solid transparent;
 }
 
 .danger-button {
@@ -222,10 +214,6 @@ h1 {
   color: var(--danger);
   background: transparent;
   border: 1px solid transparent;
-}
-
-.danger-button:hover:not(:disabled) {
-  background: var(--color-danger-soft);
 }
 
 .icon-button {
@@ -236,10 +224,6 @@ h1 {
   color: var(--ink);
   background: transparent;
   border: 1px solid var(--line);
-}
-
-.icon-button:hover {
-  background: var(--recessed);
 }
 
 .text-button {
@@ -264,7 +248,7 @@ h1 {
   padding: 0 9px 0 7px;
   margin-bottom: 17px;
   color: var(--muted);
-  background: var(--recessed);
+  background: transparent;
   border-radius: 999px;
   font-size: var(--extension-text-caption);
   font-weight: 620;
@@ -307,15 +291,15 @@ h1 {
 .current-card,
 .binding-card {
   padding: var(--space-3);
-  background: var(--recessed);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  background: transparent;
+  border: 0;
+  border-radius: var(--chat-radius-card);
 }
 
 .binding-card.prominent {
   padding: 13px var(--space-3) var(--space-2-5);
-  border-color: var(--line-strong);
-  background: var(--color-surface);
+  background: var(--color-floating);
+  box-shadow: var(--chat-inner-shadow);
 }
 
 .tab-identity,
@@ -398,8 +382,7 @@ h1 {
   align-items: center;
   gap: var(--space-2);
   padding: 9px var(--space-2-5);
-  background: var(--color-surface);
-  border-color: var(--line);
+  background: transparent;
 }
 
 .binding-list .card-actions {
@@ -444,11 +427,13 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  margin: 0 var(--extension-inset);
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--line);
+  margin: var(--space-2);
+  padding: var(--space-3) var(--space-4);
   color: var(--muted);
   font-size: var(--text-caption);
+  border-radius: var(--chat-radius-surface);
+  background: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
 }
 
 .appearance select {
@@ -456,10 +441,11 @@ h1 {
   max-width: 70%;
   height: var(--control-height);
   padding: 0 var(--space-2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  border-radius: 999px;
   color: var(--ink);
-  background: var(--color-surface);
+  background-color: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -468,4 +454,9 @@ h1 {
   *::after {
     transition-duration: 0.01ms !important;
   }
+}
+
+.field select,
+.appearance select {
+  padding-inline: 16px 44px;
 }

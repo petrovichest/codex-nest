@@ -86,6 +86,7 @@ const SETTINGS_SECTIONS = [
 type SettingsSection = (typeof SETTINGS_SECTIONS)[number]["id"];
 type EditableTaskDefaults = Omit<TaskDefaults, "serviceTier">;
 const EMPTY_MODELS: ModelOption[] = [];
+const VERTICAL_SECTIONS_QUERY = "(min-width: 1280px)";
 
 function isSettingsSection(value: string | null): value is SettingsSection {
   return SETTINGS_SECTIONS.some((section) => section.id === value);
@@ -128,6 +129,9 @@ export function SettingsPage({
     ? sectionParam
     : "application";
   const settingsScrollRef = useRef<HTMLElement>(null);
+  const [verticalSections, setVerticalSections] = useState(
+    () => window.matchMedia?.(VERTICAL_SECTIONS_QUERY).matches ?? false,
+  );
   const sectionTabRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
@@ -163,6 +167,15 @@ export function SettingsPage({
   }, [initialAppUpdateStatus]);
 
   useEffect(() => {
+    const query = window.matchMedia?.(VERTICAL_SECTIONS_QUERY);
+    if (!query) return;
+    const update = () => setVerticalSections(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
     if (sectionParam === activeSection) return;
     const canonicalParams = new URLSearchParams(searchParams);
     canonicalParams.set("section", activeSection);
@@ -174,7 +187,7 @@ export function SettingsPage({
       block: "nearest",
       inline: "nearest",
     });
-  }, [activeSection]);
+  }, [activeSection, verticalSections]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -306,9 +319,9 @@ export function SettingsPage({
 
   function handleSectionKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     let nextIndex: number | null = null;
-    if (event.key === "ArrowLeft") {
+    if (event.key === (verticalSections ? "ArrowUp" : "ArrowLeft")) {
       nextIndex = (index - 1 + SETTINGS_SECTIONS.length) % SETTINGS_SECTIONS.length;
-    } else if (event.key === "ArrowRight") {
+    } else if (event.key === (verticalSections ? "ArrowDown" : "ArrowRight")) {
       nextIndex = (index + 1) % SETTINGS_SECTIONS.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
@@ -332,7 +345,12 @@ export function SettingsPage({
       />
       <section aria-label={t("Настройки")} className="settings-scroll" ref={settingsScrollRef}>
         <div className="settings-section-shelf">
-          <div aria-label={t("Разделы настроек")} className="settings-section-tabs" role="tablist">
+          <div
+            aria-label={t("Разделы настроек")}
+            aria-orientation={verticalSections ? "vertical" : "horizontal"}
+            className="settings-section-tabs"
+            role="tablist"
+          >
             {SETTINGS_SECTIONS.map(({ id, label, Icon }, index) => (
               <button
                 aria-controls={`settings-section-panel-${id}`}

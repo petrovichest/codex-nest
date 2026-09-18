@@ -1,3 +1,5 @@
+@import "./controls.css";
+
 :root {
   /* Application roles. The extension imports tokens.css without this layer. */
   --text-micro: 12px;
@@ -52,20 +54,7 @@ button {
   justify-content: center;
   gap: var(--space-2);
   padding: 0 var(--space-3);
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
   cursor: pointer;
-  transition:
-    background-color var(--motion-fast) var(--motion-ease),
-    border-color var(--motion-fast) var(--motion-ease),
-    color var(--motion-fast) var(--motion-ease),
-    opacity var(--motion-fast) var(--motion-ease);
-}
-
-button:hover:not(:disabled) {
-  border-color: var(--color-muted);
-  background: var(--color-recessed);
 }
 
 :where(button, input, textarea, select, summary, a):focus-visible {
@@ -83,37 +72,34 @@ button:disabled {
 }
 
 button.primary {
-  border-color: var(--color-lapis);
-  background: var(--color-lapis);
-  color: var(--color-lapis-contrast);
+  color: var(--color-ink-strong);
   font-weight: var(--weight-action);
 }
 
-button.primary:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-lapis) 86%, var(--color-ink));
-  background: color-mix(in srgb, var(--color-lapis) 86%, var(--color-ink));
-}
-
 button.danger {
-  border-color: color-mix(in srgb, var(--color-danger) 35%, var(--color-line));
-  background: transparent;
   color: var(--color-danger);
 }
 
-input,
+input:not([type="checkbox"], [type="radio"], [type="file"]),
 textarea,
 select {
   width: 100%;
   min-height: var(--control-height);
-  padding: 9px 11px;
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding-block: 9px;
+  padding-inline: 16px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background-color: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
   font-size: var(--text-input);
   line-height: var(--leading-copy);
   transition:
     border-color var(--motion-fast) var(--motion-ease),
     background-color var(--motion-fast) var(--motion-ease);
+}
+
+select:not([multiple], [size]) {
+  padding-inline-end: 44px;
 }
 
 input::placeholder,
@@ -122,6 +108,7 @@ textarea::placeholder {
 }
 
 textarea {
+  border-radius: var(--chat-radius-card);
   line-height: var(--leading-copy);
   resize: none;
 }

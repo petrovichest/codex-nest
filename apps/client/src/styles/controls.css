@@ -1,0 +1,51 @@
+/* Shared interaction and select geometry. Applications retain their own sizing. */
+button {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
+}
+
+@media (hover: hover) {
+  button:hover:not(:disabled, [aria-disabled="true"]) {
+    background-color: var(--color-floating);
+    box-shadow: var(--sidebar-surface-shadow);
+  }
+}
+
+button:focus-visible:not(:disabled, [aria-disabled="true"]) {
+  background-color: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
+}
+
+button:active:not(:disabled, [aria-disabled="true"]) {
+  background-color: var(--sidebar-control-active);
+  box-shadow: var(--sidebar-pressed-shadow);
+}
+
+select:not([multiple], [size]) {
+  appearance: none;
+  background-image: var(--select-indicator);
+  background-repeat: no-repeat;
+  background-size: 18px 18px;
+  background-position: right 12px center;
+  padding-inline: 16px 44px;
+}
+
+select option,
+select optgroup {
+  color: var(--color-ink);
+  background-color: var(--color-floating);
+}
+
+@media (forced-colors: active) {
+  select:not([multiple], [size]) {
+    appearance: auto;
+    background-image: none;
+  }
+}
