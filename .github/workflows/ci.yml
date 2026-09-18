@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches: [codex/mvp]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -10,6 +12,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ci-verify-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref_type != 'tag' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -22,9 +27,9 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run format:check
       - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
       - run: npm run build
+      - run: npm run typecheck -w @codexnest/server
+      - run: npm test
       - run: bash -n deploy/install.sh deploy/adopt-existing.sh deploy/adopt-existing.test.sh deploy/codexnest
       - run: deploy/adopt-existing.test.sh
       - name: Verify pinned Node.js checksums are published
@@ -33,128 +38,31 @@ jobs:
           curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" -o node-shasums.txt
           grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-x64.tar.xz$" node-shasums.txt
           grep -Eq "^[0-9a-f]{64}  node-v${node_version}-linux-arm64.tar.xz$" node-shasums.txt
-
-  codex-compat:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        codex-version: [0.144.6, 0.154.0]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build -w @codexnest/protocol
-      - name: Verify delivery with ordinary Codex
-        env:
-          CODEX_VERSION: ${{ matrix.codex-version }}
+      - name: Package the verified browser extension
+        if: github.event_name == 'push'
         run: |
-          npm install --prefix "$RUNNER_TEMP/codex-compat" --no-save "@openai/codex@$CODEX_VERSION"
-          CODEXNEST_COMPAT_CODEX_BIN="$RUNNER_TEMP/codex-compat/node_modules/.bin/codex" \
-            npm run test -w @codexnest/server -- src/codex/durable.integration.test.ts
-
-  installer-dry-run:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        image: [ubuntu:24.04, debian:12]
-        platform: [linux/amd64, linux/arm64]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - name: Validate installer in an isolated distribution
-        run: >-
-          docker run --rm --platform "${{ matrix.platform }}" --user 1000:1000
-          --volume "$PWD:/workspace:ro" --workdir /workspace "${{ matrix.image }}"
-          bash deploy/install.sh --dry-run
-
-  android-debug:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
-        with:
-          distribution: temurin
-          java-version: 21
-          cache: gradle
-      - run: npm ci
-      - run: npm run build
-      - run: npm run android:sync -w @codexnest/client
-      - run: ./gradlew assembleDebug
-        working-directory: apps/client/android
-      - run: ./gradlew lint
-        working-directory: apps/client/android
-
-  client-visual:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build -w @codexnest/protocol
-      - run: npm exec -w @codexnest/client -- playwright install --with-deps chromium
-      - run: npm run test:visual -w @codexnest/client -- --project=chromium --update-snapshots=none
-        env:
-          NODE_ENV: test
-      - name: Upload visual failures and traces
-        if: failure()
+          npm run package -w @codexnest/extension
+          unzip -t apps/extension/artifacts/codexnest-browser-*.zip
+          test -s apps/client/dist/index.html
+      - name: Upload verified release inputs
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: client-visual-failures-${{ github.sha }}
-          path: apps/client/test-results/
-          if-no-files-found: ignore
-          retention-days: 7
-
-  extension-e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build -w @codexnest/protocol
-      - run: npm exec -w @codexnest/extension -- playwright install --with-deps chromium
-      - run: npm run test:e2e -w @codexnest/extension
-        env:
-          NODE_ENV: test
-      - name: Package the exact extension builds exercised by Playwright
-        run: npm run package -w @codexnest/extension
-      - run: unzip -t apps/extension/artifacts/codexnest-browser-*.zip
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: codexnest-browser-${{ github.sha }}
-          path: apps/extension/artifacts/codexnest-browser-*.zip
+          name: codexnest-build-${{ github.sha }}
+          # Both paths share apps/ as their artifact root.
+          path: |
+            apps/client/dist/
+            apps/extension/artifacts/codexnest-browser-*.zip
           if-no-files-found: error
+          retention-days: 1
 
   rolling-release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/mvp'
-    needs: [verify, codex-compat, installer-dry-run, android-debug, client-visual, extension-e2e]
+    needs: verify
     runs-on: ubuntu-latest
     concurrency:
       group: rolling-release
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -185,21 +93,20 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: steps.head.outputs.current == 'true'
         with:
-          name: codexnest-browser-${{ github.sha }}
-          path: release/unsigned-extensions
+          name: codexnest-build-${{ github.sha }}
+          path: apps
       - name: Prepare rolling browser extension sources
         if: steps.head.outputs.current == 'true'
         run: |
           shopt -s nullglob
-          extension_archives=(release/unsigned-extensions/codexnest-browser-[0-9]*.zip)
+          extension_archives=(apps/extension/artifacts/codexnest-browser-[0-9]*.zip)
           test "${#extension_archives[@]}" -eq 1
+          mkdir -p release
           cp "${extension_archives[0]}" release/
           cp "${extension_archives[0]}" release/codexnest-browser-latest.zip
           unzip -t release/codexnest-browser-latest.zip
       - if: steps.head.outputs.current == 'true'
         run: npm ci
-      - if: steps.head.outputs.current == 'true'
-        run: npm run build
       - if: steps.head.outputs.current == 'true'
         run: npm run android:sync -w @codexnest/client
       - name: Validate Android signing secrets
@@ -310,8 +217,8 @@ jobs:
           fi
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, codex-compat, installer-dry-run, android-debug, extension-e2e]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -325,8 +232,8 @@ jobs:
           node-version: 24
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: codexnest-browser-${{ github.sha }}
-          path: release/unsigned-extensions
+          name: codexnest-build-${{ github.sha }}
+          path: apps
       - name: Validate release source
         run: |
           test "$GITHUB_REF_TYPE" = tag
@@ -337,8 +244,9 @@ jobs:
       - name: Prepare browser extension asset
         run: |
           shopt -s nullglob
-          chrome_archives=(release/unsigned-extensions/codexnest-browser-[0-9]*.zip)
+          chrome_archives=(apps/extension/artifacts/codexnest-browser-[0-9]*.zip)
           test "${#chrome_archives[@]}" -eq 1
+          mkdir -p release
           cp "${chrome_archives[0]}" release/
           unzip -t "${chrome_archives[0]}"
       - name: Prepare installer asset

@@ -252,7 +252,16 @@ builds additionally require JDK 21 and the Android SDK.
 
 For UI changes, start with the [design kit](./docs/design-kit.md): shared tokens,
 component patterns, approved exceptions, and the new-feature checklist.
-CI checks the client's Chromium visual suite and the extension's browser tests.
+CI runs formatting, lint, unit tests, the build, dependency audit, and installer
+script checks. The build checks types for the protocol, client, and extension;
+the server has a separate type check. Browser tests, Codex compatibility checks,
+and the installer platform matrix remain available locally. Android CI builds
+only the signed release APK.
+
+Pull requests run `verify`. Pushes to `codex/mvp` publish a rolling release after
+`verify`; `v*` tags publish versioned releases. Release jobs reuse the client build
+and extension ZIP from `verify` instead of rebuilding them. Other branch pushes
+do not start CI.
 
 ```bash
 npm install
