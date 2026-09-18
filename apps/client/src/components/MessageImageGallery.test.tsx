@@ -53,6 +53,41 @@ it("opens remote image downloads in the system browser on native platforms", asy
   );
 });
 
+it("shows tool images without a disclosure and loads and downloads their exact external paths", async () => {
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tool-preview");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const path = "/tmp/screenshot %20.png";
+  const load = vi.fn(async () => new Blob(["image"], { type: "image/png" }));
+  const download = vi.fn(async () => {});
+  const item = {
+    type: "tool" as const,
+    id: "view",
+    title: "imageView",
+    detail: "",
+    status: "completed" as const,
+    images: [path],
+  };
+  const view = render(
+    <Activity item={item} cwd="/work" onLoadImage={load} onDownload={download} />,
+  );
+  const gallery = screen.getByRole("group", { name: "Изображения" });
+  expect(view.container.querySelector("details")).toBeNull();
+  await waitFor(() => expect(load).toHaveBeenCalledWith(path));
+  await waitFor(() =>
+    expect(within(gallery).getByRole("img")).toHaveAttribute("src", "blob:tool-preview"),
+  );
+  fireEvent.load(within(gallery).getByRole("img"));
+  fireEvent.click(within(gallery).getByRole("button"));
+  const viewer = screen.getByRole("dialog", { name: "Просмотр изображений" });
+  fireEvent.click(within(viewer).getByRole("button", { name: /Скачать/ }));
+  await waitFor(() => expect(download).toHaveBeenCalledWith(path));
+  fireEvent.keyDown(document, { key: "Escape" });
+  view.rerender(
+    <Activity item={{ ...item }} cwd="/work" onLoadImage={load} onDownload={download} />,
+  );
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
 it("reuses loaded images through streaming and opens links and thumbnails in the same gallery", async () => {
   vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
   const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});

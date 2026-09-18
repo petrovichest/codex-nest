@@ -3618,7 +3618,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       const file =
         (await attachments.resolveDownload(request.params.id, body.path)) ??
-        (await resolveDownloadFile(body.path, summary.cwd));
+        (await resolveDownloadFile(
+          body.path,
+          summary.cwd,
+          projection.hasToolImagePath(request.params.id, body.path),
+        ));
       const now = Date.now();
       removeExpiredDownloadTickets(downloadTickets, now);
       while (downloadTickets.size >= MAX_DOWNLOAD_TICKETS) {
@@ -8630,6 +8634,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function resolveDownloadFile(
   input: string,
   cwd: string,
+  toolImage = false,
 ): Promise<{ root: string; path: string; fileName: string; size: number }> {
   if (!isAbsolute(input) || input.includes("\0")) {
     throw new ProjectValidationError("File path must be absolute");
@@ -8642,7 +8647,11 @@ async function resolveDownloadFile(
     throwDownloadFilesystemError(error);
   }
   if (!pathContains(root, path)) {
-    throw new ProjectForbiddenError("File must stay inside the task directory");
+    if (!toolImage || path !== input || !/\.(avif|gif|jpe?g|png|webp)$/i.test(path)) {
+      throw new ProjectForbiddenError("File must stay inside the task directory");
+    }
+    // Pin the ticket to this exact file, not its containing directory.
+    root = path;
   }
   let info: Stats;
   try {

@@ -314,6 +314,31 @@ export class AppProjection extends EventEmitter {
     return this.threads.get(id)?.thread.path ?? null;
   }
 
+  /** Only tool-produced paths already loaded for this session may escape its workspace. */
+  hasToolImagePath(threadId: string, path: string): boolean {
+    const matches = (item: ActivityItem) =>
+      item.type === "tool" && Boolean(item.images?.includes(path));
+    for (const [key, item] of this.activity) {
+      if (key.startsWith(`${threadId}:`) && matches(item)) return true;
+    }
+    for (const [key, turn] of this.turnStates) {
+      if (key.startsWith(`${threadId}:`) && turn.items.some(matches)) return true;
+    }
+    if (this.latestDetails.get(threadId)?.turns.some((turn) => turn.items.some(matches)))
+      return true;
+    return Boolean(
+      this.threads
+        .get(threadId)
+        ?.thread.turns.some((turn) =>
+          turn.items.some(
+            (item) =>
+              (item.type === "imageView" && item.path === path) ||
+              (item.type === "imageGeneration" && item.savedPath === path),
+          ),
+        ),
+    );
+  }
+
   async searchThreads(
     searchTerm: string,
     archived: boolean,
@@ -3024,7 +3049,7 @@ export class AppProjection extends EventEmitter {
       id: itemId,
       status: "inProgress",
       text: previous && "text" in previous ? previous.text + delta : delta,
-      images: previous && "images" in previous ? previous.images : [],
+      images: previous && "images" in previous ? (previous.images ?? []) : [],
       timestamp:
         previous && "timestamp" in previous
           ? previous.timestamp
@@ -3769,14 +3794,21 @@ function normalizeTurn(
 }
 
 function isConversationMessage(item: ActivityItem): boolean {
-  return item.type === "userMessage" || item.type === "agentMessage" || item.type === "plan";
+  return (
+    item.type === "userMessage" ||
+    item.type === "agentMessage" ||
+    item.type === "plan" ||
+    (item.type === "tool" && Boolean(item.images?.length))
+  );
 }
 
 function conversationTurn(turn: TurnView): TurnView {
   return {
     ...turn,
     items: turn.items.filter(
-      (item) => !["reasoning", "command", "fileChange", "tool"].includes(item.type),
+      (item) =>
+        !["reasoning", "command", "fileChange", "tool"].includes(item.type) ||
+        (item.type === "tool" && Boolean(item.images?.length)),
     ),
     itemsLoaded: false,
   };
@@ -3873,6 +3905,7 @@ function mergeLiveActivities(
     const finalResponse =
       turnStatus !== "inProgress" &&
       (item.type === "userMessage" ||
+        (item.type === "tool" && Boolean(item.images?.length)) ||
         (isAssistantTextActivity(item) && item.phase !== "final_answer"))
         ? result.findIndex(
             (candidate) =>
@@ -4114,6 +4147,7 @@ function normalizeActivity(
         status: normalizeItemStatus(item.status),
         title: `${item.server}: ${item.tool}`,
         detail: item.error ? "Инструмент завершился с ошибкой" : "MCP-инструмент",
+        ...toolImageContent(item.result?.content),
       };
     case "dynamicToolCall":
       if (
@@ -4137,6 +4171,41 @@ function normalizeActivity(
         status: normalizeItemStatus(item.status),
         title: [item.namespace, item.tool].filter(Boolean).join(":"),
         detail: "Инструмент",
+        ...toolImageContent(item.contentItems),
+      };
+    case "functionCallOutput":
+      return {
+        type: "tool",
+        id: item.id,
+        status: "completed",
+        title: [item.namespace, item.name].filter(Boolean).join(":"),
+        detail: "Инструмент",
+        ...toolImageContent(item.output),
+      };
+    case "imageView":
+      return {
+        type: "tool",
+        id: item.id,
+        status: lifecycleStarted ? "inProgress" : "completed",
+        title: item.type,
+        detail: "",
+        // Do not try to read an image before the tool finishes opening it.
+        ...(!lifecycleStarted && item.path ? { images: [item.path] } : {}),
+      };
+    case "imageGeneration":
+      return {
+        type: "tool",
+        id: item.id,
+        status: item.failure ? "failed" : normalizeItemStatus(item.status),
+        title: item.type,
+        detail: item.failure ? "Инструмент завершился с ошибкой" : "",
+        ...(!item.failure && item.status === "completed"
+          ? item.savedPath
+            ? { images: [item.savedPath] }
+            : item.result
+              ? { images: [`data:image/png;base64,${item.result}`] }
+              : {}
+          : {}),
       };
     default:
       return {
@@ -4147,6 +4216,27 @@ function normalizeActivity(
         detail: "Активность Codex",
       };
   }
+}
+
+function toolImageContent(content: unknown): { images?: string[] } {
+  if (!Array.isArray(content)) return {};
+  const images = content.flatMap((part): string[] => {
+    if (!isRecord(part)) return [];
+    const src =
+      part.type === "inputImage"
+        ? part.imageUrl
+        : part.type === "input_image"
+          ? part.image_url
+          : part.type === "image" &&
+              typeof part.mimeType === "string" &&
+              /^image\/[a-z0-9.+-]+$/i.test(part.mimeType) &&
+              typeof part.data === "string" &&
+              part.data
+            ? `data:${part.mimeType};base64,${part.data}`
+            : null;
+    return typeof src === "string" && /^(data:image\/|https?:\/\/)/i.test(src) ? [src] : [];
+  });
+  return images.length ? { images: [...new Set(images)] } : {};
 }
 
 function managedSpawnThreadId(

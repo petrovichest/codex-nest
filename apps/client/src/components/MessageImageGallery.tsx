@@ -33,6 +33,7 @@ const noImages: string[] = [];
 export function MessageImageProvider({
   text,
   images = noImages,
+  toolImages = false,
   cwd,
   onLoadImage,
   onDownload,
@@ -40,13 +41,17 @@ export function MessageImageProvider({
 }: {
   text: string;
   images?: string[];
+  toolImages?: boolean;
   cwd?: string;
   onLoadImage?: (path: string) => Promise<Blob>;
   onDownload?: (path: string) => Promise<void>;
   children: ReactNode;
 }) {
   const { t } = useI18n();
-  const collection = useMemo(() => collectMessageImages(text, images, cwd), [text, images, cwd]);
+  const collection = useMemo(
+    () => collectMessageImages(text, images, cwd, toolImages),
+    [text, images, cwd, toolImages],
+  );
   const [states, setStates] = useState<Record<string, ImageState>>({});
   const [attempts, setAttempts] = useState<Record<string, number>>({});
   const [viewer, setViewer] = useState<{ key: string; opener: HTMLButtonElement } | null>(null);

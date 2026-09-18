@@ -1769,6 +1769,82 @@ describe("audio transcriptions", () => {
 });
 
 describe("file downloads", () => {
+  it("allows only canonical tool image paths from this session outside its workspace without RPCs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-tool-download-"));
+    directories.push(directory);
+    const workspace = join(directory, "workspace");
+    await mkdir(workspace);
+    const imagePath = join(directory, "screenshot.png");
+    const otherPath = join(directory, "other.png");
+    const secretPath = join(directory, "secret.txt");
+    const linkPath = join(directory, "link.png");
+    const missingPath = join(directory, "missing.png");
+    await Promise.all([
+      writeFile(imagePath, "image"),
+      writeFile(otherPath, "other"),
+      writeFile(secretPath, "secret"),
+    ]);
+    await symlink(otherPath, linkPath);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    projection.upsertThread({ ...testThread("images"), cwd: workspace });
+    projection.upsertThread({ ...testThread("other"), cwd: workspace });
+    for (const path of [imagePath, linkPath, missingPath, secretPath]) {
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: {
+          threadId: "images",
+          turnId: "turn",
+          completedAtMs: 1000,
+          item: { type: "imageView", id: path, path },
+        },
+      });
+    }
+    const app = await buildApp(
+      loadConfig({ statePath: store.path, clientDist: join(directory, "no-client") }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+        projectRoot: workspace,
+      },
+    );
+    const requests = vi.spyOn(bridge, "request");
+    const issue = (path: string, threadId = "images") =>
+      app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${threadId}/downloads`,
+        headers: { authorization: "Bearer correct" },
+        payload: { path },
+      });
+    try {
+      const ticket = await issue(imagePath);
+      expect(ticket.statusCode).toBe(201);
+      const response = await app.inject({ url: ticket.json().downloadUrl });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toBe("image");
+      expect((await issue(imagePath, "other")).statusCode).toBe(403);
+      expect((await issue(otherPath)).statusCode).toBe(403);
+      expect((await issue(secretPath)).statusCode).toBe(403);
+      expect((await issue(linkPath)).statusCode).toBe(403);
+      expect((await issue(missingPath)).statusCode).toBe(404);
+      const swapped = await issue(imagePath);
+      await unlink(imagePath);
+      await symlink(otherPath, imagePath);
+      expect((await app.inject({ url: swapped.json().downloadUrl })).statusCode).toBe(404);
+      expect(requests).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("issues short-lived tickets and confines downloads to the task directory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-download-api-test-"));
     directories.push(directory);

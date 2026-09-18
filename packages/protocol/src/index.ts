@@ -449,6 +449,7 @@ export type ActivityItem =
       status: "inProgress" | "completed" | "failed";
       title: string;
       detail: string;
+      images?: string[];
     }
   | {
       type: "userInputResponse";

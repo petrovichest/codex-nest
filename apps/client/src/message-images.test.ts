@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { collectMessageImages } from "./message-images";
 
 describe("message image collection", () => {
+  it("loads tool paths outside the workspace without changing Markdown path handling", () => {
+    const path = "/tmp/shot %20.png";
+    const image = { key: path, src: path, localPath: path, label: "shot %20.png" };
+    expect(collectMessageImages("", [path], "/work", true)).toEqual([image]);
+    expect(
+      collectMessageImages(`[Outside](${path.replaceAll(" ", "%20")})`, [], "/work", true),
+    ).toEqual([]);
+    expect(collectMessageImages("", [path], "/work")[0]?.localPath).toBeNull();
+  });
   it("merges Markdown images, file links and attachments in first-appearance order", () => {
     const result = collectMessageImages(
       "![Схема](/work/a.png)\n\n[Фото](/work/b.jpg) и [ещё раз](/work/a.png)",

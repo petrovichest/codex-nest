@@ -46,6 +46,7 @@ export function collectMessageImages(
   text: string,
   attachments: readonly string[],
   cwd?: string,
+  toolImages = false,
 ): MessageImage[] {
   const tree = parser.parse(text);
   const definitions = new Map<string, Definition>();
@@ -74,7 +75,9 @@ export function collectMessageImages(
     // Attachments already passed the upload pipeline and may use data/blob URLs.
     const image = /^(data:image\/|blob:)/i.test(src)
       ? { key: src, src, localPath: null, label: "" }
-      : messageImage(src, cwd, true);
+      : toolImages && src.startsWith("/") && !src.startsWith("//")
+        ? { key: src, src, localPath: src, label: src.split("/").at(-1) ?? "" }
+        : messageImage(src, cwd, true);
     if (image && !images.has(image.key)) images.set(image.key, image);
   }
   return [...images.values()];

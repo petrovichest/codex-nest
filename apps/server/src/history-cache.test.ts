@@ -13,7 +13,7 @@ afterEach(async () => {
   );
 });
 
-it("retains dialogue in cached pages and rejects pages from the old summary-only schema", async () => {
+it("retains dialogue and tool images and rejects pages from before tool image support", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-history-cache-test-"));
   directories.push(directory);
   const statePath = join(directory, "state.json");
@@ -44,6 +44,14 @@ it("retains dialogue in cached pages and rejects pages from the old summary-only
         },
         items: [
           {
+            type: "tool",
+            id: "image",
+            status: "completed",
+            title: "imageView",
+            detail: "",
+            images: ["/tmp/screenshot.png"],
+          },
+          {
             type: "agentMessage",
             id: "reply",
             status: "completed",
@@ -64,7 +72,7 @@ it("retains dialogue in cached pages and rejects pages from the old summary-only
   const [filename] = await readdir(parent);
   const path = join(parent, filename!);
   const oldPage = JSON.parse(await readFile(path, "utf8"));
-  oldPage.schemaVersion = 3;
+  oldPage.schemaVersion = 5;
   oldPage.turns[0].items = [];
   await writeFile(path, JSON.stringify(oldPage));
   expect(await new HistoryCache(statePath).get("thread", null, "desc")).toBeNull();

@@ -114,6 +114,239 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("keeps three tool screenshots in live, completed and cached history without extra RPCs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-tool-images-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const source = {
+      ...testTurn("screenshots", "inProgress"),
+      itemsView: "full" as const,
+    };
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/turns/list")
+        return { data: [source], nextCursor: null, backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(
+      thread("one", "/work", 10, { type: "active", activeFlags: [] }, [source]),
+    );
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    const explanation = {
+      type: "agentMessage" as const,
+      id: "explanation",
+      text: "Выведу три изображения",
+      phase: "commentary" as const,
+      memoryCitation: null,
+      delivery: null,
+      questions: null,
+    };
+    const shots = [1, 2, 3].map((index) => ({
+      type: "imageView" as const,
+      id: `shot-${index}`,
+      path: `/tmp/variant-${index}.png`,
+    }));
+    source.items = [explanation, ...shots];
+    for (const item of source.items) {
+      bridge.emit("notification", {
+        method: "item/started",
+        params: { threadId: "one", turnId: source.id, item, startedAtMs: 10000 },
+      });
+      bridge.emit("notification", {
+        method: "item/completed",
+        params: { threadId: "one", turnId: source.id, item, completedAtMs: 11000 },
+      });
+    }
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: { threadId: "one", turnId: source.id, item: shots[2], completedAtMs: 11000 },
+    });
+    expect(
+      events.filter((event) => event.type === "activity.upserted" && event.item.id === "shot-1"),
+    ).toMatchObject([
+      { item: { type: "tool", status: "inProgress" } },
+      { item: { type: "tool", status: "completed", images: ["/tmp/variant-1.png"] } },
+    ]);
+    const check = (items: ActivityItem[]) => {
+      expect(items.map((item) => item.id)).toEqual(source.items.map((item) => item.id));
+      expect(items.filter((item) => item.type === "tool").map((item) => item.images)).toEqual(
+        shots.map((item) => [item.path]),
+      );
+    };
+    check((await projection.readThread("one")).turns[0]!.items);
+    source.items.push({
+      ...explanation,
+      id: "answer",
+      text: "Вывел три скриншота",
+      phase: "final_answer",
+    });
+    source.status = "completed";
+    source.completedAt = 12;
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: { ...source, items: [explanation, source.items.at(-1)!] } },
+    });
+    await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBeNull());
+    await vi.waitFor(() => {
+      const completed = events.findLast((event) => event.type === "turn.replaced");
+      expect(completed?.type).toBe("turn.replaced");
+      if (completed?.type === "turn.replaced") check(completed.turn.items);
+    });
+    check((await projection.readThread("one", { refresh: true })).turns[0]!.items);
+    const calls = bridge.request.mock.calls.length;
+    for (const shot of shots) expect(projection.hasToolImagePath("one", shot.path)).toBe(true);
+    expect(projection.hasToolImagePath("two", shots[0]!.path)).toBe(false);
+    expect(projection.hasToolImagePath("one", "/tmp/secret.png")).toBe(false);
+    expect(bridge.request).toHaveBeenCalledTimes(calls);
+    const updatedAt = projection.summary("one")!.updatedAt / 1000;
+    await store.flushed();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    restored.upsertThread(thread("one", "/work", updatedAt));
+    check((await restored.readThread("one")).turns[0]!.items);
+    expect(restored.hasToolImagePath("one", shots[0]!.path)).toBe(true);
+    const cacheCalls = bridge.request.mock.calls.length;
+    const cached = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    cached.upsertThread(thread("one", "/work", updatedAt));
+    check((await cached.readThread("one")).turns[0]!.items);
+    expect(cached.hasToolImagePath("one", shots[0]!.path)).toBe(true);
+    expect(bridge.request).toHaveBeenCalledTimes(cacheCalls);
+  });
+
+  it("extracts structured images while keeping tool text and malformed outputs out of dialogue", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-tool-content-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const image = "data:image/png;base64,aW1hZ2U=";
+    const items: Thread["turns"][number]["items"] = [
+      {
+        type: "functionCallOutput",
+        id: "function",
+        name: "exec",
+        namespace: "functions",
+        output: [
+          { type: "input_text", text: "/tmp/not-an-image.png" },
+          { type: "input_image", image_url: image },
+        ],
+      },
+      {
+        type: "dynamicToolCall",
+        id: "dynamic",
+        namespace: "test",
+        tool: "images",
+        arguments: {},
+        status: "completed",
+        success: true,
+        durationMs: 1,
+        contentItems: [{ type: "inputImage", imageUrl: image }],
+      },
+      {
+        type: "mcpToolCall",
+        id: "mcp",
+        server: "test",
+        tool: "images",
+        arguments: {},
+        status: "completed",
+        durationMs: 1,
+        appContext: null,
+        pluginId: null,
+        readOnlyHint: true,
+        error: null,
+        result: {
+          content: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+          structuredContent: null,
+          _meta: null,
+        },
+      },
+      {
+        type: "imageGeneration",
+        id: "generated",
+        status: "completed",
+        revisedPrompt: null,
+        failure: null,
+        savedPath: "/tmp/generated.png",
+        result: "aW1hZ2U=",
+      },
+      {
+        type: "imageGeneration",
+        id: "inline-generated",
+        status: "completed",
+        revisedPrompt: null,
+        failure: null,
+        result: "aW1hZ2U=",
+      },
+      {
+        type: "imageGeneration",
+        id: "pending-generated",
+        status: "inProgress",
+        revisedPrompt: null,
+        failure: null,
+        result: "partial",
+      },
+      {
+        type: "functionCallOutput",
+        id: "plain",
+        name: "exec",
+        namespace: "functions",
+        output: "plain log",
+      },
+      {
+        type: "functionCallOutput",
+        id: "unsafe",
+        name: "exec",
+        namespace: "functions",
+        output: [
+          { type: "input_image", image_url: "javascript:alert(1)" },
+          { type: "input_image", image_url: "/tmp/secret.png" },
+        ],
+      },
+    ];
+    bridge.request.mockImplementation(async () => ({
+      data: [{ ...testTurn("results", "completed"), itemsView: "full", items }],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 10));
+    const visible = (await projection.readThread("one")).turns[0]!.items;
+    expect(visible.map((item) => item.id)).toEqual([
+      "function",
+      "dynamic",
+      "mcp",
+      "generated",
+      "inline-generated",
+    ]);
+    expect(visible.map((item) => item.type === "tool" && item.images)).toEqual([
+      [image],
+      [image],
+      [image],
+      ["/tmp/generated.png"],
+      [image],
+    ]);
+    expect(projection.hasToolImagePath("one", "/tmp/not-an-image.png")).toBe(false);
+    expect(projection.hasToolImagePath("one", "/tmp/secret.png")).toBe(false);
+  });
+
   it("persists pin changes across reloads and publishes them without Codex RPCs", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-pinning-test-"));
     directories.push(directory);
