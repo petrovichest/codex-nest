@@ -67,7 +67,7 @@
   --sidebar-button-hover-ink: var(--text-strong);
 
   position: fixed;
-  inset: var(--sidebar-gutter) auto var(--sidebar-gutter) var(--sidebar-gutter);
+  inset: var(--space-2) auto var(--sidebar-gutter) var(--sidebar-gutter);
   z-index: 30;
   width: var(--sidebar-width);
   display: flex;
@@ -1062,7 +1062,7 @@
 }
 
 .app-frame[data-sidebar-side="right"] .sidebar {
-  inset: var(--sidebar-gutter) var(--sidebar-gutter) var(--sidebar-gutter) auto;
+  inset: var(--space-2) var(--sidebar-gutter) var(--sidebar-gutter) auto;
   border-right: 0;
   border-left: 0;
 }
@@ -5995,8 +5995,7 @@ button.message-file:hover:not(:disabled) {
 
   .sidebar {
     --sidebar-edge-inset: calc(var(--sidebar-gutter) + var(--app-safe-area-left));
-    inset: calc(var(--sidebar-gutter) + var(--app-safe-area-top)) auto
-      calc(var(--sidebar-gutter) + var(--app-safe-area-bottom)) var(--sidebar-edge-inset);
+    inset: var(--app-safe-area-top) auto var(--app-safe-area-bottom) var(--sidebar-edge-inset);
     z-index: 80;
     width: min(
       310px,
@@ -6050,8 +6049,7 @@ button.message-file:hover:not(:disabled) {
 
   .app-frame[data-sidebar-side="right"] .sidebar {
     --sidebar-edge-inset: calc(var(--sidebar-gutter) + var(--app-safe-area-right));
-    inset: calc(var(--sidebar-gutter) + var(--app-safe-area-top)) var(--sidebar-edge-inset)
-      calc(var(--sidebar-gutter) + var(--app-safe-area-bottom)) auto;
+    inset: var(--app-safe-area-top) var(--sidebar-edge-inset) var(--app-safe-area-bottom) auto;
     transform: translateX(calc(104% + var(--sidebar-edge-inset)));
   }
 

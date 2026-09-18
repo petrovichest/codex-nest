@@ -81,9 +81,17 @@ for (const { width, side } of [
         const limits = controls.locator(".codex-limits");
         const panel = (await sidebar.boundingBox())!;
         const gutter = width <= 820 ? 8 : 20;
-        expect(panel.y).toBe(gutter);
-        expect(panel.height).toBe(900 - 2 * gutter);
+        expect(panel.y).toBe(width <= 820 ? 0 : 8);
+        expect(panel.height).toBe(width <= 820 ? 900 : 872);
         expect(side === "left" ? panel.x : width - panel.x - panel.width).toBe(gutter);
+        const expectVerticalAlignment = async () => {
+          const panel = (await sidebar.boundingBox())!;
+          const header = (await page.locator(".workspace-header").boundingBox())!;
+          const composer = (await page.locator(".composer-box").boundingBox())!;
+          expect(panel.y).toBe(header.y);
+          expect(panel.y + panel.height).toBe(composer.y + composer.height);
+        };
+        await expectVerticalAlignment();
         await expect(sidebar).toHaveCSS("border-radius", "28px");
         await expect(sidebar).not.toHaveCSS("box-shadow", "none");
         const content = (await page.locator(".content").boundingBox())!;
@@ -150,8 +158,9 @@ for (const { width, side } of [
             const panel = (await sidebar.boundingBox())!;
             const top = (await controls.boundingBox())!;
             const modes = (await switcher.boundingBox())!;
-            expect(panel.y).toBe(28);
-            expect(panel.y + panel.height).toBe(868);
+            expect(panel.y).toBe(20);
+            expect(panel.y + panel.height).toBe(876);
+            await expectVerticalAlignment();
             expect(side === "left" ? panel.x : width - panel.x - panel.width).toBe(
               side === "left" ? 20 : 24,
             );
