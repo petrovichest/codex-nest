@@ -72,7 +72,7 @@ for (const width of [320, 390, 610, 1440]) {
           "12px",
         );
         const metrics = dialog.locator(".fork-mode-metrics");
-        await expect(metrics.first()).toHaveCSS("font-size", "12px");
+        await expect(metrics.first()).toHaveCSS("font-size", "14px");
         for (const card of await dialog.locator(".fork-mode-card").all()) {
           const description = (await card.locator(".fork-mode-description").boundingBox())!;
           const values = card.locator(".fork-mode-metrics");
@@ -145,9 +145,11 @@ for (const theme of ["light", "dark"] as const) {
       expect(bounds.height).toBe(44);
       for (const text of await header.locator("h1, p").all()) {
         await expect(text).toHaveCSS("font-weight", "400");
-        await expect(text).toHaveCSS("font-size", "14px");
-        await expect(text).toHaveCSS("line-height", mobile ? "18px" : "20px");
       }
+      await expect(header.locator("h1")).toHaveCSS("font-size", "16px");
+      await expect(header.locator("h1")).toHaveCSS("line-height", "20px");
+      await expect(header.locator("p")).toHaveCSS("font-size", "14px");
+      await expect(header.locator("p")).toHaveCSS("line-height", mobile ? "18px" : "20px");
       const browser = header.locator(".browser-session-status");
       const refresh = header.locator(".session-refresh");
       const buttonBounds = (await browser.boundingBox())!;

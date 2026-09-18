@@ -736,7 +736,7 @@ test("sidebar typography and actual title animation use fixed geometry and speed
     }),
   );
   expect(new Set(fonts.map((font) => JSON.stringify(font))).size).toBe(1);
-  expect(fonts[0]![0]).toBe("14px");
+  expect(fonts[0]![0]).toBe("16px");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.evaluate(() => document.querySelector("style[data-visual-test-motion]")?.remove());
   for (const mode of ["Проекты", "Активные"]) {

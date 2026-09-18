@@ -121,6 +121,15 @@ for (const theme of ["light", "dark"] as const) {
         }
         const panel = page.locator(".attention-stack");
         await expect(panel).toBeVisible();
+        await expect(panel.locator("legend")).toHaveCSS("font-size", "16px");
+        await expect(panel.locator("label:has(input[type=radio]) > span").first()).toHaveCSS(
+          "font-size",
+          "16px",
+        );
+        await expect(panel.locator("label:has(input[type=radio]) small").first()).toHaveCSS(
+          "font-size",
+          "14px",
+        );
         const activity = page.locator(".turn-activity-row");
         const waitingLabel = language === "ru" ? "Ждёт вашего ответа" : "Waiting for your answer";
         await expect(activity).toContainText(waitingLabel);

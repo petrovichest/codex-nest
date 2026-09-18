@@ -21,13 +21,22 @@ for (const theme of ["light", "dark"] as const) {
           await expect(text).toHaveCSS("font-size", "16px");
           await expect(text).toHaveCSS("line-height", "24px");
         }
-        await expect(page.locator(".workspace-title h1")).toHaveCSS("font-size", "14px");
-        await expect(page.locator(".thread-link-title").first()).toHaveCSS("font-size", "14px");
+        await expect(page.locator("body")).toHaveCSS("font-size", "16px");
+        await expect(page.locator(".workspace-title h1")).toHaveCSS("font-size", "16px");
+        await expect(page.locator(".workspace-title h1")).toHaveCSS("line-height", "20px");
+        await expect(page.locator(".workspace-title p")).toHaveCSS("font-size", "14px");
+        await expect(page.locator(".workspace-title p")).toHaveCSS(
+          "line-height",
+          width <= 820 ? "18px" : "20px",
+        );
+        await expect(page.locator(".thread-link-title").first()).toHaveCSS("font-size", "16px");
         await expect(page.locator(".session-list-mode button").first()).toHaveCSS(
           "font-size",
-          "12px",
+          "16px",
         );
+        await expect(page.locator(".pinned-group-toggle")).toHaveCSS("font-size", "12px");
         await expect(page.locator(".message-footer time").first()).toHaveCSS("font-size", "12px");
+        await expect(page.locator(".model-toggle")).toHaveCSS("font-size", "12px");
         await input.fill("");
         await expect
           .poll(async () => (await page.locator(".composer-box").boundingBox())!.height)
@@ -38,14 +47,35 @@ for (const theme of ["light", "dark"] as const) {
         await expect(dialog.locator(".dialog-heading h2")).toHaveCSS("font-size", "20px");
         await expect(dialog.locator(".model-settings-option strong").first()).toHaveCSS(
           "font-size",
-          "14px",
+          "16px",
         );
         await expect(dialog.locator(".model-settings-option small").first()).toHaveCSS(
           "font-size",
-          "12px",
+          "14px",
         );
         expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        await dialog.locator(".model-settings-option").last().scrollIntoViewIfNeeded();
+        await expect(dialog.locator(".model-settings-option").last()).toBeInViewport();
         await page.keyboard.press("Escape");
+
+        await page
+          .getByRole("button", { name: language === "ru" ? "Показать сведения" : "Show details" })
+          .click();
+        const inspector = page.locator(".session-inspector");
+        await expect(inspector.locator(".inspector-list dt").first()).toHaveCSS(
+          "font-size",
+          "14px",
+        );
+        await expect(inspector.locator("dd:not(.inspector-value-technical)").first()).toHaveCSS(
+          "font-size",
+          "16px",
+        );
+        await expect(inspector.locator(".inspector-value-technical").first()).toHaveCSS(
+          "font-size",
+          "14px",
+        );
+        await expect(inspector.locator("time").first()).toHaveCSS("font-size", "12px");
+        expect(await inspector.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
 
         await page.goto("/settings?section=application");
         await waitForVisualReady(page);
@@ -55,9 +85,14 @@ for (const theme of ["light", "dark"] as const) {
         );
         await expect(page.locator(".settings-row-copy label").first()).toHaveCSS(
           "font-size",
-          "14px",
+          "16px",
         );
-        await expect(page.locator(".settings-row-copy p").first()).toHaveCSS("font-size", "12px");
+        await expect(page.locator(".settings-row-copy p").first()).toHaveCSS("font-size", "14px");
+        expect(
+          await page
+            .locator(".settings-section-tab")
+            .evaluateAll((tabs) => tabs.every((el) => el.scrollWidth <= el.clientWidth)),
+        ).toBe(true);
         const fields = page.locator(
           '.settings-workspace :is(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea)',
         );

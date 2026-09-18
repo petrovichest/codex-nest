@@ -107,10 +107,10 @@ export function SessionInspector({
             <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
               {project?.displayName ?? t("Без проекта")}
             </InspectorRow>
-            <InspectorRow technical icon={<ServerIcon />} label={t("Модель в Codex")}>
+            <InspectorRow icon={<ServerIcon />} label={t("Модель в Codex")}>
               {summary.codexSettings?.model ?? t("Не сообщено")}
             </InspectorRow>
-            <InspectorRow technical icon={<ServerIcon />} label={t("Усилие в Codex")}>
+            <InspectorRow icon={<ServerIcon />} label={t("Усилие в Codex")}>
               {summary.codexSettings?.reasoningEffort ?? t("Не сообщено")}
             </InspectorRow>
             <InspectorRow icon={<ServerIcon />} label={t("Приём сообщений")}>
@@ -124,10 +124,14 @@ export function SessionInspector({
               <GitChangesValue value={gitChanges} />
             </InspectorRow>
             <InspectorRow technical icon={<ClockIcon />} label={t("Создана")}>
-              {formatDate(summary.createdAt, language)}
+              <time dateTime={new Date(summary.createdAt).toISOString()}>
+                {formatDate(summary.createdAt, language)}
+              </time>
             </InspectorRow>
             <InspectorRow technical icon={<ClockIcon />} label={t("Обновлена")}>
-              {formatDate(summary.updatedAt, language)}
+              <time dateTime={new Date(summary.updatedAt).toISOString()}>
+                {formatDate(summary.updatedAt, language)}
+              </time>
             </InspectorRow>
           </dl>
           <div className="inspector-path">

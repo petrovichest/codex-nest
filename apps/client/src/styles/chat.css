@@ -90,6 +90,7 @@
 .thread-workspace:not(.pending-fork-workspace) .workspace-title p {
   max-width: 40%;
   margin: 0;
+  font-size: var(--text-small);
 }
 
 /* One state rule per control family: role selectors below only supply colors.
@@ -287,7 +288,7 @@
 
 .thread-workspace .timeline .attention-heading {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-weight: 400;
 }
 
@@ -1090,6 +1091,10 @@
   .thread-workspace:not(.pending-fork-workspace) .workspace-title :is(h1, p) {
     max-width: 100%;
     line-height: 18px;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+    line-height: 20px;
   }
 
   .thread-workspace:not(.pending-fork-workspace) .timeline {

@@ -57,8 +57,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
-  font-size: var(--text-caption);
-  line-height: 16px;
+  font-size: var(--text-small);
+  line-height: var(--leading-copy);
 }
 .paste-card-chevron {
   transition: transform 150ms ease;

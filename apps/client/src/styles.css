@@ -70,6 +70,7 @@
   inset: var(--space-2) auto var(--sidebar-gutter) var(--sidebar-gutter);
   z-index: 30;
   width: var(--sidebar-width);
+  container: sidebar / inline-size;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -717,7 +718,7 @@
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .status,
@@ -832,7 +833,7 @@
   display: block;
   padding: var(--space-1) var(--space-2-5) 5px var(--space-8);
   color: color-mix(in srgb, var(--muted) 72%, transparent);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .archive-group {
@@ -893,7 +894,7 @@
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-regular);
 }
 
@@ -910,7 +911,23 @@
   justify-content: center;
   gap: 3px;
   padding: 0 var(--space-1);
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
+}
+
+@container sidebar (max-width: 260px) {
+  .session-list-mode {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 48px;
+  }
+
+  .session-list-mode button {
+    padding-inline: var(--space-0-5);
+  }
+
+  .session-list-mode .pinned-group-toggle {
+    gap: var(--space-0-5);
+    padding-inline: 0;
+  }
 }
 
 .pinned-group-toggle span {
@@ -1102,7 +1119,7 @@
   color: var(--warning-text);
   background: color-mix(in srgb, var(--warning) 94%, transparent);
   box-shadow: var(--elevation-overlay);
-  font-size: var(--text-caption);
+  font-size: var(--text-ui);
 }
 
 .offline-banner {
@@ -1121,7 +1138,7 @@
   color: var(--danger);
   background: color-mix(in srgb, var(--danger-soft) 92%, transparent);
   box-shadow: var(--shadow);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .offline-banner button {
@@ -1572,7 +1589,7 @@
   padding: var(--space-3);
   border: 1px solid var(--color-line);
   border-radius: var(--radius-md);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   line-height: var(--leading-copy);
 }
 
@@ -1791,7 +1808,7 @@
   overflow: hidden;
   margin: var(--space-0-5) 0 0;
   color: var(--muted);
-  font: var(--weight-regular) var(--text-caption)/1.3 var(--font-mono);
+  font: var(--weight-regular) var(--text-small)/1.3 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1983,7 +2000,7 @@
   padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .fork-child-link:hover,
@@ -2025,7 +2042,7 @@
 
 .fork-operation-child-copy small {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .fork-child-title {
@@ -2036,7 +2053,7 @@
 
 .fork-child-archived {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .conversation-scroll {
@@ -2070,7 +2087,7 @@
   margin: 0 auto 18px;
   padding: 0 var(--space-3);
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .turn {
@@ -2206,7 +2223,7 @@
 .markdown-table-scroll table {
   min-width: 100%;
   border-collapse: collapse;
-  font-size: var(--text-ui);
+  font-size: var(--text-small);
 }
 
 .markdown-table-scroll th,
@@ -2291,7 +2308,7 @@
 
 .download-link-status {
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   text-decoration: none;
 }
 
@@ -2327,7 +2344,7 @@
 .artifact-viewer-title > span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   line-height: 1.4;
 }
 
@@ -2475,7 +2492,7 @@
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: var(--text-ui);
+  font-size: var(--text-small);
   line-height: var(--leading-message);
 }
 
@@ -2570,7 +2587,7 @@
   text-align: right;
   color: var(--text-strong);
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
   font-weight: var(--weight-action);
   text-align: right;
@@ -2839,7 +2856,7 @@ button.message-file:hover:not(:disabled) {
   background: rgb(18 18 18 / 68%);
   color: #fff;
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2927,7 +2944,7 @@ button.message-file:hover:not(:disabled) {
   border: 0;
   border-radius: 0;
   background: transparent;
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   white-space: nowrap;
 }
 
@@ -3044,7 +3061,7 @@ button.message-file:hover:not(:disabled) {
   align-items: center;
   gap: 7px;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .turn-activity-static {
@@ -3227,7 +3244,7 @@ button.message-file:hover:not(:disabled) {
 .orchestration-notice > ul > li > span {
   flex: none;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .orchestration-notice > ul > li.orchestration-result {
@@ -3277,7 +3294,7 @@ button.message-file:hover:not(:disabled) {
   gap: var(--space-1) var(--space-2);
   min-width: 0;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .orchestration-result-meta strong {
@@ -3305,7 +3322,7 @@ button.message-file:hover:not(:disabled) {
 
 .latest-plan > [role="status"] {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .implement-plan-actions {
@@ -3349,7 +3366,7 @@ button.message-file:hover:not(:disabled) {
   padding-left: var(--space-3);
   border-left: 2px solid var(--color-line-strong);
   color: var(--muted);
-  font-size: var(--text-label);
+  font-size: var(--text-small);
 }
 
 .activity-group > summary {
@@ -3428,7 +3445,7 @@ button.message-file:hover:not(:disabled) {
 
 .activity-title.technical {
   font-family: var(--font-mono);
-  font-size: var(--text-ui);
+  font-size: var(--text-small);
 }
 
 .activity-status {
@@ -3468,7 +3485,7 @@ button.message-file:hover:not(:disabled) {
   padding: 0 var(--space-5) var(--space-2) 27px;
   border-top: 0;
   color: var(--muted-strong);
-  font-size: var(--text-label);
+  font-size: var(--text-small);
 }
 
 .activity-content .path {
@@ -3611,7 +3628,7 @@ button.message-file:hover:not(:disabled) {
   overflow: hidden;
   margin: 0;
   color: var(--muted-strong);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3695,7 +3712,7 @@ button.message-file:hover:not(:disabled) {
   background: var(--composer-surface);
   box-shadow: var(--composer-shadow);
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .settings-picker {
@@ -3717,7 +3734,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-weight: var(--weight-medium);
 }
 
@@ -3866,7 +3883,7 @@ button.message-file:hover:not(:disabled) {
 
 .model-settings-option small {
   color: var(--muted);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   font-weight: var(--weight-regular);
 }
 
@@ -3949,7 +3966,7 @@ button.message-file:hover:not(:disabled) {
 .goal-popover-actions button {
   min-height: 31px;
   padding: 0 var(--space-2-5);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 :is(.composer .skill-autocomplete, .composer .goal-popover, .model-settings-popup) button {
@@ -4057,14 +4074,14 @@ button.message-file:hover:not(:disabled) {
 .composer-file-summary span {
   align-self: end;
   color: var(--text-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-semibold);
 }
 
 .composer-file-summary small {
   align-self: start;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .composer-attachment-preview {
@@ -4421,7 +4438,7 @@ button.message-file:hover:not(:disabled) {
   flex: 1;
   grid-column: 1;
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .queued-message-status {
@@ -4549,12 +4566,12 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-md);
   background: var(--surface-muted);
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .composer-empty-projects button {
   min-height: 30px;
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .new-session-empty {
@@ -4596,7 +4613,7 @@ button.message-file:hover:not(:disabled) {
   width: min(760px, calc(100% - 32px));
   margin: -6px auto var(--space-2-5);
   color: var(--warning-text);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   text-align: center;
 }
 
@@ -4642,7 +4659,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-lg);
   background: var(--surface-raised);
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .subagent-readonly-copy {
@@ -4717,7 +4734,7 @@ button.message-file:hover:not(:disabled) {
   color: var(--color-muted-strong);
   background: transparent;
   box-shadow: none;
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-semibold);
 }
 
@@ -4805,7 +4822,7 @@ button.message-file:hover:not(:disabled) {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4813,8 +4830,12 @@ button.message-file:hover:not(:disabled) {
 
 .inspector-list dd.inspector-value-technical {
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   font-variant-numeric: tabular-nums;
+}
+
+.inspector-list time {
+  font-size: var(--text-caption);
 }
 
 .status-label {
@@ -4843,7 +4864,7 @@ button.message-file:hover:not(:disabled) {
 
 .inspector-path span {
   color: var(--muted);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
 }
 
 .inspector-path code {
@@ -4852,7 +4873,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-sm);
   background: var(--color-recessed);
   overflow-wrap: anywhere;
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   line-height: 1.45;
 }
 
@@ -4937,7 +4958,7 @@ button.message-file:hover:not(:disabled) {
 .inspector-artifact-copy span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .inspector-artifact-download {
@@ -4963,7 +4984,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-md);
   color: var(--color-muted-strong);
   background: var(--color-recessed);
-  font-size: var(--text-caption);
+  font-size: var(--text-ui);
   line-height: 1.4;
 }
 
@@ -4978,7 +4999,7 @@ button.message-file:hover:not(:disabled) {
 .inspector-artifact-error button {
   min-height: 30px;
   padding: 0 var(--space-2-5);
-  font-size: var(--text-caption);
+  font-size: var(--text-ui);
 }
 
 .inspector-artifact-empty {
@@ -5006,12 +5027,12 @@ button.message-file:hover:not(:disabled) {
 
 .inspector-artifact-empty strong {
   color: var(--text-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .inspector-artifact-empty > span:last-child {
   max-width: 260px;
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   line-height: var(--leading-copy);
 }
 
@@ -5099,7 +5120,7 @@ button.message-file:hover:not(:disabled) {
 
 .user-input-progress {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-weight: var(--weight-semibold);
   white-space: nowrap;
 }
@@ -5124,7 +5145,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: 50%;
   color: var(--muted);
   background: color-mix(in srgb, var(--surface) 78%, transparent);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-weight: var(--weight-bold);
   line-height: 1;
 }
@@ -5153,7 +5174,7 @@ button.message-file:hover:not(:disabled) {
 
 .user-input-card legend {
   padding: 0 var(--space-1);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-semibold);
   color: var(--muted-strong);
 }
@@ -5182,7 +5203,7 @@ button.message-file:hover:not(:disabled) {
 
 .user-input-freeform-label {
   margin: var(--space-2) 0 var(--space-1-5);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .user-input-freeform > input {
@@ -5231,7 +5252,7 @@ button.message-file:hover:not(:disabled) {
 .user-input-draft-error {
   margin-top: var(--space-2);
   color: var(--danger);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   line-height: 1.35;
 }
 
@@ -5259,7 +5280,7 @@ button.message-file:hover:not(:disabled) {
 .timer {
   margin-bottom: var(--space-2);
   color: var(--warning-text);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
 }
 
 .policy-change,
@@ -5267,7 +5288,7 @@ button.message-file:hover:not(:disabled) {
 .error-banner {
   padding: var(--space-3);
   border-radius: var(--radius-md);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .policy-change,
@@ -5362,7 +5383,7 @@ button.message-file:hover:not(:disabled) {
 
 .dialog-eyebrow {
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   font-weight: var(--weight-bold);
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -5671,7 +5692,7 @@ button.message-file:hover:not(:disabled) {
 .fork-mode-unavailable {
   grid-column: 1 / -1;
   color: var(--muted);
-  font: 450 var(--text-caption)/1.4 var(--font-ui);
+  font: 450 var(--text-small)/1.4 var(--font-ui);
 }
 
 .dialog-actions.fork-dialog-actions {
@@ -5704,12 +5725,12 @@ button.message-file:hover:not(:disabled) {
 
 .fork-status-banner strong {
   color: var(--text-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .fork-status-banner small {
   color: var(--muted);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
   line-height: 1.4;
 }
 
@@ -5739,7 +5760,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: 999px;
   color: var(--muted);
   background: color-mix(in srgb, var(--surface) 74%, transparent);
-  font-size: var(--text-caption);
+  font-size: var(--text-small);
 }
 
 .compressed-origin-notice svg {
@@ -5774,6 +5795,7 @@ button.message-file:hover:not(:disabled) {
 .dialog-heading p {
   margin: 0;
   color: var(--color-muted);
+  font-size: var(--text-small);
   line-height: var(--leading-copy);
 }
 
@@ -5786,7 +5808,7 @@ button.message-file:hover:not(:disabled) {
   padding: var(--space-3);
   border-radius: var(--radius-md);
   background: var(--color-recessed);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   line-height: var(--leading-copy);
 }
 
@@ -5856,7 +5878,7 @@ button.message-file:hover:not(:disabled) {
   padding: 0 7px;
   border-color: transparent;
   background: transparent;
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .project-breadcrumb button:disabled {
@@ -5880,7 +5902,7 @@ button.message-file:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-medium);
   white-space: nowrap;
 }
@@ -5961,7 +5983,7 @@ button.message-file:hover:not(:disabled) {
   gap: var(--space-2-5);
   padding: var(--space-6);
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   text-align: center;
 }
 
@@ -6937,7 +6959,7 @@ button.message-file:hover:not(:disabled) {
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
-  font-size: var(--text-small);
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 /* Search views use the existing dialog and neutral surface system. */
@@ -7006,7 +7028,7 @@ button.message-file:hover:not(:disabled) {
 }
 
 .search-result-title {
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-semibold);
 }
 

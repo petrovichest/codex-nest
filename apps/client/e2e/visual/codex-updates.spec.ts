@@ -284,6 +284,9 @@ for (const mobile of [false, true]) {
     expect(searches).toHaveLength(0);
     await dialog.getByRole("button", { name: "Найти", exact: true }).click();
     await expect(dialog.getByText("Архивный диалог о поиске")).toBeVisible();
+    await expect(dialog.locator(".search-result-title")).toHaveCSS("font-size", "16px");
+    await expect(dialog.locator(".search-snippet")).toHaveCSS("font-size", "16px");
+    await expect(dialog.locator(".search-context").first()).toHaveCSS("font-size", "14px");
     expect(searches).toHaveLength(2);
     await page.screenshot({ path: testInfo.outputPath("history-search.png") });
     expect(

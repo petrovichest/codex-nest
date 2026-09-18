@@ -1,7 +1,9 @@
 :root {
   /* Application roles. The extension imports tokens.css without this layer. */
   --text-micro: 10px;
-  --text-caption: var(--text-small);
+  --text-caption: 12px;
+  --text-small: 14px;
+  --text-ui: 16px;
   --text-label: var(--text-ui);
   --text-message: var(--text-input);
   --text-section: 18px;
@@ -27,6 +29,7 @@ body {
   background: var(--color-canvas);
   color: var(--color-ink);
   font-size: var(--text-ui);
+  line-height: var(--leading-copy);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -169,7 +172,7 @@ code {
 }
 
 table {
-  font-size: var(--text-ui);
+  font-size: var(--text-small);
 }
 
 pre {
@@ -181,7 +184,7 @@ pre {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--color-recessed) 74%, var(--color-canvas));
   color: var(--color-ink);
-  font-size: var(--text-ui);
+  font-size: var(--text-small);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
