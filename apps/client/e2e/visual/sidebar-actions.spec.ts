@@ -79,6 +79,16 @@ for (const { width, side } of [
         const switcher = sidebar.locator(".session-list-mode");
         const settings = controls.locator(".sidebar-control-action").first();
         const limits = controls.locator(".codex-limits");
+        const panel = (await sidebar.boundingBox())!;
+        const gutter = width <= 820 ? 8 : 20;
+        expect(panel.y).toBe(gutter);
+        expect(panel.height).toBe(900 - 2 * gutter);
+        expect(side === "left" ? panel.x : width - panel.x - panel.width).toBe(gutter);
+        await expect(sidebar).toHaveCSS("border-radius", "28px");
+        await expect(sidebar).not.toHaveCSS("box-shadow", "none");
+        const content = (await page.locator(".content").boundingBox())!;
+        expect(content.x).toBe(width <= 820 || side === "right" ? 0 : 332);
+        expect(content.width).toBe(width <= 820 ? width : width - 332);
         await expect(settings).toHaveCSS("height", "38px");
         await expect(switcher.locator("button").first()).toHaveCSS("height", "34px");
         await expect(settings).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
@@ -98,6 +108,15 @@ for (const { width, side } of [
             "rgba(0, 0, 0, 0)",
           );
           const link = sidebar.locator(".thread-link.active");
+          const selected = switcher.locator('[aria-pressed="true"]');
+          await expect(selected).toHaveCSS(
+            "background-color",
+            await link.evaluate((node) => getComputedStyle(node).backgroundColor),
+          );
+          await expect(selected).toHaveCSS(
+            "box-shadow",
+            await link.evaluate((node) => getComputedStyle(node).boxShadow),
+          );
           const linkBounds = (await link.boundingBox())!;
           const title = (await link.locator(".thread-link-title").boundingBox())!;
           const status = (await link.locator(".status").boundingBox())!;
@@ -121,30 +140,69 @@ for (const { width, side } of [
           await expect(limits).toHaveAttribute("aria-busy", "false");
           await expect(limits).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
           await expect(limits).toHaveCSS("box-shadow", "none");
-          if (width === 320) {
+          if (width <= 390) {
             await page.evaluate(() => {
               document.documentElement.style.setProperty("--safe-area-inset-left", "12px");
               document.documentElement.style.setProperty("--safe-area-inset-right", "16px");
               document.documentElement.style.setProperty("--safe-area-inset-top", "20px");
+              document.documentElement.style.setProperty("--safe-area-inset-bottom", "24px");
             });
             const panel = (await sidebar.boundingBox())!;
             const top = (await controls.boundingBox())!;
             const modes = (await switcher.boundingBox())!;
-            expect(top.x - panel.x).toBe(20);
-            expect(panel.x + panel.width - top.x - top.width).toBeCloseTo(24, 4);
+            expect(panel.y).toBe(28);
+            expect(panel.y + panel.height).toBe(868);
+            expect(side === "left" ? panel.x : width - panel.x - panel.width).toBe(
+              side === "left" ? 20 : 24,
+            );
+            expect(panel.x).toBeGreaterThanOrEqual(20);
+            expect(panel.x + panel.width).toBeLessThanOrEqual(width - 24);
+            expect(top.x - panel.x).toBe(8);
+            expect(panel.x + panel.width - top.x - top.width).toBeCloseTo(8, 4);
             expect(modes.x).toBe(top.x);
             expect(modes.width).toBe(top.width);
-            expect(top.y - panel.y).toBe(28);
+            expect(top.y - panel.y).toBe(8);
             expect(await sidebar.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(
               true,
             );
+
+            // A short reverse swipe must interpolate from the actual inset position,
+            // then return to it. A longer swipe must hide the surface and its shadow.
+            const frame = page.locator(".app-frame");
+            const direction = side === "left" ? -1 : 1;
+            const start = { identifier: 1, clientX: width / 2, clientY: 700 };
+            for (const distance of [40, 120]) {
+              await sidebar.dispatchEvent("touchstart", { touches: [start] });
+              await sidebar.dispatchEvent("touchmove", {
+                touches: [{ ...start, clientX: start.clientX + direction * distance }],
+              });
+              await expect(frame).toHaveClass(/drawer-dragging/);
+              const translated = (await sidebar.boundingBox())!;
+              const edge = side === "left" ? panel.x : width - panel.x - panel.width;
+              const shift = (panel.width * 1.04 + edge) * (distance / panel.width);
+              expect(translated.x).toBeCloseTo(panel.x + direction * shift, 1);
+              await sidebar.dispatchEvent("touchend", { touches: [] });
+              if (distance === 40) {
+                await expect(sidebar).toHaveClass(/open/);
+                expect(await sidebar.boundingBox()).toEqual(panel);
+              }
+            }
+            await expect(sidebar).not.toHaveClass(/open/);
+            await expect(sidebar).toHaveCSS("box-shadow", "none");
+            const hidden = (await sidebar.boundingBox())!;
+            expect(side === "left" ? hidden.x + hidden.width <= 0 : hidden.x >= width).toBe(true);
+            await page.getByRole("button", { name: "Открыть список задач" }).tap();
+            expect(await sidebar.boundingBox()).toEqual(panel);
           }
           return;
         }
 
         const restBounds = await settings.boundingBox();
+        const sessionShadow = await sidebar
+          .locator(".thread-link.active")
+          .evaluate((node) => getComputedStyle(node).boxShadow);
         await settings.hover();
-        await expect(settings).not.toHaveCSS("box-shadow", "none");
+        await expect(settings).toHaveCSS("box-shadow", sessionShadow);
         expect(await settings.boundingBox()).toEqual(restBounds);
         await page.mouse.down();
         await expect(settings).toHaveCSS("box-shadow", /inset/);
@@ -152,12 +210,21 @@ for (const { width, side } of [
         await page.mouse.move(width / 2, 850);
         await page.mouse.up();
         await expect(settings).toHaveCSS("box-shadow", "none");
+        const selected = switcher.locator('[aria-pressed="true"]');
+        const selectedBounds = await selected.boundingBox();
+        await selected.hover();
+        await page.mouse.down();
+        await expect(selected).toHaveCSS("box-shadow", /inset/);
+        expect(await selected.boundingBox()).toEqual(selectedBounds);
+        await page.mouse.up();
+        await page.mouse.move(width / 2, 850);
+        await expect(selected).toHaveCSS("box-shadow", sessionShadow);
         await settings.focus();
         await page.keyboard.press("Tab");
         await page.keyboard.press("Shift+Tab");
         await expect(settings).toBeFocused();
         await expect(settings).toHaveCSS("outline-style", "solid");
-        await expect(settings).not.toHaveCSS("box-shadow", "none");
+        await expect(settings).toHaveCSS("box-shadow", sessionShadow);
         await settings.evaluate((node) => (node as HTMLElement).blur());
         await limits.evaluate((node) => ((node as HTMLButtonElement).disabled = true));
         await limits.hover({ force: true });
@@ -169,6 +236,7 @@ for (const { width, side } of [
           await page.getByRole("button", { name: "Проекты", exact: true }).click();
           await settings.hover();
           await expect(sidebar).toHaveScreenshot(`sidebar-hover-${theme}.png`);
+          await expect(page).toHaveScreenshot(`sidebar-floating-${theme}.png`);
         }
       });
     }

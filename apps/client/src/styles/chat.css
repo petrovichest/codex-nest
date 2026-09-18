@@ -14,7 +14,6 @@
   --chat-check-empty: #ecefe7;
   --chat-radius-control: 16px;
   --chat-radius-card: 20px;
-  --chat-radius-surface: 28px;
   --chat-radius-compact: 24px;
   --chat-radius-checkbox: 7px;
   --chat-radius: var(--chat-radius-surface);

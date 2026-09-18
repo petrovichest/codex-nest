@@ -1820,7 +1820,7 @@ describe("App routing and navigation", () => {
       scrollWidth: { configurable: true, value: 160 },
     });
 
-    fireEvent.mouseEnter(overflowingLink);
+    fireEvent.mouseEnter(overflowingLink.parentElement!.querySelector("summary")!);
     fireEvent.mouseEnter(fittingLink);
 
     expect(overflowingTitle).toHaveAttribute("data-overflowing", "true");
@@ -4500,6 +4500,7 @@ describe("App routing and navigation", () => {
     const view = renderApp("/threads/newer");
     const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
     const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    sidebar.style.right = "24px";
     vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
       ...sidebar.getBoundingClientRect(),
       width: 300,
@@ -4508,9 +4509,9 @@ describe("App routing and navigation", () => {
     fireEvent.touchStart(frame, { touches: [{ clientX: 220, clientY: 200 }] });
     fireEvent.touchMove(frame, { touches: [{ clientX: 120, clientY: 204 }] });
     expect(frame).toHaveClass("drawer-dragging");
-    expect(
-      Number.parseFloat(frame.style.getPropertyValue("--drawer-drag-translate")),
-    ).toBeGreaterThan(0);
+    expect(Number.parseFloat(frame.style.getPropertyValue("--drawer-drag-translate"))).toBeCloseTo(
+      (300 * 1.04 + 24) * (1 - 100 / 300),
+    );
     fireEvent.touchEnd(frame, { touches: [] });
     expect(sidebar).toHaveClass("open");
 

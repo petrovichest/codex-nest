@@ -2170,6 +2170,7 @@ function ThreadLink({
       <div
         className="thread-branch-row"
         style={{ "--thread-action-count": actionCount } as CSSProperties}
+        onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
         onPointerDownCapture={() => {
           keyboardActionsRef.current = false;
         }}
@@ -2205,7 +2206,6 @@ function ThreadLink({
           end
           state={{ focusComposer: true }}
           to={target}
-          onMouseEnter={() => prepareThreadTitleScroll(titleRef.current)}
           onClick={(event) => {
             if (
               location.pathname === target &&

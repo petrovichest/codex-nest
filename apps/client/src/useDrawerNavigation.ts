@@ -20,6 +20,7 @@ type Gesture = {
   startX: number;
   startY: number;
   drawerWidth: number;
+  hiddenDistance: number;
   distance: number;
   active: boolean;
   startedOpen: boolean;
@@ -87,10 +88,14 @@ export function useDrawerNavigation({
       const touch = event.touches[0];
       const measuredWidth = sidebarRef.current?.getBoundingClientRect().width ?? 0;
       const drawerWidth = measuredWidth || Math.min(310, window.innerWidth * 0.88);
+      const edgeInset = sidebarRef.current
+        ? Number.parseFloat(getComputedStyle(sidebarRef.current)[side]) || 0
+        : 0;
       gestureRef.current = {
         startX: touch.clientX,
         startY: touch.clientY,
         drawerWidth,
+        hiddenDistance: drawerWidth * 1.04 + edgeInset,
         distance: 0,
         active: false,
         startedOpen: openRef.current,
@@ -126,7 +131,7 @@ export function useDrawerNavigation({
       const distanceProgress = gesture.distance / gesture.drawerWidth;
       const visibleProgress = gesture.startedOpen ? 1 - distanceProgress : distanceProgress;
       const hiddenDirection = side === "left" ? -1 : 1;
-      const translate = hiddenDirection * gesture.drawerWidth * 1.04 * (1 - visibleProgress);
+      const translate = hiddenDirection * gesture.hiddenDistance * (1 - visibleProgress);
       frame!.style.setProperty("--drawer-drag-translate", `${translate}px`);
       frame!.style.setProperty("--drawer-drag-progress", String(visibleProgress));
     }

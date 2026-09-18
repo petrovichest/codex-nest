@@ -737,27 +737,48 @@ test("sidebar typography and actual title animation use fixed geometry and speed
   expect(fonts[0]![0]).toBe("14px");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.evaluate(() => document.querySelector("style[data-visual-test-motion]")?.remove());
-  const row = page.locator('a[href="/threads/session-main"]').locator("..");
-  const title = row.locator(".thread-link-title");
-  const before = await geometry(title);
-  await title.hover();
-  const speed = await title.evaluate((el) => {
-    const animation = el.getAnimations()[0]!;
-    animation.pause();
-    animation.currentTime = 0;
-    const start = parseFloat(getComputedStyle(el).textIndent);
-    animation.currentTime = 200;
-    const end = parseFloat(getComputedStyle(el).textIndent);
-    return Math.abs(end - start) / 0.2;
-  });
-  expect(speed).toBeCloseTo(45, 1);
-  unchanged(before, await geometry(title));
-  const rowBefore = await geometry(row);
-  await row.locator("summary").click();
-  unchanged(rowBefore, await geometry(row));
-  await page.keyboard.press("Escape");
-  await expect(row.locator("summary")).toBeFocused();
-  unchanged(before, await geometry(title));
+  for (const mode of ["Проекты", "Активные"]) {
+    await page.getByRole("button", { name: mode, exact: true }).click();
+    await page.mouse.move(1000, 850);
+    const row = page.locator('a[href="/threads/session-main"]').locator("..");
+    const title = row.locator(".thread-link-title");
+    const before = await geometry(title);
+    // Enter via the menu before the title has ever received a mouseenter.
+    const menu = (await row.locator("summary").boundingBox())!;
+    await page.mouse.move(menu.x + menu.width / 2, menu.y + menu.height / 2);
+    await expect(title).toHaveAttribute("data-overflowing", "true");
+    for (const target of [row.locator("summary"), title, title]) {
+      await target.hover();
+      const speed = await title.evaluate((el) => {
+        const animation = el.getAnimations()[0]!;
+        animation.pause();
+        animation.currentTime = 0;
+        const start = parseFloat(getComputedStyle(el).textIndent);
+        animation.currentTime = 200;
+        const end = parseFloat(getComputedStyle(el).textIndent);
+        return Math.abs(end - start) / 0.2;
+      });
+      expect(speed).toBeCloseTo(45, 1);
+      unchanged(before, await geometry(title));
+      await page.mouse.move(1000, 850);
+      await expect(title).toHaveCSS("text-indent", "0px");
+      // Hovering the row reveals the action target again.
+      const box = (await target.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    }
+    const rowBefore = await geometry(row);
+    await row.locator("summary").click();
+    unchanged(rowBefore, await geometry(row));
+    await page.keyboard.press("Escape");
+    await expect(row.locator("summary")).toBeFocused();
+    unchanged(before, await geometry(title));
+  }
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.locator('a[href="/threads/session-main"] .thread-link-title').hover();
+  await expect(page.locator('a[href="/threads/session-main"] .thread-link-title')).toHaveCSS(
+    "animation-name",
+    "none",
+  );
 });
 
 test.describe("compact mobile controls", () => {

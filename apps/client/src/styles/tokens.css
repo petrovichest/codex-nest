@@ -75,6 +75,7 @@
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
+  --chat-radius-surface: 28px;
   --control-height: 34px;
   --control-touch-height: 32px;
   --elevation-overlay: 0 10px 32px rgb(28 30 27 / 9%), 0 1px 3px rgb(28 30 27 / 7%);

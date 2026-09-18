@@ -39,6 +39,9 @@
 }
 
 .app-frame {
+  --sidebar-gutter: var(--space-5);
+  --sidebar-footprint: calc(var(--sidebar-width) + 2 * var(--sidebar-gutter));
+
   width: 100%;
   height: 100dvh;
   overflow: hidden;
@@ -46,37 +49,42 @@
 }
 
 .sidebar {
+  --sidebar-panel: #f8f9f6;
+  --sidebar-panel-shadow: 0 24px 52px rgb(39 50 26 / 19%), 0 5px 14px rgb(39 50 26 / 8%);
   --sidebar-surface: #f8f9f6;
   --sidebar-control-active: #eceee8;
   --sidebar-surface-shadow: 0 12px 32px rgb(39 50 26 / 9%), 0 3px 12px rgb(39 50 26 / 4%);
-  --sidebar-control-shadow: 0 5px 14px rgb(39 50 26 / 10%), 0 2px 4px rgb(39 50 26 / 5%);
   --sidebar-pressed-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
   --sidebar-radius-row: 18px;
   --sidebar-radius-menu: 20px;
   --sidebar-inset-left: var(--space-2);
   --sidebar-inset-right: var(--space-2);
   --sidebar-button-rest: transparent;
+  --sidebar-button-rest-shadow: none;
   --sidebar-button-hover: var(--sidebar-surface);
   --sidebar-button-pressed: var(--sidebar-control-active);
   --sidebar-button-ink: var(--muted-strong);
   --sidebar-button-hover-ink: var(--text-strong);
 
   position: fixed;
-  inset: 0 auto 0 0;
+  inset: var(--sidebar-gutter) auto var(--sidebar-gutter) var(--sidebar-gutter);
   z-index: 30;
   width: var(--sidebar-width);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--color-canvas);
+  background: var(--sidebar-panel);
   border: 0;
+  border-radius: var(--chat-radius-surface);
+  box-shadow: var(--sidebar-panel-shadow);
 }
 
 :root[data-resolved-theme="dark"] .sidebar {
+  --sidebar-panel: #242722;
+  --sidebar-panel-shadow: 0 24px 52px rgb(0 0 0 / 48%), 0 5px 14px rgb(0 0 0 / 26%);
   --sidebar-surface: #292c28;
   --sidebar-control-active: #363a33;
   --sidebar-surface-shadow: 0 12px 34px rgb(0 0 0 / 27%), 0 3px 14px rgb(0 0 0 / 10%);
-  --sidebar-control-shadow: 0 5px 14px rgb(0 0 0 / 30%), 0 2px 4px rgb(0 0 0 / 20%);
   --sidebar-pressed-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
 }
 
@@ -84,8 +92,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0 var(--sidebar-inset-right) calc(18px + var(--app-safe-area-bottom))
-    var(--sidebar-inset-left);
+  padding: 0 var(--sidebar-inset-right) 18px var(--sidebar-inset-left);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--muted) 25%, transparent) transparent;
 }
@@ -514,6 +521,8 @@
 }
 
 .thread-pin-action.pinned {
+  --sidebar-button-rest: var(--sidebar-surface);
+  --sidebar-button-rest-shadow: var(--sidebar-surface-shadow);
   --sidebar-button-ink: var(--text-strong);
 }
 
@@ -880,8 +889,8 @@
 }
 
 .session-list-mode button[aria-pressed="true"] {
-  --sidebar-button-rest: var(--sidebar-control-active);
-  --sidebar-button-hover: var(--sidebar-control-active);
+  --sidebar-button-rest: var(--sidebar-surface);
+  --sidebar-button-rest-shadow: var(--sidebar-surface-shadow);
   --sidebar-button-ink: var(--text-strong);
   font-weight: var(--weight-medium);
 }
@@ -927,8 +936,8 @@
 }
 
 .sidebar-control-action.active {
-  --sidebar-button-rest: var(--sidebar-control-active);
-  --sidebar-button-hover: var(--sidebar-control-active);
+  --sidebar-button-rest: var(--sidebar-surface);
+  --sidebar-button-rest-shadow: var(--sidebar-surface-shadow);
 }
 
 .sidebar-control-action svg {
@@ -967,8 +976,8 @@
 }
 
 .app-update-indicator.active {
-  --sidebar-button-rest: var(--sidebar-control-active);
-  --sidebar-button-hover: var(--sidebar-control-active);
+  --sidebar-button-rest: var(--sidebar-surface);
+  --sidebar-button-rest-shadow: var(--sidebar-surface-shadow);
 }
 
 .app-update-indicator.update-available {
@@ -999,7 +1008,7 @@
   border: 0;
   border-radius: 999px;
   background: var(--sidebar-button-rest);
-  box-shadow: none;
+  box-shadow: var(--sidebar-button-rest-shadow);
   color: var(--sidebar-button-ink);
   transition:
     background-color var(--motion-fast) var(--motion-ease),
@@ -1009,21 +1018,21 @@
 
   &:is(:hover, :active, :disabled, [aria-disabled="true"]) {
     background: var(--sidebar-button-rest);
-    box-shadow: none;
+    box-shadow: var(--sidebar-button-rest-shadow);
     color: var(--sidebar-button-ink);
   }
 
   @media (hover: hover) {
     &:hover:not(:disabled, [aria-disabled="true"]) {
       background: var(--sidebar-button-hover);
-      box-shadow: var(--sidebar-control-shadow);
+      box-shadow: var(--sidebar-surface-shadow);
       color: var(--sidebar-button-hover-ink);
     }
   }
 
   &:focus-visible:not(:disabled, [aria-disabled="true"]) {
     background: var(--sidebar-button-hover);
-    box-shadow: var(--sidebar-control-shadow);
+    box-shadow: var(--sidebar-surface-shadow);
     color: var(--sidebar-button-hover-ink);
   }
 
@@ -1047,24 +1056,24 @@
 
 .content {
   height: 100dvh;
-  margin-left: var(--sidebar-width);
+  margin-left: var(--sidebar-footprint);
   overflow: hidden;
   background: var(--color-canvas);
 }
 
 .app-frame[data-sidebar-side="right"] .sidebar {
-  inset: 0 0 0 auto;
+  inset: var(--sidebar-gutter) var(--sidebar-gutter) var(--sidebar-gutter) auto;
   border-right: 0;
   border-left: 0;
 }
 
 .app-frame[data-sidebar-side="right"] .content {
-  margin-right: var(--sidebar-width);
+  margin-right: var(--sidebar-footprint);
   margin-left: 0;
 }
 
 .app-frame[data-sidebar-side="right"] .http-warning {
-  left: calc(50% - var(--sidebar-width));
+  left: calc((100% - var(--sidebar-footprint)) / 2);
 }
 
 .app-frame[data-sidebar-side="right"] .mobile-nav-toggle svg {
@@ -1074,7 +1083,7 @@
 .http-warning {
   position: fixed;
   top: 8px;
-  left: calc(var(--sidebar-width) + 50%);
+  left: calc((100% + var(--sidebar-footprint)) / 2);
   z-index: 80;
   transform: translateX(-50%);
   max-width: 520px;
@@ -3871,7 +3880,7 @@ button.message-file:hover:not(:disabled) {
   bottom: calc(100% + 10px);
   left: auto;
   z-index: 65;
-  width: min(360px, calc(100vw - var(--sidebar-width) - 60px));
+  width: min(360px, calc(100vw - var(--sidebar-footprint) - 60px));
   display: grid;
   gap: var(--space-2-5);
   padding: 15px;
@@ -5947,7 +5956,7 @@ button.message-file:hover:not(:disabled) {
     right: 0;
     bottom: 0;
     z-index: 60;
-    width: min(352px, calc(100vw - var(--sidebar-width)));
+    width: min(352px, calc(100vw - var(--sidebar-footprint)));
     max-width: 352px;
     margin: 0;
     box-shadow: var(--shadow);
@@ -5955,7 +5964,7 @@ button.message-file:hover:not(:disabled) {
 
   .inspector-backdrop {
     position: fixed;
-    inset: 0 0 0 var(--sidebar-width);
+    inset: 0 0 0 var(--sidebar-footprint);
     z-index: 55;
     display: block;
     width: auto;
@@ -5966,11 +5975,11 @@ button.message-file:hover:not(:disabled) {
   }
 
   .app-frame[data-sidebar-side="right"] .session-inspector {
-    right: var(--sidebar-width);
+    right: var(--sidebar-footprint);
   }
 
   .app-frame[data-sidebar-side="right"] .inspector-backdrop {
-    inset: 0 var(--sidebar-width) 0 0;
+    inset: 0 var(--sidebar-footprint) 0 0;
   }
 }
 
@@ -5979,14 +5988,25 @@ button.message-file:hover:not(:disabled) {
     --header-height: calc(56px + var(--app-safe-area-top));
   }
 
+  .app-frame {
+    --sidebar-gutter: var(--space-2);
+    --sidebar-footprint: 0px;
+  }
+
   .sidebar {
-    --sidebar-inset-left: calc(var(--space-2) + var(--app-safe-area-left));
-    --sidebar-inset-right: calc(var(--space-2) + var(--app-safe-area-right));
+    --sidebar-edge-inset: calc(var(--sidebar-gutter) + var(--app-safe-area-left));
+    inset: calc(var(--sidebar-gutter) + var(--app-safe-area-top)) auto
+      calc(var(--sidebar-gutter) + var(--app-safe-area-bottom)) var(--sidebar-edge-inset);
     z-index: 80;
-    width: min(310px, 88vw);
-    padding-top: var(--app-safe-area-top);
-    transform: translateX(-104%);
-    box-shadow: var(--shadow);
+    width: min(
+      310px,
+      88vw,
+      calc(
+        100vw - 2 * var(--sidebar-gutter) - var(--app-safe-area-left) - var(--app-safe-area-right)
+      )
+    );
+    transform: translateX(calc(-104% - var(--sidebar-edge-inset)));
+    box-shadow: none;
     transition: transform 180ms ease;
     will-change: transform;
   }
@@ -6025,10 +6045,14 @@ button.message-file:hover:not(:disabled) {
 
   .sidebar.open {
     transform: translateX(0);
+    box-shadow: var(--sidebar-panel-shadow);
   }
 
   .app-frame[data-sidebar-side="right"] .sidebar {
-    transform: translateX(104%);
+    --sidebar-edge-inset: calc(var(--sidebar-gutter) + var(--app-safe-area-right));
+    inset: calc(var(--sidebar-gutter) + var(--app-safe-area-top)) var(--sidebar-edge-inset)
+      calc(var(--sidebar-gutter) + var(--app-safe-area-bottom)) auto;
+    transform: translateX(calc(104% + var(--sidebar-edge-inset)));
   }
 
   .app-frame[data-sidebar-side="right"] .sidebar.open {
@@ -6049,8 +6073,9 @@ button.message-file:hover:not(:disabled) {
     transition: opacity 180ms ease;
   }
 
-  .app-frame.drawer-dragging .sidebar {
+  .app-frame[data-sidebar-side].drawer-dragging .sidebar {
     transform: translateX(var(--drawer-drag-translate, -104%));
+    box-shadow: var(--sidebar-panel-shadow);
     transition: none;
   }
 
