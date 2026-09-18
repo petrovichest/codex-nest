@@ -3406,6 +3406,163 @@ describe("AppProjection", () => {
     },
   );
 
+  it.each(["completed", "failed", "interrupted", "stop"] as const)(
+    "retires questions on %s and rejects late requests without answering them",
+    async (outcome) => {
+      const { store, bridge, attention, projection, transport, receive, events } =
+        await createUserInputLifecycleHarness();
+      const request = receive();
+      await projection.updateUserInputDraft(request, {
+        answers: { choice: ["Unsent answer"] },
+        currentQuestionId: "choice",
+      });
+      if (outcome === "stop") {
+        await projection.markInterrupted("one", ["question-turn"]);
+      } else {
+        bridge.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "one",
+            turn: { ...testTurn("question-turn", "completed"), status: outcome },
+          },
+        } satisfies ServerNotification);
+      }
+      // This can race the asynchronous draft cleanup in turn/completed.
+      const racing = receive();
+      expect(attention.get(racing.id)).toBeUndefined();
+      await vi.waitFor(() => expect(projection.summary("one")?.currentTurnId).toBeNull());
+      expect(attention.get(request.id)).toBeUndefined();
+      expect(store.view().threadMeta.one?.userInputDrafts).toBeUndefined();
+      expect(events).toContainEqual({ type: "attention.removed", attentionId: request.id });
+
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "one", turn: testTurn("new-turn", "inProgress") },
+      } satisfies ServerNotification);
+      const newer = receive("new-turn");
+      const late = receive();
+      expect(attention.list()).toEqual([newer]);
+      expect(projection.summary("one")).toMatchObject({
+        currentTurnId: "new-turn",
+        state: "needsAttention",
+      });
+      expect(events).not.toContainEqual(
+        expect.objectContaining({
+          type: "attention.upserted",
+          attention: expect.objectContaining({ id: late.id }),
+        }),
+      );
+      expect(transport.respond).not.toHaveBeenCalled();
+      expect(transport.respondError).not.toHaveBeenCalled();
+      expect(bridge.request).not.toHaveBeenCalled();
+      expect(store.view().threadMeta.one?.timelineArtifacts).toBeUndefined();
+      await store.flushed();
+    },
+  );
+
+  it.each(["notification", "stop"] as const)(
+    "a late %s only retires questions belonging to the old turn",
+    async (source) => {
+      const { store, bridge, attention, projection, transport, receive } =
+        await createUserInputLifecycleHarness();
+      const old = receive();
+      const other = receive("question-turn", "two");
+      const newer = receive("new-turn");
+      await projection.updateUserInputDraft(newer, {
+        answers: { choice: ["Keep this draft"] },
+        currentQuestionId: "choice",
+      });
+      if (source === "stop") {
+        await projection.markInterrupted("one", ["question-turn"]);
+      } else {
+        bridge.emit("notification", {
+          method: "turn/completed",
+          params: { threadId: "one", turn: testTurn("question-turn", "completed") },
+        } satisfies ServerNotification);
+      }
+      await vi.waitFor(() => expect(attention.get(old.id)).toBeUndefined());
+      expect(attention.list()).toEqual([other, newer]);
+      expect(projection.summary("one")?.currentTurnId).toBe("new-turn");
+      expect(Object.values(store.view().threadMeta.one?.userInputDrafts ?? {})).toMatchObject([
+        { turnId: "new-turn", answers: { choice: ["Keep this draft"] } },
+      ]);
+      expect(transport.respond).not.toHaveBeenCalled();
+      expect(bridge.request).not.toHaveBeenCalled();
+      await store.flushed();
+    },
+  );
+
+  it("cleans up historical questions while preserving active and unloaded turns", async () => {
+    const { store, bridge, attention, projection, receive } =
+      await createUserInputLifecycleHarness();
+    const old = receive();
+    await projection.updateUserInputDraft(old, {
+      answers: { choice: ["Old draft"] },
+      currentQuestionId: "choice",
+    });
+    const unloaded = receive("unloaded-turn");
+    const newer = receive("new-turn");
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/turns/list") {
+        return {
+          data: [testTurn("new-turn", "inProgress"), testTurn("question-turn", "completed")],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+
+    const detail = await projection.readThread("one");
+    expect(detail.summary.currentTurnId).toBe("new-turn");
+    expect(attention.list()).toEqual([unloaded, newer]);
+    expect(store.view().threadMeta.one?.userInputDrafts).toBeUndefined();
+    const replayed = receive();
+    expect(attention.get(replayed.id)).toBeUndefined();
+    await projection.readThread("one");
+    expect(attention.list()).toEqual([unloaded, newer]);
+    expect(bridge.request).toHaveBeenCalledTimes(1);
+    await store.flushed();
+  });
+
+  it("retires replayed questions during connection recovery", async () => {
+    const { store, bridge, attention, projection, receive } =
+      await createUserInputLifecycleHarness();
+    const request = receive();
+    await projection.updateUserInputDraft(request, {
+      answers: { choice: ["Old draft"] },
+      currentQuestionId: "choice",
+    });
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/list")
+        return {
+          data: params.archived
+            ? []
+            : [thread("one", "/work", 10, { type: "active", activeFlags: [] })],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      if (method === "thread/loaded/list" || method === "model/list")
+        return { data: [], nextCursor: null };
+      if (method === "thread/goal/get") return { goal: null };
+      if (method === "thread/resume")
+        return {
+          thread: thread("one", "/work", 10, { type: "idle" }, [
+            testTurn("question-turn", "completed"),
+          ]),
+        };
+      throw new Error(`Unexpected ${method}`);
+    });
+    await projection.sync();
+    expect(attention.list()).toEqual([]);
+    expect(store.view().threadMeta.one?.userInputDrafts).toBeUndefined();
+    expect(attention.get(receive().id)).toBeUndefined();
+    expect(bridge.request.mock.calls.some(([method]) => method === "thread/turns/list")).toBe(
+      false,
+    );
+    await store.flushed();
+  });
+
   it("persists, enriches, reattaches, fingerprints, and cleans up user-input drafts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);
@@ -3528,10 +3685,13 @@ describe("AppProjection", () => {
       expect(reloadedStore.snapshot().threadMeta.one?.userInputDrafts).toBeUndefined(),
     );
 
-    const deleted = replayAttention.receive(userInputServerRequest(706), {
-      respond: vi.fn(),
-      respondError: vi.fn(),
-    } as unknown as JsonlTransport);
+    const deleted = replayAttention.receive(
+      userInputServerRequest(706, "Which one?", "next-turn"),
+      {
+        respond: vi.fn(),
+        respondError: vi.fn(),
+      } as unknown as JsonlTransport,
+    );
     if (deleted.kind !== "userInput") throw new Error("Expected user input");
     await replayProjection.updateUserInputDraft(deleted, {
       answers: { choice: ["Delete"] },
@@ -5425,13 +5585,42 @@ describe("AppProjection", () => {
   });
 });
 
-function userInputServerRequest(id: number, question = "Which one?"): ServerRequest {
+async function createUserInputLifecycleHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-input-lifecycle-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  const bridge = new FakeBridge();
+  const attention = new AttentionManager();
+  const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+  projection.upsertThread(thread("one", "/work", 10));
+  const transport = { respond: vi.fn(), respondError: vi.fn() };
+  let nextRpcId = 900;
+  const receive = (turnId = "question-turn", threadId = "one") => {
+    const request = attention.receive(
+      userInputServerRequest(nextRpcId++, "Which one?", turnId, threadId),
+      transport as unknown as JsonlTransport,
+    );
+    if (request.kind !== "userInput") throw new Error("Expected user input");
+    return request;
+  };
+  const events: ServerEvent[] = [];
+  projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+  return { store, bridge, attention, projection, transport, receive, events };
+}
+
+function userInputServerRequest(
+  id: number,
+  question = "Which one?",
+  turnId = "question-turn",
+  threadId = "one",
+): ServerRequest {
   return {
     method: "item/tool/requestUserInput",
     id,
     params: {
-      threadId: "one",
-      turnId: "question-turn",
+      threadId,
+      turnId,
       itemId: "question-item",
       autoResolutionMs: null,
       questions: [

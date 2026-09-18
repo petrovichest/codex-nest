@@ -7716,6 +7716,58 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
 }
 
 describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
+  it("starts a follow-up after interrupting a question without restoring its form", async () => {
+    const { app, bridge, headers, store, projection, attention } =
+      await createForkHarness(deliveryVersion);
+    try {
+      await projection.setCurrentTurn("thread", "turn");
+      const respond = vi.fn();
+      const pending = attention.receive(dismissibleQuestion("question"), {
+        respond,
+      } as unknown as JsonlTransport);
+      if (pending.kind !== "userInput") throw new Error("Expected question");
+      await projection.updateUserInputDraft(pending, {
+        answers: { choice: ["Unsent answer"] },
+        currentQuestionId: "choice",
+      });
+      const stopped = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/interrupt",
+        headers,
+        payload: { turnId: "turn" },
+      });
+      expect(stopped.statusCode).toBe(204);
+      expect(attention.get(pending.id)).toBeUndefined();
+
+      const message = {
+        method: "POST" as const,
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: {
+          input: "Use my new instructions",
+          clientMessageId: "after-interruption",
+          dismissUserInput: { turnId: "turn", itemId: "question" },
+        },
+      };
+      expect((await app.inject(message)).statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.view().messageReceipts?.["after-interruption"]?.turnId).toBeTruthy(),
+      );
+      expect((await app.inject(message)).statusCode).toBe(202);
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
+        1,
+      );
+      expect(bridge.request.mock.calls.filter(([method]) => method === "turn/steer")).toHaveLength(
+        0,
+      );
+      expect(projection.snapshot().attention).toEqual([]);
+      expect(store.view().threadMeta.thread?.userInputDrafts).toBeUndefined();
+      expect(respond).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it.each([true, false])(
     "dismisses a question (blocking=%s) and delivers the new instruction once",
     async (isBlocking) => {

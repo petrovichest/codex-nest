@@ -184,6 +184,16 @@ export class AppProjection extends EventEmitter {
     });
     attention.on("upserted", (request) => {
       const cached = request.threadId ? this.threads.get(request.threadId) : undefined;
+      if (request.kind === "userInput" && request.threadId && request.turnId) {
+        const knownTurns = [
+          cached?.thread.turns.find((turn) => turn.id === request.turnId),
+          this.turnStates.get(turnKey(request.threadId, request.turnId)),
+        ];
+        if (knownTurns.some((turn) => turn && turn.status !== "inProgress")) {
+          this.attention.expire(request.id);
+          return;
+        }
+      }
       if (cached && request.turnId) {
         cached.currentTurnId = request.turnId;
         cached.liveOutcome = undefined;
@@ -765,6 +775,10 @@ export class AppProjection extends EventEmitter {
           (cached.threadUpdatedAt === threadUpdatedAt &&
             cached.historyRevision === this.historyRevision(id)))
       ) {
+        for (const turn of cached.turns) {
+          if (turn.status !== "inProgress") this.turnStates.set(turnKey(id, turn.id), turn);
+        }
+        await this.clearCompletedUserInputs(id, cached.turns);
         return cached;
       }
     }
@@ -833,6 +847,7 @@ export class AppProjection extends EventEmitter {
       nextCursor: response.nextCursor,
       backwardsCursor: response.backwardsCursor ?? null,
     };
+    await this.clearCompletedUserInputs(id, page.turns);
     if (
       canReadCache &&
       local.thread.updatedAt * 1_000 === threadUpdatedAt &&
@@ -1190,6 +1205,7 @@ export class AppProjection extends EventEmitter {
       await this.setCurrentTurn(threadId, source.id);
     }
     this.replaceTurnState(threadId, source.id, { source, publish: true });
+    await this.clearCompletedUserInputs(threadId, [source]);
     await this.saveSessionSnapshot(threadId, true);
   }
 
@@ -1215,6 +1231,16 @@ export class AppProjection extends EventEmitter {
   async markInterrupted(threadId: string, expectedTurnIds: readonly string[]): Promise<void> {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
+    for (const turnId of expectedTurnIds) {
+      const source = cached.thread.turns.find((turn) => turn.id === turnId);
+      if (source?.status === "inProgress") source.status = "interrupted";
+      this.replaceTurnState(threadId, turnId);
+      const turn = this.turnStates.get(turnKey(threadId, turnId))!;
+      if (turn.status === "inProgress") turn.status = "interrupted";
+    }
+    await Promise.all(
+      expectedTurnIds.map((turnId) => this.clearUserInputsForTurn(threadId, turnId)),
+    );
     if (cached.currentTurnId && !expectedTurnIds.includes(cached.currentTurnId)) return;
     const interruptedTextActivities = new Map(
       expectedTurnIds.map((turnId) => [
@@ -1828,6 +1854,7 @@ export class AppProjection extends EventEmitter {
         goalStatus: liveGoalStatus === undefined ? restoredGoalStatus : liveGoalStatus,
       });
       this.hydrateLiveTurn(latestThread);
+      await this.clearCompletedUserInputs(thread.id, latestThread.turns);
     }
     for (const thread of archived) {
       if (this.removedThreads.has(thread.id)) continue;
@@ -2432,9 +2459,7 @@ export class AppProjection extends EventEmitter {
   ): Promise<{ historyChanged: boolean } | null> {
     if (turn.status === "inProgress") return null;
     this.flushActivityDeltas(threadId, turn.id);
-    await this.clearUserInputDraftsForTurn(threadId, turn.id);
     const cached = this.threads.get(threadId);
-    if (recovered && cached?.currentTurnId !== turn.id) return null;
     const outcome = normalizeOutcome(turn.status);
     const interruptedTextActivities =
       outcome === "interrupted"
@@ -2448,6 +2473,8 @@ export class AppProjection extends EventEmitter {
         cached.thread.turns.push(turn);
       }
     }
+    await this.clearUserInputsForTurn(threadId, turn.id);
+    if (recovered && cached?.currentTurnId !== turn.id) return null;
     if (cached?.currentTurnId && cached.currentTurnId !== turn.id) return null;
     if (cached) {
       cached.currentTurnId = null;
@@ -3172,7 +3199,25 @@ export class AppProjection extends EventEmitter {
     });
   }
 
-  private async clearUserInputDraftsForTurn(threadId: string, turnId: string): Promise<void> {
+  private async clearCompletedUserInputs(
+    threadId: string,
+    turns: readonly { id: string; status: Turn["status"] }[],
+  ): Promise<void> {
+    for (const turn of turns) {
+      if (turn.status !== "inProgress") await this.clearUserInputsForTurn(threadId, turn.id);
+    }
+  }
+
+  private async clearUserInputsForTurn(threadId: string, turnId: string): Promise<void> {
+    for (const request of this.attention.list()) {
+      if (
+        request.kind === "userInput" &&
+        request.threadId === threadId &&
+        request.turnId === turnId
+      ) {
+        this.attention.expire(request.id);
+      }
+    }
     const existing = this.store.view().threadMeta[threadId]?.userInputDrafts;
     if (!existing || !Object.values(existing).some((draft) => draft.turnId === turnId)) return;
     await this.store.update((state) => {

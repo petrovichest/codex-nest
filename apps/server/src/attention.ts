@@ -73,7 +73,7 @@ export class AttentionManager extends EventEmitter {
     return found[1].request;
   }
 
-  /** Retire a question already answered through the durable command route. */
+  /** Retire a request without answering its RPC (e.g. after its turn ends). */
   expire(id: string): AttentionRequest | null {
     const pending = this.pending.get(id);
     if (!pending) return null;
