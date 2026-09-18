@@ -123,8 +123,14 @@ for (const theme of ["light", "dark"] as const) {
       const expectAligned = async () => {
         const panel = (await header.boundingBox())!;
         const composer = (await page.locator(".composer-box").boundingBox())!;
-        expect(panel.x).toBeCloseTo(composer.x, 1);
-        expect(panel.width).toBeCloseTo(composer.width, 1);
+        if (mobile) {
+          expect(panel.x).toBeCloseTo(composer.x, 1);
+          expect(panel.width).toBeCloseTo(composer.width, 1);
+        } else {
+          const pane = (await page.locator(".conversation-pane").boundingBox())!;
+          expect(panel.x).toBeCloseTo(pane.x + 20, 1);
+          expect(panel.width).toBeCloseTo(pane.width - 40, 1);
+        }
       };
       await expectAligned();
       if (!mobile) {

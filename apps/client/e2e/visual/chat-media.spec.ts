@@ -6,7 +6,13 @@ import { installVisualFixture, snapshot, waitForVisualReady } from "./fixtures";
 const comment = "Стена из ОСБ в несколько листов, около 7 см. Плинтуса нет.";
 const quote = "Из чего сделана стена?";
 
-async function openChat(page: Page, theme: "light" | "dark", text: string, images: string[] = []) {
+async function openChat(
+  page: Page,
+  theme: "light" | "dark",
+  text: string,
+  images: string[] = [],
+  type: "agentMessage" | "userMessage" = "agentMessage",
+) {
   const seed = structuredClone(snapshot);
   seed.attention = [];
   const summary = seed.threads.find((item) => item.id === "session-main")!;
@@ -47,7 +53,7 @@ async function openChat(page: Page, theme: "light" | "dark", text: string, image
         items: [
           {
             id: "message",
-            type: "agentMessage",
+            type,
             text,
             images,
             status: "completed",
@@ -66,7 +72,7 @@ async function openChat(page: Page, theme: "light" | "dark", text: string, image
     }),
   );
   await page.goto("/threads/session-main");
-  await expect(page.locator(".message.agentMessage")).toBeVisible();
+  await expect(page.locator(`.message.${type}`)).toBeVisible();
   await waitForVisualReady(page);
 }
 
@@ -346,4 +352,121 @@ for (const readingAbove of [false, true]) {
       await expect.poll(distance).toBeLessThan(2);
     }
   });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const text of [
+    "",
+    "Давай подумаем ещё над вариантами левой панели. На телефоне она сильно выбивается.",
+  ]) {
+    test(`user images stay inside the message after loading and resizing, ${theme}, ${text ? "with text" : "images only"}`, async ({
+      page,
+    }) => {
+      const sizes = [
+        [712, 1796],
+        [300, 4000],
+        [1600, 480],
+        [80, 40],
+      ];
+      const sources = sizes.map((_, i) => `https://image.test/user-${i}.png`);
+      let releaseImage!: () => void;
+      const imageGate = new Promise<void>((resolve) => {
+        releaseImage = resolve;
+      });
+      const png = await page.evaluate(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 712;
+        canvas.height = 1796;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#697760";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL().split(",")[1]!;
+      });
+      await page.route("https://image.test/user-*.png", async (route) => {
+        const index = Number(new URL(route.request().url()).pathname.match(/user-(\d+)/)![1]);
+        if (index === 0) {
+          await imageGate;
+          await route.fulfill({ contentType: "image/png", body: Buffer.from(png, "base64") });
+        } else {
+          const [w, h] = sizes[index]!;
+          await route.fulfill({
+            contentType: "image/svg+xml",
+            body: decodeURIComponent(imageSource(w!, h!).split(",")[1]!),
+          });
+        }
+      });
+      await page.setViewportSize({ width: 1440, height: 900 });
+      // Opening the transcript must not wait for the deferred attachment.
+      const opening = openChat(page, theme, text, [sources[0]!], "userMessage");
+      await page.locator(".message-images img").waitFor({ state: "attached" });
+      await page.setViewportSize({ width: 390, height: 844 });
+      releaseImage();
+      await opening;
+      const expectContained = async () => {
+        await page
+          .locator(".message-images img")
+          .evaluateAll((images) =>
+            Promise.all(images.map((image) => (image as HTMLImageElement).decode())),
+          );
+        await waitForVisualReady(page);
+        const measurements = await page.locator(".message-images img").evaluateAll((images) =>
+          images.map((node) => {
+            const image = node as HTMLImageElement;
+            const frame = image.closest("button")!.getBoundingClientRect();
+            const grid = image.closest(".message-images")!.getBoundingClientRect();
+            const body = image.closest(".message-body")!;
+            const box = body.getBoundingClientRect();
+            const style = getComputedStyle(body);
+            const rect = image.getBoundingClientRect();
+            return {
+              bottom: rect.bottom,
+              frameBottom: frame.bottom,
+              gridBottom: grid.bottom,
+              contentBottom: box.bottom - parseFloat(style.paddingBottom),
+              left: rect.left,
+              right: rect.right,
+              contentLeft: box.left + parseFloat(style.paddingLeft),
+              contentRight: box.right - parseFloat(style.paddingRight),
+              ratio: rect.width / rect.height,
+              naturalRatio: image.naturalWidth / image.naturalHeight,
+              height: rect.height,
+              maxHeight: Math.min(480, innerHeight * 0.65),
+              enlarged:
+                rect.width > image.naturalWidth + 1 || rect.height > image.naturalHeight + 1,
+            };
+          }),
+        );
+        for (const m of measurements) {
+          expect(m.bottom).toBeLessThanOrEqual(m.frameBottom + 1);
+          expect(m.frameBottom).toBeLessThanOrEqual(m.gridBottom + 1);
+          expect(m.gridBottom).toBeLessThanOrEqual(m.contentBottom + 1);
+          expect(m.left).toBeGreaterThanOrEqual(m.contentLeft - 1);
+          expect(m.right).toBeLessThanOrEqual(m.contentRight + 1);
+          expect(m.ratio).toBeCloseTo(m.naturalRatio, 2);
+          expect(m.height).toBeLessThanOrEqual(m.maxHeight + 1);
+          expect(m.enlarged).toBe(false);
+        }
+        expect(
+          await page
+            .locator(".conversation-scroll")
+            .evaluate((el) => el.scrollWidth <= el.clientWidth),
+        ).toBe(true);
+      };
+      await expectContained();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expectContained();
+      await page.locator(".message-image-preview").click();
+      const viewer = page.getByRole("dialog", { name: "Просмотр изображений" });
+      await expect(viewer).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(viewer).toHaveCount(0);
+      await expect(page.locator(".message-image-preview")).toBeFocused();
+
+      await openChat(page, theme, text, sources, "userMessage");
+      for (const width of [1440, 320, 390, 820, 821, 1920, 1440]) {
+        await page.setViewportSize({ width, height: width <= 820 ? 844 : 900 });
+        await expectContained();
+      }
+    });
+  }
 }

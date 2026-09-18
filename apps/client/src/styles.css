@@ -2685,6 +2685,8 @@
   display: grid;
   align-items: start;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  /* Size each row from its images, including after WebKit recalculates columns. */
+  grid-auto-rows: max-content;
   gap: 9px;
   width: min(100%, 560px);
   margin-top: var(--space-2-5);

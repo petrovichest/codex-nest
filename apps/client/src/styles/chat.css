@@ -1157,8 +1157,43 @@
 }
 
 @media (min-width: 821px) {
-  /* Within the shared 880px container, panels extend 8px beyond each side
-     of the transcript. Keep the pending-fork layout independent. */
+  /* The two capsules span the conversation pane; their transparent gap belongs
+     to the transcript below. The title grows naturally until it reaches actions. */
+  .thread-workspace:not(.pending-fork-workspace) .workspace-header {
+    right: var(--space-5);
+    left: var(--space-5);
+    width: auto;
+    margin: 0;
+    padding: 0;
+    gap: var(--space-4);
+    background: transparent;
+    box-shadow: none;
+    pointer-events: none;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) :is(.workspace-title, .workspace-actions) {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--chat-surface);
+    box-shadow: var(--chat-shadow);
+    pointer-events: auto;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title {
+    flex: 0 1 auto;
+    padding-inline: var(--space-4);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title > div:last-child {
+    width: max-content;
+    max-width: 100%;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-actions {
+    padding-inline: var(--space-2-5);
+  }
+
+  /* The composer still extends 8px beyond each side of the transcript. */
   .thread-workspace:not(.pending-fork-workspace) .composer {
     padding-inline: var(--space-5);
   }

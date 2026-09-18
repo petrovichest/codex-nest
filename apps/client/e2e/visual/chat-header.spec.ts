@@ -111,13 +111,20 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
         const panel = (await header.boundingBox())!;
         const composer = (await page.locator(".composer-box").boundingBox())!;
         const message = (await plan.boundingBox())!;
-        expect(composer.x).toBeCloseTo(panel.x, 1);
-        expect(composer.width).toBeCloseTo(panel.width, 1);
-        expect(message.x - panel.x).toBeCloseTo(8, 1);
-        expect(panel.x + panel.width - message.x - message.width).toBeCloseTo(8, 1);
-        if (!mobile) {
+        expect(message.x - composer.x).toBeCloseTo(8, 1);
+        expect(composer.x + composer.width - message.x - message.width).toBeCloseTo(8, 1);
+        if (mobile) {
+          expect(composer.x).toBeCloseTo(panel.x, 1);
+          expect(composer.width).toBeCloseTo(panel.width, 1);
+        } else {
           const pane = (await page.locator(".conversation-pane").boundingBox())!;
-          expect(panel.width).toBeCloseTo(Math.min(880, pane.width) - 40, 1);
+          expect(panel.x).toBeCloseTo(pane.x + 20, 1);
+          expect(panel.width).toBeCloseTo(pane.width - 40, 1);
+          const title = (await page.locator(".workspace-title").boundingBox())!;
+          const actions = (await page.locator(".workspace-actions").boundingBox())!;
+          expect(title.x).toBeCloseTo(panel.x, 1);
+          expect(actions.x + actions.width).toBeCloseTo(panel.x + panel.width, 1);
+          expect(actions.x - title.x - title.width).toBeGreaterThanOrEqual(15.9);
           expect(message.width).toBeCloseTo(Math.min(880, pane.width) - 56, 1);
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
@@ -163,8 +170,29 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       expect(await header.boundingBox()).toEqual(bounds);
       const checkLayers = async () =>
         page.evaluate(
-          ({ headerBounds, cardBounds, safeTop }) => {
+          ({ headerBounds, cardBounds, safeTop, mobile }) => {
             const at = (x: number, y: number) => document.elementFromPoint(x, y);
+            if (!mobile) {
+              const title = document.querySelector(".workspace-title")!.getBoundingClientRect();
+              const actions = document.querySelector(".workspace-actions")!.getBoundingClientRect();
+              return {
+                gap: !!at((title.right + actions.left) / 2, title.top + 22)?.closest(
+                  ".conversation-scroll",
+                ),
+                title: !!at(title.left + title.width / 2, title.top + 22)?.closest(
+                  ".workspace-title",
+                ),
+                actions: !!at(actions.left + actions.width / 2, actions.top + 22)?.closest(
+                  ".workspace-actions",
+                ),
+                titleCorner: !!at(title.left + 1, title.bottom - 1)?.closest(
+                  ".conversation-scroll",
+                ),
+                actionsCorner: !!at(actions.right - 1, actions.bottom - 1)?.closest(
+                  ".conversation-scroll",
+                ),
+              };
+            }
             const left = Math.max(cardBounds.x, headerBounds.x) + 1;
             const right =
               Math.min(cardBounds.x + cardBounds.width, headerBounds.x + headerBounds.width) - 1;
@@ -186,21 +214,24 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
             headerBounds: (await header.boundingBox())!,
             cardBounds: (await plan.boundingBox())!,
             safeTop,
+            mobile,
           },
         );
-      const expectedLayers = {
-        leftCorner: true,
-        rightCorner: true,
-        center: true,
-        statusBar: safeTop > 0,
-      };
+      const expectedLayers = mobile
+        ? {
+            leftCorner: true,
+            rightCorner: true,
+            center: true,
+            statusBar: safeTop > 0,
+          }
+        : { gap: true, title: true, actions: true, titleCorner: true, actionsCorner: true };
       expect(await checkLayers()).toEqual(expectedLayers);
       if (browserName === "chromium" && [320, 390, 821, 1440].includes(width)) {
         await expect(page).toHaveScreenshot(`chat-header-scrolled-${width}-${theme}.png`);
       }
 
-      // A desktop inspector can narrow the conversation without changing the
-      // viewport breakpoint. Both panels must retain their 8px overhang.
+      // Capsules follow the conversation edges when the inspector narrows it;
+      // the composer and transcript keep their independent centered widths.
       if (!mobile) {
         await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
         await expectPanelGeometry();
@@ -294,6 +325,87 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
             .evaluate((element) => getComputedStyle(element, "::after").display),
         ).not.toBe("none");
       }
+    });
+  }
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [821, 1440, 1920]) {
+    test(`${width}px ${theme}: title capsule grows before truncating and keeps actions reachable`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openLongPlan(page, theme);
+      const title = page.locator(".workspace-title");
+      const heading = title.locator("h1");
+      const project = title.locator(".workspace-context");
+      const actions = page.locator(".workspace-actions");
+      const originalActions = (await actions.boundingBox())!;
+      const originalComposer = await page.locator(".composer-box").boundingBox();
+      const setTitle = async (text: string) => {
+        await heading.evaluate((element, value) => {
+          element.textContent = value;
+        }, text);
+        await waitForVisualReady(page);
+        return (await title.boundingBox())!;
+      };
+      const short = await setTitle("Панель");
+      expect(await heading.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
+        false,
+      );
+      const long = await setTitle(
+        "Исправление отображения скриншотов в сообщениях и оформление верхней панели на компьютере",
+      );
+      expect(long.width).toBeGreaterThan(short.width);
+      if (width >= 1440)
+        expect(await heading.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
+          false,
+        );
+      const longest = await setTitle("Очень длинное название задачи ".repeat(30));
+      expect(longest.width).toBeCloseTo(originalActions.x - longest.x - 16, 1);
+      expect(await heading.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
+        true,
+      );
+      await expect(heading).toHaveCSS("text-overflow", "ellipsis");
+      expect(await actions.boundingBox()).toEqual(originalActions);
+      expect(await page.locator(".composer-box").boundingBox()).toEqual(originalComposer);
+      expect((await setTitle("Панель")).width).toBeCloseTo(short.width, 1);
+
+      await project.evaluate((element) => {
+        element.textContent = "Очень длинное имя проекта ".repeat(30);
+      });
+      await setTitle("Очень длинное название задачи ".repeat(30));
+      const expectContained = async () => {
+        const capsule = (await title.boundingBox())!;
+        const buttons = (await actions.boundingBox())!;
+        expect(buttons.x - capsule.x - capsule.width).toBeGreaterThanOrEqual(15.9);
+        for (const text of await title.locator("h1, p").all()) {
+          const bounds = (await text.boundingBox())!;
+          expect(bounds.x).toBeGreaterThanOrEqual(capsule.x);
+          expect(bounds.x + bounds.width).toBeLessThanOrEqual(capsule.x + capsule.width + 1);
+          expect(bounds.y + bounds.height).toBeLessThanOrEqual(capsule.y + capsule.height + 1);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await expect(
+          page.getByRole("button", { name: "Показать сведения", exact: true }),
+        ).toBeInViewport();
+      };
+      await expectContained();
+      await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
+      await expectContained();
+      await page
+        .getByRole("complementary", { name: "Сведения о задаче", exact: true })
+        .getByRole("button", { name: "Закрыть сведения", exact: true })
+        .click();
+      await page.evaluate(() => {
+        document.documentElement.dataset.customTypography = "true";
+        document.documentElement.style.setProperty("--text-ui", "32px");
+        document.documentElement.style.setProperty("--text-small", "32px");
+      });
+      await expectContained();
+      expect((await title.boundingBox())!.height).toBeGreaterThan(44);
     });
   }
 }
