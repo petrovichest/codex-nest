@@ -88,12 +88,22 @@
 }
 
 .thread-nav {
+  --thread-nav-mask: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--thread-nav-fade-top, 0px),
+    #000 calc(100% - var(--thread-nav-fade-bottom, 0px)),
+    transparent
+  );
+
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 0 var(--sidebar-inset-right) 18px var(--sidebar-inset-left);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--muted) 25%, transparent) transparent;
+  -webkit-mask-image: var(--thread-nav-mask);
+  mask-image: var(--thread-nav-mask);
 }
 
 .project-list {
@@ -6179,7 +6189,8 @@ button.message-file:hover:not(:disabled) {
     transform: translateX(0);
   }
 
-  .drawer-backdrop {
+  .drawer-backdrop,
+  .drawer-backdrop:hover:not(:disabled) {
     position: fixed;
     inset: 0;
     z-index: 75;
@@ -6188,8 +6199,9 @@ button.message-file:hover:not(:disabled) {
     height: 100%;
     border: 0;
     border-radius: 0;
-    background: rgb(20 21 19 / 38%);
-    backdrop-filter: blur(2px);
+    background: transparent;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
     transition: opacity 180ms ease;
   }
 
@@ -6201,7 +6213,6 @@ button.message-file:hover:not(:disabled) {
 
   .app-frame.drawer-dragging .drawer-backdrop {
     opacity: var(--drawer-drag-progress, 0);
-    backdrop-filter: none;
     transition: none;
   }
 

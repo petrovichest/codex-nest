@@ -874,6 +874,36 @@ function Sidebar({
         : 0;
   }, [projectListDirection, sessionListMode, snapshotReady]);
 
+  useEffect(() => {
+    const navigation = threadNavRef.current;
+    if (!navigation || !snapshotReady) return;
+
+    const updateScrollFades = () => {
+      const maxScroll = Math.max(0, navigation.scrollHeight - navigation.clientHeight);
+      // Clamp elastic overscroll before calculating either edge.
+      const scrollTop = Math.max(0, Math.min(maxScroll, navigation.scrollTop));
+      const fadeSize = Math.min(28, navigation.clientHeight / 2);
+      navigation.style.setProperty("--thread-nav-fade-top", `${Math.min(fadeSize, scrollTop)}px`);
+      navigation.style.setProperty(
+        "--thread-nav-fade-bottom",
+        `${Math.min(fadeSize, maxScroll - scrollTop)}px`,
+      );
+    };
+
+    updateScrollFades();
+    navigation.addEventListener("scroll", updateScrollFades, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateScrollFades);
+    observer?.observe(navigation);
+    // Watch content as well: expanding groups and incoming sessions can change
+    // the scroll extent without changing the navigation viewport.
+    if (navigation.firstElementChild) observer?.observe(navigation.firstElementChild);
+    return () => {
+      navigation.removeEventListener("scroll", updateScrollFades);
+      observer?.disconnect();
+    };
+  }, [projectListDirection, sessionListMode, snapshotReady]);
+
   useEffect(
     () => () => {
       if (noticeTimerRef.current !== undefined) window.clearTimeout(noticeTimerRef.current);
