@@ -118,9 +118,9 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
     expect(updateBox.width).toBe(updateBox.height);
     expect(connectionBox.width).toBe(connectionBox.height);
     expect(searchBox.width).toBe(searchBox.height);
-    expect(updateBox.x - (settingsBox.x + settingsBox.width)).toBe(2);
-    expect(connectionBox.x - (limitsBox.x + limitsBox.width)).toBe(2);
-    expect(searchBox.x - (addProjectBox.x + addProjectBox.width)).toBe(2);
+    expect(updateBox.x - (settingsBox.x + settingsBox.width)).toBe(8);
+    expect(connectionBox.x - (limitsBox.x + limitsBox.width)).toBe(8);
+    expect(searchBox.x - (addProjectBox.x + addProjectBox.width)).toBe(8);
     expect(settingsBox.y + settingsBox.height / 2).toBe(updateBox.y + updateBox.height / 2);
     expect(limitsBox.y + limitsBox.height / 2).toBe(connectionBox.y + connectionBox.height / 2);
     expect(addProjectBox.y + addProjectBox.height / 2).toBe(searchBox.y + searchBox.height / 2);
@@ -298,7 +298,8 @@ for (const mobile of [false, true]) {
     await expect(page.getByText("Текущий ответ", { exact: true })).toHaveCount(0);
     const composer = page.getByRole("textbox", { name: "Сообщение для Codex" });
     await expect(composer).toBeEditable();
-    await expect(page.getByRole("button", { name: "Начать запись", exact: true })).toBeDisabled();
+    // Browsers without a recording codec show a different accessible label.
+    await expect(page.locator(".composer-action.microphone")).toBeDisabled();
     await composer.fill("Черновик остаётся доступным");
     await expect(page.getByRole("button", { name: "Отправить", exact: true })).toBeDisabled();
     await page.screenshot({ path: testInfo.outputPath("history-target.png") });

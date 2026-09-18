@@ -7,10 +7,8 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../../..");
 
-// Optical geometry, not surface radii: session marker, document/image edge,
-// and inline-link focus.
+// Optical geometry, not surface radii: document/image edge and inline-link focus.
 const opticalRadii = new Map([
-  [".thread-link .status", "2px"],
   [".artifact-document, .artifact-html-frame", "2px"],
   [".artifact-image", "2px"],
   [".fork-parent-link:focus-visible", "3px"],
@@ -33,6 +31,7 @@ describe("shared surface radii", () => {
           const remaining = value
             .replace(/var\(--radius-(?:sm|md|lg)\)/g, "")
             .replace(/var\(--chat-radius(?:-(?:control|card|surface|compact|checkbox))?\)/g, "")
+            .replace(/var\(--sidebar-radius-(?:row|menu)\)/g, "")
             .replace(/\b(?:0|50%|999px)(?=\s|$)/g, "")
             .trim();
           if (remaining) violations.push(`${selector}: ${value}`);

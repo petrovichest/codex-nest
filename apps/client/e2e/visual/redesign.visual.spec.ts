@@ -147,7 +147,7 @@ test.describe("CodexNest redesign visual contract", () => {
             element.getBoundingClientRect().right - action.getBoundingClientRect().right,
           );
         }),
-      ).toBe(12);
+      ).toBe(19);
       await expect(row.locator(".thread-row-actions")).toHaveScreenshot(
         "18-desktop-light-sidebar-finish.png",
       );
@@ -349,7 +349,7 @@ test.describe("CodexNest redesign visual contract", () => {
     await assertCompactTouchTarget(drawerToggle);
     await drawerToggle.click();
     await expect(page.getByRole("link", { name: "Настройки" })).toBeVisible();
-    await assertCompactTouchTarget(page.getByRole("link", { name: "Настройки" }));
+    await expect(page.getByRole("link", { name: "Настройки" })).toHaveCSS("height", "38px");
     await expect(
       page.getByRole("link", { name: "Сверка токенов темы" }).locator(".status"),
     ).toHaveCSS("background-color", "rgb(75, 156, 232)");

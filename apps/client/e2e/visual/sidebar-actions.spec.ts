@@ -54,6 +54,127 @@ async function modeButtonBounds(page: Page) {
   );
 }
 
+for (const { width, side } of [
+  { width: 320, side: "left" },
+  { width: 390, side: "right" },
+  { width: 820, side: "left" },
+  { width: 821, side: "right" },
+  { width: 1440, side: "left" },
+] as const) {
+  test.describe(`bubble navigation at ${width}px on the ${side}`, () => {
+    test.use({ viewport: { width, height: 900 }, hasTouch: width <= 820 });
+
+    for (const theme of ["light", "dark"] as const) {
+      test(`${theme} aligned groups, inset session contents and control states`, async ({
+        page,
+      }) => {
+        await installVisualFixture(page, { theme, sidebarSide: side });
+        await page.goto("/threads/session-active");
+        await waitForVisualReady(page);
+        if (width <= 820) {
+          await page.getByRole("button", { name: "Открыть список задач" }).tap();
+        }
+        const sidebar = page.locator(".sidebar");
+        const controls = sidebar.locator(".sidebar-controls");
+        const switcher = sidebar.locator(".session-list-mode");
+        const settings = controls.locator(".sidebar-control-action").first();
+        const limits = controls.locator(".codex-limits");
+        await expect(settings).toHaveCSS("height", "38px");
+        await expect(switcher.locator("button").first()).toHaveCSS("height", "34px");
+        await expect(settings).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(settings).toHaveCSS("box-shadow", "none");
+
+        for (const mode of ["Проекты", "Активные"]) {
+          await page.getByRole("button", { name: mode, exact: true }).click();
+          const topBounds = (await controls.boundingBox())!;
+          const modeBounds = (await switcher.boundingBox())!;
+          expect(topBounds.x).toBe(modeBounds.x);
+          expect(topBounds.width).toBe(modeBounds.width);
+          await expect(controls).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+          await expect(switcher).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+          await expect(switcher).toHaveCSS("box-shadow", "none");
+          await expect(switcher.locator('[aria-pressed="true"]')).not.toHaveCSS(
+            "background-color",
+            "rgba(0, 0, 0, 0)",
+          );
+          const link = sidebar.locator(".thread-link.active");
+          const linkBounds = (await link.boundingBox())!;
+          const title = (await link.locator(".thread-link-title").boundingBox())!;
+          const status = (await link.locator(".status").boundingBox())!;
+          expect(title.x - linkBounds.x).toBe(12);
+          expect(linkBounds.x + linkBounds.width - status.x - status.width).toBeCloseTo(10, 4);
+          expect(status.width).toBe(3);
+          expect(status.height).toBe(20);
+          // Reserve room for the status pulse as well as the marker itself.
+          expect(status.y - 4).toBeGreaterThanOrEqual(linkBounds.y);
+          expect(status.y + status.height + 4).toBeLessThanOrEqual(
+            linkBounds.y + linkBounds.height,
+          );
+          if (mode === "Проекты") {
+            const row = (await link.locator("..").boundingBox())!;
+            expect(title.x - row.x).toBe(32);
+          }
+        }
+
+        if (width <= 820) {
+          await limits.tap();
+          await expect(limits).toHaveAttribute("aria-busy", "false");
+          await expect(limits).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+          await expect(limits).toHaveCSS("box-shadow", "none");
+          if (width === 320) {
+            await page.evaluate(() => {
+              document.documentElement.style.setProperty("--safe-area-inset-left", "12px");
+              document.documentElement.style.setProperty("--safe-area-inset-right", "16px");
+              document.documentElement.style.setProperty("--safe-area-inset-top", "20px");
+            });
+            const panel = (await sidebar.boundingBox())!;
+            const top = (await controls.boundingBox())!;
+            const modes = (await switcher.boundingBox())!;
+            expect(top.x - panel.x).toBe(20);
+            expect(panel.x + panel.width - top.x - top.width).toBeCloseTo(24, 4);
+            expect(modes.x).toBe(top.x);
+            expect(modes.width).toBe(top.width);
+            expect(top.y - panel.y).toBe(28);
+            expect(await sidebar.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(
+              true,
+            );
+          }
+          return;
+        }
+
+        const restBounds = await settings.boundingBox();
+        await settings.hover();
+        await expect(settings).not.toHaveCSS("box-shadow", "none");
+        expect(await settings.boundingBox()).toEqual(restBounds);
+        await page.mouse.down();
+        await expect(settings).toHaveCSS("box-shadow", /inset/);
+        expect(await settings.boundingBox()).toEqual(restBounds);
+        await page.mouse.move(width / 2, 850);
+        await page.mouse.up();
+        await expect(settings).toHaveCSS("box-shadow", "none");
+        await settings.focus();
+        await page.keyboard.press("Tab");
+        await page.keyboard.press("Shift+Tab");
+        await expect(settings).toBeFocused();
+        await expect(settings).toHaveCSS("outline-style", "solid");
+        await expect(settings).not.toHaveCSS("box-shadow", "none");
+        await settings.evaluate((node) => (node as HTMLElement).blur());
+        await limits.evaluate((node) => ((node as HTMLButtonElement).disabled = true));
+        await limits.hover({ force: true });
+        await expect(limits).toHaveCSS("box-shadow", "none");
+        await expect(limits).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await limits.evaluate((node) => ((node as HTMLButtonElement).disabled = false));
+
+        if (width === 1440) {
+          await page.getByRole("button", { name: "Проекты", exact: true }).click();
+          await settings.hover();
+          await expect(sidebar).toHaveScreenshot(`sidebar-hover-${theme}.png`);
+        }
+      });
+    }
+  });
+}
+
 for (const theme of ["light", "dark"] as const) {
   test(`desktop ${theme} active alignment, hover actions and pin persistence`, async ({ page }) => {
     await openSidebar(page, theme);
