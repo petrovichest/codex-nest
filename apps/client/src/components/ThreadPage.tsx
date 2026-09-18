@@ -5976,6 +5976,45 @@ export function QueuedMessages({
 }) {
   const { language, t } = useI18n();
   const [editor, setEditor] = useState<{ messageId: string; value: string } | null>(null);
+  const editorFieldRef = useRef<HTMLTextAreaElement>(null);
+  const nativeFieldSizing = useMemo(
+    () => typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content"),
+    [],
+  );
+  const resizeEditor = useCallback(() => {
+    const field = editorFieldRef.current;
+    if (!field || nativeFieldSizing) return;
+    const scrollTop = field.scrollTop;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+    field.scrollTop = scrollTop;
+  }, [nativeFieldSizing]);
+
+  useLayoutEffect(() => {
+    resizeEditor();
+  }, [editor, resizeEditor]);
+
+  const editorMessageId = editor?.messageId;
+  useEffect(() => {
+    const field = editorFieldRef.current;
+    if (!editorMessageId || !field || nativeFieldSizing) return;
+    let width = field.getBoundingClientRect().width;
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            const nextWidth = field.getBoundingClientRect().width;
+            if (nextWidth === width) return;
+            width = nextWidth;
+            resizeEditor();
+          });
+    observer?.observe(field);
+    window.addEventListener("resize", resizeEditor);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resizeEditor);
+    };
+  }, [editorMessageId, nativeFieldSizing, resizeEditor]);
 
   useEffect(() => {
     if (
@@ -6028,7 +6067,7 @@ export function QueuedMessages({
                     : t("В очереди");
           return (
             <article
-              className="queued-message message userMessage"
+              className={`queued-message message userMessage${editing ? " queued-message-editing" : ""}`}
               data-message-id={message.id}
               key={message.id}
             >
@@ -6041,9 +6080,10 @@ export function QueuedMessages({
                 {editing ? (
                   <div className="queued-message-editor">
                     <textarea
+                      ref={editorFieldRef}
                       autoFocus
                       aria-label={t("Текст сообщения в очереди")}
-                      rows={3}
+                      rows={1}
                       value={editValue}
                       disabled={busy}
                       onChange={(event) =>

@@ -331,13 +331,74 @@
 
 .thread-workspace
   .timeline
-  :is(.attention-card, .async-question-card, .queued-message-editor)
+  :is(.attention-card, .async-question-card)
   :is(input:not([type="radio"], [type="checkbox"]), textarea, select),
 .chat-dialog :is(input:not([type="radio"], [type="checkbox"]), textarea, select) {
   border-color: transparent;
   border-radius: var(--chat-radius-control);
   background: var(--chat-inset);
   font-weight: 400;
+}
+
+.thread-workspace .outgoing-messages .queued-message.queued-message-editing {
+  width: calc(100% + 16px);
+  max-width: none;
+  margin-inline: -8px;
+}
+
+.thread-workspace .outgoing-messages .queued-message-editing > .message-body {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 16px 20px;
+}
+
+.thread-workspace .timeline .queued-message-editor {
+  min-width: 0;
+  gap: 12px;
+  margin: 0;
+}
+
+.thread-workspace .timeline .queued-message-editor textarea {
+  width: 100%;
+  min-height: 1.6em;
+  max-height: 240px;
+  height: auto;
+  field-sizing: content;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-strong);
+  font: 400 16px/1.6 var(--font-ui);
+  overflow-y: auto;
+  resize: none;
+}
+
+.thread-workspace .timeline .queued-message-editor-actions {
+  gap: 8px;
+}
+
+.thread-workspace .timeline .queued-message-editor-actions button {
+  min-height: 36px;
+  padding-inline: 18px;
+  font-size: 14px;
+}
+
+.thread-workspace .timeline .queued-message-editor-actions button:not(.primary) {
+  color: var(--muted-strong);
+}
+
+.thread-workspace .outgoing-messages .queued-message-editing > .queued-message-footer {
+  padding-inline: 4px;
+}
+
+.thread-workspace .queued-message-editing > .message-body:focus-within {
+  box-shadow:
+    var(--chat-shadow),
+    0 0 14px 1px color-mix(in srgb, var(--muted) 12%, transparent);
 }
 
 .thread-workspace .timeline .user-input-freeform {
@@ -554,7 +615,8 @@
 }
 
 @media (forced-colors: active) {
-  .thread-workspace .timeline .annotation-editor:focus-within {
+  .thread-workspace .timeline .annotation-editor:focus-within,
+  .thread-workspace .queued-message-editing > .message-body:focus-within {
     outline: 2px solid Highlight;
   }
 }
@@ -1051,6 +1113,10 @@
   .thread-workspace .message.userMessage > .message-body {
     padding: 14px 16px;
     border-radius: var(--chat-radius-compact);
+  }
+
+  .thread-workspace .outgoing-messages .queued-message-editing > .message-body {
+    padding: 16px;
   }
 
   .thread-workspace .timeline .user-input-voice-actions button {
