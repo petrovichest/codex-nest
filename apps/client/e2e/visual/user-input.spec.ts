@@ -90,6 +90,13 @@ for (const theme of ["light", "dark"] as const) {
         await waitForVisualReady(page);
         const panel = page.locator(".attention-stack");
         await expect(panel).toBeVisible();
+        const activity = page.locator(".turn-activity-row");
+        const waitingLabel = language === "ru" ? "Ждёт вашего ответа" : "Waiting for your answer";
+        await expect(activity).toContainText(waitingLabel);
+        await expect(activity.locator(".spinner, .turn-activity-duration")).toHaveCount(0);
+        await page.reload();
+        await expect(panel).toBeVisible();
+        await expect(activity).toContainText(waitingLabel);
         const steps = panel.locator(".user-input-steps button");
         await expect(steps).toHaveCount(3);
         for (const step of await steps.all()) {
@@ -132,6 +139,7 @@ for (const theme of ["light", "dark"] as const) {
           messages: detail.queuedMessages,
         });
         await expect(panel).toBeHidden();
+        await expect(activity).toContainText(waitingLabel);
         expect(await gap(".voice-transcription-message", ".outgoing-messages")).toBeCloseTo(16, 0);
         detail.queuedMessages[0]!.deliveryError = { message: "Delivery failed", retryable: false };
         send({
@@ -140,10 +148,15 @@ for (const theme of ["light", "dark"] as const) {
           messages: detail.queuedMessages,
         });
         await expect(panel).toBeVisible();
+        await expect(activity).toContainText(waitingLabel);
         await expect(input).toHaveValue("Сохранённый ответ");
         await expect(steps.nth(1)).toHaveAttribute("aria-current", "step");
         send({ type: "attention.removed", attentionId: question.id });
         await expect(panel).toHaveCount(0);
+        await expect(activity).toContainText(
+          language === "ru" ? "Codex работает" : "Codex is working",
+        );
+        await expect(activity.locator(".spinner")).toHaveCount(1);
         expect(await gap(".voice-transcription-message", ".outgoing-messages")).toBeCloseTo(16, 0);
       });
     }

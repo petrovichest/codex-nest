@@ -764,6 +764,125 @@ describe("Activity", () => {
     expect(context.loadTurnItems).not.toHaveBeenCalled();
   });
 
+  it("waits for every blocking question to close before resuming activity and elapsed time", () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now() - 3_000;
+      const context = mockThreadConnection(
+        threadApi(),
+        { ...summary, state: "running", currentTurnId: "turn" },
+        {
+          turns: [
+            {
+              id: "turn",
+              status: "inProgress",
+              startedAt,
+              completedAt: null,
+              durationMs: null,
+              progress: { ...progress(), startedAt, explanation: "Проверяю результат" },
+              items: [
+                {
+                  id: "tool",
+                  type: "tool",
+                  status: "completed",
+                  title: "Проверка завершена",
+                  detail: "",
+                },
+              ],
+            },
+          ],
+        },
+      );
+      const view = renderThread();
+      const activity = view.container.querySelector(".turn-activity-row")!;
+      expect(activity).toHaveTextContent("Проверяю результат");
+      expect(activity.querySelector(".spinner")).not.toBeNull();
+      expect(activity.querySelector(".turn-activity-duration")).toHaveTextContent("3с");
+      fireEvent.click(screen.getByRole("button", { name: "Технические детали" }));
+
+      context.state.snapshot.attention = [
+        pendingInputRequest(),
+        { ...pendingInputRequest("second-question"), id: "second-attention", isBlocking: true },
+      ];
+      view.rerender(threadRoute());
+      expect(within(activity as HTMLElement).getByRole("status")).toHaveTextContent(
+        "Ждёт вашего ответа",
+      );
+      expect(activity).not.toHaveTextContent("Проверяю результат");
+      expect(activity.querySelector(".spinner")).toBeNull();
+      expect(activity.querySelector(".turn-activity-state svg")).not.toBeNull();
+      expect(activity.querySelector(".turn-activity-duration")).toBeNull();
+      expect(screen.getByText("Проверка завершена")).toBeVisible();
+      act(() => vi.advanceTimersByTime(10_000));
+
+      context.state.snapshot.attention = [context.state.snapshot.attention[1]!];
+      view.rerender(threadRoute());
+      expect(activity).toHaveTextContent("Ждёт вашего ответа");
+      expect(activity.querySelector(".spinner")).toBeNull();
+
+      context.state.snapshot.attention = [];
+      view.rerender(threadRoute());
+      expect(activity).toHaveTextContent("Проверяю результат");
+      expect(activity.querySelector(".spinner")).not.toBeNull();
+      expect(activity.querySelector(".turn-activity-duration")).toHaveTextContent("13с");
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(activity.querySelector(".turn-activity-duration")).toHaveTextContent("14с");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps waiting while history arrives and after reopening the thread", () => {
+    const context = mockThreadConnection(
+      threadApi(),
+      { ...summary, state: "needsAttention", currentTurnId: "turn" },
+      { attention: [pendingInputRequest()] },
+    );
+    const view = renderThread();
+    expect(view.container.querySelector(".active-turn-placeholder")).toHaveTextContent(
+      "Ждёт вашего ответа",
+    );
+    context.state.details.thread.turns = [
+      {
+        id: "turn",
+        status: "inProgress",
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+        progress: progress(),
+        items: [],
+      },
+    ];
+    view.rerender(threadRoute());
+    expect(view.container.querySelector(".active-turn-placeholder")).toBeNull();
+    expect(view.container.querySelector(".turn-activity-row")).toHaveTextContent(
+      "Ждёт вашего ответа",
+    );
+    view.unmount();
+    const reopened = renderThread();
+    expect(reopened.container.querySelector(".turn-activity-row")).toHaveTextContent(
+      "Ждёт вашего ответа",
+    );
+    expect(reopened.container.querySelector(".turn-activity-row .spinner")).toBeNull();
+  });
+
+  it.each([
+    { label: "non-blocking", patch: { isBlocking: false } },
+    { label: "another turn", patch: { turnId: "other-turn" } },
+    { label: "another thread", patch: { threadId: "other-thread" } },
+  ])("keeps working for a $label question", ({ patch }) => {
+    mockThreadConnection(
+      threadApi(),
+      { ...summary, state: "running", currentTurnId: "turn" },
+      { attention: [{ ...pendingInputRequest(), ...patch }] },
+    );
+    const view = renderThread();
+    const activity = view.container.querySelector(".turn-activity-row")!;
+    expect(activity).toHaveTextContent("Codex работает");
+    expect(activity.querySelector(".spinner")).not.toBeNull();
+    expect(screen.queryByText("Ждёт вашего ответа")).toBeNull();
+  });
+
   it("keeps lazy-load retry inline", async () => {
     const context = mockThreadConnection(threadApi(), summary, {
       turns: [
@@ -4389,6 +4508,9 @@ describe("Activity", () => {
       expect(screen.queryByRole("region", { name: "Требуется внимание" })).toBeNull(),
     );
     expect(view.container.querySelector(".attention-stack")).toHaveAttribute("hidden");
+    expect(view.container.querySelector(".turn-activity-row")).toHaveTextContent(
+      "Ждёт вашего ответа",
+    );
     expect(api.enqueue.mock.calls[0]?.[1]).not.toHaveProperty("replyToUserInput");
     context.state.optimisticMessages.thread![0]!.deliveryError = {
       message: "Не удалось доставить",
@@ -4396,6 +4518,9 @@ describe("Activity", () => {
     };
     view.rerender(threadRoute());
     expect(screen.getByRole("textbox", { name: "Свой ответ" })).toHaveValue("Сохранить мой ответ");
+    expect(view.container.querySelector(".turn-activity-row")).toHaveTextContent(
+      "Ждёт вашего ответа",
+    );
     expect(screen.getByRole("button", { name: /Вопрос 2 из 2:/ })).toHaveAttribute(
       "aria-current",
       "step",

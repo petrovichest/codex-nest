@@ -93,6 +93,7 @@ import {
   BrowserIcon,
   CheckIcon,
   ChevronDownIcon,
+  ClockIcon,
   CopyIcon,
   FileIcon,
   GitBranchIcon,
@@ -3393,6 +3394,15 @@ export function ThreadPage({
     summary ??
     preparationRef.current.thread ??
     pendingThreadSummary(newSessionProject!, pendingSettings);
+  const waitingForUserInput = Boolean(
+    workspaceSummary.currentTurnId &&
+    attention.some(
+      (request) =>
+        request.turnId === workspaceSummary.currentTurnId &&
+        request.kind === "userInput" &&
+        request.isBlocking !== false,
+    ),
+  );
   const emptyCreatedWorkspace =
     createdInWorkspaceRef.current === threadId &&
     (detail?.turns.length ?? 0) === 0 &&
@@ -3893,6 +3903,7 @@ export function ThreadPage({
                             <TurnActivityDisclosure
                               turn={turn}
                               active={active}
+                              waitingForUserInput={active && waitingForUserInput}
                               items={technicalItems}
                               loaded={turn.itemsLoaded !== false}
                               interactive={!isSubagent}
@@ -3918,7 +3929,11 @@ export function ThreadPage({
                     {workspaceSummary.currentTurnId &&
                       !detail?.turns.some((turn) => turn.id === workspaceSummary.currentTurnId) && (
                         <div className="turn active-turn-placeholder">
-                          <TurnActivityStatus progress={activeProgress} active />
+                          <TurnActivityStatus
+                            progress={activeProgress}
+                            active
+                            waitingForUserInput={waitingForUserInput}
+                          />
                         </div>
                       )}
                     {detachedOptimisticMessages(
@@ -5850,6 +5865,7 @@ const MemoizedActivityGroup = memo(ActivityGroup);
 function TurnActivityDisclosure({
   turn,
   active,
+  waitingForUserInput,
   items,
   loaded,
   interactive,
@@ -5860,6 +5876,7 @@ function TurnActivityDisclosure({
 }: {
   turn: TurnView;
   active: boolean;
+  waitingForUserInput: boolean;
   items: ActivityItem[];
   loaded: boolean;
   interactive: boolean;
@@ -5892,13 +5909,16 @@ function TurnActivityDisclosure({
   if (!active && turn.status === "inProgress") return null;
   const canOpen = interactive && (!loaded || visibleItems.length > 0);
   if (!canOpen) {
-    return <TurnActivityStatus turn={turn} active={active} />;
+    return (
+      <TurnActivityStatus turn={turn} active={active} waitingForUserInput={waitingForUserInput} />
+    );
   }
   return (
     <div className="turn-activity-disclosure">
       <TurnActivityStatus
         turn={turn}
         active={active}
+        waitingForUserInput={waitingForUserInput}
         loading={loading}
         disclosure={{
           open,
@@ -6324,38 +6344,49 @@ function TurnActivityStatus({
   turn,
   progress = turn?.progress,
   active = turn?.status === "inProgress",
+  waitingForUserInput = false,
   loading = false,
   disclosure,
 }: {
   turn?: TurnView;
   progress?: TurnProgress;
   active?: boolean;
+  waitingForUserInput?: boolean;
   loading?: boolean;
   disclosure?: { open: boolean; journalId: string; onToggle(): void };
 }) {
   const { language, t } = useI18n();
   const isActive = active;
-  const showSpinner = isActive || loading;
+  const isWaiting = isActive && waitingForUserInput;
+  const showSpinner = !isWaiting && (isActive || loading);
   const startedAt = turn?.startedAt ?? progress?.startedAt ?? null;
-  const elapsed = useElapsed(startedAt ?? 0, isActive && startedAt !== null, language);
+  const elapsed = useElapsed(
+    startedAt ?? 0,
+    isActive && !isWaiting && startedAt !== null,
+    language,
+  );
   const duration = turn
     ? (turn.durationMs ??
       (startedAt === null || turn.completedAt === null
         ? null
         : Math.max(0, turn.completedAt - startedAt)))
     : null;
-  const label = isActive
-    ? progress?.explanation?.trim() || t("Codex работает")
-    : turn
-      ? turnOutcomeLabel(turn.status, duration, language, t)
-      : t("Codex работает");
+  const label = isWaiting
+    ? t("Ждёт вашего ответа")
+    : isActive
+      ? progress?.explanation?.trim() || t("Codex работает")
+      : turn
+        ? turnOutcomeLabel(turn.status, duration, language, t)
+        : t("Codex работает");
   const content = (
     <>
       <span
-        className={`turn-activity-state turn-activity-state-${showSpinner ? "active" : (turn?.status ?? "active")}`}
+        className={`turn-activity-state turn-activity-state-${isWaiting ? "waiting" : showSpinner ? "active" : (turn?.status ?? "active")}`}
         aria-hidden="true"
       >
-        {showSpinner ? (
+        {isWaiting ? (
+          <ClockIcon />
+        ) : showSpinner ? (
           <span className="spinner small" />
         ) : turn?.status === "completed" ? (
           <CheckIcon />
@@ -6387,7 +6418,7 @@ function TurnActivityStatus({
       ) : (
         <span className="turn-activity-copy">{content}</span>
       )}
-      {isActive && startedAt !== null && (
+      {isActive && !isWaiting && startedAt !== null && (
         <span className="turn-activity-duration" aria-live="off">
           {elapsed}
         </span>

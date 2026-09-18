@@ -107,6 +107,10 @@ test("async replies preserve the composer and survive acceptance and history rel
     return route.fallback();
   });
   await page.goto("/threads/session-main");
+  const activity = page.locator(".turn-activity-row");
+  await expect(activity).toContainText("Codex работает");
+  await expect(activity.locator(".spinner")).toHaveCount(1);
+  await expect(activity.locator(".turn-activity-duration")).toHaveCount(1);
   const composer = page.getByRole("textbox", { name: "Направить текущую задачу" });
   await expect(composer).toHaveValue("Мой основной черновик");
   const card = page.getByRole("region", { name: "Вопросы Codex" });

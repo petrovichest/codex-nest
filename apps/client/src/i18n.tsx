@@ -727,6 +727,7 @@ const ENGLISH: Record<string, string> = {
   "Эта версия Codex запросила действие, которое CodexNest пока не поддерживает.":
     "This Codex version requested an action that CodexNest does not support yet.",
   "Codex работает": "Codex is working",
+  "Ждёт вашего ответа": "Waiting for your answer",
   Аннотация: "Annotate",
   "Аннотация {{number}}": "Annotation {{number}}",
   "В очереди": "Queued",
