@@ -2253,13 +2253,13 @@ function ThreadLink({
           {secondaryLabel ? (
             <span className="thread-link-copy">
               <span className="thread-link-title" ref={titleRef}>
-                {displayTitle}
+                <span className="thread-link-title-text">{displayTitle}</span>
               </span>
               <span className="thread-link-project">{secondaryLabel}</span>
             </span>
           ) : (
             <span className="thread-link-title" ref={titleRef}>
-              {displayTitle}
+              <span className="thread-link-title-text">{displayTitle}</span>
             </span>
           )}
           <span className="thread-marker-slot">
@@ -2338,9 +2338,11 @@ function ThreadLink({
 }
 
 function prepareThreadTitleScroll(element: HTMLSpanElement | null): void {
-  if (!element) return;
+  const text = element?.querySelector<HTMLSpanElement>(".thread-link-title-text");
+  if (!element || !text) return;
 
-  const overflow = Math.max(0, element.scrollWidth - element.clientWidth);
+  // Measure the text itself: the clipping container's scrollWidth changes as it moves.
+  const overflow = Math.max(0, text.scrollWidth - element.clientWidth);
   if (overflow <= 1) {
     element.removeAttribute("data-overflowing");
     element.style.removeProperty("--thread-title-scroll-distance");

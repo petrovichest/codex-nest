@@ -1813,10 +1813,15 @@ describe("App routing and navigation", () => {
     const fittingTitle = fittingLink.querySelector(".thread-link-title") as HTMLSpanElement;
     Object.defineProperties(overflowingTitle, {
       clientWidth: { configurable: true, value: 120 },
+      scrollWidth: { configurable: true, value: 120 },
+    });
+    Object.defineProperties(overflowingTitle.firstElementChild!, {
       scrollWidth: { configurable: true, value: 120 + overflow },
     });
     Object.defineProperties(fittingTitle, {
       clientWidth: { configurable: true, value: 160 },
+    });
+    Object.defineProperties(fittingTitle.firstElementChild!, {
       scrollWidth: { configurable: true, value: 160 },
     });
 

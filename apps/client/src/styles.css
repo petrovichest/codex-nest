@@ -354,29 +354,30 @@
   white-space: nowrap;
 }
 
-@media (hover: hover) and (pointer: fine) {
-  .thread-link:hover .thread-link-title[data-overflowing="true"],
-  .thread-branch-row:hover > .thread-link .thread-link-title[data-overflowing="true"] {
+.thread-link-title-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .thread-link:hover .thread-link-title[data-overflowing="true"] > .thread-link-title-text,
+  .thread-branch-row:hover
+    > .thread-link
+    .thread-link-title[data-overflowing="true"]
+    > .thread-link-title-text {
+    width: max-content;
     animation: thread-title-scroll var(--thread-title-scroll-duration, 1.5s) linear forwards;
   }
 }
 
 @keyframes thread-title-scroll {
   from {
-    text-indent: 0;
-    text-overflow: clip;
+    transform: translateX(0);
   }
 
   to {
-    text-indent: calc(-1 * var(--thread-title-scroll-distance, 0px));
-    text-overflow: clip;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .thread-link:hover .thread-link-title[data-overflowing="true"],
-  .thread-branch-row:hover > .thread-link .thread-link-title[data-overflowing="true"] {
-    animation: none;
+    transform: translateX(calc(-1 * var(--thread-title-scroll-distance, 0px)));
   }
 }
 
