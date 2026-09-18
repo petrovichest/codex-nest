@@ -931,10 +931,10 @@
 }
 
 .thread-workspace .session-inspector {
-  margin-block: 12px;
+  margin: 8px 20px 20px 0;
   border: 0;
-  border-radius: var(--chat-radius-surface) 0 0 var(--chat-radius-surface);
-  background: var(--chat-surface);
+  border-radius: var(--chat-radius-surface);
+  background: var(--color-floating);
   box-shadow: var(--chat-shadow);
 }
 
@@ -944,39 +944,127 @@
 }
 
 .thread-workspace .inspector-tabs {
+  margin-top: 6px;
   padding: 4px;
   border: 0;
   border-radius: 999px;
-  background: var(--chat-active);
+  background: transparent;
 }
 
-.thread-workspace .inspector-tabs button.active {
-  --chat-button-rest: var(--chat-surface);
-  --chat-button-hover: var(--chat-control-hover);
-  --chat-button-pressed: var(--chat-control-pressed);
+.thread-workspace .session-inspector button {
+  --inspector-button-shadow: none;
+  --chat-button-hover: var(--color-floating);
+  box-shadow: var(--inspector-button-shadow);
+
+  &:is(:hover, :active, :disabled, [aria-disabled="true"]) {
+    background: var(--chat-button-rest);
+    box-shadow: var(--inspector-button-shadow);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled, [aria-disabled="true"]) {
+      background: var(--color-floating);
+      box-shadow: var(--chat-shadow);
+    }
+  }
+
+  &:focus-visible {
+    background: var(--color-floating);
+    box-shadow: var(--chat-shadow);
+  }
+
+  &:active:not(:disabled, [aria-disabled="true"]) {
+    background: var(--chat-active);
+    box-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
+  }
+}
+
+:root[data-resolved-theme="dark"]
+  .thread-workspace
+  .session-inspector
+  button:active:not(:disabled, [aria-disabled="true"]) {
+  box-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
+}
+
+.thread-workspace .session-inspector .inspector-tabs button.active {
+  --chat-button-rest: var(--color-floating);
+  --inspector-button-shadow: var(--chat-shadow);
   color: var(--text-strong);
-  box-shadow: var(--chat-inner-shadow);
 }
 
 .thread-workspace
-  :is(.inspector-list, .inspector-list > div, .inspector-path, .inspector-artifact-item) {
+  :is(
+    .inspector-list,
+    .inspector-list > div,
+    .inspector-artifact-item,
+    .inspector-artifact-list,
+    .inspector-artifact-empty
+  ) {
   border: 0;
 }
 
-.thread-workspace button.inspector-artifact-download {
+.thread-workspace .session-inspector :is(.icon-button, .inspector-artifact-download) {
   align-self: center;
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   border-radius: 50%;
 }
 
-.thread-workspace .inspector-path code {
-  padding: 12px;
+.thread-workspace .session-inspector .inspector-path-copy {
+  align-self: flex-start;
+}
+
+.thread-workspace .inspector-artifact-list {
+  overflow: visible;
+}
+
+.thread-workspace .inspector-artifact-row {
+  gap: var(--space-2);
+}
+
+.thread-workspace .inspector-artifact-open {
+  padding-inline: var(--space-2);
+}
+
+.thread-workspace
+  :is(.inspector-artifact-stamp, .inspector-artifact-progress, .inspector-artifact-error) {
   border: 0;
   border-radius: var(--chat-radius-control);
-  background: var(--chat-inset);
+  background: var(--color-floating);
+  box-shadow: var(--chat-inner-shadow);
+}
+
+.thread-workspace .inspector-artifact-progress {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1279px) and (min-width: 821px) {
+  .thread-workspace .session-inspector {
+    top: 8px;
+    right: 20px;
+    bottom: 20px;
+    width: min(352px, calc(100vw - var(--sidebar-footprint) - 40px));
+    margin: 0;
+  }
+
+  .app-frame[data-sidebar-side="right"] .thread-workspace .session-inspector {
+    right: calc(var(--sidebar-footprint) + 20px);
+  }
+}
+
+@media (pointer: coarse) {
+  .thread-workspace .session-inspector :is(.icon-button, .inspector-artifact-download) {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .thread-workspace .inspector-tabs button {
+    min-height: 44px;
+  }
 }
 
 .thread-workspace .artifact-viewer {
@@ -1211,7 +1299,15 @@
     padding: 10px;
   }
 
-  .thread-workspace :is(.session-inspector, .artifact-viewer),
+  .thread-workspace .session-inspector,
+  .app-frame[data-sidebar-side="right"] .thread-workspace .session-inspector {
+    margin: 0;
+    left: calc(8px + var(--app-safe-area-left));
+    right: calc(8px + var(--app-safe-area-right));
+    border-radius: var(--chat-radius-surface);
+  }
+
+  .thread-workspace .artifact-viewer,
   .chat-dialog.dialog-surface {
     border-radius: var(--chat-radius-compact);
   }

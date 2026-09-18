@@ -1,10 +1,18 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Project, ThreadSummary } from "@codexnest/protocol";
 
 import type { SessionArtifact } from "../artifacts";
+import { copyText } from "../clipboard";
 import { NewSessionInspector, SessionInspector, type GitChangesView } from "./SessionInspector";
+
+vi.mock("../clipboard", () => ({ copyText: vi.fn() }));
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.mocked(copyText).mockReset();
+});
 
 const summary: ThreadSummary = {
   id: "thread",
@@ -53,6 +61,49 @@ const artifact: SessionArtifact = {
 };
 
 describe("SessionInspector", () => {
+  it("copies the displayed worktree path and clears success after two seconds", async () => {
+    vi.useFakeTimers();
+    vi.mocked(copyText).mockResolvedValue(undefined);
+    renderInspector(null, { ...summary, cwd: "/work/project worktrees/feature" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    });
+    expect(copyText).toHaveBeenCalledWith("/work/project worktrees/feature");
+    expect(screen.getByRole("status")).toHaveTextContent("Путь скопирован");
+    expect(screen.getByRole("button", { name: "Путь скопирован" })).toBeEnabled();
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.getByRole("button", { name: "Копировать путь" })).toBeEnabled();
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("reports copy failures and allows retrying the same path", async () => {
+    vi.mocked(copyText).mockRejectedValueOnce(new Error("Clipboard unavailable"));
+    renderInspector(null);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать путь");
+    vi.mocked(copyText).mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    await screen.findByRole("button", { name: "Путь скопирован" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(copyText).toHaveBeenNthCalledWith(2, summary.cwd);
+  });
+
+  it("copies a new session project path and resets feedback when the project changes", async () => {
+    vi.mocked(copyText).mockResolvedValue(undefined);
+    const view = render(<NewSessionInspector open project={project} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    await screen.findByRole("button", { name: "Путь скопирован" });
+    expect(copyText).toHaveBeenCalledWith(project.path);
+    view.rerender(
+      <NewSessionInspector open project={{ ...project, path: "/work/other" }} onClose={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Копировать путь" }));
+    await screen.findByRole("button", { name: "Путь скопирован" });
+    expect(copyText).toHaveBeenLastCalledWith("/work/other");
+    view.rerender(<NewSessionInspector open project={null} onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /путь/iu })).not.toBeInTheDocument();
+  });
+
   it.each([
     [null, "Загрузка…"],
     ["error", "Недоступно"],

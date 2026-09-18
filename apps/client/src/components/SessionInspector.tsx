@@ -1,16 +1,18 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { GitChangesSummary, Project, ThreadSummary } from "@codexnest/protocol";
 
 import type { SessionArtifact } from "../artifacts";
+import { copyText } from "../clipboard";
 import { useI18n, type Translate } from "../i18n";
 import { threadStatusClasses } from "../thread-status";
 import {
   ArrowDownIcon,
+  CheckIcon,
   ClockIcon,
+  CopyIcon,
   FileIcon,
   FolderIcon,
-  GitBranchIcon,
   ServerIcon,
   XIcon,
 } from "./Icons";
@@ -97,47 +99,64 @@ export function SessionInspector({
           role="tabpanel"
           aria-labelledby="session-overview-tab"
         >
-          <dl className="inspector-list">
-            <InspectorRow icon={<ServerIcon />} label={t("Статус")}>
-              <span className={`status-label status-label-${summary.state}`}>
-                <span className={threadStatusClasses(summary)} />
-                {stateLabel(summary.state, t)}
-              </span>
-            </InspectorRow>
-            <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
-              {project?.displayName ?? t("Без проекта")}
-            </InspectorRow>
-            <InspectorRow icon={<ServerIcon />} label={t("Модель в Codex")}>
-              {summary.codexSettings?.model ?? t("Не сообщено")}
-            </InspectorRow>
-            <InspectorRow icon={<ServerIcon />} label={t("Усилие в Codex")}>
-              {summary.codexSettings?.reasoningEffort ?? t("Не сообщено")}
-            </InspectorRow>
-            <InspectorRow icon={<ServerIcon />} label={t("Приём сообщений")}>
-              {summary.canAcceptDirectInput == null
-                ? t("Не сообщено")
-                : summary.canAcceptDirectInput
-                  ? t("Доступен")
-                  : t("Временно недоступен")}
-            </InspectorRow>
-            <InspectorRow technical icon={<GitBranchIcon />} label="Git changes">
-              <GitChangesValue value={gitChanges} />
-            </InspectorRow>
-            <InspectorRow technical icon={<ClockIcon />} label={t("Создана")}>
-              <time dateTime={new Date(summary.createdAt).toISOString()}>
-                {formatDate(summary.createdAt, language)}
-              </time>
-            </InspectorRow>
-            <InspectorRow technical icon={<ClockIcon />} label={t("Обновлена")}>
-              <time dateTime={new Date(summary.updatedAt).toISOString()}>
-                {formatDate(summary.updatedAt, language)}
-              </time>
-            </InspectorRow>
-          </dl>
-          <div className="inspector-path">
-            <span>{t("Рабочая папка")}</span>
-            <code>{summary.cwd}</code>
-          </div>
+          <section className="inspector-section">
+            <h2>
+              <FolderIcon />
+              {t("Проект")}
+            </h2>
+            <div className="inspector-project-name">{project?.displayName ?? t("Без проекта")}</div>
+            <InspectorPath key={summary.cwd} path={summary.cwd} />
+            <dl className="inspector-list">
+              <InspectorRow technical label={t("Изменения Git")}>
+                <GitChangesValue value={gitChanges} />
+              </InspectorRow>
+            </dl>
+          </section>
+          <section className="inspector-section">
+            <h2>
+              <ServerIcon />
+              {t("Выполнение")}
+            </h2>
+            <dl className="inspector-list">
+              <InspectorRow label={t("Статус")}>
+                <span className={`status-label status-label-${summary.state}`}>
+                  <span className={threadStatusClasses(summary)} />
+                  {stateLabel(summary.state, t)}
+                </span>
+              </InspectorRow>
+              <InspectorRow label={t("Модель")}>
+                {summary.codexSettings?.model ?? t("Не сообщено")}
+              </InspectorRow>
+              <InspectorRow label={t("Усилие")}>
+                {summary.codexSettings?.reasoningEffort ?? t("Не сообщено")}
+              </InspectorRow>
+              <InspectorRow label={t("Приём сообщений")}>
+                {summary.canAcceptDirectInput == null
+                  ? t("Не сообщено")
+                  : summary.canAcceptDirectInput
+                    ? t("Доступен")
+                    : t("Временно недоступен")}
+              </InspectorRow>
+            </dl>
+          </section>
+          <section className="inspector-section">
+            <h2>
+              <ClockIcon />
+              {t("Активность")}
+            </h2>
+            <dl className="inspector-list inspector-dates">
+              <InspectorRow label={t("Создана")}>
+                <time dateTime={new Date(summary.createdAt).toISOString()}>
+                  {formatDate(summary.createdAt, language)}
+                </time>
+              </InspectorRow>
+              <InspectorRow label={t("Обновлена")}>
+                <time dateTime={new Date(summary.updatedAt).toISOString()}>
+                  {formatDate(summary.updatedAt, language)}
+                </time>
+              </InspectorRow>
+            </dl>
+          </section>
         </div>
       ) : (
         <div
@@ -216,22 +235,72 @@ export function NewSessionInspector({
         </button>
       </div>
       <div className="inspector-panel inspector-overview new-session-inspector-panel">
-        <dl className="inspector-list">
-          <InspectorRow icon={<FolderIcon />} label={t("Проект")}>
-            {project?.displayName ?? t("Не выбран")}
-          </InspectorRow>
-        </dl>
-        {project && (
-          <div className="inspector-path">
-            <span>{t("Рабочая папка")}</span>
-            <code>{project.path}</code>
-          </div>
-        )}
+        <section className="inspector-section">
+          <h2>
+            <FolderIcon />
+            {t("Проект")}
+          </h2>
+          <div className="inspector-project-name">{project?.displayName ?? t("Не выбран")}</div>
+          {project && <InspectorPath key={project.path} path={project.path} />}
+        </section>
         <p className="inspector-note">
           {t("Задача будет создана после отправки первого сообщения.")}
         </p>
       </div>
     </aside>
+  );
+}
+
+function InspectorPath({ path }: { path: string }) {
+  const { t } = useI18n();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
+
+  async function copy() {
+    clearTimeout(timer.current);
+    try {
+      await copyText(path);
+      if (!mounted.current) return;
+      setCopyState("copied");
+      timer.current = setTimeout(() => setCopyState("idle"), 2_000);
+    } catch {
+      if (mounted.current) setCopyState("failed");
+    }
+  }
+
+  const label = copyState === "copied" ? t("Путь скопирован") : t("Копировать путь");
+  return (
+    <div className="inspector-path">
+      <span className="sr-only">{t("Рабочая папка")}</span>
+      <div className="inspector-path-row">
+        <code>{path}</code>
+        <button
+          type="button"
+          className="icon-button inspector-path-copy"
+          aria-label={label}
+          title={label}
+          onClick={() => void copy()}
+        >
+          {copyState === "copied" ? <CheckIcon /> : <CopyIcon />}
+        </button>
+      </div>
+      <span className="sr-only" role="status">
+        {copyState === "copied" ? t("Путь скопирован") : ""}
+      </span>
+      {copyState === "failed" && (
+        <span className="inspector-copy-error" role="alert">
+          {t("Не удалось скопировать путь")}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -326,22 +395,17 @@ function GitChangesValue({ value }: { value: GitChangesView }) {
 }
 
 function InspectorRow({
-  icon,
   label,
   technical = false,
   children,
 }: {
-  icon: React.ReactNode;
   label: string;
   technical?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div>
-      <dt>
-        {icon}
-        {label}
-      </dt>
+      <dt>{label}</dt>
       <dd className={technical ? "inspector-value-technical" : undefined}>{children}</dd>
     </div>
   );
