@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import { collectMessageImages } from "./message-images";
 
 describe("message image collection", () => {
-  it("loads tool paths outside the workspace without changing Markdown path handling", () => {
+  it("routes external image links through downloads while preserving raw tool paths", () => {
     const path = "/tmp/shot %20.png";
     const image = { key: path, src: path, localPath: path, label: "shot %20.png" };
     expect(collectMessageImages("", [path], "/work", true)).toEqual([image]);
-    expect(
-      collectMessageImages(`[Outside](${path.replaceAll(" ", "%20")})`, [], "/work", true),
-    ).toEqual([]);
-    expect(collectMessageImages("", [path], "/work")[0]?.localPath).toBeNull();
+    expect(collectMessageImages(`[Outside](${encodeURI(path)})`, [], "/work")).toEqual([
+      { ...image, src: encodeURI(path), label: "Outside" },
+    ]);
+    expect(collectMessageImages("![Outside](/tmp/image.png)", [], "/work")[0]?.localPath).toBe(
+      "/tmp/image.png",
+    );
   });
   it("merges Markdown images, file links and attachments in first-appearance order", () => {
     const result = collectMessageImages(
@@ -34,7 +36,7 @@ describe("message image collection", () => {
   it("ignores code, document links, web pages and unsupported local paths", () => {
     expect(
       collectMessageImages(
-        "`![код](/work/a.png)`\n\n```md\n[код](/work/b.png)\n```\n\n[PDF](/work/file.pdf) [Сайт](https://example.test) [вне проекта](/else/image.png) [обход](/work/../secret.png)",
+        "`![код](/work/a.png)`\n\n```md\n[код](/work/b.png)\n```\n\n[PDF](/work/file.pdf) [Сайт](https://example.test) [вне проекта](/else/file.pdf) [обход](/work/../secret.png) [кодированный обход](/tmp/%2e%2e/secret.png) [сетевой путь](//example.test/image.png)",
         [],
         "/work",
       ),

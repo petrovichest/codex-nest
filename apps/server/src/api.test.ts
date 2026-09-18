@@ -3641,6 +3641,44 @@ describe("thread settings", () => {
     );
     await app.close();
   });
+  it.each(["default", "plan", "team"] as const)(
+    "explains explicit image delivery in existing %s sessions without an extra resume",
+    async (collaborationMode) => {
+      const { app, bridge, projection, store, headers } = await createTeamHarness();
+      try {
+        await projection.setSettings("thread", { collaborationMode });
+        expect(store.view().threadMeta.thread?.sessionArtifactsVersion).toBeUndefined();
+        const before = bridge.request.mock.calls.length;
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/turns",
+          headers,
+          payload: {
+            clientMessageId: `image-delivery-${collaborationMode}`,
+            input: "Покажи снимок",
+          },
+        });
+        expect(response.statusCode).toBe(201);
+        const calls = bridge.request.mock.calls.slice(before);
+        expect(calls.filter(([method]) => method === "thread/resume")).toHaveLength(0);
+        const starts = calls.filter(([method]) => method === "turn/start");
+        expect(starts).toHaveLength(1);
+        expect(starts[0]?.[1]).toMatchObject({
+          additionalContext: {
+            "codexnest.images": {
+              kind: "application",
+              value: expect.stringMatching(
+                /only in expandable technical details.*Markdown image.*commentary, plan, or final message.*outside that directory.*view_image.*Do not claim to have shown/is,
+              ),
+            },
+          },
+        });
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it("persists settings on the server and maps plan mode into turn/start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-settings-api-test-"));
     directories.push(directory);
@@ -7182,6 +7220,20 @@ describe("Team orchestration", () => {
       developerInstructions: expect.stringMatching(
         /fixed delay.*asynchronously.*startup check.*built-in sleep tool once.*remaining time.*submit_result with outcome/is,
       ),
+    });
+    expect(
+      bridge.request.mock.calls.find(
+        ([method, params]) =>
+          method === "turn/start" &&
+          (params as Record<string, unknown>).threadId === spawned.threadId,
+      )?.[1],
+    ).toMatchObject({
+      additionalContext: {
+        "codexnest.images": {
+          kind: "application",
+          value: expect.stringContaining("explicitly include a Markdown image"),
+        },
+      },
     });
 
     const startedAt = Date.now();

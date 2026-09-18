@@ -53,7 +53,7 @@ it("opens remote image downloads in the system browser on native platforms", asy
   );
 });
 
-it("shows tool images without a disclosure and loads and downloads their exact external paths", async () => {
+it("loads tool images only after disclosure and downloads their exact external paths", async () => {
   vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tool-preview");
   vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   const path = "/tmp/screenshot %20.png";
@@ -70,8 +70,12 @@ it("shows tool images without a disclosure and loads and downloads their exact e
   const view = render(
     <Activity item={item} cwd="/work" onLoadImage={load} onDownload={download} />,
   );
+  expect(screen.queryByRole("group", { name: "Изображения" })).toBeNull();
+  expect(load).not.toHaveBeenCalled();
+  const details = view.container.querySelector("details")!;
+  details.open = true;
+  fireEvent(details, new Event("toggle"));
   const gallery = screen.getByRole("group", { name: "Изображения" });
-  expect(view.container.querySelector("details")).toBeNull();
   await waitFor(() => expect(load).toHaveBeenCalledWith(path));
   await waitFor(() =>
     expect(within(gallery).getByRole("img")).toHaveAttribute("src", "blob:tool-preview"),

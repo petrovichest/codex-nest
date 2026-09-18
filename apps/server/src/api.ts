@@ -276,6 +276,12 @@ const TEAM_CHILD_INSTRUCTIONS = [
 ].join(" ");
 const SESSION_ARTIFACT_INSTRUCTIONS =
   "Use codexnest.publish_artifact only for standalone final deliverables intentionally delivered to the user. Never publish ordinary source references, intermediate files, plans or checklists, or every edited file.";
+const IMAGE_DELIVERY_CONTEXT = [
+  "In CodexNest, images returned by tools (including image viewing and generation) appear only in expandable technical details, not in the main conversation.",
+  "To show an image to the user, explicitly include a Markdown image or a labeled image-file link in your commentary, plan, or final message, using an absolute local path or an HTTPS image URL.",
+  "Prefer files in the thread's working directory. Before linking a local image outside that directory, open it with view_image in this thread, then link its exact path. If a tool returns only image data, save the chosen image in the working directory before linking it.",
+  "Viewing, generating, or forwarding an image through a tool output such as image(...) does not attach it to your message. Do not claim to have shown an image unless you have included it in a user-facing message.",
+].join(" ");
 
 interface DownloadTicket {
   root: string;
@@ -7289,6 +7295,9 @@ function managedChildTurnSettings(
     serviceTier: null,
     effort,
     personality: settings.personality,
+    additionalContext: {
+      "codexnest.images": { kind: "application", value: IMAGE_DELIVERY_CONTEXT },
+    },
     ...(task && runtime
       ? {
           cwd: runtime.cwd,
@@ -7586,37 +7595,33 @@ function turnSettings(
         developer_instructions: null,
       },
     },
-    additionalContext:
-      settings.collaborationMode === "team" ||
-      settings.collaborationMode === "plan" ||
-      continuationContext
+    additionalContext: {
+      "codexnest.images": { kind: "application", value: IMAGE_DELIVERY_CONTEXT },
+      ...(settings.collaborationMode === "plan"
         ? {
-            ...(settings.collaborationMode === "plan"
-              ? {
-                  "codexnest.plan": {
-                    kind: "application",
-                    value: PLAN_MODE_CONTEXT,
-                  },
-                }
-              : {}),
-            ...(settings.collaborationMode === "team"
-              ? {
-                  "codexnest.team": {
-                    kind: "application",
-                    value: TEAM_MODE_CONTEXT,
-                  },
-                }
-              : {}),
-            ...(continuationContext
-              ? {
-                  "codexnest.team.results": {
-                    kind: "application",
-                    value: continuationContext,
-                  },
-                }
-              : {}),
+            "codexnest.plan": {
+              kind: "application",
+              value: PLAN_MODE_CONTEXT,
+            },
           }
-        : undefined,
+        : {}),
+      ...(settings.collaborationMode === "team"
+        ? {
+            "codexnest.team": {
+              kind: "application",
+              value: TEAM_MODE_CONTEXT,
+            },
+          }
+        : {}),
+      ...(continuationContext
+        ? {
+            "codexnest.team.results": {
+              kind: "application",
+              value: continuationContext,
+            },
+          }
+        : {}),
+    },
   });
 }
 

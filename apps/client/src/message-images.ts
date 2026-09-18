@@ -16,7 +16,12 @@ export function messageImage(
   explicit = false,
 ): MessageImage | null {
   if (!src || !defaultUrlTransform(src)) return null;
-  const localPath = cwd ? localDownloadPath(src, cwd) : null;
+  let localPath = cwd ? localDownloadPath(src, cwd) : null;
+  if (!localPath && cwd && src.startsWith("/") && !src.startsWith("//")) {
+    const path = localDownloadPath(src, "/");
+    // The download API authorizes external images against this session's tool history.
+    if (path && artifactDescriptor(path)?.kind === "image") localPath = path;
+  }
   let fileName = localPath ?? src;
   if (/^https?:\/\//i.test(src)) {
     try {

@@ -3924,6 +3924,7 @@ export function ThreadPage({
                                   items={entry}
                                   cwd={workspaceSummary.cwd}
                                   onDownload={downloadFile}
+                                  onLoadImage={loadLocalImage}
                                   onOpenArtifact={openLinkedArtifact}
                                 />
                               </div>
@@ -4029,6 +4030,7 @@ export function ThreadPage({
                               onLoad={() => loadTurnItems(threadId, turn.id)}
                               cwd={workspaceSummary.cwd}
                               onDownload={downloadFile}
+                              onLoadImage={loadLocalImage}
                               onOpenArtifact={openLinkedArtifact}
                             />
                           </div>
@@ -5425,27 +5427,21 @@ export function Activity({
     );
   }
   if (item.type === "tool") {
-    if (item.images?.length) {
-      return (
-        <MessageImageProvider
-          text=""
-          images={item.images}
-          toolImages
-          cwd={cwd}
-          onLoadImage={onLoadImage}
-          onDownload={onDownload}
-        >
-          <article className="message tool-images">
-            <div className="message-body">
-              <MessageImageGallery />
-            </div>
-          </article>
-        </MessageImageProvider>
-      );
-    }
     return (
       <ActivityDetails icon={<ToolIcon />} title={item.title} status={item.status}>
         {item.detail && <p>{localizeKnownServerText(language, item.detail)}</p>}
+        {Boolean(item.images?.length) && (
+          <MessageImageProvider
+            text=""
+            images={item.images}
+            toolImages
+            cwd={cwd}
+            onLoadImage={onLoadImage}
+            onDownload={onDownload}
+          >
+            <MessageImageGallery />
+          </MessageImageProvider>
+        )}
       </ActivityDetails>
     );
   }
@@ -5893,11 +5889,13 @@ function ActivityGroup({
   items,
   cwd,
   onDownload,
+  onLoadImage,
   onOpenArtifact,
 }: {
   items: ActivityItem[];
   cwd: string;
   onDownload(path: string): Promise<void>;
+  onLoadImage?: LocalImageLoader;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
 }) {
   const { t } = useI18n();
@@ -5931,6 +5929,7 @@ function ActivityGroup({
               item={item}
               cwd={cwd}
               onDownload={onDownload}
+              onLoadImage={onLoadImage}
               onOpenArtifact={onOpenArtifact}
               key={item.id}
             />
@@ -5953,6 +5952,7 @@ function TurnActivityDisclosure({
   onLoad,
   cwd,
   onDownload,
+  onLoadImage,
   onOpenArtifact,
 }: {
   turn: TurnView;
@@ -5964,6 +5964,7 @@ function TurnActivityDisclosure({
   onLoad(): Promise<void>;
   cwd: string;
   onDownload(path: string): Promise<void>;
+  onLoadImage?: LocalImageLoader;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
 }) {
   const { t } = useI18n();
@@ -6024,6 +6025,7 @@ function TurnActivityDisclosure({
                   item={item}
                   cwd={cwd}
                   onDownload={onDownload}
+                  onLoadImage={onLoadImage}
                   onOpenArtifact={onOpenArtifact}
                   key={item.id}
                 />
@@ -6702,18 +6704,12 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
 }
 
 function isTechnicalActivity(item: ActivityItem): boolean {
-  if (item.type === "tool" && item.images?.length) return false;
   return ["reasoning", "command", "fileChange", "tool"].includes(item.type);
 }
 
 function activitiesForThreadDisplay(items: ActivityItem[], isSubagent: boolean): ActivityItem[] {
   if (!isSubagent) return items;
-  return items.filter(
-    (item) =>
-      item.type === "userMessage" ||
-      item.type === "agentMessage" ||
-      (item.type === "tool" && Boolean(item.images?.length)),
-  );
+  return items.filter((item) => item.type === "userMessage" || item.type === "agentMessage");
 }
 
 function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {
