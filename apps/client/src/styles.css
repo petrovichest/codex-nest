@@ -1657,7 +1657,7 @@
 .settings-technical,
 .codex-proxy-summary code {
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
   font-weight: var(--weight-medium);
 }
 
@@ -2224,7 +2224,7 @@
 .markdown-table-scroll table {
   min-width: 100%;
   border-collapse: collapse;
-  font-size: var(--text-small);
+  font-size: var(--text-code);
 }
 
 .markdown-table-scroll th,
@@ -2493,7 +2493,7 @@
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
   line-height: var(--leading-message);
 }
 
@@ -3367,7 +3367,7 @@ button.message-file:hover:not(:disabled) {
   padding-left: var(--space-3);
   border-left: 2px solid var(--color-line-strong);
   color: var(--muted);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
 }
 
 .activity-group > summary {
@@ -3446,7 +3446,7 @@ button.message-file:hover:not(:disabled) {
 
 .activity-title.technical {
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
 }
 
 .activity-status {
@@ -3486,7 +3486,7 @@ button.message-file:hover:not(:disabled) {
   padding: 0 var(--space-5) var(--space-2) 27px;
   border-top: 0;
   color: var(--muted-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
 }
 
 .activity-content .path {
@@ -4831,7 +4831,7 @@ button.message-file:hover:not(:disabled) {
 
 .inspector-list dd.inspector-value-technical {
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4874,7 +4874,7 @@ button.message-file:hover:not(:disabled) {
   border-radius: var(--radius-sm);
   background: var(--color-recessed);
   overflow-wrap: anywhere;
-  font-size: var(--text-small);
+  font-size: var(--text-code);
   line-height: 1.45;
 }
 

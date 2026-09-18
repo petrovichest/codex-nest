@@ -48,6 +48,7 @@ import { WorkspaceHeader } from "./WorkspaceHeader";
 import { RecoverySettingsCard } from "./RecoverySettingsCard";
 import { SettingsGroup, SettingsRow } from "./SettingsPresentation";
 import { SkillsSettingsCard } from "./SkillsSettingsCard";
+import { TypographySettings } from "./TypographySettings";
 
 export type SidebarSide = "left" | "right";
 export type ProjectListDirection = "bottom-up" | "top-down";
@@ -436,6 +437,8 @@ export function SettingsPage({
                 </select>
               </SettingsRow>
             </SettingsGroup>
+
+            <TypographySettings />
 
             {!Capacitor.isNativePlatform() && (
               <SettingsGroup

@@ -1,3 +1,4 @@
+import { useTypography } from "../typography";
 import { pastedText, samePastedText, type PastedText } from "@codexnest/protocol";
 import { PasteBlocks } from "./PasteBlocks";
 import { PasteTextarea, usePasteEditor } from "./PasteEditor";
@@ -205,6 +206,7 @@ export function Composer({
   children?: ReactNode;
 }) {
   const { language, t } = useI18n();
+  const { message: messageFontSize } = useTypography();
   const creating = projects !== undefined;
   const formRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -479,7 +481,7 @@ export function Composer({
   useEffect(() => {
     if (nativeFieldSizing) return;
     scheduleTextareaResize();
-  }, [draftInput, nativeFieldSizing]);
+  }, [draftInput, nativeFieldSizing, messageFontSize]);
 
   useEffect(() => {
     if (nativeFieldSizing) return;

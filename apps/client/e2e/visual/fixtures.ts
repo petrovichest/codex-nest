@@ -452,6 +452,7 @@ export type VisualFixtureOptions = {
   forkEstimate?: "ready" | "loading" | "failure" | "unavailable";
   forkLineage?: boolean;
   notificationPrompt?: boolean;
+  preserveLocalStorage?: boolean;
   reducedMotion?: "reduce" | "no-preference";
   sidebarSide?: "left" | "right";
   theme: "light" | "dark";
@@ -466,6 +467,7 @@ export async function installVisualFixture(
     forkEstimate = "ready",
     forkLineage = false,
     notificationPrompt = false,
+    preserveLocalStorage = false,
     reducedMotion = "reduce",
     sidebarSide = "left",
     snapshot: suppliedSnapshot,
@@ -507,6 +509,7 @@ export async function installVisualFixture(
       disableMotion,
       fixedNow,
       notificationPrompt: showPrompt,
+      preserveLocalStorage: keepLocalStorage,
       serverOrigin,
       sidebarSide: seededSidebarSide,
       theme: seededTheme,
@@ -514,7 +517,7 @@ export async function installVisualFixture(
     }) => {
       Date.now = () => fixedNow;
       try {
-        localStorage.clear();
+        if (!keepLocalStorage) localStorage.clear();
         localStorage.setItem("codexnest.theme", seededTheme);
         localStorage.setItem("codexnest.uiLanguage", "ru");
         localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
@@ -563,6 +566,7 @@ export async function installVisualFixture(
       disableMotion: reducedMotion === "reduce",
       fixedNow: FIXED_NOW,
       notificationPrompt,
+      preserveLocalStorage,
       serverOrigin: SERVER_ORIGIN,
       sidebarSide,
       theme,

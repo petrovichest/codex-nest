@@ -1,8 +1,10 @@
 :root {
   /* Application roles. The extension imports tokens.css without this layer. */
   --text-micro: 10px;
+  --text-tiny: var(--text-micro);
   --text-caption: 12px;
   --text-small: 14px;
+  --text-code: 14px;
   --text-ui: 16px;
   --text-label: var(--text-ui);
   --text-message: var(--text-input);
@@ -172,7 +174,7 @@ code {
 }
 
 table {
-  font-size: var(--text-small);
+  font-size: var(--text-code);
 }
 
 pre {
@@ -184,7 +186,7 @@ pre {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--color-recessed) 74%, var(--color-canvas));
   color: var(--color-ink);
-  font-size: var(--text-small);
+  font-size: var(--text-code);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

@@ -22,6 +22,25 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  Шрифты: "Fonts",
+  "Основной интерфейс": "Main interface",
+  "Проекты · Настройки": "Projects \u00b7 Settings",
+  "Сообщения и поля ввода": "Messages and input fields",
+  "Напишите сообщение": "Write a message",
+  "Описания и пояснения": "Descriptions and explanations",
+  "Настройки на этом устройстве": "Settings on this device",
+  "Код, логи и таблицы": "Code, logs and tables",
+  "Метаданные и компактные действия": "Metadata and compact actions",
+  "Сегодня, 12:30 · 3 файла": "Today, 12:30 \u00b7 3 files",
+  "Мелкие индикаторы": "Small indicators",
+  "Заголовки разделов": "Section headings",
+  "Заголовки диалогов и пустых состояний": "Dialog and empty state headings",
+  "Заголовок экрана подключения": "Connection screen heading",
+  "Каждый размер настраивается отдельно. Изменения видны сразу и сохраняются на этом устройстве.":
+    "Adjust each size independently. Changes appear immediately and are saved on this device.",
+  "Вернуть стандартные размеры": "Restore default font sizes",
+  "Сбросить размер: {{name}}": "Reset size: {{name}}",
+  "Стандартный размер: {{size}} px": "Default size: {{size}} px",
   "Вставленный текст": "Pasted text",
   "Удалить вставленный текст": "Remove pasted text",
   "Исходный вставленный текст": "Pasted text source",

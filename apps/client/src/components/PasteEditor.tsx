@@ -1,3 +1,4 @@
+import { useTypography } from "../typography";
 import { PasteBlocks } from "./PasteBlocks";
 import "../styles/pasted-text.css";
 import {
@@ -146,6 +147,7 @@ export function PasteTextarea({
   const selection = useRef<[number, number] | undefined>(undefined);
   const inputType = useRef("");
   const { t } = useI18n();
+  const { message: messageFontSize } = useTypography();
   const { input, inlinePastes } = editor.value;
   const latestEditor = useRef(editor);
   latestEditor.current = editor;
@@ -197,7 +199,7 @@ export function PasteTextarea({
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
     observer?.observe(textarea);
     return () => observer?.disconnect();
-  }, [input, inlinePastes]);
+  }, [input, inlinePastes, messageFontSize]);
   let cursor = 0;
   const fragments = (inlinePastes ?? []).flatMap((range) => {
     const before = input.slice(cursor, range.start);

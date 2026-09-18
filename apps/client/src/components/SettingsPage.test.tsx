@@ -209,6 +209,7 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("heading", { name: "Новые задачи" })).not.toBeInTheDocument();
     expect(panelHeadings(view.container, "application")).toEqual([
       "Интерфейс",
+      "Шрифты",
       "Уведомления браузера",
       "Распознавание речи",
     ]);

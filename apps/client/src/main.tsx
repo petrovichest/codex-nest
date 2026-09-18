@@ -11,6 +11,10 @@ import "./styles/tokens.css";
 import "./styles/primitives.css";
 import "./styles.css";
 import "./styles/chat.css";
+import "./styles/typography.css";
+import { initializeTypography } from "./typography";
+
+initializeTypography();
 
 function Root() {
   const [settings, setSettings] = useState<ConnectionSettings | null | undefined>(undefined);

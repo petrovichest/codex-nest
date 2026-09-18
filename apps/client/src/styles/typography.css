@@ -1,0 +1,267 @@
+.typography-example {
+  display: block;
+  line-height: var(--leading-copy);
+  overflow-wrap: anywhere;
+}
+
+.typography-size-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
+}
+
+.typography-size-control input {
+  min-width: 0;
+  width: 5em;
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.typography-size-control .icon-button {
+  flex: 0 0 auto;
+}
+
+.typography-unit {
+  color: var(--muted);
+  font-size: var(--text-small);
+}
+
+.typography-reset {
+  padding-top: var(--space-4);
+}
+
+.typography-reset button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-block: var(--space-2);
+}
+
+/* Defaults retain the established geometry; custom type grows within it. */
+:root[data-custom-typography] {
+  select {
+    min-width: 0;
+    max-width: 100%;
+    /* WebKit's native select can paint long labels beyond its declared width. */
+    contain: paint;
+    text-overflow: ellipsis;
+  }
+
+  .settings-row-copy :is(label, strong, p),
+  .settings-group-heading,
+  .dialog-heading,
+  .model-settings-section {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .settings-group-heading h2,
+  .workspace-title h1 {
+    line-height: 1.333333;
+  }
+
+  .dialog-heading h2 {
+    line-height: 1.4;
+  }
+
+  .workspace-header {
+    height: auto;
+    min-height: 60px;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) {
+    --chat-title-line: calc(var(--text-ui) * 1.25);
+    --chat-project-line: calc(var(--text-small) * 1.428571);
+    --chat-header-height: max(
+      44px,
+      calc(max(var(--chat-title-line), var(--chat-project-line)) + 12px)
+    );
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-header {
+    height: var(--chat-header-height);
+    min-height: var(--chat-header-height);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title h1 {
+    line-height: var(--chat-title-line);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .workspace-title p {
+    line-height: var(--chat-project-line);
+  }
+
+  .sidebar-controls {
+    --sidebar-control-size: max(38px, calc(var(--text-ui) * 1.4 + 12px));
+  }
+
+  .sidebar-control-action,
+  .project-toggle,
+  .project-title {
+    min-height: max(38px, calc(var(--text-ui) * 1.5 + 8px));
+    height: auto;
+  }
+
+  .sidebar-control-action {
+    overflow: hidden;
+  }
+
+  .sidebar-control-action :is(span, .action-label-text) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-list-mode {
+    grid-template-columns: repeat(2, minmax(max-content, 1fr)) max-content;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .session-list-mode button {
+    height: auto;
+    min-height: max(34px, calc(var(--text-ui) * 1.5 + 8px));
+    white-space: nowrap;
+  }
+
+  .session-list-mode .pinned-group-toggle {
+    min-width: 48px;
+    min-height: max(34px, calc(var(--text-caption) * 1.5 + 8px));
+  }
+
+  .thread-link-project {
+    line-height: 1.25;
+  }
+
+  .thread-link,
+  .thread-link.active-feed-link {
+    min-height: max(38px, calc(var(--text-ui) * 1.2 + var(--text-caption) * 1.25 + 8px));
+  }
+
+  .composer-toolbar {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .composer-options {
+    flex: 1 0 auto;
+  }
+
+  /* Anchor outside the scrolling toolbar so the goal panel remains reachable. */
+  .goal-picker {
+    position: static;
+  }
+
+  .goal-popover-heading {
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .goal-popover-heading span {
+    white-space: normal;
+  }
+
+  @media (min-width: 821px) {
+    .goal-popover {
+      right: var(--space-3);
+      max-height: 60dvh;
+      overflow: auto;
+    }
+  }
+
+  .composer-toolbar .setting-control:not(.icon-only),
+  .composer-toolbar .project-picker select {
+    height: auto;
+    min-height: max(32px, calc(var(--text-caption) * 1.5 + 4px));
+  }
+
+  .composer-toolbar .model-toggle {
+    max-width: none;
+    flex: 0 0 auto;
+  }
+
+  .composer-action-timer {
+    font-size: var(--text-caption);
+  }
+
+  .composer-actions > .microphone:is(.recording, .timing) {
+    --composer-action-size: max(34px, calc(var(--text-caption) * 2.5));
+  }
+
+  .settings-section-tabs,
+  .inspector-tabs,
+  .dialog-actions,
+  .queued-message-editor-actions {
+    overflow-x: auto;
+    min-width: 0;
+  }
+
+  .settings-section-tab,
+  .inspector-tabs button,
+  .dialog-actions button,
+  .queued-message-editor-actions button {
+    flex-shrink: 0;
+    height: auto;
+    min-height: max(34px, calc(var(--text-ui) * 1.5 + 8px));
+  }
+
+  .inspector-tabs {
+    grid-template-columns: repeat(2, minmax(max-content, 1fr));
+  }
+
+  .settings-section-tabs {
+    grid-template-columns: repeat(5, minmax(max-content, 1fr));
+  }
+
+  .message-footer,
+  .queued-message-footer,
+  .turn-activity-row,
+  .thread-workspace .turn-activity-row,
+  .thread-workspace .timeline .voice-transcription-message > .message-body {
+    height: auto;
+    min-height: max(32px, calc(var(--text-caption) * 1.5));
+    flex-wrap: wrap;
+  }
+
+  .thread-workspace .timeline .voice-transcription-message > .message-body {
+    line-height: var(--leading-copy);
+  }
+
+  .user-input-steps button {
+    width: max(34px, calc(var(--text-caption) * 1.5 + 8px));
+    height: max(34px, calc(var(--text-caption) * 1.5 + 8px));
+  }
+
+  .inspector-artifact-stamp {
+    flex-basis: max(38px, 3.5em);
+    width: max(38px, 3.5em);
+    height: max(24px, 1.5em);
+  }
+
+  .fork-operation-failed {
+    width: max(14px, 1.4em);
+    height: max(14px, 1.4em);
+  }
+
+  .fork-children-trigger {
+    height: auto;
+    min-height: max(34px, 1.5em);
+  }
+
+  .queued-message-order {
+    width: max(20px, 2ch);
+  }
+
+  @media (max-width: 820px) {
+    .thread-workspace:not(.pending-fork-workspace) {
+      --chat-project-line: calc(var(--text-small) * 1.285714);
+      --chat-header-height: max(
+        44px,
+        calc(var(--chat-title-line) + var(--chat-project-line) + 6px)
+      );
+    }
+  }
+}

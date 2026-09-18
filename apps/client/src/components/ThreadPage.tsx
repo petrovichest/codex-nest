@@ -1,3 +1,4 @@
+import { useTypography } from "../typography";
 import { PasteBlocks } from "./PasteBlocks";
 import { PasteMessageEditor } from "./PasteEditor";
 import { PastedMarkdown } from "./PastedMarkdown";
@@ -5505,6 +5506,7 @@ function AnnotatableMarkdownContent({
   onDelete?(annotationId: string): boolean;
 }) {
   const { t } = useI18n();
+  const { message: annotationFontSize } = useTypography();
   const surfaceRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFormElement>(null);
@@ -5667,7 +5669,7 @@ function AnnotatableMarkdownContent({
 
   useLayoutEffect(() => {
     resizeEditor();
-  }, [comment, resizeEditor]);
+  }, [comment, resizeEditor, annotationFontSize]);
 
   useEffect(() => {
     if (!editor) return;
@@ -6045,6 +6047,7 @@ export function QueuedMessages({
   onRetry?(messageId: string): Promise<void>;
 }) {
   const { language, t } = useI18n();
+  const { message: messageFontSize } = useTypography();
   const [editor, setEditor] = useState<({ messageId: string; value: string } & PastedText) | null>(
     null,
   );
@@ -6064,7 +6067,7 @@ export function QueuedMessages({
 
   useLayoutEffect(() => {
     resizeEditor();
-  }, [editor, resizeEditor]);
+  }, [editor, resizeEditor, messageFontSize]);
 
   const editorMessageId = editor?.messageId;
   useEffect(() => {
