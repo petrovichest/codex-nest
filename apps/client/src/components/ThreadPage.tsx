@@ -939,19 +939,32 @@ export function ThreadPage({
   const groupedTurnActivities = useMemo(
     () =>
       new Map(
-        (detail?.turns ?? []).map(
-          (turn) =>
-            [
-              turn.id,
-              groupActivities(
-                activitiesForThreadDisplay(turn.items, isSubagent).filter(
-                  (item) => !isTechnicalActivity(item),
-                ),
-              ),
-            ] as const,
-        ),
+        (detail?.turns ?? []).map((turn) => {
+          const entries = groupActivities(
+            activitiesForThreadDisplay(turn.items, isSubagent).filter(
+              (item) => !isTechnicalActivity(item),
+            ),
+          );
+          const completionResponseId =
+            turn.status === "completed"
+              ? entries
+                  .flat()
+                  .reverse()
+                  .find(
+                    (item) =>
+                      (item.type === "agentMessage" || item.type === "plan") &&
+                      item.status === "completed" &&
+                      Boolean(item.text.trim()),
+                  )?.id
+              : undefined;
+          return [turn.id, { entries, completionResponseId }] as const;
+        }),
       ),
     [detail?.turns, isSubagent],
+  );
+  const loadTurnJournal = useCallback(
+    (turnId: string) => loadTurnItems(threadId, turnId),
+    [loadTurnItems, threadId],
   );
   const technicalTurnActivities = useMemo(
     () =>
@@ -3875,7 +3888,8 @@ export function ThreadPage({
                         </div>
                       )}
                     {detail?.turns.map((turn) => {
-                      const entries = groupedTurnActivities.get(turn.id)!;
+                      const display = groupedTurnActivities.get(turn.id)!;
+                      const { entries } = display;
                       const technicalItems = technicalTurnActivities.get(turn.id)!;
                       const forkTarget = completedTurnForkActions.get(turn.id);
                       const turnOptimisticMessages = optimisticTurnMessages.filter(
@@ -3884,6 +3898,9 @@ export function ThreadPage({
                           (!message.turnId && workspaceSummary.currentTurnId === turn.id),
                       );
                       const active = workspaceSummary.currentTurnId === turn.id;
+                      const completionResponseId = active
+                        ? undefined
+                        : display.completionResponseId;
                       const pendingRows = turnOptimisticMessages.length ? 1 : 0;
                       // An optimistic clarification must stay below a plan already in this turn.
                       const pendingAtEnd = entries.some(
@@ -3907,144 +3924,159 @@ export function ThreadPage({
                         </div>
                       );
                       return (
-                        <div className="turn" data-turn-id={turn.id} key={turn.id}>
-                          {!pendingAtEnd && pendingMessages}
-                          {entries.map((entry, index) => {
-                            const isLatestPlan =
-                              !Array.isArray(entry) &&
-                              turn.id === latestPlan?.turn.id &&
-                              entry.id === latestPlan.item.id;
-                            return Array.isArray(entry) ? (
+                        <TurnActivityDisclosure
+                          turn={turn}
+                          active={active}
+                          waitingForUserInput={active && waitingForUserInput}
+                          items={technicalItems}
+                          loaded={turn.itemsLoaded !== false}
+                          interactive={!isSubagent}
+                          onLoad={loadTurnJournal}
+                          cwd={workspaceSummary.cwd}
+                          onDownload={downloadFile}
+                          onLoadImage={loadLocalImage}
+                          onOpenArtifact={openLinkedArtifact}
+                          key={turn.id}
+                        >
+                          {(activityStatus, journal) => (
+                            <div className="turn" data-turn-id={turn.id}>
+                              {!pendingAtEnd && pendingMessages}
+                              {entries.map((entry, index) => {
+                                const isLatestPlan =
+                                  !Array.isArray(entry) &&
+                                  turn.id === latestPlan?.turn.id &&
+                                  entry.id === latestPlan.item.id;
+                                return Array.isArray(entry) ? (
+                                  <div
+                                    className={responsePieceClass(entries, index)}
+                                    style={{ gridRow: index + leadingPendingRows + 1 }}
+                                    key={entry.map((item) => item.id).join(":")}
+                                  >
+                                    <MemoizedActivityGroup
+                                      items={entry}
+                                      cwd={workspaceSummary.cwd}
+                                      onDownload={downloadFile}
+                                      onLoadImage={loadLocalImage}
+                                      onOpenArtifact={openLinkedArtifact}
+                                    />
+                                  </div>
+                                ) : (
+                                  <div
+                                    className={`${responsePieceClass(entries, index)}${isLatestPlan ? " latest-plan" : ""}`}
+                                    style={{ gridRow: index + leadingPendingRows + 1 }}
+                                    key={
+                                      "questionKey" in entry
+                                        ? (entry.questionKey ?? entry.id)
+                                        : entry.id
+                                    }
+                                  >
+                                    <MemoizedActivity
+                                      item={entry}
+                                      threadId={threadId}
+                                      turnId={turn.id}
+                                      readOnly={isSubagent}
+                                      cwd={workspaceSummary.cwd}
+                                      onDownload={downloadFile}
+                                      onOpenArtifact={openLinkedArtifact}
+                                      onLoadImage={loadLocalImage}
+                                      forkAction={
+                                        entry.id === forkTarget?.responseId
+                                          ? forkTarget.action
+                                          : undefined
+                                      }
+                                      footerStatus={
+                                        entry.id === completionResponseId
+                                          ? activityStatus
+                                          : undefined
+                                      }
+                                      annotations={annotations}
+                                      annotationEnabled={
+                                        isLatestPlan
+                                          ? !busy &&
+                                            !workspaceSummary.currentTurnId &&
+                                            latestPlan.ready
+                                          : !isSubagent && !busy && entry.id === latestAnnotatableId
+                                      }
+                                      annotationBusy={busy}
+                                      onCreateAnnotation={createAnnotationEvent}
+                                      onUpdateAnnotation={updateAnnotationEvent}
+                                      onDeleteAnnotation={deleteAnnotationEvent}
+                                    />
+                                    {isLatestPlan && (
+                                      <>
+                                        {planNotice && <p role="status">{planNotice}</p>}
+                                        <div className="implement-plan-actions">
+                                          <button
+                                            className="implement-plan"
+                                            disabled={planAcceptanceDisabled}
+                                            title={planAcceptanceTitle}
+                                            type="button"
+                                            onClick={() => void implementPlan("default")}
+                                          >
+                                            {t("Да, реализуй этот план")}
+                                          </button>
+                                          <button
+                                            className="implement-plan goal"
+                                            disabled={planAcceptanceDisabled}
+                                            title={planAcceptanceTitle}
+                                            type="button"
+                                            onClick={() => void implementPlan("goal")}
+                                          >
+                                            <TargetIcon />
+                                            {t("Запустить в режиме цели")}
+                                          </button>
+                                          <button
+                                            className="implement-plan orchestrator"
+                                            disabled={planAcceptanceDisabled}
+                                            title={planAcceptanceTitle}
+                                            type="button"
+                                            onClick={() => void implementPlan("team")}
+                                          >
+                                            <TeamIcon />
+                                            {t("Запустить в режиме оркестратора")}
+                                          </button>
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {pendingAtEnd && pendingMessages}
                               <div
-                                className={responsePieceClass(entries, index)}
-                                style={{ gridRow: index + leadingPendingRows + 1 }}
-                                key={entry.map((item) => item.id).join(":")}
+                                className={`turn-response-tail response-piece response-end${!entries.length || isUserEntry(entries.at(-1)) ? " response-start" : ""}`}
+                                style={{ gridRow: entries.length + pendingRows + 1 }}
                               >
-                                <MemoizedActivityGroup
-                                  items={entry}
-                                  cwd={workspaceSummary.cwd}
-                                  onDownload={downloadFile}
-                                  onLoadImage={loadLocalImage}
-                                  onOpenArtifact={openLinkedArtifact}
-                                />
-                              </div>
-                            ) : (
-                              <div
-                                className={`${responsePieceClass(entries, index)}${isLatestPlan ? " latest-plan" : ""}`}
-                                style={{ gridRow: index + leadingPendingRows + 1 }}
-                                key={
-                                  "questionKey" in entry
-                                    ? (entry.questionKey ?? entry.id)
-                                    : entry.id
-                                }
-                              >
-                                <MemoizedActivity
-                                  item={entry}
-                                  threadId={threadId}
-                                  turnId={turn.id}
-                                  readOnly={isSubagent}
-                                  cwd={workspaceSummary.cwd}
-                                  onDownload={downloadFile}
-                                  onOpenArtifact={openLinkedArtifact}
-                                  onLoadImage={loadLocalImage}
-                                  forkAction={
-                                    entry.id === forkTarget?.responseId
-                                      ? forkTarget.action
-                                      : undefined
+                                <AttentionPanel
+                                  requests={attention.filter(
+                                    (request) =>
+                                      request.turnId === turn.id &&
+                                      !standaloneAttentionIds.current.has(request.id),
+                                  )}
+                                  hiddenRequestIds={hiddenAttentionIds}
+                                  transcriptionConfig={transcriptionConfig}
+                                  transcriptionProvider={transcriptionProvider}
+                                  onTranscriptionTimingEstimateChange={
+                                    onTranscriptionTimingEstimateChange
                                   }
-                                  annotations={annotations}
-                                  annotationEnabled={
-                                    isLatestPlan
-                                      ? !busy && !workspaceSummary.currentTurnId && latestPlan.ready
-                                      : !isSubagent && !busy && entry.id === latestAnnotatableId
-                                  }
-                                  annotationBusy={busy}
-                                  onCreateAnnotation={createAnnotationEvent}
-                                  onUpdateAnnotation={updateAnnotationEvent}
-                                  onDeleteAnnotation={deleteAnnotationEvent}
                                 />
-                                {isLatestPlan && (
-                                  <>
-                                    {planNotice && <p role="status">{planNotice}</p>}
-                                    <div className="implement-plan-actions">
-                                      <button
-                                        className="implement-plan"
-                                        disabled={planAcceptanceDisabled}
-                                        title={planAcceptanceTitle}
-                                        type="button"
-                                        onClick={() => void implementPlan("default")}
-                                      >
-                                        {t("Да, реализуй этот план")}
-                                      </button>
-                                      <button
-                                        className="implement-plan goal"
-                                        disabled={planAcceptanceDisabled}
-                                        title={planAcceptanceTitle}
-                                        type="button"
-                                        onClick={() => void implementPlan("goal")}
-                                      >
-                                        <TargetIcon />
-                                        {t("Запустить в режиме цели")}
-                                      </button>
-                                      <button
-                                        className="implement-plan orchestrator"
-                                        disabled={planAcceptanceDisabled}
-                                        title={planAcceptanceTitle}
-                                        type="button"
-                                        onClick={() => void implementPlan("team")}
-                                      >
-                                        <TeamIcon />
-                                        {t("Запустить в режиме оркестратора")}
-                                      </button>
-                                    </div>
-                                  </>
-                                )}
+                                <div className="turn-activity-disclosure">
+                                  {!completionResponseId && activityStatus}
+                                  {journal}
+                                </div>
                               </div>
-                            );
-                          })}
-                          {pendingAtEnd && pendingMessages}
-                          <div
-                            className={`turn-response-tail response-piece response-end${!entries.length || isUserEntry(entries.at(-1)) ? " response-start" : ""}`}
-                            style={{ gridRow: entries.length + pendingRows + 1 }}
-                          >
-                            <AttentionPanel
-                              requests={attention.filter(
-                                (request) =>
-                                  request.turnId === turn.id &&
-                                  !standaloneAttentionIds.current.has(request.id),
-                              )}
-                              hiddenRequestIds={hiddenAttentionIds}
-                              transcriptionConfig={transcriptionConfig}
-                              transcriptionProvider={transcriptionProvider}
-                              onTranscriptionTimingEstimateChange={
-                                onTranscriptionTimingEstimateChange
-                              }
-                            />
-                            <TurnActivityDisclosure
-                              turn={turn}
-                              active={active}
-                              waitingForUserInput={active && waitingForUserInput}
-                              items={technicalItems}
-                              loaded={turn.itemsLoaded !== false}
-                              interactive={!isSubagent}
-                              onLoad={() => loadTurnItems(threadId, turn.id)}
-                              cwd={workspaceSummary.cwd}
-                              onDownload={downloadFile}
-                              onLoadImage={loadLocalImage}
-                              onOpenArtifact={openLinkedArtifact}
-                            />
-                          </div>
-                          {responseSurfaceRows(entries).map(([start, end]) => (
-                            <div
-                              className="response-surface"
-                              aria-hidden="true"
-                              style={{
-                                gridRow: `${start + leadingPendingRows + 1} / ${end + leadingPendingRows + 1}`,
-                              }}
-                              key={`surface:${start}`}
-                            />
-                          ))}
-                        </div>
+                              {responseSurfaceRows(entries).map(([start, end]) => (
+                                <div
+                                  className="response-surface"
+                                  aria-hidden="true"
+                                  style={{
+                                    gridRow: `${start + leadingPendingRows + 1} / ${end + leadingPendingRows + 1}`,
+                                  }}
+                                  key={`surface:${start}`}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </TurnActivityDisclosure>
                       );
                     })}
                     {workspaceSummary.currentTurnId &&
@@ -5054,6 +5086,7 @@ export function Activity({
   onOpenArtifact,
   onLoadImage,
   forkAction,
+  footerStatus,
   annotations = [],
   annotationEnabled = false,
   annotationBusy = false,
@@ -5070,6 +5103,7 @@ export function Activity({
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
   forkAction?: { disabled: boolean; onFork(opener?: HTMLElement): void };
+  footerStatus?: React.ReactNode;
   annotations?: PendingAnnotation[];
   annotationEnabled?: boolean;
   annotationBusy?: boolean;
@@ -5142,6 +5176,7 @@ export function Activity({
           markdown={item.type === "agentMessage"}
           timestamp={item.timestamp}
           forkAction={item.type === "agentMessage" ? forkAction : undefined}
+          status={item.type === "agentMessage" ? footerStatus : undefined}
         />
       </article>
     );
@@ -5206,6 +5241,7 @@ export function Activity({
             text={item.text}
             timestamp={item.timestamp}
             forkAction={forkAction}
+            status={footerStatus}
             markdown
           />
         </article>
@@ -5954,14 +5990,16 @@ function TurnActivityDisclosure({
   onDownload,
   onLoadImage,
   onOpenArtifact,
+  children,
 }: {
+  children(status: React.ReactNode, journal: React.ReactNode): React.ReactNode;
   turn: TurnView;
   active: boolean;
   waitingForUserInput: boolean;
   items: ActivityItem[];
   loaded: boolean;
   interactive: boolean;
-  onLoad(): Promise<void>;
+  onLoad(turnId: string): Promise<void>;
   cwd: string;
   onDownload(path: string): Promise<void>;
   onLoadImage?: LocalImageLoader;
@@ -5980,61 +6018,64 @@ function TurnActivityDisclosure({
     loadAttempted.current = true;
     setLoading(true);
     setError(false);
-    void onLoad()
+    void onLoad(turn.id)
       .catch(() => {
         loadAttempted.current = false;
         setError(true);
       })
       .finally(() => setLoading(false));
-  }, [loaded, loading, onLoad]);
+  }, [loaded, loading, onLoad, turn.id]);
 
-  if (!active && turn.status === "inProgress") return null;
   const canOpen = interactive && (!loaded || visibleItems.length > 0);
-  if (!canOpen) {
-    return (
-      <TurnActivityStatus turn={turn} active={active} waitingForUserInput={waitingForUserInput} />
-    );
-  }
-  return (
-    <div className="turn-activity-disclosure">
+  const status = useMemo(
+    () => (
       <TurnActivityStatus
         turn={turn}
         active={active}
         waitingForUserInput={waitingForUserInput}
         loading={loading}
-        disclosure={{
-          open,
-          journalId,
-          onToggle: () => {
-            setOpen(!open);
-            if (!open) load();
-          },
-        }}
+        disclosure={
+          canOpen
+            ? {
+                open,
+                journalId,
+                onToggle: () => {
+                  setOpen(!open);
+                  if (!open) load();
+                },
+              }
+            : undefined
+        }
       />
-      <div className="turn-activity-journal" id={journalId} hidden={!open}>
-        {open && (
-          <>
-            {error && (
-              <button type="button" className="history-retry" onClick={load}>
-                {t("Повторить загрузку технических деталей")}
-              </button>
-            )}
-            {loaded &&
-              visibleItems.map((item) => (
-                <MemoizedActivity
-                  item={item}
-                  cwd={cwd}
-                  onDownload={onDownload}
-                  onLoadImage={onLoadImage}
-                  onOpenArtifact={onOpenArtifact}
-                  key={item.id}
-                />
-              ))}
-          </>
-        )}
-      </div>
-    </div>
+    ),
+    [turn, active, waitingForUserInput, loading, canOpen, open, journalId, load],
   );
+  if (!active && turn.status === "inProgress") return children(null, null);
+  const journal = canOpen ? (
+    <div className="turn-activity-journal" id={journalId} hidden={!open}>
+      {open && (
+        <>
+          {error && (
+            <button type="button" className="history-retry" onClick={load}>
+              {t("Повторить загрузку технических деталей")}
+            </button>
+          )}
+          {loaded &&
+            visibleItems.map((item) => (
+              <MemoizedActivity
+                item={item}
+                cwd={cwd}
+                onDownload={onDownload}
+                onLoadImage={onLoadImage}
+                onOpenArtifact={onOpenArtifact}
+                key={item.id}
+              />
+            ))}
+        </>
+      )}
+    </div>
+  ) : null;
+  return children(status, journal);
 }
 
 export function QueuedMessages({
@@ -6427,11 +6468,13 @@ function MessageFooter({
   timestamp,
   forkAction,
   markdown = false,
+  status,
 }: {
   text: string;
   timestamp: number | null;
   forkAction?: { disabled: boolean; onFork(opener?: HTMLElement): void };
   markdown?: boolean;
+  status?: React.ReactNode;
 }) {
   const { language, t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -6457,7 +6500,7 @@ function MessageFooter({
   }
 
   return (
-    <footer className="message-footer">
+    <footer className={`message-footer${status ? " message-footer-with-status" : ""}`}>
       {copyState === "copied" && (
         <span className="message-footer-feedback" role="status">
           {t("Скопировано")}
@@ -6468,28 +6511,31 @@ function MessageFooter({
           {t("Не удалось скопировать")}
         </span>
       )}
-      {timestamp !== null && (
-        <time dateTime={new Date(timestamp).toISOString()}>
-          {formatMessageTime(timestamp, language)}
-        </time>
-      )}
-      {canCopy && (
-        <button type="button" aria-label={t("Копировать сообщение")} onClick={() => void copy()}>
-          <CopyIcon />
-        </button>
-      )}
-      {forkAction && (
-        <button
-          type="button"
-          aria-busy={forkAction.disabled}
-          aria-label={t("Создать ответвление отсюда")}
-          disabled={forkAction.disabled}
-          title={t("Создать ответвление отсюда")}
-          onClick={(event) => forkAction.onFork(event.currentTarget)}
-        >
-          <GitBranchIcon />
-        </button>
-      )}
+      <span className="message-footer-actions">
+        {timestamp !== null && (
+          <time dateTime={new Date(timestamp).toISOString()}>
+            {formatMessageTime(timestamp, language)}
+          </time>
+        )}
+        {canCopy && (
+          <button type="button" aria-label={t("Копировать сообщение")} onClick={() => void copy()}>
+            <CopyIcon />
+          </button>
+        )}
+        {forkAction && (
+          <button
+            type="button"
+            aria-busy={forkAction.disabled}
+            aria-label={t("Создать ответвление отсюда")}
+            disabled={forkAction.disabled}
+            title={t("Создать ответвление отсюда")}
+            onClick={(event) => forkAction.onFork(event.currentTarget)}
+          >
+            <GitBranchIcon />
+          </button>
+        )}
+      </span>
+      {status}
     </footer>
   );
 }
@@ -6534,22 +6580,22 @@ function TurnActivityStatus({
         : t("Codex работает");
   const content = (
     <>
-      <span
-        className={`turn-activity-state turn-activity-state-${isWaiting ? "waiting" : showSpinner ? "active" : (turn?.status ?? "active")}`}
-        aria-hidden="true"
-      >
-        {isWaiting ? (
-          <ClockIcon />
-        ) : showSpinner ? (
-          <span className="spinner small" />
-        ) : turn?.status === "completed" ? (
-          <CheckIcon />
-        ) : turn?.status === "failed" ? (
-          <XIcon />
-        ) : (
-          <StopIcon />
-        )}
-      </span>
+      {(isWaiting || showSpinner || turn?.status !== "completed") && (
+        <span
+          className={`turn-activity-state turn-activity-state-${isWaiting ? "waiting" : showSpinner ? "active" : (turn?.status ?? "active")}`}
+          aria-hidden="true"
+        >
+          {isWaiting ? (
+            <ClockIcon />
+          ) : showSpinner ? (
+            <span className="spinner small" />
+          ) : turn?.status === "failed" ? (
+            <XIcon />
+          ) : (
+            <StopIcon />
+          )}
+        </span>
+      )}
       <span className="turn-activity-phase" role={isActive ? "status" : undefined}>
         {label}
       </span>

@@ -2883,6 +2883,14 @@ button.message-file:hover:not(:disabled) {
   line-height: var(--leading-tight);
 }
 
+.message-footer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+
 .message-footer button {
   width: 28px;
   min-width: 28px;
@@ -2909,7 +2917,7 @@ button.message-file:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.message.agentMessage .message-footer-feedback {
+:is(.message.agentMessage, .message.plan) .message-footer-feedback {
   right: auto;
   left: 0;
 }
@@ -2923,7 +2931,7 @@ button.message-file:hover:not(:disabled) {
   width: 100%;
 }
 
-.message.agentMessage .message-footer {
+:is(.message.agentMessage, .message.plan) .message-footer {
   justify-content: flex-start;
 }
 
@@ -3092,10 +3100,6 @@ button.message-file:hover:not(:disabled) {
 
 .turn-activity-state-active {
   color: var(--status-running);
-}
-
-.turn-activity-state-completed {
-  color: var(--success);
 }
 
 .turn-activity-state-failed {

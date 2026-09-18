@@ -170,10 +170,12 @@ test.describe("CodexNest redesign visual contract", () => {
       await openVisualPage(page, "/threads/session-main", "dark", DESKTOP_VIEWPORT);
       const disclosure = page.locator(".turn-activity-disclosure");
 
-      await expect(disclosure).toBeVisible();
-      await expect(disclosure).toHaveScreenshot("11-desktop-dark-activity-closed.png");
+      const footer = page.locator(".message-footer-with-status");
+      await expect(footer).toBeVisible();
+      await expect(footer).toHaveScreenshot("11-desktop-dark-activity-closed.png");
+      await expectA11yClean(page, "completion footer", ".message-footer-with-status");
 
-      await disclosure.getByRole("button", { name: "Технические детали" }).click();
+      await footer.getByRole("button", { name: "Технические детали" }).click();
       await expect(disclosure.getByText("Рассуждение")).toBeVisible();
       await expect(disclosure.getByText("npm test -- --runInBand")).toBeVisible();
       await expect(disclosure).toHaveScreenshot("12-desktop-dark-activity-open.png");

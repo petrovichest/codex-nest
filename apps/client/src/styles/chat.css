@@ -319,6 +319,42 @@
   margin-right: 8px;
 }
 
+.thread-workspace .message-footer-actions {
+  gap: 2px;
+}
+
+.thread-workspace .message-footer-with-status {
+  height: auto;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  row-gap: 0;
+}
+
+.thread-workspace .message-footer-with-status time {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.thread-workspace .message-footer-with-status > .turn-activity-row {
+  max-width: 100%;
+}
+
+.thread-workspace .timeline .message-footer .turn-activity-copy {
+  width: auto;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border-radius: 999px;
+  font: inherit;
+}
+
+.thread-workspace .message-footer .turn-activity-phase {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .thread-workspace
   .timeline
   :is(

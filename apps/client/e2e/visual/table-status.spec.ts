@@ -139,8 +139,8 @@ for (const theme of ["light", "dark"] as const) {
         await expect(wide.locator("td").first()).toHaveCSS("border-right-width", "0px");
         const status = page.locator(".turn-activity-toggle");
         await expect(status).toHaveCSS("height", "32px");
-        await expect(status).toHaveCSS("padding-left", "12px");
-        await expect(status).toHaveCSS("padding-right", "12px");
+        await expect(status).toHaveCSS("padding-left", "0px");
+        await expect(status).toHaveCSS("padding-right", "0px");
         await expect(status).toHaveCSS("column-gap", "8px");
         await expect(status).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
         if (language === "ru" && [390, 1440].includes(width)) {
@@ -233,8 +233,9 @@ for (const theme of ["light", "dark"] as const) {
     await openChat(page, theme, "ru", turns);
     for (const status of await page.locator(".turn-activity-copy").all()) {
       await expect(status).toHaveCSS("height", "32px");
-      await expect(status).toHaveCSS("padding-left", "12px");
-      await expect(status).toHaveCSS("padding-right", "12px");
+      const inline = await status.evaluate((el) => Boolean(el.closest(".message-footer")));
+      await expect(status).toHaveCSS("padding-left", inline ? "0px" : "12px");
+      await expect(status).toHaveCSS("padding-right", inline ? "0px" : "12px");
     }
     const phase = page.locator(".turn-activity-row").last().locator(".turn-activity-phase");
     expect(await phase.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
@@ -242,4 +243,95 @@ for (const theme of ["light", "dark"] as const) {
       await page.locator(".conversation-scroll").evaluate((el) => el.scrollWidth <= el.clientWidth),
     ).toBe(true);
   });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [320, 390, 1440]) {
+    for (const language of ["ru", "en"] as const) {
+      test(`completion footer ${width}px ${theme} ${language}: alignment, actions and wrapping`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 1000 });
+        const now = Date.UTC(2026, 7, 3, 12, 0, 0);
+        await page.clock.setFixedTime(new Date(now));
+        const turns = [
+          turn("answer", "completed", "Обычный ответ агента."),
+          turn("plan", "completed", "Обновить визуальные снимки и описание панели."),
+        ];
+        const answer = turns[0]!.items[0]!;
+        const plan = turns[1]!.items[0]!;
+        if (answer.type !== "agentMessage" || plan.type !== "agentMessage")
+          throw new Error("Missing answer");
+        answer.timestamp = now;
+        turns[1]!.items[0] = { ...plan, type: "plan", timestamp: now };
+        turns[0]!.items.unshift({
+          type: "userMessage",
+          id: "request",
+          text: "Проверь интерфейс",
+          images: [],
+          status: "completed",
+          timestamp: now,
+          phase: null,
+        });
+        await openChat(page, theme, language, turns);
+        const footers = page.locator(".message-footer-with-status");
+        await expect(footers).toHaveCount(2);
+        for (const footer of await footers.all()) {
+          await expect(footer).toHaveCSS("justify-content", "flex-start");
+          await expect(footer.locator(".turn-activity-state")).toHaveCount(0);
+          await expect(footer.locator(".turn-activity-copy")).toHaveCSS(
+            "font-size",
+            await footer.locator("time").evaluate((el) => getComputedStyle(el).fontSize),
+          );
+          const actions = (await footer.locator(".message-footer-actions").boundingBox())!;
+          const status = (await footer.locator(".turn-activity-copy").boundingBox())!;
+          expect(
+            Math.abs(status.y + status.height / 2 - actions.y - actions.height / 2),
+          ).toBeLessThan(1);
+          expect(Math.abs(status.x - actions.x - actions.width - 12)).toBeLessThan(1);
+        }
+        await expect(page.locator(".message.userMessage .message-footer")).toHaveCSS(
+          "justify-content",
+          "flex-end",
+        );
+        if (language === "ru" && width !== 320) {
+          await expect(page.locator(".timeline")).toHaveScreenshot(
+            `completion-footer-${width}-${theme}.png`,
+          );
+        }
+        const status = footers.last().locator(".turn-activity-toggle");
+        await status.focus();
+        await expect(status).toBeFocused();
+        await expect(status).toHaveCSS("outline-style", "solid");
+        await status.press("Enter");
+        await expect(page.locator(".turn-activity-journal").last()).toBeVisible();
+        await status.press("Space");
+        await expect(page.locator(".turn-activity-journal").last()).toBeHidden();
+        // Exercise actual font preferences and an older date, not a shortened mock label.
+        await page.addInitScript(() =>
+          localStorage.setItem("codexnest.typography", JSON.stringify({ caption: 32 })),
+        );
+        turns[1]!.durationMs = 3661000;
+        turns[1]!.items = turns[1]!.items.map((item) =>
+          item.type === "plan" ? { ...item, timestamp: now - 86400000 } : item,
+        );
+        await page.reload();
+        await waitForVisualReady(page);
+        await expect(footers.last().locator(".turn-activity-phase")).toHaveText(
+          language === "ru" ? "Готово за 1ч 1м 1с" : "Completed in 1h 1m 1s",
+        );
+        for (const footer of await footers.all()) {
+          expect(await footer.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+          const phase = footer.locator(".turn-activity-phase");
+          await expect(phase).toHaveCSS("font-size", "32px");
+          expect(await phase.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        }
+        expect(
+          await page
+            .locator(".conversation-scroll")
+            .evaluate((el) => el.scrollWidth <= el.clientWidth),
+        ).toBe(true);
+      });
+    }
+  }
 }

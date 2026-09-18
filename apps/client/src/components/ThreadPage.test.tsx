@@ -705,6 +705,15 @@ describe("Activity", () => {
     expect(context.loadTurnItems).not.toHaveBeenCalled();
     const toggle = screen.getByRole("button", { name: "Технические детали" });
     expect(screen.getByText("Готово за 0с").closest("button")).toBe(toggle);
+    const footer = toggle.closest("footer")!;
+    expect(footer).toHaveClass("message-footer-with-status");
+    expect(footer.lastElementChild).toBe(toggle.closest(".turn-activity-row"));
+    expect(within(footer).getByRole("button", { name: "Копировать сообщение" })).toBeVisible();
+    expect(
+      within(footer).getByRole("button", { name: "Создать ответвление отсюда" }),
+    ).toBeVisible();
+    expect(footer.querySelector(".turn-activity-state")).toBeNull();
+    expect(screen.getAllByText("Готово за 0с")).toHaveLength(1);
     fireEvent.click(toggle);
     await waitFor(() => expect(context.loadTurnItems).toHaveBeenCalledWith("thread", "turn"));
     fireEvent.click(toggle);
@@ -1020,7 +1029,7 @@ describe("Activity", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Скопировано");
     expect(screen.getByText(formatMessageTime(timestamp))).toBeInTheDocument();
     const copyButton = screen.getByRole("button", { name: "Копировать сообщение" });
-    expect(copyButton.closest(".message-footer")?.lastElementChild).toBe(copyButton);
+    expect(copyButton.nextElementSibling).toBeNull();
     expect(formatMessageTime(timestamp - 3 * 86_400_000)).toMatch(/\d{2}:\d{2}/);
   });
 
@@ -1394,6 +1403,81 @@ describe("Activity", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["agentMessage", "plan"] as const)(
+    "moves completion into the last %s footer without losing the open journal",
+    (type) => {
+      const message: ActivityItem = {
+        type,
+        id: "final-response",
+        text: "Итоговый ответ",
+        status: "completed",
+        images: [],
+        timestamp: 2,
+        phase: type === "agentMessage" ? "final_answer" : null,
+      };
+      const runningSummary: ThreadSummary = {
+        ...summary,
+        state: "running",
+        currentTurnId: "turn",
+      };
+      const current: ThreadDetail["turns"][number] = {
+        id: "turn",
+        status: "inProgress",
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+        progress: progress(),
+        items: [
+          {
+            ...message,
+            type: "agentMessage",
+            id: "commentary",
+            text: "Подготовка",
+            phase: "commentary",
+          },
+          message,
+          {
+            type: "tool",
+            id: "tool",
+            status: "completed",
+            title: "Проверка",
+            detail: "Журнал проверки",
+          },
+        ],
+      };
+      const context = mockThreadConnection(threadApi(), runningSummary, { turns: [current] });
+      const view = renderThread();
+      const answer = screen.getByText("Итоговый ответ").closest("article")!;
+      fireEvent.click(screen.getByRole("button", { name: "Технические детали" }));
+      const journal = view.container.querySelector(".turn-activity-journal")!;
+      expect(journal).toBeVisible();
+      const completedSummary = {
+        ...runningSummary,
+        state: "completed" as const,
+        currentTurnId: null,
+      };
+      context.state.snapshot.threads = [completedSummary];
+      context.state.details.thread = {
+        ...context.state.details.thread!,
+        summary: completedSummary,
+        turns: [{ ...current, status: "completed", completedAt: 61001, durationMs: 61000 }],
+      };
+      view.rerender(threadRoute());
+      const toggle = screen.getByRole("button", { name: "Технические детали" });
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(toggle.closest("article")).toBe(answer);
+      expect(screen.getAllByText("Готово за 1м 1с")).toHaveLength(1);
+      expect(answer.querySelector(".turn-activity-state")).toBeNull();
+      expect(journal).toBeVisible();
+      expect(view.container.querySelector(".turn-activity-journal")).toBe(journal);
+      expect(
+        screen.getByText("Подготовка").closest("article")!.querySelector(".turn-activity-row"),
+      ).toBeNull();
+      fireEvent.click(toggle);
+      expect(journal).not.toBeVisible();
+    },
+  );
 
   it("uses outcome-specific labels with and without durations", () => {
     mockThreadConnection(threadApi(), summary, {
