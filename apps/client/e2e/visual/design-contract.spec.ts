@@ -162,6 +162,9 @@ for (const theme of ["light", "dark"] as const) {
         expect(bounds.y).toBe(34);
         expect(bounds.x).toBe(24);
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 20);
+        await expectAligned();
+        await expect(page.locator(".timeline")).toHaveCSS("padding-left", "32px");
+        await expect(page.locator(".timeline")).toHaveCSS("padding-right", "28px");
       }
       const actions = await header
         .locator(

@@ -13,7 +13,16 @@ guest/public Wi-Fi. A captured token grants owner-level CodexNest access until i
 rotated. See the complete HTTP threat model in
 [`deploy/DEPLOYMENT.md`](../../../deploy/DEPLOYMENT.md#вариант-a-http-внутри-приватного-vpn-или-доверенной-lan).
 
-Run from the repository root:
+On Android 15 and newer, the existing edge-to-edge layout uses theme-colored
+chat gradients instead of Android's three-button navigation contrast scrim.
+Android 10–14 retain their existing window layout and opaque system-bar styles.
+In edge-to-edge mode, system-bar icon styles follow
+the resolved app theme through Capacitor's built-in `SystemBars`, independently
+of the device theme. `MainActivity` emits `codexnest:system-bars-reset` after
+configuration changes, page load and resume so the UI reapplies its selected style.
+The IME continues to own its navigation bar while the keyboard is visible.
+
+Build from the repository root:
 
 ```bash
 npm run build

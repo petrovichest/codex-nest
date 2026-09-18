@@ -11,7 +11,7 @@ import {
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router";
 
 import { App as CapacitorApp } from "@capacitor/app";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, SystemBars, SystemBarsStyle, SystemBarType } from "@capacitor/core";
 import { isActiveFeedEligible } from "@codexnest/protocol";
 import type {
   AppUpdateStatus,
@@ -279,11 +279,33 @@ export function App({
 
   useEffect(() => {
     const colorScheme = window.matchMedia(DARK_THEME_QUERY);
-    const syncTheme = () => applyTheme(theme, colorScheme.matches);
+    const android = Capacitor.getPlatform() === "android";
+    const syncSystemBars = () => {
+      // Capacitor injects these insets on Android 15+. Older versions retain
+      // opaque OS-themed bars, whose icon colors must still match that background.
+      if (!android || !document.documentElement.style.getPropertyValue("--safe-area-inset-top"))
+        return;
+      const style =
+        document.documentElement.dataset.resolvedTheme === "dark"
+          ? SystemBarsStyle.Dark
+          : SystemBarsStyle.Light;
+      // Target each app-window bar explicitly; the IME owns its own navigation
+      // bar while visible and must not determine the status bar's appearance.
+      void SystemBars.setStyle({ bar: SystemBarType.StatusBar, style }).catch(() => undefined);
+      void SystemBars.setStyle({ bar: SystemBarType.NavigationBar, style }).catch(() => undefined);
+    };
+    const syncTheme = () => {
+      applyTheme(theme, colorScheme.matches);
+      syncSystemBars();
+    };
     syncTheme();
     localStorage.setItem(THEME_KEY, theme);
     colorScheme.addEventListener("change", syncTheme);
-    return () => colorScheme.removeEventListener("change", syncTheme);
+    if (android) window.addEventListener("codexnest:system-bars-reset", syncSystemBars);
+    return () => {
+      colorScheme.removeEventListener("change", syncTheme);
+      window.removeEventListener("codexnest:system-bars-reset", syncSystemBars);
+    };
   }, [theme]);
 
   useEffect(() => {

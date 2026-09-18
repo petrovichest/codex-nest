@@ -6147,7 +6147,8 @@ button.message-file:hover:not(:disabled) {
   }
 
   .composer {
-    padding: 0 var(--space-3) var(--app-safe-area-bottom);
+    padding: 0 calc(var(--space-2) + var(--app-safe-area-right)) var(--app-safe-area-bottom)
+      calc(var(--space-2) + var(--app-safe-area-left));
   }
 
   .composer.keyboard-open {
@@ -6662,10 +6663,6 @@ button.message-file:hover:not(:disabled) {
 }
 
 @media (max-width: 359px) {
-  .composer {
-    padding-inline: var(--space-2);
-  }
-
   .composer-toolbar {
     padding-inline: 5px;
   }

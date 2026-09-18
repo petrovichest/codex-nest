@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
+import type * as CapacitorCore from "@capacitor/core";
 
 import type {
   AppSnapshot,
@@ -44,6 +45,7 @@ const capacitor = vi.hoisted(() => ({
   getPlatform: vi.fn(() => "web"),
   isNativePlatform: vi.fn(() => false),
   removeListener: vi.fn(),
+  setSystemBarsStyle: vi.fn(),
 }));
 
 vi.mock("./connection", () => ({ useConnection: connection }));
@@ -69,11 +71,13 @@ vi.mock("./push", () => ({
   stopPushNotifications: vi.fn().mockResolvedValue(undefined),
   usePushNotifications: vi.fn(() => manualNavigationIntent),
 }));
-vi.mock("@capacitor/core", () => ({
+vi.mock("@capacitor/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof CapacitorCore>()),
   Capacitor: {
     getPlatform: capacitor.getPlatform,
     isNativePlatform: capacitor.isNativePlatform,
   },
+  SystemBars: { setStyle: capacitor.setSystemBarsStyle },
 }));
 vi.mock("@capacitor/app", () => ({
   App: { addListener: capacitor.addListener, getInfo: capacitor.getInfo },
@@ -120,6 +124,8 @@ beforeEach(() => {
     build: "2",
   });
   capacitor.removeListener.mockResolvedValue(undefined);
+  capacitor.setSystemBarsStyle.mockReset().mockResolvedValue(undefined);
+  document.documentElement.style.removeProperty("--safe-area-inset-top");
   capacitor.addListener.mockImplementation(async (event: string, listener: () => void) => {
     if (event === "appStateChange") {
       capacitor.appStateHandler = listener as unknown as (state: { isActive: boolean }) => void;
@@ -1890,6 +1896,105 @@ describe("App routing and navigation", () => {
     );
   });
 
+  it.each(["light", "dark"] as const)(
+    "keeps Android system icons readable in the %s app theme when Android uses the opposite theme",
+    async (theme) => {
+      capacitor.getPlatform.mockReturnValue("android");
+      document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+      localStorage.setItem("codexnest.theme", theme);
+      vi.mocked(window.matchMedia).mockReturnValue({
+        matches: theme === "light",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as MediaQueryList);
+      mockConnection(snapshot([baseThread]));
+
+      const view = renderApp("/settings");
+      const style = theme === "light" ? "LIGHT" : "DARK";
+      await waitFor(() => {
+        expect(capacitor.setSystemBarsStyle).toHaveBeenCalledWith({ bar: "StatusBar", style });
+        expect(capacitor.setSystemBarsStyle).toHaveBeenCalledWith({ bar: "NavigationBar", style });
+      });
+
+      // Capacitor restores the OS style on configuration changes. The activity
+      // also sends this event on resume, including with an IME still visible.
+      capacitor.setSystemBarsStyle.mockClear();
+      act(() => window.dispatchEvent(new Event("codexnest:system-bars-reset")));
+      expect(capacitor.setSystemBarsStyle.mock.calls).toEqual([
+        [{ bar: "StatusBar", style }],
+        [{ bar: "NavigationBar", style }],
+      ]);
+
+      view.unmount();
+      capacitor.setSystemBarsStyle.mockClear();
+      window.dispatchEvent(new Event("codexnest:system-bars-reset"));
+      expect(capacitor.setSystemBarsStyle).not.toHaveBeenCalled();
+    },
+  );
+
+  it("updates Android system icons for automatic and explicitly selected themes", async () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+    let onChange: (() => void) | undefined;
+    const colorScheme = {
+      matches: false,
+      addEventListener: vi.fn((_type: string, listener: () => void) => {
+        onChange = listener;
+      }),
+      removeEventListener: vi.fn(),
+    };
+    vi.mocked(window.matchMedia).mockReturnValue(colorScheme as unknown as MediaQueryList);
+    mockConnection(snapshot([baseThread]));
+    renderApp("/settings");
+    await waitFor(() =>
+      expect(capacitor.setSystemBarsStyle).toHaveBeenCalledWith({
+        bar: "StatusBar",
+        style: "LIGHT",
+      }),
+    );
+
+    capacitor.setSystemBarsStyle.mockClear();
+    colorScheme.matches = true;
+    act(() => onChange?.());
+    expect(capacitor.setSystemBarsStyle).toHaveBeenCalledWith({ bar: "StatusBar", style: "DARK" });
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "Тема" }), {
+      target: { value: "light" },
+    });
+    capacitor.setSystemBarsStyle.mockClear();
+    act(() => window.dispatchEvent(new Event("codexnest:system-bars-reset")));
+    expect(capacitor.setSystemBarsStyle.mock.calls).toEqual([
+      [{ bar: "StatusBar", style: "LIGHT" }],
+      [{ bar: "NavigationBar", style: "LIGHT" }],
+    ]);
+  });
+
+  it("keeps the selected theme usable if the native system-bar call fails", async () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+    capacitor.setSystemBarsStyle.mockRejectedValue(new Error("Activity is unavailable"));
+    localStorage.setItem("codexnest.theme", "light");
+    mockConnection(snapshot([baseThread]));
+    renderApp("/settings");
+    await waitFor(() => expect(capacitor.setSystemBarsStyle).toHaveBeenCalledTimes(2));
+    expect(document.documentElement.dataset.resolvedTheme).toBe("light");
+    expect(await screen.findByRole("combobox", { name: "Тема" })).toHaveValue("light");
+  });
+
+  it("waits for native edge-to-edge insets before restyling the system bars", () => {
+    capacitor.getPlatform.mockReturnValue("android");
+    localStorage.setItem("codexnest.theme", "light");
+    mockConnection(snapshot([baseThread]));
+    renderApp("/settings");
+    // Android 10–14 never supply these insets and keep their existing opaque bars.
+    act(() => window.dispatchEvent(new Event("codexnest:system-bars-reset")));
+    expect(capacitor.setSystemBarsStyle).not.toHaveBeenCalled();
+
+    document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+    act(() => window.dispatchEvent(new Event("codexnest:system-bars-reset")));
+    expect(capacitor.setSystemBarsStyle).toHaveBeenCalledWith({ bar: "StatusBar", style: "LIGHT" });
+  });
+
   it("keeps settings inside the app's single main landmark", () => {
     mockConnection(snapshot([baseThread]));
 
@@ -1925,6 +2030,7 @@ describe("App routing and navigation", () => {
       "content",
       "#171817",
     );
+    expect(capacitor.setSystemBarsStyle).not.toHaveBeenCalled();
   });
 
   it("uses conventional interface defaults on a new device", async () => {

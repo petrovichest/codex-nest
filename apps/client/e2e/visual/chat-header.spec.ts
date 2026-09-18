@@ -106,10 +106,33 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       const bounds = (await header.boundingBox())!;
       expect(bounds.height).toBe(44);
       expect(bounds.y).toBe(safeTop + (mobile ? 0 : 8));
-      expect((await scroll.boundingBox())!.y).toBe(safeTop);
+      expect((await scroll.boundingBox())!.y).toBe(0);
       if (mobile) {
         const composer = (await page.locator(".composer-box").boundingBox())!;
-        expect(composer.y + composer.height).toBe(844 - safeBottom);
+        expect(composer.y + composer.height).toBeCloseTo(844 - safeBottom, 1);
+        expect(bounds.x).toBe(8);
+        expect(bounds.width).toBe(width - 16);
+        expect(composer.x).toBe(bounds.x);
+        expect(composer.width).toBe(bounds.width);
+        const message = (await plan.boundingBox())!;
+        expect(message.x - bounds.x).toBe(8);
+        expect(bounds.x + bounds.width - message.x - message.width).toBe(8);
+        const protection = await page.locator(".conversation-pane").evaluate((element) => {
+          const top = getComputedStyle(element, "::before");
+          const bottom = getComputedStyle(element, "::after");
+          return {
+            topHeight: parseFloat(top.height),
+            bottomHeight: parseFloat(bottom.height),
+            topPointerEvents: top.pointerEvents,
+            bottomPointerEvents: bottom.pointerEvents,
+          };
+        });
+        expect(protection).toEqual({
+          topHeight: safeTop ? safeTop + 12 : 0,
+          bottomHeight: safeBottom ? safeBottom + 16 : 0,
+          topPointerEvents: "none",
+          bottomPointerEvents: "none",
+        });
       }
 
       await scroll.evaluate((element) => {
@@ -158,7 +181,7 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
         leftCorner: true,
         rightCorner: true,
         center: true,
-        statusBar: false,
+        statusBar: safeTop > 0,
       };
       expect(await checkLayers()).toEqual(expectedLayers);
       if (browserName === "chromium" && [320, 390, 821, 1440].includes(width)) {
@@ -246,11 +269,21 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       expect(composer.y).toBeGreaterThan(bounds.y + bounds.height);
       expect(composer.y + composer.height).toBeLessThanOrEqual(460);
       if (mobile) {
-        expect(composer.y + composer.height).toBe(460);
+        expect(composer.y + composer.height).toBeCloseTo(460, 1);
+        expect(
+          await page
+            .locator(".conversation-pane")
+            .evaluate((element) => getComputedStyle(element, "::after").display),
+        ).toBe("none");
         await page.setViewportSize({ width, height: 844 });
         await expect(page.locator(".composer")).not.toHaveClass(/keyboard-open/);
         const restored = (await page.locator(".composer-box").boundingBox())!;
-        expect(restored.y + restored.height).toBe(844 - safeBottom);
+        expect(restored.y + restored.height).toBeCloseTo(844 - safeBottom, 1);
+        expect(
+          await page
+            .locator(".conversation-pane")
+            .evaluate((element) => getComputedStyle(element, "::after").display),
+        ).not.toBe("none");
       }
     });
   }

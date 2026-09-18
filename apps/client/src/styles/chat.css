@@ -936,20 +936,51 @@
 
   .thread-workspace .timeline {
     padding-top: 22px;
-    padding-inline: 12px;
+    padding-right: calc(var(--space-4) + var(--app-safe-area-right));
+    padding-left: calc(var(--space-4) + var(--app-safe-area-left));
   }
 
-  /* Only the rounded header paints over the transcript. The scroll viewport
-     starts at the safe area, so cards keep moving behind the header's corners. */
-  .thread-workspace:not(.pending-fork-workspace) .conversation-pane {
-    --chat-header-gutter: var(--space-3);
-    padding-top: var(--app-safe-area-top);
+  /* The transcript extends behind system bars. These stationary protections
+     sit below the opaque header/composer and disappear when their inset is zero. */
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane::before,
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane::after {
+    content: "";
+    position: absolute;
+    z-index: 15;
+    inset-inline: 0;
+    pointer-events: none;
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane::before {
+    top: 0;
+    height: calc(var(--app-safe-area-top) + min(12px, var(--app-safe-area-top)));
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-canvas) 88%, transparent),
+      color-mix(in srgb, var(--color-canvas) 78%, transparent) var(--app-safe-area-top),
+      transparent
+    );
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .conversation-pane::after {
+    bottom: 0;
+    height: calc(var(--app-safe-area-bottom) + min(16px, var(--app-safe-area-bottom)));
+    background: linear-gradient(
+      to top,
+      color-mix(in srgb, var(--color-canvas) 78%, transparent) var(--app-safe-area-bottom),
+      transparent
+    );
+  }
+
+  .thread-workspace:not(.pending-fork-workspace)
+    .conversation-pane:has(.composer.keyboard-open)::after {
+    display: none;
   }
 
   .thread-workspace:not(.pending-fork-workspace) .workspace-header {
     top: var(--app-safe-area-top);
-    right: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-right)));
-    left: max(var(--chat-header-gutter), calc(8px + var(--app-safe-area-left)));
+    right: calc(var(--space-2) + var(--app-safe-area-right));
+    left: calc(var(--space-2) + var(--app-safe-area-left));
     width: auto;
     margin: 0;
   }
@@ -964,11 +995,11 @@
   }
 
   .thread-workspace:not(.pending-fork-workspace) .timeline {
-    padding-top: calc(var(--chat-header-height) + 22px);
+    padding-top: calc(var(--app-safe-area-top) + var(--chat-header-height) + 22px);
   }
 
   .thread-workspace:not(.pending-fork-workspace) .conversation-scroll {
-    scroll-padding-top: calc(var(--chat-header-height) + 8px);
+    scroll-padding-top: calc(var(--app-safe-area-top) + var(--chat-header-height) + 8px);
   }
 
   .thread-workspace:not(.pending-fork-workspace) .fork-children-popover {
@@ -999,12 +1030,6 @@
   .thread-workspace :is(.session-inspector, .artifact-viewer),
   .chat-dialog.dialog-surface {
     border-radius: var(--chat-radius-compact);
-  }
-}
-
-@media (max-width: 359px) {
-  .thread-workspace:not(.pending-fork-workspace) .conversation-pane {
-    --chat-header-gutter: var(--space-2);
   }
 }
 
