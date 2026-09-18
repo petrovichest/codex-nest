@@ -57,7 +57,7 @@
   right: 0;
   left: 0;
   /* Match the visible composer bubble, inside its 880px padded container. */
-  width: min(832px, calc(100% - 2 * var(--space-6)));
+  width: min(840px, calc(100% - 2 * var(--space-5)));
   height: var(--chat-header-height);
   min-height: var(--chat-header-height);
   margin: 0 auto;
@@ -928,6 +928,18 @@
   border: 0;
   border-radius: 999px;
   font-weight: 400;
+}
+
+@media (min-width: 821px) {
+  /* Within the shared 880px container, panels extend 8px beyond each side
+     of the transcript. Keep the pending-fork layout independent. */
+  .thread-workspace:not(.pending-fork-workspace) .composer {
+    padding-inline: var(--space-5);
+  }
+
+  .thread-workspace:not(.pending-fork-workspace) .timeline {
+    padding-inline: calc(var(--space-5) + var(--space-2));
+  }
 }
 
 @media (max-width: 820px) {

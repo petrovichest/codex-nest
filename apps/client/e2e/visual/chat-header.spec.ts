@@ -107,16 +107,27 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       expect(bounds.height).toBe(44);
       expect(bounds.y).toBe(safeTop + (mobile ? 0 : 8));
       expect((await scroll.boundingBox())!.y).toBe(0);
+      const expectPanelGeometry = async () => {
+        const panel = (await header.boundingBox())!;
+        const composer = (await page.locator(".composer-box").boundingBox())!;
+        const message = (await plan.boundingBox())!;
+        expect(composer.x).toBeCloseTo(panel.x, 1);
+        expect(composer.width).toBeCloseTo(panel.width, 1);
+        expect(message.x - panel.x).toBeCloseTo(8, 1);
+        expect(panel.x + panel.width - message.x - message.width).toBeCloseTo(8, 1);
+        if (!mobile) {
+          const pane = (await page.locator(".conversation-pane").boundingBox())!;
+          expect(panel.width).toBeCloseTo(Math.min(880, pane.width) - 40, 1);
+          expect(message.width).toBeCloseTo(Math.min(880, pane.width) - 56, 1);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      };
+      await expectPanelGeometry();
       if (mobile) {
         const composer = (await page.locator(".composer-box").boundingBox())!;
         expect(composer.y + composer.height).toBeCloseTo(844 - safeBottom, 1);
         expect(bounds.x).toBe(8);
         expect(bounds.width).toBe(width - 16);
-        expect(composer.x).toBe(bounds.x);
-        expect(composer.width).toBe(bounds.width);
-        const message = (await plan.boundingBox())!;
-        expect(message.x - bounds.x).toBe(8);
-        expect(bounds.x + bounds.width - message.x - message.width).toBe(8);
         const protection = await page.locator(".conversation-pane").evaluate((element) => {
           const top = getComputedStyle(element, "::before");
           const bottom = getComputedStyle(element, "::after");
@@ -189,13 +200,10 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
       }
 
       // A desktop inspector can narrow the conversation without changing the
-      // viewport breakpoint. The overlay must still match the composer and card.
+      // viewport breakpoint. Both panels must retain their 8px overhang.
       if (!mobile) {
         await page.getByRole("button", { name: "Показать сведения", exact: true }).click();
-        const narrowed = (await header.boundingBox())!;
-        const composer = (await page.locator(".composer-box").boundingBox())!;
-        expect(narrowed.x).toBeCloseTo(composer.x, 1);
-        expect(narrowed.width).toBeCloseTo(composer.width, 1);
+        await expectPanelGeometry();
         if (width >= 1280) {
           await scroll.evaluate((element) => {
             element.scrollTop +=
@@ -208,6 +216,7 @@ for (const width of [320, 390, 820, 821, 1100, 1440, 1920]) {
           .getByRole("button", { name: "Закрыть сведения", exact: true })
           .click();
         expect(await header.boundingBox()).toEqual(bounds);
+        await expectPanelGeometry();
       }
 
       // Native scrollIntoView and keyboard focus must reveal a target below the overlay.
