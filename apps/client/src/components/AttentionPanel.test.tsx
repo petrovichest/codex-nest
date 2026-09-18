@@ -329,7 +329,7 @@ describe("AttentionPanel", () => {
 
     fireEvent.click(stop);
     expect(await screen.findByRole("button", { name: "Распознаём запись" })).toHaveTextContent(
-      "≈0:02",
+      "≈2",
     );
     await act(async () =>
       resolveTranscription?.({
@@ -410,6 +410,61 @@ describe("AttentionPanel", () => {
     expect(secret).toHaveAttribute("type", "password");
     expect(screen.getByRole("button", { name: "Начать запись" })).toBeInTheDocument();
   });
+
+  it.each([true, false])(
+    "uses seconds for question recording and transcription (estimate: %s)",
+    async (estimated) => {
+      vi.useFakeTimers();
+      const track = { stop: vi.fn() };
+      installMediaRecorder(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
+      const transcribe = vi.fn(() => new Promise(() => undefined));
+      connection.mockReturnValue({ api: { respond: vi.fn(), transcribe } });
+      const view = render(
+        <AttentionPanel
+          requests={[freeformRequest()]}
+          transcriptionConfig={{
+            ...transcriptionConfig,
+            timingEstimate: estimated
+              ? {
+                  sampleCount: 1,
+                  estimatedFixedProcessingMs: 8000,
+                  estimatedProcessingMsPerAudioSecond: 0,
+                }
+              : {
+                  sampleCount: 0,
+                  estimatedFixedProcessingMs: null,
+                  estimatedProcessingMsPerAudioSecond: null,
+                },
+          }}
+          transcriptionProvider="local"
+        />,
+      );
+      try {
+        const input = screen.getByRole("textbox", { name: "Свой ответ" });
+        fireEvent.change(input, { target: { value: "Сохранить ответ" } });
+        await act(async () =>
+          fireEvent.click(screen.getByRole("button", { name: "Начать запись" })),
+        );
+        const recording = screen.getByRole("button", { name: "Остановить запись" });
+        let elapsed = 0;
+        for (const seconds of [5, 59, 60, 99, 100, 125]) {
+          await act(async () => vi.advanceTimersByTime((seconds - elapsed) * 1000));
+          expect(recording).toHaveTextContent(new RegExp(`^${seconds}$`));
+          elapsed = seconds;
+        }
+        fireEvent.click(recording);
+        const processing = screen.getByRole("button", { name: "Распознаём запись" });
+        expect(processing).toHaveTextContent(estimated ? /^≈8$/ : /^0$/);
+        await act(async () => vi.advanceTimersByTime(11000));
+        expect(processing).toHaveTextContent(estimated ? /^\+3$/ : /^11$/);
+        expect(input).toHaveValue("Сохранить ответ");
+        expect(track.stop).toHaveBeenCalledOnce();
+      } finally {
+        view.unmount();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("cancels an active answer recording without changing the answer", async () => {
     const track = { stop: vi.fn() };

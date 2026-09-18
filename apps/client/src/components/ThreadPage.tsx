@@ -905,15 +905,13 @@ export function ThreadPage({
               turn.id,
               groupActivities(
                 activitiesForThreadDisplay(turn.items, isSubagent).filter(
-                  (item) =>
-                    !isTechnicalActivity(item) &&
-                    !(turn.id === latestPlan?.turn.id && item.id === latestPlan.item.id),
+                  (item) => !isTechnicalActivity(item),
                 ),
               ),
             ] as const,
         ),
       ),
-    [detail?.turns, isSubagent, latestPlan],
+    [detail?.turns, isSubagent],
   );
   const technicalTurnActivities = useMemo(
     () =>
@@ -3818,26 +3816,39 @@ export function ThreadPage({
                       );
                       const active = workspaceSummary.currentTurnId === turn.id;
                       const pendingRows = turnOptimisticMessages.length ? 1 : 0;
+                      // An optimistic clarification must stay below a plan already in this turn.
+                      const pendingAtEnd = entries.some(
+                        (entry) => !Array.isArray(entry) && entry.type === "plan",
+                      );
+                      const leadingPendingRows = pendingAtEnd ? 0 : pendingRows;
+                      const pendingMessages = turnOptimisticMessages.length > 0 && (
+                        <div
+                          className="turn-pending-messages"
+                          style={{ gridRow: pendingAtEnd ? entries.length + 1 : 1 }}
+                        >
+                          {turnOptimisticMessages.map((message) => (
+                            <Activity
+                              item={optimisticActivity(message)}
+                              cwd={workspaceSummary.cwd}
+                              onDownload={downloadFile}
+                              onOpenArtifact={openLinkedArtifact}
+                              key={message.id}
+                            />
+                          ))}
+                        </div>
+                      );
                       return (
                         <div className="turn" data-turn-id={turn.id} key={turn.id}>
-                          {turnOptimisticMessages.length > 0 && (
-                            <div className="turn-pending-messages" style={{ gridRow: 1 }}>
-                              {turnOptimisticMessages.map((message) => (
-                                <Activity
-                                  item={optimisticActivity(message)}
-                                  cwd={workspaceSummary.cwd}
-                                  onDownload={downloadFile}
-                                  onOpenArtifact={openLinkedArtifact}
-                                  key={message.id}
-                                />
-                              ))}
-                            </div>
-                          )}
-                          {entries.map((entry, index) =>
-                            Array.isArray(entry) ? (
+                          {!pendingAtEnd && pendingMessages}
+                          {entries.map((entry, index) => {
+                            const isLatestPlan =
+                              !Array.isArray(entry) &&
+                              turn.id === latestPlan?.turn.id &&
+                              entry.id === latestPlan.item.id;
+                            return Array.isArray(entry) ? (
                               <div
                                 className={responsePieceClass(entries, index)}
-                                style={{ gridRow: index + pendingRows + 1 }}
+                                style={{ gridRow: index + leadingPendingRows + 1 }}
                                 key={entry.map((item) => item.id).join(":")}
                               >
                                 <MemoizedActivityGroup
@@ -3849,8 +3860,8 @@ export function ThreadPage({
                               </div>
                             ) : (
                               <div
-                                className={responsePieceClass(entries, index)}
-                                style={{ gridRow: index + pendingRows + 1 }}
+                                className={`${responsePieceClass(entries, index)}${isLatestPlan ? " latest-plan" : ""}`}
+                                style={{ gridRow: index + leadingPendingRows + 1 }}
                                 key={
                                   "questionKey" in entry
                                     ? (entry.questionKey ?? entry.id)
@@ -3873,16 +3884,55 @@ export function ThreadPage({
                                   }
                                   annotations={annotations}
                                   annotationEnabled={
-                                    !isSubagent && !busy && entry.id === latestAnnotatableId
+                                    isLatestPlan
+                                      ? !busy && !workspaceSummary.currentTurnId && latestPlan.ready
+                                      : !isSubagent && !busy && entry.id === latestAnnotatableId
                                   }
                                   annotationBusy={busy}
                                   onCreateAnnotation={createAnnotationEvent}
                                   onUpdateAnnotation={updateAnnotationEvent}
                                   onDeleteAnnotation={deleteAnnotationEvent}
                                 />
+                                {isLatestPlan && (
+                                  <>
+                                    {planNotice && <p role="status">{planNotice}</p>}
+                                    <div className="implement-plan-actions">
+                                      <button
+                                        className="implement-plan"
+                                        disabled={planAcceptanceDisabled}
+                                        title={planAcceptanceTitle}
+                                        type="button"
+                                        onClick={() => void implementPlan("default")}
+                                      >
+                                        {t("Да, реализуй этот план")}
+                                      </button>
+                                      <button
+                                        className="implement-plan goal"
+                                        disabled={planAcceptanceDisabled}
+                                        title={planAcceptanceTitle}
+                                        type="button"
+                                        onClick={() => void implementPlan("goal")}
+                                      >
+                                        <TargetIcon />
+                                        {t("Запустить в режиме цели")}
+                                      </button>
+                                      <button
+                                        className="implement-plan orchestrator"
+                                        disabled={planAcceptanceDisabled}
+                                        title={planAcceptanceTitle}
+                                        type="button"
+                                        onClick={() => void implementPlan("team")}
+                                      >
+                                        <TeamIcon />
+                                        {t("Запустить в режиме оркестратора")}
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
                               </div>
-                            ),
-                          )}
+                            );
+                          })}
+                          {pendingAtEnd && pendingMessages}
                           <div
                             className={`turn-response-tail response-piece response-end${!entries.length || isUserEntry(entries.at(-1)) ? " response-start" : ""}`}
                             style={{ gridRow: entries.length + pendingRows + 1 }}
@@ -3918,7 +3968,7 @@ export function ThreadPage({
                               className="response-surface"
                               aria-hidden="true"
                               style={{
-                                gridRow: `${start + pendingRows + 1} / ${end + pendingRows + 1}`,
+                                gridRow: `${start + leadingPendingRows + 1} / ${end + leadingPendingRows + 1}`,
                               }}
                               key={`surface:${start}`}
                             />
@@ -3994,66 +4044,6 @@ export function ThreadPage({
                   onUpdate={updateQueued}
                   onDelete={deleteQueued}
                 />
-                {!searchTarget && latestPlan && (
-                  <div className="latest-plan">
-                    <MemoizedActivity
-                      key={`${latestPlan.turn.id}:${latestPlan.item.id}`}
-                      item={latestPlan.item}
-                      threadId={threadId}
-                      turnId={latestPlan.turn.id}
-                      cwd={workspaceSummary.cwd}
-                      onDownload={downloadFile}
-                      onOpenArtifact={openLinkedArtifact}
-                      onLoadImage={loadLocalImage}
-                      forkAction={
-                        latestPlan.item.id ===
-                        completedTurnForkActions.get(latestPlan.turn.id)?.responseId
-                          ? completedTurnForkActions.get(latestPlan.turn.id)?.action
-                          : undefined
-                      }
-                      annotations={annotations}
-                      annotationEnabled={
-                        !busy && !workspaceSummary.currentTurnId && latestPlan.ready
-                      }
-                      annotationBusy={busy}
-                      onCreateAnnotation={createAnnotationEvent}
-                      onUpdateAnnotation={updateAnnotationEvent}
-                      onDeleteAnnotation={deleteAnnotationEvent}
-                    />
-                    {planNotice && <p role="status">{planNotice}</p>}
-                    <div className="implement-plan-actions">
-                      <button
-                        className="implement-plan"
-                        disabled={planAcceptanceDisabled}
-                        title={planAcceptanceTitle}
-                        type="button"
-                        onClick={() => void implementPlan("default")}
-                      >
-                        {t("Да, реализуй этот план")}
-                      </button>
-                      <button
-                        className="implement-plan goal"
-                        disabled={planAcceptanceDisabled}
-                        title={planAcceptanceTitle}
-                        type="button"
-                        onClick={() => void implementPlan("goal")}
-                      >
-                        <TargetIcon />
-                        {t("Запустить в режиме цели")}
-                      </button>
-                      <button
-                        className="implement-plan orchestrator"
-                        disabled={planAcceptanceDisabled}
-                        title={planAcceptanceTitle}
-                        type="button"
-                        onClick={() => void implementPlan("team")}
-                      >
-                        <TeamIcon />
-                        {t("Запустить в режиме оркестратора")}
-                      </button>
-                    </div>
-                  </div>
-                )}
               </>
             )}
           </section>

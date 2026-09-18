@@ -71,15 +71,19 @@ export function estimatedTranscriptionSeconds(
   return Math.max(1, Math.ceil((fixed + (audioDurationMs / 1_000) * perSecond) / 1_000));
 }
 
-export function formatEstimatedTranscriptionTime(
+export function formatTimerSeconds(seconds: number): string {
+  return String(Math.max(0, Math.floor(seconds)));
+}
+
+export function formatTranscriptionTimer(
   elapsedSeconds: number,
   estimatedTotalSeconds: number | null,
 ): string {
-  if (estimatedTotalSeconds === null) return formatRecordingTime(elapsedSeconds);
+  if (estimatedTotalSeconds === null) return formatTimerSeconds(elapsedSeconds);
   if (elapsedSeconds <= estimatedTotalSeconds) {
-    return `≈${formatRecordingTime(Math.max(0, estimatedTotalSeconds - elapsedSeconds))}`;
+    return `≈${formatTimerSeconds(estimatedTotalSeconds - elapsedSeconds)}`;
   }
-  return `+${formatRecordingTime(elapsedSeconds - estimatedTotalSeconds)}`;
+  return `+${formatTimerSeconds(elapsedSeconds - estimatedTotalSeconds)}`;
 }
 
 export function insertTranscriptAtSelection(

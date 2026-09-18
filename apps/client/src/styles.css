@@ -2489,8 +2489,7 @@
 }
 
 .voice-transcription-timer {
-  width: 8ch;
-  flex: 0 0 8ch;
+  flex: 0 0 auto;
   text-align: right;
   color: var(--text-strong);
   font-family: var(--font-mono);
@@ -3225,10 +3224,6 @@ button.message-file:hover:not(:disabled) {
 
 .orchestration-result-paths code {
   overflow-wrap: anywhere;
-}
-
-.latest-plan {
-  margin-top: var(--space-6);
 }
 
 .latest-plan > [role="status"] {
@@ -6935,16 +6930,8 @@ button.message-file:hover:not(:disabled) {
   scrollbar-gutter: stable;
 }
 
-.message.voice-transcription-message {
-  width: min(72%, 320px);
-}
-
-.message.voice-transcription-message > .message-body {
-  width: 100%;
-}
-
 .voice-transcription-message .message-body > span:nth-child(2) {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

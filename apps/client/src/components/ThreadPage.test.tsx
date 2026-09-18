@@ -3945,7 +3945,7 @@ describe("Activity", () => {
     );
   });
 
-  it("moves the latest plan below the whole discussion and restores its position outside Plan mode", () => {
+  it("keeps the latest plan in chronological order when switching out of Plan mode", () => {
     const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
     const planTurn = completedPlanDetail().turns![0]!;
     const context = mockThreadConnection(threadApi(), planThread, {
@@ -3954,11 +3954,11 @@ describe("Activity", () => {
     const view = renderThread();
     const plan = screen.getByText("Сделать").closest("article")!;
     const tail = plan.closest(".latest-plan")!;
-    expect(tail.parentElement!.lastElementChild).toBe(tail);
+    expect(tail.closest("[data-turn-id]")).toHaveAttribute("data-turn-id", "plan-turn");
     expect(screen.getAllByText("Сделать")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
     expect(
-      screen.getByText("Готовый фрагмент ответа").compareDocumentPosition(plan) &
+      plan.compareDocumentPosition(screen.getByText("Готовый фрагмент ответа")) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
 
@@ -3967,6 +3967,7 @@ describe("Activity", () => {
     view.rerender(threadRoute());
 
     expect(screen.queryByRole("button", { name: "Да, реализуй этот план" })).toBeNull();
+    expect(screen.getByText("Сделать").closest("article")).toBe(plan);
     expect(screen.getByText("Сделать").closest("[data-turn-id]")).toHaveAttribute(
       "data-turn-id",
       "plan-turn",
@@ -3979,7 +3980,7 @@ describe("Activity", () => {
     ).toBeTruthy();
   });
 
-  it("keeps an old plan at the tail but blocks all implementation choices after a clarification", () => {
+  it("keeps an old plan above its clarification and blocks all implementation choices", () => {
     const api = threadApi();
     const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
     const planTurn = completedPlanDetail().turns![0]!;
@@ -4000,7 +4001,11 @@ describe("Activity", () => {
     const view = renderThread();
 
     const tail = screen.getByText("Сделать").closest(".latest-plan")!;
-    expect(tail.parentElement!.lastElementChild).toBe(tail);
+    expect(tail.closest("[data-turn-id]")).toHaveAttribute("data-turn-id", "plan-turn");
+    expect(
+      tail.compareDocumentPosition(screen.getByText(clarification.text)) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.getByText("План ещё не обновлён после уточнений")).toBeVisible();
     for (const button of tail.querySelectorAll(".implement-plan")) {
       expect(button).toBeDisabled();
@@ -4029,7 +4034,11 @@ describe("Activity", () => {
     expect(screen.getByText("Сделать").closest(".latest-plan")).toBeNull();
     expect(screen.getAllByText("План с прогревом соединений")).toHaveLength(1);
     const revisedTail = screen.getByText("План с прогревом соединений").closest(".latest-plan")!;
-    expect(revisedTail.parentElement!.lastElementChild).toBe(revisedTail);
+    expect(revisedTail.closest("[data-turn-id]")).toHaveAttribute("data-turn-id", followup.id);
+    expect(
+      screen.getByText(clarification.text).compareDocumentPosition(revisedTail) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Да, реализуй этот план" })).toHaveLength(1);
 
     view.unmount();
@@ -4037,6 +4046,75 @@ describe("Activity", () => {
     expect(screen.getByText("План с прогревом соединений").closest(".latest-plan")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
   });
+
+  it.each(["detached", "same-turn", "queue"] as const)(
+    "keeps a %s optimistic clarification below the plan through server confirmation",
+    (destination) => {
+      const planTurn = completedPlanDetail().turns![0]!;
+      const planThread = {
+        ...summary,
+        settings: { collaborationMode: "plan" as const },
+        ...(destination === "same-turn"
+          ? { currentTurnId: planTurn.id, state: "running" as const }
+          : {}),
+      };
+      const context = mockThreadConnection(threadApi(), planThread, { turns: [planTurn] });
+      const view = renderThread();
+      const originalPlan = screen.getByText("Сделать").closest("article")!;
+      const message = {
+        id: "clarification",
+        threadId: "thread",
+        text: "Уточнение после плана",
+        images: [],
+        createdAt: 3,
+        destination: destination === "queue" ? ("queue" as const) : ("turn" as const),
+        turnId: destination === "same-turn" ? planTurn.id : null,
+      };
+      context.state.optimisticMessages.thread = [message];
+      view.rerender(threadRoute());
+
+      const clarification = screen.getByText(message.text);
+      expect(
+        originalPlan.compareDocumentPosition(clarification) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+      if (destination === "same-turn") {
+        const pending = clarification.closest<HTMLElement>(".turn-pending-messages")!;
+        expect(Number(pending.style.gridRow)).toBeGreaterThan(
+          Number(originalPlan.parentElement!.style.gridRow),
+        );
+      }
+
+      context.state.optimisticMessages.thread = [];
+      const reply: ActivityItem = {
+        type: "userMessage",
+        id: message.id,
+        text: message.text,
+        status: "completed",
+        timestamp: 3,
+        images: [],
+        phase: null,
+      };
+      context.state.details.thread = {
+        ...context.state.details.thread,
+        turns:
+          destination === "same-turn"
+            ? [{ ...planTurn, items: [...planTurn.items, reply] }]
+            : [
+                planTurn,
+                { ...completedAgentTurn(), items: [reply, ...completedAgentTurn().items] },
+              ],
+      };
+      view.rerender(threadRoute());
+      expect(screen.getByText("Сделать").closest("article")).toBe(originalPlan);
+      expect(screen.getAllByText(message.text)).toHaveLength(1);
+      expect(
+        originalPlan.compareDocumentPosition(screen.getByText(message.text)) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    },
+  );
 
   it.each(["userMessage", "userInputResponse"] as const)(
     "blocks a plan followed by a %s in the same turn",
@@ -4069,10 +4147,17 @@ describe("Activity", () => {
 
       expect(screen.getByText("План ещё не обновлён после уточнений")).toBeVisible();
       expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+      expect(
+        screen
+          .getByText("Сделать")
+          .compareDocumentPosition(
+            screen.getByText(type === "userMessage" ? "Используем два прокси" : "Два"),
+          ) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
     },
   );
 
-  it("keeps a streaming plan at the tail and enables it only after successful turn completion", () => {
+  it("keeps a streaming plan in its turn and enables it only after successful completion", () => {
     const planTurn = completedPlanDetail().turns![0]!;
     const planThread = { ...summary, settings: { collaborationMode: "plan" as const } };
     const running = { ...planThread, state: "running" as const, currentTurnId: planTurn.id };

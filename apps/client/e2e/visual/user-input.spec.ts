@@ -88,6 +88,37 @@ for (const theme of ["light", "dark"] as const) {
         });
         await page.goto("/threads/session-attention");
         await waitForVisualReady(page);
+        const voice = page.locator(".voice-transcription-message");
+        for (const status of ["queued", "applying", "transcribing"] as const) {
+          seed.voiceTranscriptions![0]!.status = status;
+          await page.reload();
+          const label =
+            status === "queued"
+              ? language === "ru"
+                ? "На сервере · ожидание"
+                : "On the server · waiting"
+              : status === "applying"
+                ? language === "ru"
+                  ? "Готовим отправку"
+                  : "Preparing to send"
+                : language === "ru"
+                  ? "Распознаём"
+                  : "Transcribing";
+          await expect(voice).toHaveAttribute("aria-label", label);
+          const body = voice.locator(".message-body");
+          const bounds = (await body.boundingBox())!;
+          const caption = (await body.locator(":scope > span").nth(1).boundingBox())!;
+          const timer = (await voice.locator(".voice-transcription-timer").boundingBox())!;
+          expect(bounds.height).toBe(36);
+          expect(timer.x - caption.x - caption.width).toBeCloseTo(8, 0);
+          expect(timer.x + timer.width).toBeLessThanOrEqual(bounds.x + bounds.width);
+          expect(bounds.width).toBeLessThan(280);
+          expect(bounds.x).toBeGreaterThanOrEqual(0);
+          expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+        }
+        if (language === "ru" && width === 390) {
+          await voice.screenshot({ path: testInfo.outputPath(`voice-capsule-${theme}.png`) });
+        }
         const panel = page.locator(".attention-stack");
         await expect(panel).toBeVisible();
         const activity = page.locator(".turn-activity-row");
@@ -160,5 +191,59 @@ for (const theme of ["light", "dark"] as const) {
         expect(await gap(".voice-transcription-message", ".outgoing-messages")).toBeCloseTo(16, 0);
       });
     }
+  }
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [320, 1440]) {
+    test(`${theme} ${width}: question recording timer stays round and uses seconds`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await installVisualFixture(page, { theme });
+      await page.goto("/threads/session-attention");
+      await page.evaluate(() => {
+        class Recorder extends EventTarget {
+          static isTypeSupported() {
+            return true;
+          }
+          state = "inactive";
+          mimeType = "audio/webm";
+          start() {
+            this.state = "recording";
+          }
+          stop() {
+            this.state = "inactive";
+            this.dispatchEvent(new Event("stop"));
+          }
+        }
+        Object.defineProperty(window, "MediaRecorder", { configurable: true, value: Recorder });
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+        });
+      });
+      const panel = page.locator(".attention-stack");
+      const input = panel.getByRole("textbox", { name: "Свой ответ" });
+      await input.fill("Сохранённый ответ");
+      const startedAt = await page.evaluate(() => Date.now());
+      await panel.getByRole("button", { name: "Начать запись" }).click();
+      const timer = panel.getByRole("button", { name: "Остановить запись" });
+      await expect(timer).toHaveText("0");
+      const before = (await timer.boundingBox())!;
+      await page.evaluate((now) => {
+        Date.now = () => now;
+      }, startedAt + 125000);
+      await expect(timer).toHaveText("125");
+      const after = (await timer.boundingBox())!;
+      expect(after.width).toBe(width <= 820 ? 32 : 34);
+      expect(after.height).toBe(after.width);
+      expect(after.width).toBe(before.width);
+      expect(after.x).toBe(before.x);
+      await expect(timer).toHaveCSS("border-radius", "50%");
+      await panel.getByRole("button", { name: "Отменить запись" }).click();
+      await expect(input).toHaveValue("Сохранённый ответ");
+      await expect(panel.getByRole("button", { name: "Начать запись" })).toBeVisible();
+    });
   }
 }

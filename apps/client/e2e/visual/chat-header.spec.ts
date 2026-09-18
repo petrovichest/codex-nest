@@ -59,8 +59,8 @@ async function openLongPlan(page: Page, theme: "light" | "dark") {
               "- Сведения и диалоги сохраняют доступные действия и клавиатурный фокус.\n" +
               "- Проверить длинный текст, код, таблицы и вложения в обеих темах.\n" +
               "- Сохранить текущую геометрию композера и боковой колонки.\n" +
-              // The latest plan follows the discussion. Keep the card taller than
-              // the viewport so it can pass behind the header even at the tail.
+              // Keep the plan taller than the viewport so its card can pass
+              // behind the header while remaining in chronological order.
               "\n## Проверка результата\n\n" +
               "- Проверить край карточки под обоими закруглениями верхней панели.\n" +
               "- Убедиться, что панель остаётся неподвижной при прокрутке длинного плана.\n" +

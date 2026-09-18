@@ -16,8 +16,8 @@ import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { AlertIcon, MicrophoneIcon, XIcon } from "./Icons";
 import {
   estimatedTranscriptionSeconds,
-  formatEstimatedTranscriptionTime,
-  formatRecordingTime,
+  formatTranscriptionTimer,
+  formatTimerSeconds,
   insertTranscriptAtSelection,
   microphoneUnavailableReason,
   recordingErrorMessage,
@@ -403,9 +403,9 @@ function UserInputForm({
   );
   const speechTimerText =
     speechState === "recording"
-      ? formatRecordingTime(speechSeconds)
+      ? formatTimerSeconds(speechSeconds)
       : speechState === "transcribing"
-        ? formatEstimatedTranscriptionTime(speechSeconds, speechEstimatedTotalSeconds)
+        ? formatTranscriptionTimer(speechSeconds, speechEstimatedTotalSeconds)
         : null;
 
   function updateDraft(

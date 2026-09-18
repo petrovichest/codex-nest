@@ -31,6 +31,8 @@ import { ImageViewer } from "./ImageViewer";
 import { SettingsPicker } from "./SettingsPicker";
 import {
   formatRecordingTime,
+  formatTimerSeconds,
+  formatTranscriptionTimer,
   insertTranscriptAtSelection,
   microphoneUnavailableReason,
   recordingErrorMessage,
@@ -1767,21 +1769,6 @@ function formatTranscriptionStatus(
   return t("Распознаём · дольше прогноза на {{time}}", {
     time: formatRecordingTime(elapsedSeconds - estimatedTotalSeconds),
   });
-}
-
-function formatTimerSeconds(seconds: number): string {
-  return String(Math.max(0, Math.floor(seconds)));
-}
-
-function formatTranscriptionTimer(
-  elapsedSeconds: number,
-  estimatedTotalSeconds: number | null,
-): string {
-  if (estimatedTotalSeconds === null) return formatTimerSeconds(elapsedSeconds);
-  if (elapsedSeconds <= estimatedTotalSeconds) {
-    return `≈${formatTimerSeconds(estimatedTotalSeconds - elapsedSeconds)}`;
-  }
-  return `+${formatTimerSeconds(elapsedSeconds - estimatedTotalSeconds)}`;
 }
 
 function inlineImageBytes(url: string): number {
