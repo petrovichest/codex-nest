@@ -229,6 +229,8 @@ h1 {
 }
 
 .icon-button {
+  display: inline-grid;
+  place-items: center;
   min-width: var(--control-height);
   padding: 0;
   color: var(--ink);

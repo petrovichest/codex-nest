@@ -495,10 +495,33 @@ function bindingCard(
   const open = el("button", {
     className: prominent ? "secondary-button" : "icon-button",
     type: "button",
-    textContent: prominent ? text.open : "↗",
+    textContent: prominent ? text.open : "",
     title: text.open,
     ariaLabel: text.open,
   });
+  if (!prominent) {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    for (const [name, value] of Object.entries({
+      "aria-hidden": "true",
+      width: "18",
+      height: "18",
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.8",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    })) {
+      icon.setAttribute(name, value);
+    }
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute(
+      "d",
+      "M10 4.5H7a3 3 0 0 0-3 3v9.5a3 3 0 0 0 3 3h9.5a3 3 0 0 0 3-3v-3 M14 4h6v6M20 4l-9 9",
+    );
+    icon.append(path);
+    open.append(icon);
+  }
   open.addEventListener(
     "click",
     () => void act(() => request({ type: "popup.open", threadId: binding.threadId })),

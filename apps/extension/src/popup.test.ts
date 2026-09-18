@@ -273,6 +273,27 @@ describe("popup session catalog", () => {
     ).toBe(false);
   });
 
+  it("opens another session from its accessible icon button", async () => {
+    const { sendMessage } = await loadPopup(snapshot({ bindings: [binding("thread-other")] }), {
+      windowId: 37,
+    });
+    const open = document.querySelector<HTMLButtonElement>(
+      '.icon-button[aria-label="Open in CodexNest"]',
+    )!;
+    expect(open).not.toBeNull();
+    expect(open.textContent).toBe("");
+    const icon = open.querySelector("svg")!;
+    expect(icon.getAttribute("aria-hidden")).toBe("true");
+    icon.querySelector("path")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "popup.open",
+        threadId: "thread-other",
+        windowId: 37,
+      }),
+    );
+  });
+
   it("includes the current window in configure, open, and detach requests", async () => {
     const attached = binding("thread-bound");
     const { sendMessage } = await loadPopup(
