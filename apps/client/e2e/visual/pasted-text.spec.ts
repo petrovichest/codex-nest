@@ -137,6 +137,10 @@ for (const theme of ["light", "dark"] as const)
       for (const pasteCard of [card, page.locator(".composer .paste-card")]) {
         await expect(pasteCard).toHaveCSS("border-radius", "20px");
         await expect(pasteCard.locator(".paste-card-toggle")).toHaveCSS("border-radius", "16px");
+        await pasteCard.getByRole("button", { expanded: false }).click();
+        await expect(pasteCard.getByRole("table")).toHaveCSS("font-size", "14px");
+        await expect(pasteCard.locator("pre code")).toHaveCSS("font-size", "14px");
+        await pasteCard.getByRole("button", { expanded: true }).click();
       }
       expect(await card.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(
         await bubble.evaluate((el) => getComputedStyle(el).backgroundColor),

@@ -14,7 +14,7 @@
   --font-ui: "Onest", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: var(--font-ui);
 
-  /* Existing type sizes: tokenizing them must not change layout. */
+  /* Shared baseline retained by the extension; client roles override in primitives.css. */
   --text-micro: 9px;
   --text-tiny: 10px;
   --text-caption: 11px;

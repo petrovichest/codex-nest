@@ -69,7 +69,7 @@ for (const width of [320, 390, 610, 1440]) {
         await expect(dialog.locator(".fork-dialog-actions .primary")).toBeEnabled();
         await expect(dialog.locator(".fork-mode-metrics small").first()).toHaveCSS(
           "font-size",
-          "11px",
+          "12px",
         );
         const metrics = dialog.locator(".fork-mode-metrics");
         await expect(metrics.first()).toHaveCSS("font-size", "12px");

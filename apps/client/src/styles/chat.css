@@ -293,7 +293,7 @@
 
 .thread-workspace .timeline .attention-card h3 {
   margin: 10px 0 16px;
-  font-size: 18px;
+  font-size: var(--text-section);
 }
 
 .thread-workspace .timeline :is(.attention-card, .async-question-card) fieldset {
@@ -370,7 +370,7 @@
   background: transparent;
   box-shadow: none;
   color: var(--text-strong);
-  font: 400 16px/1.6 var(--font-ui);
+  font: var(--weight-regular) var(--text-input)/var(--leading-copy) var(--font-ui);
   overflow-y: auto;
   resize: none;
 }
@@ -382,7 +382,7 @@
 .thread-workspace .timeline .queued-message-editor-actions button {
   min-height: 36px;
   padding-inline: 18px;
-  font-size: 14px;
+  font-size: var(--text-ui);
 }
 
 .thread-workspace .timeline .queued-message-editor-actions button:not(.primary) {
@@ -1123,10 +1123,6 @@
 
   .thread-workspace .timeline .markdown-code-block pre {
     padding: 16px 46px 16px 16px;
-  }
-
-  .thread-workspace .timeline .attention-card h3 {
-    font-size: 17px;
   }
 
   .thread-workspace .timeline :is(.attention-card, .async-question-card) .check {

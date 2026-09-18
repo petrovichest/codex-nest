@@ -707,7 +707,7 @@
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
 }
 
 .status,
@@ -1225,7 +1225,7 @@
 .settings-group-heading h2 {
   margin: 0 0 var(--space-1);
   font-size: var(--text-section);
-  line-height: var(--leading-tight);
+  line-height: 24px;
 }
 
 .settings-group-heading p {
@@ -1769,7 +1769,8 @@
 .workspace-title h1 {
   overflow: hidden;
   margin: 0;
-  font-size: var(--text-input);
+  font-size: var(--text-section);
+  line-height: 24px;
   font-weight: var(--weight-action);
   letter-spacing: -0.015em;
   text-overflow: ellipsis;
@@ -2014,7 +2015,7 @@
 
 .fork-operation-child-copy small {
   color: var(--muted);
-  font-size: var(--text-micro);
+  font-size: var(--text-small);
 }
 
 .fork-child-title {
@@ -2025,7 +2026,7 @@
 
 .fork-child-archived {
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
 }
 
 .conversation-scroll {
@@ -2124,7 +2125,7 @@
   padding: 0.12em 0.35em;
   border-radius: var(--radius-sm);
   background: var(--surface-muted);
-  font-size: 0.9em;
+  font-size: inherit;
 }
 
 .message pre {
@@ -2307,7 +2308,7 @@
 .artifact-viewer-title strong {
   overflow: hidden;
   color: var(--text-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-action);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2316,7 +2317,7 @@
 .artifact-viewer-title > span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
   line-height: 1.4;
 }
 
@@ -2357,10 +2358,6 @@
 
 .artifact-viewer-title {
   flex: 1;
-}
-
-.artifact-viewer-title strong {
-  font-size: var(--text-label);
 }
 
 .artifact-viewer-actions {
@@ -2445,7 +2442,7 @@
   background: var(--color-surface);
   color: var(--color-ink);
   font-size: var(--text-message);
-  line-height: 1.65;
+  line-height: var(--leading-message);
 }
 
 .artifact-markdown code {
@@ -2468,7 +2465,7 @@
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   line-height: var(--leading-message);
 }
 
@@ -3421,7 +3418,7 @@ button.message-file:hover:not(:disabled) {
 
 .activity-title.technical {
   font-family: var(--font-mono);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
 }
 
 .activity-status {
@@ -4057,7 +4054,7 @@ button.message-file:hover:not(:disabled) {
 .composer-file-summary small {
   align-self: start;
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
 }
 
 .composer-attachment-preview {
@@ -4414,7 +4411,7 @@ button.message-file:hover:not(:disabled) {
   flex: 1;
   grid-column: 1;
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
 }
 
 .queued-message-status {
@@ -4569,9 +4566,13 @@ button.message-file:hover:not(:disabled) {
   color: var(--muted-strong);
 }
 
+.center-state h2 {
+  font-size: var(--text-dialog);
+}
+
 .new-session-empty h2 {
   margin-bottom: var(--space-2);
-  font-size: 22px;
+  font-size: var(--text-dialog);
 }
 
 .new-session-empty p {
@@ -4658,7 +4659,7 @@ button.message-file:hover:not(:disabled) {
 
 .subagent-readonly a small {
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
 }
 
 .inspector-heading {
@@ -4919,14 +4920,14 @@ button.message-file:hover:not(:disabled) {
 
 .inspector-artifact-copy strong {
   color: var(--text-strong);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   font-weight: var(--weight-action);
 }
 
 .inspector-artifact-copy span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--text-micro);
+  font-size: var(--text-small);
 }
 
 .inspector-artifact-download {
@@ -5057,7 +5058,7 @@ button.message-file:hover:not(:disabled) {
 
 .attention-card h3 {
   margin-bottom: var(--space-2);
-  font-size: var(--text-message);
+  font-size: var(--text-section);
 }
 
 .attention-card p {
@@ -5315,7 +5316,7 @@ button.message-file:hover:not(:disabled) {
 .setup-identity,
 .splash {
   color: var(--color-ink-strong);
-  font-size: 18px;
+  font-size: var(--text-section);
   font-weight: var(--weight-bold);
   letter-spacing: -0.035em;
 }
@@ -5335,7 +5336,7 @@ button.message-file:hover:not(:disabled) {
 
 .setup-card h1 {
   margin: 0 0 -6px;
-  font-size: 24px;
+  font-size: var(--text-display);
   line-height: 1.15;
 }
 
@@ -5351,7 +5352,7 @@ button.message-file:hover:not(:disabled) {
 
 .dialog-eyebrow {
   color: var(--muted);
-  font-size: var(--text-tiny);
+  font-size: var(--text-small);
   font-weight: var(--weight-bold);
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -5757,6 +5758,7 @@ button.message-file:hover:not(:disabled) {
 .dialog-heading h2 {
   margin: 0;
   font-size: var(--text-dialog);
+  line-height: 28px;
 }
 
 .dialog-heading p {
@@ -6014,6 +6016,36 @@ button.message-file:hover:not(:disabled) {
 }
 
 @media (max-width: 1279px) {
+  .settings-section-tabs {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-section-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-section-tab {
+    min-width: max-content;
+    flex: 0 0 auto;
+  }
+
+  .settings-group {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-4);
+  }
+
+  .settings-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+
+  .settings-row-control {
+    justify-content: flex-start;
+    justify-self: stretch;
+  }
+
   .artifact-viewer-backdrop {
     position: absolute;
     inset: 0;
@@ -6216,7 +6248,6 @@ button.message-file:hover:not(:disabled) {
 
   .workspace-title h1 {
     max-width: min(48vw, 270px);
-    font-size: var(--text-ui);
   }
 
   .workspace-title p {
@@ -6237,26 +6268,12 @@ button.message-file:hover:not(:disabled) {
     padding: var(--space-1) 0 var(--space-3);
   }
 
-  .settings-section-tabs {
-    display: flex;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .settings-section-tabs::-webkit-scrollbar {
-    display: none;
-  }
-
   .settings-section-tab {
-    min-width: max-content;
     min-height: var(--control-touch-height);
-    flex: 0 0 auto;
     padding: 0 14px;
   }
 
   .settings-group {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-4);
     padding: var(--space-6) 0;
   }
 
@@ -6266,14 +6283,7 @@ button.message-file:hover:not(:disabled) {
 
   .settings-row {
     min-height: 0;
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-2);
     padding: var(--space-4) 0;
-  }
-
-  .settings-row-control {
-    justify-content: flex-start;
-    justify-self: stretch;
   }
 
   .settings-actions {
@@ -6916,7 +6926,7 @@ button.message-file:hover:not(:disabled) {
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
-  font-size: 0.85em;
+  font-size: var(--text-small);
   color: var(--muted);
 }
 /* Search views use the existing dialog and neutral surface system. */

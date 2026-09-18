@@ -23,6 +23,9 @@ for (const locale of ["en-US", "ru-RU"]) {
         const theme = page.getByLabel(locale === "ru-RU" ? "Тема" : "Theme", { exact: true });
         const address = page.locator("#base-url");
         await expect(address).toBeVisible();
+        // The client role scale must not change the compact extension forms.
+        await expect(address).toHaveCSS("font-size", "12.5px");
+        await expect(theme).toHaveCSS("font-size", "11px");
         const logo = page.locator("img.nest-logo");
         await expect(logo).toBeVisible();
         await expect

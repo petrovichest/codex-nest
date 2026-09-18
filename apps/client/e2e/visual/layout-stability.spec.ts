@@ -451,6 +451,8 @@ for (const mobile of [false, true]) {
           };
         });
       const before = await compare(queued);
+      expect(before.size).toBe("16px");
+      expect(before.lineHeight).toBe("24px");
       expect(before).toEqual(await compare(original));
       await expect(queued.locator("strong")).toHaveText("сообщение");
       expect(

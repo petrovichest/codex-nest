@@ -1,3 +1,15 @@
+:root {
+  /* Application roles. The extension imports tokens.css without this layer. */
+  --text-micro: 10px;
+  --text-caption: var(--text-small);
+  --text-label: var(--text-ui);
+  --text-message: var(--text-input);
+  --text-section: 18px;
+  --text-dialog: 20px;
+  --text-display: 24px;
+  --leading-message: var(--leading-copy);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -27,6 +39,7 @@ select {
 }
 
 button {
+  font-size: var(--text-ui);
   min-height: var(--control-height);
   display: inline-flex;
   align-items: center;
@@ -90,6 +103,8 @@ select {
   border: 1px solid var(--color-line-strong);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+  font-size: var(--text-input);
+  line-height: var(--leading-copy);
   transition:
     border-color var(--motion-fast) var(--motion-ease),
     background-color var(--motion-fast) var(--motion-ease);
@@ -113,6 +128,10 @@ label {
   font-weight: var(--weight-semibold);
 }
 
+small {
+  font-size: var(--text-small);
+}
+
 h1,
 h2,
 h3,
@@ -125,6 +144,11 @@ h2,
 h3 {
   color: var(--color-ink-strong);
   letter-spacing: -0.025em;
+}
+
+/* Content headings retain Markdown's relative hierarchy. */
+:where(h1, h2, h3):not(:where(.message *, .artifact-markdown *, .paste-card-preview *)) {
+  font-size: var(--text-section);
 }
 
 a {
@@ -141,7 +165,11 @@ code {
   padding: 1px 5px;
   border-radius: var(--radius-sm);
   background: var(--color-recessed);
-  font-size: 0.88em;
+  font-size: inherit;
+}
+
+table {
+  font-size: var(--text-ui);
 }
 
 pre {
@@ -153,7 +181,7 @@ pre {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--color-recessed) 74%, var(--color-canvas));
   color: var(--color-ink);
-  font-size: var(--text-small);
+  font-size: var(--text-ui);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

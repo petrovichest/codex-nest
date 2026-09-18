@@ -41,3 +41,18 @@ describe("shared surface radii", () => {
     });
   }
 });
+
+describe("application typography roles", () => {
+  for (const file of globSync("apps/client/src/**/*.css", { cwd: root }).sort()) {
+    it(`${file} uses role tokens for font sizes, including shorthand`, () => {
+      const css = readFileSync(resolve(root, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      const violations: string[] = [];
+      for (const declaration of css.matchAll(/\b(font-size|font):\s*([^;{}]+);/g)) {
+        const value = declaration[2]!.trim();
+        if (value === "inherit" || /var\(--text-[\w-]+\)/.test(value)) continue;
+        violations.push(declaration[0]);
+      }
+      expect(violations).toEqual([]);
+    });
+  }
+});
