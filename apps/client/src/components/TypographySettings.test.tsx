@@ -20,7 +20,7 @@ it("shows all nine roles and applies only valid values while preserving editable
   const field = screen.getByRole("spinbutton", { name: "Основной интерфейс" });
   fireEvent.change(field, { target: { value: "24" } });
   expect(document.documentElement.style.getPropertyValue("--text-ui")).toBe("24px");
-  expect(screen.getByRole("spinbutton", { name: "Сообщения и поля ввода" })).toHaveValue(16);
+  expect(screen.getByRole("spinbutton", { name: "Сообщения и поля ввода" })).toHaveValue(15);
   fireEvent.change(field, { target: { value: "33" } });
   expect(field).toHaveValue(33);
   expect(document.documentElement.style.getPropertyValue("--text-ui")).toBe("24px");
@@ -30,8 +30,8 @@ it("shows all nine roles and applies only valid values while preserving editable
   fireEvent.keyDown(field, { key: "Enter" });
   expect(field).toHaveValue(24);
   fireEvent.click(screen.getByRole("button", { name: "Сбросить размер: Основной интерфейс" }));
-  expect(field).toHaveValue(16);
-  expect(JSON.parse(localStorage.getItem(TYPOGRAPHY_KEY)!).ui).toBe(16);
+  expect(field).toHaveValue(14);
+  expect(JSON.parse(localStorage.getItem(TYPOGRAPHY_KEY)!).ui).toBe(14);
 });
 
 it("restores defaults including an invalid draft whose saved size is already default", () => {
@@ -43,6 +43,6 @@ it("restores defaults including an invalid draft whose saved size is already def
   const field = screen.getByRole("spinbutton", { name: "Основной интерфейс" });
   fireEvent.change(field, { target: { value: "99" } });
   fireEvent.click(screen.getByRole("button", { name: "Вернуть стандартные размеры" }));
-  expect(field).toHaveValue(16);
+  expect(field).toHaveValue(14);
   act(() => resetTypography());
 });

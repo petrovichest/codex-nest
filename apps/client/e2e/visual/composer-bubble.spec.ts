@@ -31,11 +31,11 @@ for (const theme of ["light", "dark"] as const) {
       await setup(page, theme);
       const field = page.locator(".composer-box textarea");
       const bubble = page.locator(".composer-box");
-      const compactHeight = width <= 820 ? 86 : 94;
-      const height = async () => (await bubble.boundingBox())!.height;
+      const compactHeight = width <= 820 ? 85 : 93;
+      const height = async () => Math.round((await bubble.boundingBox())!.height);
       await expect.poll(height).toBe(compactHeight);
-      await expect(field).toHaveCSS("font-size", "16px");
-      await expect(field).toHaveCSS("line-height", "24px");
+      await expect(field).toHaveCSS("font-size", "15px");
+      await expect(field).toHaveCSS("line-height", "22.5px");
       await expect(bubble).toHaveCSS("border-radius", width <= 820 ? "24px" : "28px");
       await field.evaluate((el) => {
         el.placeholder =
@@ -45,7 +45,7 @@ for (const theme of ["light", "dark"] as const) {
       await field.fill("Проверь изменения");
       await expect.poll(height).toBe(compactHeight);
       await field.fill("Первая строка\nВторая строка");
-      await expect.poll(height).toBe(compactHeight + 24);
+      await expect.poll(height).toBe(compactHeight + 22);
       await field.fill("Длинная строка без ручного переноса. ".repeat(5));
       await expect.poll(height).toBeGreaterThan(compactHeight);
       await field.fill("Длинный ввод\n".repeat(30));
@@ -70,20 +70,21 @@ for (const theme of ["light", "dark"] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await setup(page, theme, true);
     const field = page.locator(".composer-box textarea");
-    const height = async () => (await page.locator(".composer-box").boundingBox())!.height;
-    await expect.poll(height).toBe(94);
+    const height = async () =>
+      Math.round((await page.locator(".composer-box").boundingBox())!.height);
+    await expect.poll(height).toBe(93);
     await field.fill("Проверь порядок кнопок и одинаковый тон подложек.");
-    await expect.poll(height).toBe(94);
+    await expect.poll(height).toBe(93);
     await page.setViewportSize({ width: 320, height: 900 });
-    await expect.poll(height).toBeGreaterThan(86);
+    await expect.poll(height).toBeGreaterThan(85);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect.poll(height).toBe(94);
+    await expect.poll(height).toBe(93);
     await field.fill("Много строк\n".repeat(30));
     await expect.poll(async () => (await field.boundingBox())!.height).toBe(190);
     await field.fill("");
-    await expect.poll(height).toBe(94);
+    await expect.poll(height).toBe(93);
     await page.setViewportSize({ width: 390, height: 900 });
-    await expect.poll(height).toBe(86);
+    await expect.poll(height).toBe(85);
   });
 
   test(`${theme} composer controls and model menu use floating states`, async ({ page }) => {

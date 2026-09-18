@@ -451,8 +451,8 @@ for (const mobile of [false, true]) {
           };
         });
       const before = await compare(queued);
-      expect(before.size).toBe("16px");
-      expect(before.lineHeight).toBe("24px");
+      expect(before.size).toBe("15px");
+      expect(before.lineHeight).toBe("22.5px");
       expect(before).toEqual(await compare(original));
       await expect(queued.locator("strong")).toHaveText("сообщение");
       expect(
@@ -742,7 +742,7 @@ test("sidebar typography and actual title animation use fixed geometry and speed
     }),
   );
   expect(new Set(fonts.map((font) => JSON.stringify(font))).size).toBe(1);
-  expect(fonts[0]![0]).toBe("16px");
+  expect(fonts[0]![0]).toBe("14px");
   for (const mode of ["Проекты", "Активные"]) {
     await page.getByRole("button", { name: mode, exact: true }).click();
     await page.mouse.move(1000, 850);

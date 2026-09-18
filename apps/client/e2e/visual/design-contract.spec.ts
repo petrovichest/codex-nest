@@ -146,7 +146,7 @@ for (const theme of ["light", "dark"] as const) {
       for (const text of await header.locator("h1, p").all()) {
         await expect(text).toHaveCSS("font-weight", "400");
       }
-      await expect(header.locator("h1")).toHaveCSS("font-size", "16px");
+      await expect(header.locator("h1")).toHaveCSS("font-size", "14px");
       await expect(header.locator("h1")).toHaveCSS("line-height", "20px");
       await expect(header.locator("p")).toHaveCSS("font-size", "14px");
       await expect(header.locator("p")).toHaveCSS("line-height", mobile ? "18px" : "20px");

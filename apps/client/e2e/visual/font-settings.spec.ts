@@ -2,15 +2,15 @@ import { expect, test } from "@playwright/test";
 import { installVisualFixture, snapshot, waitForVisualReady } from "./fixtures";
 
 const defaults = {
-  ui: 16,
-  message: 16,
+  ui: 14,
+  message: 15,
   description: 14,
   technical: 14,
   caption: 12,
-  micro: 10,
-  section: 18,
-  dialog: 20,
-  display: 24,
+  micro: 12,
+  section: 14,
+  dialog: 14,
+  display: 22,
 };
 const profiles = {
   minimum: Object.fromEntries(Object.keys(defaults).map((key) => [key, 10])),
@@ -159,7 +159,7 @@ test("font controls apply independently, persist, and reset", async ({ page }) =
   await page.locator("#font-size-ui").blur();
   await expect(page.locator("#font-size-ui")).toHaveValue("20");
   await page.getByRole("button", { name: "Сбросить размер: Основной интерфейс" }).click();
-  await expect(page.locator("body")).toHaveCSS("font-size", "16px");
+  await expect(page.locator("body")).toHaveCSS("font-size", "14px");
   await expect(page.locator("#font-size-technical")).toHaveValue("24");
   await page.getByRole("button", { name: "Вернуть стандартные размеры" }).click();
   await expect(page.locator("html")).not.toHaveAttribute("data-custom-typography");

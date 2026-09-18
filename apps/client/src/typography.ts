@@ -5,9 +5,9 @@ export const TYPOGRAPHY_MIN = 10;
 export const TYPOGRAPHY_MAX = 32;
 
 export const TYPOGRAPHY_ROLES = {
-  ui: { size: 16, token: "--text-ui", label: "Основной интерфейс", example: "Проекты · Настройки" },
+  ui: { size: 14, token: "--text-ui", label: "Основной интерфейс", example: "Проекты · Настройки" },
   message: {
-    size: 16,
+    size: 15,
     token: "--text-input",
     label: "Сообщения и поля ввода",
     example: "Напишите сообщение",
@@ -30,16 +30,16 @@ export const TYPOGRAPHY_ROLES = {
     label: "Метаданные и компактные действия",
     example: "Сегодня, 12:30 · 3 файла",
   },
-  micro: { size: 10, token: "--text-micro", label: "Мелкие индикаторы", example: "PNG · 12" },
-  section: { size: 18, token: "--text-section", label: "Заголовки разделов", example: "Интерфейс" },
+  micro: { size: 12, token: "--text-micro", label: "Мелкие индикаторы", example: "PNG · 12" },
+  section: { size: 14, token: "--text-section", label: "Заголовки разделов", example: "Интерфейс" },
   dialog: {
-    size: 20,
+    size: 14,
     token: "--text-dialog",
     label: "Заголовки диалогов и пустых состояний",
     example: "Новая задача",
   },
   display: {
-    size: 24,
+    size: 22,
     token: "--text-display",
     label: "Заголовок экрана подключения",
     example: "Подключение к CodexNest",

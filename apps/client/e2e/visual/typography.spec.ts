@@ -18,36 +18,36 @@ for (const theme of ["light", "dark"] as const) {
         const message = page.locator(".message.userMessage").first();
         const input = page.locator(".composer-box textarea");
         for (const text of [message, input]) {
-          await expect(text).toHaveCSS("font-size", "16px");
-          await expect(text).toHaveCSS("line-height", "24px");
+          await expect(text).toHaveCSS("font-size", "15px");
+          await expect(text).toHaveCSS("line-height", "22.5px");
         }
-        await expect(page.locator("body")).toHaveCSS("font-size", "16px");
-        await expect(page.locator(".workspace-title h1")).toHaveCSS("font-size", "16px");
+        await expect(page.locator("body")).toHaveCSS("font-size", "14px");
+        await expect(page.locator(".workspace-title h1")).toHaveCSS("font-size", "14px");
         await expect(page.locator(".workspace-title h1")).toHaveCSS("line-height", "20px");
         await expect(page.locator(".workspace-title p")).toHaveCSS("font-size", "14px");
         await expect(page.locator(".workspace-title p")).toHaveCSS(
           "line-height",
           width <= 820 ? "18px" : "20px",
         );
-        await expect(page.locator(".thread-link-title").first()).toHaveCSS("font-size", "16px");
+        await expect(page.locator(".thread-link-title").first()).toHaveCSS("font-size", "14px");
         await expect(page.locator(".session-list-mode button").first()).toHaveCSS(
           "font-size",
-          "16px",
+          "14px",
         );
         await expect(page.locator(".pinned-group-toggle")).toHaveCSS("font-size", "12px");
         await expect(page.locator(".message-footer time").first()).toHaveCSS("font-size", "12px");
         await expect(page.locator(".model-toggle")).toHaveCSS("font-size", "12px");
         await input.fill("");
         await expect
-          .poll(async () => (await page.locator(".composer-box").boundingBox())!.height)
-          .toBe(width <= 820 ? 86 : 94);
+          .poll(async () => Math.round((await page.locator(".composer-box").boundingBox())!.height))
+          .toBe(width <= 820 ? 85 : 93);
 
         await page.locator(".model-toggle").click();
         const dialog = page.getByRole("dialog");
-        await expect(dialog.locator(".dialog-heading h2")).toHaveCSS("font-size", "20px");
+        await expect(dialog.locator(".dialog-heading h2")).toHaveCSS("font-size", "14px");
         await expect(dialog.locator(".model-settings-option strong").first()).toHaveCSS(
           "font-size",
-          "16px",
+          "14px",
         );
         await expect(dialog.locator(".model-settings-option small").first()).toHaveCSS(
           "font-size",
@@ -68,7 +68,7 @@ for (const theme of ["light", "dark"] as const) {
         );
         await expect(inspector.locator("dd:not(.inspector-value-technical)").first()).toHaveCSS(
           "font-size",
-          "16px",
+          "14px",
         );
         await expect(inspector.locator(".inspector-value-technical").first()).toHaveCSS(
           "font-size",
@@ -81,11 +81,11 @@ for (const theme of ["light", "dark"] as const) {
         await waitForVisualReady(page);
         await expect(page.locator(".settings-group-heading h2").first()).toHaveCSS(
           "font-size",
-          "18px",
+          "14px",
         );
         await expect(page.locator(".settings-row-copy label").first()).toHaveCSS(
           "font-size",
-          "16px",
+          "14px",
         );
         await expect(page.locator(".settings-row-copy p").first()).toHaveCSS("font-size", "14px");
         expect(
@@ -98,7 +98,7 @@ for (const theme of ["light", "dark"] as const) {
         );
         expect(await fields.count()).toBeGreaterThan(0);
         for (const field of await fields.all()) {
-          if (await field.isVisible()) await expect(field).toHaveCSS("font-size", "16px");
+          if (await field.isVisible()) await expect(field).toHaveCSS("font-size", "15px");
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
           true,

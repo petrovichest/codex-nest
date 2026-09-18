@@ -1,16 +1,17 @@
 :root {
   /* Application roles. The extension imports tokens.css without this layer. */
-  --text-micro: 10px;
+  --text-micro: 12px;
   --text-tiny: var(--text-micro);
   --text-caption: 12px;
   --text-small: 14px;
   --text-code: 14px;
-  --text-ui: 16px;
+  --text-ui: 14px;
   --text-label: var(--text-ui);
+  --text-input: 15px;
   --text-message: var(--text-input);
-  --text-section: 18px;
-  --text-dialog: 20px;
-  --text-display: 24px;
+  --text-section: 14px;
+  --text-dialog: 14px;
+  --text-display: 22px;
   --leading-message: var(--leading-copy);
 }
 

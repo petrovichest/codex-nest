@@ -60,8 +60,8 @@ for (const width of [320, 390, 1440]) {
       const { card, field } = await openQueue(page, theme);
       await expectAligned(page);
       await expect(field).toBeFocused();
-      await expect(field).toHaveCSS("font-size", "16px");
-      await expect(field).toHaveCSS("line-height", "24px");
+      await expect(field).toHaveCSS("font-size", "15px");
+      await expect(field).toHaveCSS("line-height", "22.5px");
       await expect(field).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await expect(field).toHaveCSS("outline-style", "none");
       if (width !== 320) {

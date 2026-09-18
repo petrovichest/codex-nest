@@ -125,7 +125,7 @@ for (const width of [390, 1440]) {
       await expect(mirror.locator("mark")).toHaveText("FATCOINUSDT");
       await expect(field).toHaveValue(text);
     }
-    await changeSize(page, "message", 16);
+    await changeSize(page, "message", 15);
     for (const [index, field] of [composer, queue].entries())
       await expect.poll(() => field.evaluate((el) => el.clientHeight)).toBe(heights[index]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
@@ -147,7 +147,7 @@ test("saved font sizes apply on the disconnected setup screen", async ({ page })
   await page.goto("/");
   await expect(page.locator(".setup-card h1")).toHaveCSS("font-size", "32px");
   await expect(page.locator('input[type="url"]')).toHaveCSS("font-size", "24px");
-  await expect(page.locator(".setup-card p")).toHaveCSS("font-size", "16px");
+  await expect(page.locator(".setup-card p")).toHaveCSS("font-size", "14px");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
@@ -165,5 +165,5 @@ test("technical sizes are independent of message and description sizes", async (
     "28px",
   );
   await expect(inspector.locator("dt").first()).toHaveCSS("font-size", "10px");
-  await expect(page.locator(".composer-box textarea")).toHaveCSS("font-size", "16px");
+  await expect(page.locator(".composer-box textarea")).toHaveCSS("font-size", "15px");
 });

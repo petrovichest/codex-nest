@@ -176,7 +176,7 @@ for (const theme of ["light", "dark"] as const) {
       const remove = form.getByRole("button", { name: "Удалить аннотацию" });
       const save = form.getByRole("button", { name: "Сохранить аннотацию" });
       await expect(input).toHaveValue(comment);
-      await expect(input).toHaveCSS("font-size", "16px");
+      await expect(input).toHaveCSS("font-size", "15px");
       await expect(input).toHaveCSS("font-weight", "400");
       await expect(input).toHaveCSS("resize", "none");
       await expect(input).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");

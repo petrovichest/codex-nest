@@ -424,7 +424,7 @@ test.describe("CodexNest redesign visual contract", () => {
       "rgb(247, 248, 245)",
     );
     await expect(report.locator("code")).toHaveCSS("background-color", "rgb(37, 39, 37)");
-    await expect(report.locator("code")).toHaveCSS("font-size", "16px");
+    await expect(report.locator("code")).toHaveCSS("font-size", "15px");
     await expect(report.locator("table")).toHaveCSS("color", "rgb(233, 234, 231)");
     await expect(report.locator("table")).toHaveCSS("font-size", "14px");
     expect(
