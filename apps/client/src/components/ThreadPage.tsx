@@ -1,3 +1,13 @@
+import { PasteBlocks } from "./PasteBlocks";
+import { PasteMessageEditor } from "./PasteEditor";
+import { PastedMarkdown } from "./PastedMarkdown";
+import {
+  pastedText,
+  rebasePastedText,
+  trimPastedMessage,
+  copyPastedMessage,
+  type PastedText,
+} from "@codexnest/protocol";
 import {
   memo,
   useCallback,
@@ -8,8 +18,7 @@ import {
   useRef,
   useState,
 } from "react";
-import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { type Components as MarkdownComponents } from "react-markdown";
 import { Link, matchPath, Navigate, useLocation, useNavigate, useParams } from "react-router";
 
 import { DEFAULT_SESSION_SETTINGS } from "@codexnest/protocol";
@@ -196,7 +205,7 @@ export type QueuedMessageView = QueuedMessage & {
   serverAccepted?: boolean;
 };
 
-type SubmittedMessageIdentity = {
+type SubmittedMessageIdentity = PastedText & {
   text: string;
   images: readonly string[];
   files: ReadonlyArray<{ name: string; path: string }>;
@@ -226,6 +235,7 @@ function emptyComposerDraft(): UpdateThreadDraftRequest {
 function composerDraftHasContent(value: UpdateThreadDraftRequest): boolean {
   return (
     Boolean(value.input) ||
+    !!value.pasteBlocks?.length ||
     value.images.length > 0 ||
     (value.files?.length ?? 0) > 0 ||
     value.goalMode ||
@@ -239,6 +249,7 @@ function submittedMessageFingerprint(identity: SubmittedMessageIdentity): string
     identity.images,
     identity.files.map(({ name, path }) => ({ name, path })),
     identity.goal,
+    pastedText(identity),
   ]);
 }
 
@@ -256,6 +267,7 @@ function latestRootUserMessage(detail: ThreadDetail | undefined): ActivityItem |
 function normalizeNewSessionDraft(value: UpdateThreadDraftRequest): UpdateThreadDraftRequest {
   return structuredClone({
     input: value.input,
+    ...pastedText(value),
     images: value.images,
     ...(value.files ? { files: value.files } : {}),
     goalMode: value.goalMode,
@@ -374,10 +386,32 @@ function mergeComposerDrafts(
     !submittedInput || !newerInput || submittedInput === newerInput
       ? submittedInput || newerInput
       : `${submittedInput}\n\n${newerInput}`;
+  const firstPastes = rebasePastedText(submitted.input, submittedInput, submitted);
+  const nextPastes = rebasePastedText(newer.input, newerInput, newer);
+  const blockIds = new Set(submitted.pasteBlocks?.map((block) => block.id));
+  const inlinePastes = !submittedInput
+    ? nextPastes.inlinePastes
+    : !newerInput || submittedInput === newerInput
+      ? firstPastes.inlinePastes
+      : [
+          ...(firstPastes.inlinePastes ?? []),
+          ...(nextPastes.inlinePastes ?? []).map((range) => ({
+            ...range,
+            start: range.start + submittedInput.length + 2,
+            end: range.end + submittedInput.length + 2,
+          })),
+        ];
   const annotationIds = new Set(submitted.annotations.map((annotation) => annotation.id));
   const files = mergeComposerFiles(submitted.files ?? [], newer.files ?? []);
   return {
     input,
+    ...pastedText({
+      inlinePastes,
+      pasteBlocks: [
+        ...(submitted.pasteBlocks ?? []),
+        ...(newer.pasteBlocks ?? []).filter((block) => !blockIds.has(block.id)),
+      ],
+    }),
     images: mergeComposerImages(submitted.images, newer.images),
     ...(files.length ? { files } : {}),
     goalMode: newer.goalMode || (!newerInput && submitted.goalMode),
@@ -656,6 +690,7 @@ export function ThreadPage({
     value: detail?.draft
       ? {
           input: detail.draft.input,
+          ...pastedText(detail.draft),
           images: detail.draft.images,
           files: detail.draft.files ?? [],
           goalMode: detail.draft.goalMode,
@@ -846,6 +881,7 @@ export function ThreadPage({
   for (const message of optimisticMessages) {
     addActiveMessage({
       text: message.text,
+      ...pastedText(message),
       images: message.images,
       files: message.files ?? [],
       goal:
@@ -856,6 +892,7 @@ export function ThreadPage({
   for (const message of detail?.queuedMessages ?? []) {
     addActiveMessage({
       text: message.text,
+      ...pastedText(message),
       images: message.images ?? [],
       files: message.files ?? [],
       goal: Boolean(message.goal),
@@ -868,6 +905,7 @@ export function ThreadPage({
     if (item.type !== "userMessage") continue;
     addActiveMessage({
       text: item.text,
+      ...pastedText(item),
       images: item.images,
       files: item.files ?? [],
       goal: submittedGoalMessageIdsRef.current.has(item.id),
@@ -882,6 +920,7 @@ export function ThreadPage({
     if (message?.type === "userMessage") {
       addActiveMessage({
         text: message.text,
+        ...pastedText(message),
         images: message.images,
         files: message.files ?? [],
         goal: submittedGoalMessageIdsRef.current.has(message.id),
@@ -1625,9 +1664,15 @@ export function ThreadPage({
     scheduleDraftSave(targetThreadId, value, persistence === "immediate");
   }
 
-  function setInput(value: string): void {
+  function setInput(value: string, pastes?: PastedText): void {
     composerEditRevisionRef.current += 1;
-    replaceComposerDraft({ ...currentComposerDraft(), input: value }, "debounced", false);
+    const current = currentComposerDraft();
+    const next = pastes ?? rebasePastedText(current.input, value, current);
+    replaceComposerDraft(
+      { ...current, input: value, inlinePastes: next.inlinePastes, pasteBlocks: next.pasteBlocks },
+      "debounced",
+      false,
+    );
   }
 
   function setImages(value: ComposerImage[], sourceScope = attachmentScopeRef.current): void {
@@ -1892,6 +1937,7 @@ export function ThreadPage({
           id: stored.submission.id,
           threadId: storedThreadId ?? "",
           text: stored.submission.input,
+          ...pastedText(trimPastedMessage(stored.submission.draft.input, stored.submission.draft)),
           images: stored.submission.draft.images.map((image) => image.url),
           files: stored.submission.draft.files ?? [],
           createdAt: stored.updatedAt,
@@ -2062,6 +2108,7 @@ export function ThreadPage({
     const serverSource = detailDraft
       ? {
           input: detailDraft.input,
+          ...pastedText(detailDraft),
           images: detailDraft.images,
           files: detailDraft.files ?? [],
           goalMode: detailDraft.goalMode,
@@ -2577,7 +2624,10 @@ export function ThreadPage({
       language,
     );
     if (
-      (!submittedInput.trim() && !submittedDraft.images.length && !submittedDraft.files?.length) ||
+      (!submittedInput.trim() &&
+        !submittedDraft.images.length &&
+        !submittedDraft.files?.length &&
+        !submittedDraft.pasteBlocks?.length) ||
       (submittedDraft.goalMode && !submittedDraft.input.trim())
     ) {
       return;
@@ -2587,6 +2637,7 @@ export function ThreadPage({
     const dismissUserInput = userInputToDismiss(targetThreadId);
     const submittedIdentity: SubmittedMessageIdentity = {
       text: submittedInput,
+      ...pastedText(trimPastedMessage(submittedDraft.input, submittedDraft)),
       images: submittedDraft.images.map((image) => image.url),
       files: submittedDraft.files ?? [],
       goal: submittedDraft.goalMode,
@@ -2597,6 +2648,7 @@ export function ThreadPage({
       id: clientMessageId,
       threadId: targetThreadId,
       text: submittedInput.trim(),
+      ...pastedText(trimPastedMessage(submittedDraft.input, submittedDraft)),
       images: [...submittedIdentity.images],
       files: submittedDraft.files ?? [],
       goal: submittedIdentity.goal,
@@ -2624,6 +2676,7 @@ export function ThreadPage({
         targetThreadId,
         {
           input: submittedInput,
+          ...pastedText(trimPastedMessage(submittedDraft.input, submittedDraft)),
           ...(submittedDraft.images.length
             ? { images: submittedDraft.images.map((image) => image.url) }
             : {}),
@@ -2712,6 +2765,7 @@ export function ThreadPage({
       (!submittedInput.trim() &&
         !submittedDraft.images.length &&
         !submittedDraft.files?.length &&
+        !submittedDraft.pasteBlocks?.length &&
         !pendingAttachmentScopesRef.current.has(attachmentScopeRef.current)) ||
       (submittedDraft.goalMode && !submittedDraft.input.trim())
     ) {
@@ -2721,6 +2775,7 @@ export function ThreadPage({
     let messageClaimKey = claimSubmittedMessage(
       {
         text: submittedInput,
+        ...pastedText(trimPastedMessage(submittedDraft.input, submittedDraft)),
         images: submittedDraft.images.map((image) => image.url),
         files: submittedDraft.files ?? [],
         goal: submittedDraft.goalMode,
@@ -2791,6 +2846,7 @@ export function ThreadPage({
           id: clientMessageId,
           threadId: preparationRef.current.threadId ?? "",
           text: completeInput,
+          ...pastedText(trimPastedMessage(completeDraft.input, completeDraft)),
           images: completeDraft.images.map((image) => image.url),
           files: completeDraft.files ?? [],
           createdAt: Date.now(),
@@ -2805,6 +2861,7 @@ export function ThreadPage({
       } else if (submission) submission.staged = stagedInPreparation;
       const completeIdentity: SubmittedMessageIdentity = {
         text: completeInput,
+        ...pastedText(trimPastedMessage(completeDraft.input, completeDraft)),
         images: completeDraft.images.map((image) => image.url),
         files: completeDraft.files ?? [],
         goal: completeDraft.goalMode,
@@ -2819,6 +2876,7 @@ export function ThreadPage({
         id: clientMessageId,
         threadId: thread.id,
         text: completeInput.trim(),
+        ...pastedText(trimPastedMessage(completeDraft.input, completeDraft)),
         images: [...completeIdentity.images],
         files: completeDraft.files ?? [],
         goal: completeIdentity.goal,
@@ -2854,6 +2912,7 @@ export function ThreadPage({
         thread.id,
         {
           input: completeInput,
+          ...pastedText(trimPastedMessage(completeDraft.input, completeDraft)),
           ...(completeDraft.images.length
             ? { images: completeDraft.images.map((image) => image.url) }
             : {}),
@@ -3112,11 +3171,15 @@ export function ThreadPage({
     }
   }
 
-  async function updateQueued(messageId: string, value: string): Promise<boolean> {
+  async function updateQueued(
+    messageId: string,
+    value: string,
+    pastes?: PastedText,
+  ): Promise<boolean> {
     setQueueAction({ messageId, kind: "update" });
     setError(null);
     try {
-      await api.updateQueued(threadId, messageId, { input: value });
+      await api.updateQueued(threadId, messageId, { input: value, ...pastes });
       return true;
     } catch (caught) {
       setError(
@@ -3369,7 +3432,8 @@ export function ThreadPage({
         )}
         {optimisticMessages.map((message) => (
           <article className="message userMessage" key={message.id}>
-            <p>{message.text}</p>
+            <PasteBlocks blocks={message.pasteBlocks} />
+            <PastedMarkdown text={message.text} inlinePastes={message.inlinePastes} />
             {message.deliveryError && (
               <p role="status">
                 {localizeKnownServerText(language, message.deliveryError.message)}
@@ -3377,7 +3441,10 @@ export function ThreadPage({
             )}
             <MessageImages images={message.images} />
             <MessageFiles files={message.files ?? []} />
-            <button type="button" onClick={() => void copyText(message.text)}>
+            <button
+              type="button"
+              onClick={() => void copyText(copyPastedMessage(message.text, message))}
+            >
               {t("Скопировать сообщение")}
             </button>
           </article>
@@ -4078,6 +4145,7 @@ export function ThreadPage({
             inputSyncRevision={composerInputSyncRevision}
             input={input}
             onInput={setInput}
+            pastes={activeComposerDraft}
             onDraftFlush={onDraftFlush}
             cwd={workspaceSummary.cwd}
             skillsEpoch={state.skillsEpoch}
@@ -4385,6 +4453,7 @@ function optimisticActivity(message: OptimisticMessage): ActivityItem {
     id: message.id,
     status: "completed",
     text: message.text,
+    ...pastedText(message),
     images: message.images,
     files: (message.files ?? []).map(({ name, path }) => ({ name, path })),
     timestamp: message.createdAt,
@@ -4420,6 +4489,7 @@ function mergeOptimisticQueue(
         id: message.id,
         threadId: message.threadId,
         text: message.text,
+        ...pastedText(message),
         ...(message.images.length ? { images: message.images } : {}),
         ...(message.files?.length ? { files: message.files } : {}),
         ...(message.deliveryError ? { deliveryError: message.deliveryError } : {}),
@@ -4447,12 +4517,14 @@ function MarkdownTable({ children }: { children?: React.ReactNode }) {
 
 function MarkdownContent({
   text,
+  inlinePastes,
   cwd,
   onDownload,
   onOpenArtifact,
   onLoadImage,
 }: {
   text: string;
+  inlinePastes?: PastedText["inlinePastes"];
   cwd?: string;
   onDownload?(path: string): Promise<void>;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
@@ -4492,11 +4564,7 @@ function MarkdownContent({
     }),
     [cwd, onDownload, onLoadImage, onOpenArtifact],
   );
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-      {text}
-    </ReactMarkdown>
-  );
+  return <PastedMarkdown text={text} inlinePastes={inlinePastes} components={components} />;
 }
 
 function MarkdownLink({
@@ -5014,9 +5082,10 @@ export function Activity({
     const messageAnnotations = numberedAnnotations(annotations, item.id);
     const content = (
       <article
-        className={`message ${item.type}`}
+        className={`message ${item.type}${item.pasteBlocks?.length ? " message-with-pastes" : ""}`}
         data-message-id={item.type === "userMessage" ? item.id : undefined}
       >
+        {item.type === "userMessage" && <PasteBlocks blocks={item.pasteBlocks} />}
         <div className="message-body">
           {item.text &&
             (item.type === "agentMessage" ? (
@@ -5038,6 +5107,7 @@ export function Activity({
             ) : (
               <MarkdownContent
                 text={item.text}
+                inlinePastes={item.inlinePastes}
                 cwd={cwd}
                 onDownload={onDownload}
                 onOpenArtifact={onOpenArtifact}
@@ -5067,7 +5137,7 @@ export function Activity({
             ))}
         </div>
         <MessageFooter
-          text={item.text}
+          text={item.type === "userMessage" ? copyPastedMessage(item.text, item) : item.text}
           markdown={item.type === "agentMessage"}
           timestamp={item.timestamp}
           forkAction={item.type === "agentMessage" ? forkAction : undefined}
@@ -5969,13 +6039,15 @@ export function QueuedMessages({
   action: QueueAction | null;
   canSendNow?: boolean;
   onSendNow(messageId: string): Promise<boolean>;
-  onUpdate(messageId: string, value: string): Promise<boolean>;
+  onUpdate(messageId: string, value: string, pastes?: PastedText): Promise<boolean>;
   onDelete(messageId: string): Promise<boolean>;
   inTimeline?: boolean;
   onRetry?(messageId: string): Promise<void>;
 }) {
   const { language, t } = useI18n();
-  const [editor, setEditor] = useState<{ messageId: string; value: string } | null>(null);
+  const [editor, setEditor] = useState<({ messageId: string; value: string } & PastedText) | null>(
+    null,
+  );
   const editorFieldRef = useRef<HTMLTextAreaElement>(null);
   const nativeFieldSizing = useMemo(
     () => typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content"),
@@ -6051,8 +6123,14 @@ export function QueuedMessages({
             action !== null || !message.confirmed || message.status === "dispatching";
           const editValue = editing ? editor.value : "";
           const canSave =
-            Boolean(editValue.trim() || message.images?.length) &&
-            editValue.trim() !== message.text;
+            Boolean(
+              editValue.trim() ||
+              message.images?.length ||
+              message.files?.length ||
+              editor?.pasteBlocks?.length,
+            ) &&
+            (editValue.trim() !== message.text ||
+              JSON.stringify(pastedText(editor ?? {})) !== JSON.stringify(pastedText(message)));
           const status = message.deliveryError
             ? localizeKnownServerText(language, message.deliveryError.message)
             : !message.confirmed
@@ -6067,7 +6145,7 @@ export function QueuedMessages({
                     : t("В очереди");
           return (
             <article
-              className={`queued-message message userMessage${editing ? " queued-message-editing" : ""}`}
+              className={`queued-message message userMessage${message.pasteBlocks?.length ? " message-with-pastes" : ""}${editing ? " queued-message-editing" : ""}`}
               data-message-id={message.id}
               key={message.id}
             >
@@ -6076,18 +6154,20 @@ export function QueuedMessages({
                   {String(index + 1).padStart(2, "0")}
                 </span>
               )}
+              {!editing && <PasteBlocks blocks={message.pasteBlocks} />}
               <div className="queued-message-content message-body">
                 {editing ? (
                   <div className="queued-message-editor">
-                    <textarea
+                    <PasteMessageEditor
+                      identity={message.id}
                       ref={editorFieldRef}
                       autoFocus
                       aria-label={t("Текст сообщения в очереди")}
                       rows={1}
-                      value={editValue}
+                      value={{ input: editValue, ...pastedText(editor ?? {}) }}
                       disabled={busy}
-                      onChange={(event) =>
-                        setEditor({ messageId: message.id, value: event.target.value })
+                      onValueChange={(next) =>
+                        setEditor({ messageId: message.id, value: next.input, ...pastedText(next) })
                       }
                     />
                     <div className="queued-message-editor-actions">
@@ -6099,7 +6179,19 @@ export function QueuedMessages({
                         className="primary"
                         disabled={busy || !canSave}
                         onClick={() => {
-                          void onUpdate(message.id, editValue).then((saved) => {
+                          void onUpdate(
+                            message.id,
+                            editValue,
+                            message.inlinePastes?.length ||
+                              message.pasteBlocks?.length ||
+                              editor?.inlinePastes?.length ||
+                              editor?.pasteBlocks?.length
+                              ? {
+                                  inlinePastes: editor?.inlinePastes ?? [],
+                                  pasteBlocks: editor?.pasteBlocks ?? [],
+                                }
+                              : undefined,
+                          ).then((saved) => {
                             if (saved) setEditor(null);
                           });
                         }}
@@ -6114,6 +6206,7 @@ export function QueuedMessages({
                       <div className="queued-message-text">
                         <MarkdownContent
                           text={message.text}
+                          inlinePastes={message.inlinePastes}
                           onLoadImage={onLoadImage}
                           cwd={cwd}
                           onDownload={onDownload}
@@ -6151,17 +6244,18 @@ export function QueuedMessages({
                   )}
                 </div>
                 <div className="queued-message-actions">
-                  {(message.deliveryError || !message.confirmed) && message.text && (
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={t("Скопировать сообщение")}
-                      title={t("Скопировать сообщение")}
-                      onClick={() => void copyText(message.text)}
-                    >
-                      <CopyIcon />
-                    </button>
-                  )}
+                  {(message.deliveryError || !message.confirmed) &&
+                    (message.text || message.pasteBlocks?.length) && (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={t("Скопировать сообщение")}
+                        title={t("Скопировать сообщение")}
+                        onClick={() => void copyText(copyPastedMessage(message.text, message))}
+                      >
+                        <CopyIcon />
+                      </button>
+                    )}
                   {onRetry &&
                     !message.confirmed &&
                     !message.serverAccepted &&
@@ -6184,7 +6278,13 @@ export function QueuedMessages({
                         aria-label={t("Изменить сообщение в очереди")}
                         title={t("Изменить сообщение в очереди")}
                         disabled={actionsDisabled}
-                        onClick={() => setEditor({ messageId: message.id, value: message.text })}
+                        onClick={() =>
+                          setEditor({
+                            messageId: message.id,
+                            value: message.text,
+                            ...pastedText(message),
+                          })
+                        }
                       >
                         <PencilIcon />
                       </button>
@@ -6635,7 +6735,11 @@ function hasVisibleActivity(item: ActivityItem): boolean {
   if (item.type === "userMessage" && isQuestionReplyDelivery(item)) return false;
   if ("text" in item)
     return Boolean(
-      item.text.trim() || item.images.length || (item.files?.length ?? 0) || item.questions?.length,
+      item.text.trim() ||
+      item.pasteBlocks?.length ||
+      item.images.length ||
+      (item.files?.length ?? 0) ||
+      item.questions?.length,
     );
   return true;
 }

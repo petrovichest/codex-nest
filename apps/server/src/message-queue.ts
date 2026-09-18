@@ -1,3 +1,9 @@
+import {
+  pastedText,
+  trimPastedMessage,
+  rebasePastedText,
+  type PastedText,
+} from "@codexnest/protocol";
 import { createHash, randomUUID } from "node:crypto";
 
 import type {
@@ -57,7 +63,7 @@ export class MessageQueue {
     text: string,
     images: string[] = [],
     messageId: string = randomUUID(),
-    options: {
+    options: PastedText & {
       goal?: boolean;
       files?: ThreadFileAttachment[];
       completeVoiceTranscriptionId?: string;
@@ -70,6 +76,7 @@ export class MessageQueue {
       id: messageId,
       threadId,
       text: text.trim(),
+      ...pastedText(trimPastedMessage(text, options)),
       ...(images.length ? { images } : {}),
       ...(options.files?.length ? { files: options.files } : {}),
       ...(options.goal ? { goal: true } : {}),
@@ -88,6 +95,7 @@ export class MessageQueue {
       !!message.goal,
       message.replyToUserInput ?? message.replyToAsyncQuestion,
       message.dismissUserInput,
+      message,
     );
     let stored = message;
     await this.store.update((state) => {
@@ -140,6 +148,7 @@ export class MessageQueue {
             !!existing.goal,
             existing.replyToUserInput ?? existing.replyToAsyncQuestion,
             existing.dismissUserInput,
+            existing,
           ) !== contentHash ||
           JSON.stringify(existing.replyToAsyncQuestion) !==
             JSON.stringify(message.replyToAsyncQuestion)
@@ -200,7 +209,12 @@ export class MessageQueue {
     });
   }
 
-  update(threadId: string, messageId: string, text: string): Promise<QueuedMessage> {
+  update(
+    threadId: string,
+    messageId: string,
+    text: string,
+    pastes?: PastedText,
+  ): Promise<QueuedMessage> {
     return this.withLock(threadId, async () => {
       const current = this.list(threadId).find((candidate) => candidate.id === messageId);
       if (!current) throw new MessageQueueNotFoundError("Queued message not found");
@@ -213,11 +227,25 @@ export class MessageQueue {
       if ((current.status !== "queued" && receipt?.status !== "rejected") || receipt?.request) {
         throw new MessageQueueConflictError("Queued message is already being sent");
       }
-      const trimmed = text.trim();
-      if (!trimmed && !current.images?.length && !current.files?.length) {
+      const presentation = trimPastedMessage(
+        text,
+        pastes ?? rebasePastedText(current.text, text, current),
+      );
+      const trimmed = presentation.input;
+      if (
+        !trimmed &&
+        !current.images?.length &&
+        !current.files?.length &&
+        !presentation.pasteBlocks?.length
+      ) {
         throw new MessageQueueValidationError("Queued message text must not be empty");
       }
-      const updated = { ...current, text: trimmed };
+      const updated = {
+        ...current,
+        text: trimmed,
+        inlinePastes: presentation.inlinePastes,
+        pasteBlocks: presentation.pasteBlocks,
+      };
       await this.store.update((state) => {
         const messages = state.messageQueues?.[threadId];
         if (!messages?.some((message) => message.id === messageId)) {
@@ -253,6 +281,7 @@ export class MessageQueue {
             !!current.goal,
             current.replyToUserInput ?? current.replyToAsyncQuestion,
             current.dismissUserInput,
+            current,
           ),
           status: "canceled",
           createdAt: Date.now(),
@@ -488,6 +517,9 @@ export class MessageQueue {
           ...state.messageReceipts[messageId],
           threadId,
           turnId: deliveredTurnId,
+          ...(Object.keys(pastedText(deliveredMessage)).length
+            ? { presentation: trimPastedMessage(deliveredMessage.text, deliveredMessage) }
+            : {}),
           contentHash: messageContentHash(
             deliveredMessage.text,
             deliveredMessage.images ?? [],
@@ -495,6 +527,7 @@ export class MessageQueue {
             !!deliveredMessage.goal,
             deliveredMessage.replyToUserInput ?? deliveredMessage.replyToAsyncQuestion,
             deliveredMessage.dismissUserInput,
+            deliveredMessage,
           ),
           createdAt: Date.now(),
         };
@@ -576,18 +609,16 @@ export function messageContentHash(
   goal: boolean,
   reply?: unknown,
   dismissUserInput?: AsyncQuestionReference,
+  pastes: PastedText = {},
 ): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(
-        dismissUserInput
-          ? [text.trim(), images, files, goal, reply ?? null, { dismissUserInput }]
-          : reply !== undefined
-            ? [text.trim(), images, files, goal, reply]
-            : files.length
-              ? [text.trim(), images, files, goal]
-              : [text.trim(), images, goal],
-      ),
-    )
-    .digest("hex");
+  const content: unknown[] = dismissUserInput
+    ? [text.trim(), images, files, goal, reply ?? null, { dismissUserInput }]
+    : reply !== undefined
+      ? [text.trim(), images, files, goal, reply]
+      : files.length
+        ? [text.trim(), images, files, goal]
+        : [text.trim(), images, goal];
+  const normalized = pastedText(trimPastedMessage(text, pastes));
+  if (Object.keys(normalized).length) content.push(normalized);
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }

@@ -60,6 +60,112 @@ afterEach(async () =>
   ),
 );
 
+describe("pasted text delivery", () => {
+  it("keeps full context for the model and original Markdown in history and drafts", async () => {
+    const { app, bridge, headers } = await createSkillsHarness();
+    const pastes = {
+      inlinePastes: [{ id: "short", start: 6, end: 13 }],
+      pasteBlocks: [{ id: "long", text: "## Original\n- value 42\n```\n$review\n```" }],
+    };
+    const input = "Check $review please";
+    await app.inject({ url: "/api/v1/skills?cwd=%2Fwork", headers });
+    const draft = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: { input, ...pastes, images: [], goalMode: false, annotations: [] },
+    });
+    expect(draft.statusCode).toBe(200);
+    expect(draft.json()).toMatchObject({ input, ...pastes });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: { input, ...pastes, clientMessageId: "paste-message" },
+    });
+    expect(response.statusCode).toBe(201);
+    const command = bridge.request.mock.calls.find(([method]) => method === "turn/start")![1];
+    const nativeInput = command.input as Array<{ type: string; text?: string }>;
+    expect(nativeInput.find((item) => item.type === "text")?.text).toContain(
+      pastes.pasteBlocks[0]!.text,
+    );
+    expect(nativeInput.find((item) => item.type === "text")?.text).toContain(
+      "Check <pasted_text>$review</pasted_text> please",
+    );
+    expect(nativeInput.some((item) => item.type === "skill")).toBe(false);
+    const detail = await app.inject({ url: "/api/v1/threads/thread", headers });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().turns.flatMap((turn: { items: unknown[] }) => turn.items)).toContainEqual(
+      expect.objectContaining({ id: "paste-message", type: "userMessage", text: input, ...pastes }),
+    );
+    await app.close();
+  });
+
+  it("accepts a block-only message and rejects invalid ranges before delivery", async () => {
+    const { app, bridge, headers } = await createSkillsHarness();
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: {
+        input: "abc",
+        inlinePastes: [{ id: "bad", start: 0, end: 4 }],
+        clientMessageId: "invalid",
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    const draftBody = {
+      input: "",
+      pasteBlocks: [{ id: "log", text: "a\nb" }],
+      images: [],
+      goalMode: false,
+      annotations: [],
+    };
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft",
+      headers,
+      payload: draftBody,
+    });
+    expect(saved.json()).toMatchObject(draftBody);
+    const replay = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft?expectedUpdatedAt=none",
+      headers,
+      payload: draftBody,
+    });
+    expect(replay.statusCode).toBe(200);
+    const conflict = await app.inject({
+      method: "PUT",
+      url: "/api/v1/threads/thread/draft?expectedUpdatedAt=none",
+      headers,
+      payload: { ...draftBody, pasteBlocks: [{ id: "log", text: "changed" }] },
+    });
+    expect(conflict.statusCode).toBe(409);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/turns",
+      headers,
+      payload: {
+        input: "",
+        pasteBlocks: [{ id: "log", text: "a\nb" }],
+        clientMessageId: "only-block",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    const detail = await app.inject({ url: "/api/v1/threads/thread", headers });
+    expect(detail.json().turns.flatMap((turn: { items: unknown[] }) => turn.items)).toContainEqual(
+      expect.objectContaining({
+        id: "only-block",
+        text: "",
+        pasteBlocks: [{ id: "log", text: "a\nb" }],
+      }),
+    );
+    await app.close();
+  });
+});
+
 describe("HTTP authentication", () => {
   it("gates mutations until recovery and exposes a token-protected restart drain", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-recovery-api-test-"));

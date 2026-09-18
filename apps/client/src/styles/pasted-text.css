@@ -1,0 +1,169 @@
+.paste-blocks {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.composer > .paste-blocks {
+  width: min(100%, 440px);
+  margin-bottom: 12px;
+}
+.composer > .paste-blocks:has(.paste-card-expanded) {
+  width: min(100%, 620px);
+}
+.paste-card {
+  min-width: 0;
+  width: 100%;
+  border-radius: var(--chat-radius-card);
+  background: var(--chat-user);
+  box-shadow: var(--chat-shadow);
+  color: var(--text-strong);
+}
+.paste-card-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px 4px 4px;
+}
+.paste-card-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  border: 0;
+  border-radius: var(--chat-radius-card);
+  background: transparent;
+  color: inherit;
+  font: 400 15px/1.5 var(--font-ui);
+  text-align: start;
+  box-shadow: none;
+}
+.paste-card-toggle > svg {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--muted-strong);
+}
+.paste-card-label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+.paste-card-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+.paste-card-chevron {
+  transition: transform 150ms ease;
+}
+.paste-card-chevron.expanded {
+  transform: rotate(180deg);
+}
+.paste-card .icon-button {
+  flex: none;
+  background: transparent;
+  box-shadow: none;
+}
+.paste-card-expanded {
+  padding: 0 16px 12px;
+}
+.paste-card-preview {
+  max-height: 240px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font: 400 var(--text-message)/1.6 var(--font-ui);
+}
+.paste-card-preview > :first-child {
+  margin-top: 0;
+}
+.paste-card-preview > :last-child {
+  margin-bottom: 0;
+}
+.paste-card-preview pre {
+  overflow: auto;
+  white-space: pre;
+}
+.paste-card-preview code {
+  font-family: var(--font-mono);
+}
+.paste-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.paste-card-source {
+  width: 100%;
+  min-height: 120px;
+  max-height: 240px;
+  resize: vertical;
+  background: transparent;
+  font: 400 14px/1.5 var(--font-mono);
+}
+.paste-inline {
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-strong) 8%, transparent);
+  box-shadow: inset 0 -1px color-mix(in srgb, var(--text-strong) 24%, transparent);
+  color: inherit;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.paste-input {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+.paste-input > textarea {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+.paste-input-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.paste-input-mirror {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: transparent;
+  border-color: transparent;
+}
+.paste-input-mirror .paste-inline {
+  color: transparent;
+}
+.thread-workspace .message-with-pastes {
+  width: 620px;
+  gap: 10px;
+}
+.thread-workspace .message-with-pastes > .message-body {
+  width: 100%;
+}
+.thread-workspace .message-with-pastes > .message-body:empty {
+  display: none;
+}
+.thread-workspace .message-with-pastes > .paste-blocks {
+  grid-column: 1 / -1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .paste-card-chevron {
+    transition: none;
+  }
+}
+
+.paste-card-toggle:hover:not(:disabled),
+.paste-card-toggle:active:not(:disabled) {
+  background: transparent;
+  box-shadow: none;
+}
+.thread-workspace .message-with-pastes > .paste-blocks {
+  margin-bottom: 12px;
+}

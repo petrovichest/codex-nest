@@ -1,3 +1,4 @@
+import { pastedText } from "@codexnest/protocol";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import {
@@ -250,6 +251,7 @@ export function ConnectionProvider({
               id: message.id,
               threadId: message.threadId,
               text: message.input,
+              ...pastedText(message),
               images: message.images,
               files: message.files ?? [],
               createdAt: message.createdAt,
@@ -663,6 +665,7 @@ export function ConnectionProvider({
                 try {
                   await api.enqueue(threadId, {
                     input: message.input,
+                    ...pastedText(message),
                     ...(message.images.length ? { images: message.images } : {}),
                     ...(message.files?.length ? { files: message.files } : {}),
                     ...(message.goal ? { goal: true } : {}),
@@ -691,6 +694,7 @@ export function ConnectionProvider({
                       id: message.id,
                       threadId,
                       text: message.input,
+                      ...pastedText(message),
                       images: message.images,
                       files: message.files ?? [],
                       createdAt: message.createdAt,
@@ -765,6 +769,7 @@ export function ConnectionProvider({
         connectionKey: connectionCacheKey(settings),
         threadId,
         input: body.input,
+        ...pastedText(body),
         images: body.images ?? [],
         files: body.files ?? [],
         goal: body.goal ?? false,

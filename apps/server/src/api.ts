@@ -1,3 +1,11 @@
+import {
+  pastedText,
+  trimPastedMessage,
+  rebasePastedText,
+  serializePastedMessage,
+  validPastedText,
+  type PastedText,
+} from "@codexnest/protocol";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
 import { access, lstat, mkdir, realpath, stat } from "node:fs/promises";
@@ -553,6 +561,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     goal = false,
     replyToAsyncQuestion?: AsyncQuestionReference,
     dismissUserInput?: AsyncQuestionReference,
+    pastes: PastedText = {},
   ): Promise<TurnStartResult> => {
     if (clientMessageId) {
       const receipt = store.view().messageReceipts?.[clientMessageId];
@@ -563,7 +572,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         if (
           receipt.threadId !== threadId ||
           receipt.contentHash !==
-            messageContentHash(input, images, files, goal, replyToAsyncQuestion, dismissUserInput)
+            messageContentHash(
+              input,
+              images,
+              files,
+              goal,
+              replyToAsyncQuestion,
+              dismissUserInput,
+              pastes,
+            )
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
         }
@@ -660,6 +677,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           images,
           validatedFiles,
           goal,
+          pastes,
         ),
         ...turnSettings(
           summary.settings,
@@ -680,9 +698,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             goal,
             replyToAsyncQuestion,
             dismissUserInput,
+            pastes,
           ),
           "turn/start",
           startParams,
+          undefined,
+          Object.keys(pastedText(pastes)).length ? trimPastedMessage(input, pastes) : undefined,
         );
         return {
           turn: { id: receipt.turnId, items: [], status: "inProgress", error: null },
@@ -772,6 +793,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     goal = false,
     replyToAsyncQuestion?: AsyncQuestionReference,
     dismissUserInput?: AsyncQuestionReference,
+    pastes: PastedText = {},
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
@@ -785,6 +807,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           goal,
           replyToAsyncQuestion,
           dismissUserInput,
+          pastes,
         );
       const result =
         projection.summary(threadId)?.settings.collaborationMode === "team"
@@ -1041,6 +1064,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     replyToAsyncQuestion?: AsyncQuestionReference,
     replyToUserInput?: UserInputReply,
     dismissUserInput?: AsyncQuestionReference,
+    pastes: PastedText = {},
   ): Promise<string> => {
     codexManager?.assertTurnsAllowed();
     const summary = projection.summary(threadId);
@@ -1053,6 +1077,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       images,
       validatedFiles,
       false,
+      pastes,
     );
     const userInput = replyToAsyncQuestion
       ? undefined
@@ -1126,6 +1151,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
                   false,
                   replyToUserInput ?? replyToAsyncQuestion,
                   dismissUserInput,
+                  pastes,
                 ),
                 "turn/steer",
                 params,
@@ -1155,6 +1181,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
                       if (!images.length && !validatedFiles.length) return { turnId };
                       return bridge.request("turn/steer", params);
                     }
+                  : undefined,
+                Object.keys(pastedText(pastes)).length
+                  ? trimPastedMessage(input, pastes)
                   : undefined,
               )
             ).turnId!,
@@ -1238,6 +1267,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     replyToAsyncQuestion?: AsyncQuestionReference,
     replyToUserInput?: UserInputReply,
     dismissUserInput?: AsyncQuestionReference,
+    pastes: PastedText = {},
   ): Promise<string> => {
     const run = () =>
       steerTurnUnlocked(
@@ -1250,6 +1280,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         replyToAsyncQuestion,
         replyToUserInput,
         dismissUserInput,
+        pastes,
       );
     return projection.summary(threadId)?.settings.collaborationMode === "team"
       ? withKeyLock(teamParentLocks, threadId, run)
@@ -1273,6 +1304,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.goal ?? false,
         message.replyToAsyncQuestion,
         message.dismissUserInput,
+        message,
       ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(
@@ -1285,6 +1317,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.replyToAsyncQuestion,
         message.replyToUserInput,
         message.dismissUserInput,
+        message,
       ),
     deliveredTurnId: async (threadId, messageId) => {
       const receipt = store.view().messageReceipts?.[messageId];
@@ -3854,7 +3887,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           body.input,
           body.images,
           body.clientMessageId,
-          { goal: body.goal, files },
+          { goal: body.goal, files, ...pastedText(body) },
         );
         return reply.code(202).send(message);
       }
@@ -3865,6 +3898,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         id: body.clientMessageId ?? randomUUID(),
         threadId: operation.id,
         text: body.input.trim(),
+        ...pastedText(trimPastedMessage(body.input, body)),
         ...(body.images.length ? { images: body.images } : {}),
         ...(body.files.length ? { files: body.files } : {}),
         ...(body.goal ? { goal: true } : {}),
@@ -3883,12 +3917,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               existing.images ?? [],
               existing.files ?? [],
               !!existing.goal,
+              undefined,
+              undefined,
+              existing,
             ) !==
             messageContentHash(
               message.text,
               message.images ?? [],
               message.files ?? [],
               !!message.goal,
+              undefined,
+              undefined,
+              message,
             )
           ) {
             throw new MessageQueueConflictError("Message id has already been used");
@@ -3915,7 +3955,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (typeof body.input !== "string")
         throw new ProjectValidationError("input must be a string");
       if (operation.status === "ready" && operation.targetThreadId) {
-        return queue.update(operation.targetThreadId, request.params.messageId, body.input);
+        return queue.update(
+          operation.targetThreadId,
+          request.params.messageId,
+          body.input,
+          validateQueuedPastes(body),
+        );
       }
       let updated!: QueuedMessage;
       await store.update((state) => {
@@ -3924,10 +3969,21 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           (item) => item.id === request.params.messageId,
         );
         if (!message) throw new MessageQueueNotFoundError("Queued message not found");
-        if (!body.input.trim() && !message.images?.length && !message.files?.length) {
+        const presentation = trimPastedMessage(
+          body.input,
+          validateQueuedPastes(body) ?? rebasePastedText(message.text, body.input, message),
+        );
+        if (
+          !body.input.trim() &&
+          !message.images?.length &&
+          !message.files?.length &&
+          !presentation.pasteBlocks?.length
+        ) {
           throw new MessageQueueValidationError("Queued message text must not be empty");
         }
-        message.text = body.input.trim();
+        message.text = presentation.input;
+        message.inlinePastes = presentation.inlinePastes;
+        message.pasteBlocks = presentation.pasteBlocks;
         updated = structuredClone(message);
         current!.updatedAt = Date.now();
       });
@@ -4179,8 +4235,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.input,
         body.images ?? [],
         body.files ?? [],
-        body.clientMessageId ?? null,
+        body.clientMessageId ?? (Object.keys(pastedText(body)).length ? randomUUID() : null),
         body.goal ?? false,
+        undefined,
+        undefined,
+        body,
       );
       return reply.code(201).send(result);
     },
@@ -4213,6 +4272,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.clientMessageId,
         {
           goal: body.goal,
+          ...pastedText(body),
           files,
           replyToAsyncQuestion: body.replyToAsyncQuestion,
           replyToUserInput: body.replyToUserInput,
@@ -4247,7 +4307,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (typeof body.input !== "string") {
         return apiError(reply, 400, "validation_failed", "input must be a string");
       }
-      return queue.update(request.params.id, request.params.messageId, body.input);
+      return queue.update(
+        request.params.id,
+        request.params.messageId,
+        body.input,
+        validateQueuedPastes(body),
+      );
     },
   );
 
@@ -7657,8 +7722,12 @@ function skillAwareMessageInput(
   images: string[],
   files: ThreadFileAttachment[],
   goal: boolean,
+  pastes: PastedText = {},
 ): UserInput[] {
-  const input = messageInput(text, images, files);
+  const input = messageInput(serializePastedMessage(text, pastes), images, files);
+  for (const range of [...(pastes.inlinePastes ?? [])].reverse()) {
+    text = text.slice(0, range.start) + " ".repeat(range.end - range.start) + text.slice(range.end);
+  }
   if (goal || !entry || !/(?:^|\s)\$[\p{L}\p{N}_.:-]+/u.test(text)) return input;
   input.push(...explicitSkillItems(text, entry.skills));
   return input;
@@ -7796,7 +7865,7 @@ function parseExpectedDraftRevision(value: string | undefined): number | null | 
   return parsed;
 }
 
-function validateQueueMessageBody(value: unknown): {
+function validateQueueMessageBody(value: unknown): PastedText & {
   input: string;
   images: string[];
   files: ThreadFileAttachment[];
@@ -7812,6 +7881,8 @@ function validateQueueMessageBody(value: unknown): {
       (key) =>
         ![
           "input",
+          "inlinePastes",
+          "pasteBlocks",
           "images",
           "files",
           "goal",
@@ -7824,12 +7895,17 @@ function validateQueueMessageBody(value: unknown): {
   ) {
     throw new ProjectValidationError("Unknown queue field");
   }
+  if (typeof body.input === "string" && !validPastedText(body, body.input))
+    throw new ProjectValidationError("Invalid pasted text");
   const images = validateImages(body.images);
   const files = validateFiles(body.files);
   validateAttachmentPayloadSize(images, files);
   const clientMessageId = optionalClientMessageId(body.clientMessageId);
   if (!clientMessageId) throw new ProjectValidationError("clientMessageId is required");
-  if (typeof body.input !== "string" || (!body.input.trim() && !images.length && !files.length)) {
+  if (
+    typeof body.input !== "string" ||
+    (!body.input.trim() && !images.length && !files.length && !body.pasteBlocks?.length)
+  ) {
     throw new ProjectValidationError("input, images, or files are required");
   }
   if (body.goal !== undefined && typeof body.goal !== "boolean") {
@@ -7884,6 +7960,7 @@ function validateQueueMessageBody(value: unknown): {
   }
   return {
     input: body.input,
+    ...pastedText(body),
     images,
     files,
     goal: body.goal ?? false,
@@ -7938,15 +8015,29 @@ function validateStartTurnBody(body: unknown, reply: FastifyReply): StartTurnReq
   const value = requireRecord<StartTurnRequest>(body);
   if (
     Object.keys(value).some(
-      (key) => !["input", "images", "files", "goal", "clientMessageId"].includes(key),
+      (key) =>
+        ![
+          "input",
+          "inlinePastes",
+          "pasteBlocks",
+          "images",
+          "files",
+          "goal",
+          "clientMessageId",
+        ].includes(key),
     )
   ) {
     throw new ProjectValidationError("Unknown turn field");
   }
+  if (typeof value.input === "string" && !validPastedText(value, value.input))
+    throw new ProjectValidationError("Invalid pasted text");
   const images = validateImages(value.images);
   const files = validateFiles(value.files);
   validateAttachmentPayloadSize(images, files);
-  if (typeof value.input !== "string" || (!value.input.trim() && !images.length && !files.length)) {
+  if (
+    typeof value.input !== "string" ||
+    (!value.input.trim() && !images.length && !files.length && !value.pasteBlocks?.length)
+  ) {
     apiError(reply, 400, "validation_failed", "input, images, or files are required");
     return undefined;
   }
@@ -8021,9 +8112,19 @@ function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
   const body = requireRecord<UpdateThreadDraftRequest>(value);
   if (
     Object.keys(body).some(
-      (key) => !["input", "images", "files", "goalMode", "annotations"].includes(key),
+      (key) =>
+        ![
+          "input",
+          "inlinePastes",
+          "pasteBlocks",
+          "images",
+          "files",
+          "goalMode",
+          "annotations",
+        ].includes(key),
     ) ||
     typeof body.input !== "string" ||
+    !validPastedText(body, body.input) ||
     typeof body.goalMode !== "boolean" ||
     !Array.isArray(body.images) ||
     !Array.isArray(body.annotations)
@@ -8080,7 +8181,14 @@ function validateThreadDraft(value: unknown): UpdateThreadDraftRequest {
       createdAt: annotation.createdAt,
     };
   });
-  return { input: body.input, images, files, goalMode: body.goalMode, annotations };
+  return {
+    input: body.input,
+    ...pastedText(body),
+    images,
+    files,
+    goalMode: body.goalMode,
+    annotations,
+  };
 }
 
 function validateUserInputDraft(
@@ -8595,4 +8703,11 @@ function apiError(
   message: string,
 ): FastifyReply {
   return reply.code(status).send({ error: { code, message } });
+}
+
+function validateQueuedPastes(body: UpdateQueuedMessageRequest): PastedText | undefined {
+  if (!validPastedText(body, body.input)) throw new ProjectValidationError("Invalid pasted text");
+  return body.inlinePastes !== undefined || body.pasteBlocks !== undefined
+    ? pastedText(body)
+    : undefined;
 }

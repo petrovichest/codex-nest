@@ -22,6 +22,13 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  "Вставленный текст": "Pasted text",
+  "Удалить вставленный текст": "Remove pasted text",
+  "Исходный вставленный текст": "Pasted text source",
+  "Содержимое вставки": "Pasted content",
+  "Редактировать вставленный текст": "Edit pasted text",
+  "Скопировать вставленный текст": "Copy pasted text",
+
   "Поиск недоступен в этой версии Codex или для этой истории.":
     "Search is unavailable in this Codex version or for this history.",
   "Поиск по диалогам": "Search conversations",

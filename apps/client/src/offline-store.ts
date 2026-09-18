@@ -1,3 +1,4 @@
+import { pastedText, type PastedText } from "@codexnest/protocol";
 import type {
   AppSnapshot,
   AsyncQuestionReference,
@@ -74,7 +75,7 @@ export type NewSessionSubmission = {
   deliveryError?: { message: string; retryable: boolean };
 };
 
-export type OutboxMessage = {
+export type OutboxMessage = PastedText & {
   id: string;
   connectionKey: string;
   threadId: string;
@@ -297,6 +298,7 @@ export async function confirmLocalDraft(
   if (
     confirmed &&
     (confirmed.input ||
+      confirmed.pasteBlocks?.length ||
       confirmed.images.length ||
       (confirmed.files?.length ?? 0) > 0 ||
       confirmed.goalMode ||
@@ -307,6 +309,7 @@ export async function confirmLocalDraft(
       threadId,
       {
         input: confirmed.input,
+        ...pastedText(confirmed),
         images: confirmed.images,
         ...(confirmed.files?.length ? { files: confirmed.files } : {}),
         goalMode: confirmed.goalMode,
@@ -330,6 +333,7 @@ export function outboxMessageIntent(value: OutboxMessage): string {
     value.replyToAsyncQuestion,
     value.replyToUserInput,
     value.dismissUserInput,
+    pastedText(value),
   ]);
 }
 
@@ -390,6 +394,7 @@ export async function putOutboxMessage(
 function normalizeDraft(draft: UpdateThreadDraftRequest) {
   return {
     input: draft.input,
+    ...pastedText(draft),
     images: draft.images,
     files: draft.files ?? [],
     annotations: draft.annotations,

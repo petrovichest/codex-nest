@@ -1,3 +1,4 @@
+import { pastedText } from "@codexnest/protocol";
 import type {
   ApiError,
   AppUpdateStatus,
@@ -338,6 +339,7 @@ export class ApiClient {
       method: "PUT",
       body: {
         input: body.input,
+        ...pastedText(body),
         images: body.images,
         ...(body.files?.length ? { files: body.files } : {}),
         goalMode: body.goalMode,
@@ -438,6 +440,7 @@ export class ApiClient {
       method: "PUT",
       body: {
         input: body.input,
+        ...pastedText(body),
         images: body.images,
         ...(body.files?.length ? { files: body.files } : {}),
         goalMode: body.goalMode,

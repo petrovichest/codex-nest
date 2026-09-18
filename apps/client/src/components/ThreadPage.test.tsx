@@ -131,6 +131,37 @@ describe("initialSessionSettings", () => {
 });
 
 describe("Activity", () => {
+  it("sends pasted context with annotations and restores the complete draft after rejection", async () => {
+    const api = threadApi();
+    const pasteBlocks = [{ id: "log", text: "# Log\n42" }];
+    const inlinePastes = [{ id: "short", start: 2, end: 7 }];
+    const annotation = pendingAnnotation();
+    const context = mockThreadConnection(api, summary, {
+      turns: [completedAgentTurn()],
+      draft: {
+        input: "  pasted  ",
+        inlinePastes,
+        pasteBlocks,
+        images: [],
+        goalMode: false,
+        annotations: [annotation],
+        updatedAt: 10,
+      },
+    });
+    context.sendReliable.mockRejectedValueOnce(new Error("Rejected pasted message"));
+    renderThread();
+    expect(document.querySelectorAll(".composer .paste-card")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledOnce());
+    const body = context.sendReliable.mock.calls[0]![1];
+    expect(body).toMatchObject({ inlinePastes: [{ id: "short", start: 0, end: 5 }], pasteBlocks });
+    expect(body.input).toContain(annotation.comment);
+    await screen.findByText("Rejected pasted message");
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("  pasted  ");
+    expect(document.querySelectorAll(".composer .paste-card")).toHaveLength(1);
+    expect(document.querySelector(".composer mark")?.textContent).toBe("paste");
+  });
+
   it("preserves an async form across item renumbering and separates repeated questions", async () => {
     const question: ActivityItem = {
       type: "agentMessage",

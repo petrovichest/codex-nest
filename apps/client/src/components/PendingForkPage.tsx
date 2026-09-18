@@ -1,3 +1,9 @@
+import {
+  pastedText,
+  trimPastedMessage,
+  rebasePastedText,
+  type PastedText,
+} from "@codexnest/protocol";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router";
 
@@ -167,7 +173,11 @@ export function PendingForkPage({
 
   async function submit() {
     const current = structuredClone(draftRef.current);
-    if ((!current.input.trim() && !current.images.length) || submittingRef.current) return;
+    if (
+      (!current.input.trim() && !current.images.length && !current.pasteBlocks?.length) ||
+      submittingRef.current
+    )
+      return;
     submittingRef.current = true;
     setBusy(true);
     setError(null);
@@ -176,6 +186,7 @@ export function PendingForkPage({
       id,
       threadId: operationId,
       text: current.input.trim(),
+      ...pastedText(trimPastedMessage(current.input, current)),
       ...(current.images.length ? { images: current.images.map((image) => image.url) } : {}),
       createdAt: Date.now(),
       status: "queued",
@@ -186,6 +197,7 @@ export function PendingForkPage({
     try {
       const accepted = await api.enqueueForkOperation(operationId, {
         input: current.input,
+        ...pastedText(current),
         ...(current.images.length ? { images: current.images.map((image) => image.url) } : {}),
         clientMessageId: id,
       });
@@ -206,10 +218,17 @@ export function PendingForkPage({
     }
   }
 
-  async function updateQueued(messageId: string, input: string): Promise<boolean> {
+  async function updateQueued(
+    messageId: string,
+    input: string,
+    pastes?: PastedText,
+  ): Promise<boolean> {
     setQueueAction({ messageId, kind: "update" });
     try {
-      const updated = await api.updateForkOperationQueued(operationId, messageId, { input });
+      const updated = await api.updateForkOperationQueued(operationId, messageId, {
+        input,
+        ...pastes,
+      });
       setQueue((messages) =>
         messages.map((message) =>
           message.id === messageId ? { ...updated, confirmed: true } : message,
@@ -313,7 +332,17 @@ export function PendingForkPage({
             }
             sessionIdentity={`fork-operation:${operationId}`}
             input={draft.input}
-            onInput={(input) => scheduleDraft({ ...draftRef.current, input })}
+            pastes={draft}
+            onInput={(input, pastes) => {
+              const next =
+                pastes ?? rebasePastedText(draftRef.current.input, input, draftRef.current);
+              scheduleDraft({
+                ...draftRef.current,
+                input,
+                inlinePastes: next.inlinePastes,
+                pasteBlocks: next.pasteBlocks,
+              });
+            }}
             onDraftFlush={() => void flushDraft()}
             images={draft.images as ComposerImage[]}
             onImagesChange={(images) => scheduleDraft({ ...draftRef.current, images }, true)}
@@ -417,6 +446,7 @@ function draftValue(draft: ThreadDraft | null): UpdateThreadDraftRequest {
   return draft
     ? {
         input: draft.input,
+        ...pastedText(draft),
         images: draft.images,
         files: draft.files ?? [],
         goalMode: draft.goalMode,

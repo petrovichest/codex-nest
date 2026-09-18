@@ -1,3 +1,4 @@
+import { pastedText } from "@codexnest/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
@@ -875,6 +876,7 @@ export class AppProjection extends EventEmitter {
     const empty =
       value.input === "" &&
       value.images.length === 0 &&
+      (value.pasteBlocks?.length ?? 0) === 0 &&
       (value.files?.length ?? 0) === 0 &&
       !value.goalMode &&
       value.annotations.length === 0;
@@ -3278,6 +3280,9 @@ export class AppProjection extends EventEmitter {
   private withDeliveryReceipt(threadId: string, turnId: string, item: ActivityItem): ActivityItem {
     if (item.type !== "userMessage") return item;
     const receipt = this.store.view().messageReceipts?.[item.id];
+    if (receipt?.presentation) {
+      item = { ...item, text: receipt.presentation.input, ...pastedText(receipt.presentation) };
+    }
     if (
       receipt?.status !== "delivered" ||
       receipt.threadId !== threadId ||
@@ -4402,6 +4407,7 @@ function threadDraftMatches(
     return (
       value.input === "" &&
       value.images.length === 0 &&
+      (value.pasteBlocks?.length ?? 0) === 0 &&
       (value.files?.length ?? 0) === 0 &&
       !value.goalMode &&
       value.annotations.length === 0
@@ -4410,6 +4416,7 @@ function threadDraftMatches(
   return isDeepStrictEqual(
     {
       input: current.input,
+      ...pastedText(current),
       images: current.images,
       files: current.files ?? [],
       goalMode: current.goalMode,

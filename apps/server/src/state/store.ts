@@ -1,3 +1,4 @@
+import { validPastedText, type MessagePresentation } from "@codexnest/protocol";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { constants as fsConstants } from "node:fs";
@@ -333,6 +334,7 @@ export interface VoiceReceiptState {
 }
 
 export interface MessageReceiptState {
+  presentation?: MessagePresentation;
   threadId: string;
   turnId: string | null;
   contentHash: string;
@@ -1215,6 +1217,10 @@ function validateState(value: unknown): CodexNestState {
       (receipt.status !== undefined &&
         !["prepared", "delivered", "rejected", "canceled"].includes(receipt.status as string)) ||
       (receipt.deliveryVersion !== undefined && receipt.deliveryVersion !== 1) ||
+      (receipt.presentation !== undefined &&
+        (!isRecord(receipt.presentation) ||
+          typeof receipt.presentation.input !== "string" ||
+          !validPastedText(receipt.presentation, receipt.presentation.input))) ||
       (receipt.request !== undefined &&
         (!isRecord(receipt.request) ||
           typeof receipt.request.method !== "string" ||
@@ -2045,6 +2051,7 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     typeof value.id === "string" &&
     value.threadId === threadId &&
     typeof value.text === "string" &&
+    validPastedText(value, value.text) &&
     (value.images === undefined ||
       (Array.isArray(value.images) && value.images.every(isInlineImage))) &&
     (value.files === undefined ||
@@ -2066,6 +2073,7 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
         isBoundedString(value.replyToAsyncQuestion.turnId, 200) &&
         isBoundedString(value.replyToAsyncQuestion.itemId, 500))) &&
     (Boolean(value.text.trim()) ||
+      (Array.isArray(value.pasteBlocks) && value.pasteBlocks.length > 0) ||
       (Array.isArray(value.images) && value.images.length > 0) ||
       (Array.isArray(value.files) && value.files.length > 0)) &&
     typeof value.createdAt === "number" &&
@@ -2157,6 +2165,7 @@ function isThreadDraft(value: unknown): value is ThreadDraft {
   if (
     !isRecord(value) ||
     typeof value.input !== "string" ||
+    !validPastedText(value, value.input) ||
     typeof value.goalMode !== "boolean" ||
     typeof value.updatedAt !== "number" ||
     !Number.isFinite(value.updatedAt) ||

@@ -489,6 +489,28 @@ describe("VoiceTranscriptionManager", () => {
 });
 
 describe("insertTranscript", () => {
+  it("rebases surviving pasted ranges around a voice insertion and retains cards", () => {
+    const pasteBlocks = [{ id: "block", text: "a\nb" }];
+    const result = insertTranscript(
+      {
+        input: "abcdef",
+        inlinePastes: [{ id: "paste", start: 0, end: 6 }],
+        pasteBlocks,
+        images: [],
+        goalMode: false,
+        annotations: [],
+      },
+      3,
+      3,
+      "spoken",
+    );
+    expect(result.input).toBe("abc spoken def");
+    expect(result.inlinePastes).toEqual([
+      { id: "paste", start: 0, end: 3 },
+      { id: "paste", start: 11, end: 14 },
+    ]);
+    expect(result.pasteBlocks).toEqual(pasteBlocks);
+  });
   it("preserves spacing and the goal input limit", () => {
     expect(
       insertTranscript(

@@ -37,6 +37,38 @@ async function setup() {
 }
 
 describe("DurableDelivery", () => {
+  it("keeps original pasted presentation after acceptance and a restart", async () => {
+    const { store, sender } = await setup();
+    const presentation = {
+      input: "Check abc",
+      inlinePastes: [{ id: "short", start: 6, end: 9 }],
+      pasteBlocks: [{ id: "large", text: "# Log\n42" }],
+    };
+    const pastedHash = messageContentHash(
+      presentation.input,
+      [],
+      [],
+      false,
+      undefined,
+      undefined,
+      presentation,
+    );
+    expect(pastedHash).not.toBe(messageContentHash(presentation.input, [], [], false));
+    await sender.send(
+      "thread",
+      "message",
+      pastedHash,
+      "turn/start",
+      params,
+      undefined,
+      presentation,
+    );
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    expect(reopened.view().messageReceipts?.message?.presentation).toEqual(presentation);
+    expect(reopened.view().messageReceipts?.message?.request).toBeUndefined();
+  });
+
   it("treats a receiver restart as retryable and replays the frozen command after reconnection", async () => {
     const { store, request, sender } = await setup();
     request.mockRejectedValueOnce(new Error("reply lost"));

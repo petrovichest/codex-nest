@@ -1,3 +1,4 @@
+import { replacePasteRanges, pastedText, trimPastedMessage } from "@codexnest/protocol";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -403,6 +404,8 @@ export class VoiceTranscriptionManager {
       job.id,
       {
         goal: inserted.goalMode,
+        ...pastedText(trimPastedMessage(inserted.input, inserted)),
+        ...(inserted.files?.length ? { files: inserted.files } : {}),
         completeVoiceTranscriptionId: job.id,
         ...(job.dismissUserInput ? { dismissUserInput: job.dismissUserInput } : {}),
       },
@@ -530,7 +533,13 @@ export function insertTranscript(
   const inserted = draft.goalMode
     ? completeInsertion.slice(0, Math.max(0, 4_000 - before.length - after.length))
     : completeInsertion;
-  return { ...draft, input: `${before}${inserted}${after}` };
+  return {
+    ...draft,
+    input: `${before}${inserted}${after}`,
+    ...(draft.inlinePastes?.length
+      ? { inlinePastes: replacePasteRanges(draft.inlinePastes, start, end, inserted.length) }
+      : {}),
+  };
 }
 
 function emptyDraft(): Omit<ThreadDraft, "updatedAt"> {

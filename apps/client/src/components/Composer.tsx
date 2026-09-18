@@ -1,3 +1,6 @@
+import { pastedText, samePastedText, type PastedText } from "@codexnest/protocol";
+import { PasteBlocks } from "./PasteBlocks";
+import { PasteTextarea, usePasteEditor } from "./PasteEditor";
 import {
   type ClipboardEvent,
   type KeyboardEvent,
@@ -92,6 +95,7 @@ function createVoiceRecordingId(): string {
 
 export function Composer({
   input,
+  pastes = {},
   onInput,
   onDraftFlush,
   onLayoutChange,
@@ -146,7 +150,8 @@ export function Composer({
   children,
 }: {
   input: string;
-  onInput(value: string): void;
+  pastes?: PastedText;
+  onInput(value: string, pastes?: PastedText): void;
   onDraftFlush?(): void;
   onLayoutChange?(): void;
   images: ComposerImage[];
@@ -205,7 +210,15 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [draftInput, setDraftInput] = useState(input);
   const draftInputRef = useRef(input);
+  const [draftPastes, setDraftPastes] = useState<PastedText>(() => pastedText(pastes));
+  const draftPastesRef = useRef(draftPastes);
+  const pasteEditor = usePasteEditor(
+    { input: draftInput, ...draftPastes },
+    (next) => commitDraft(next.input, pastedText(next)),
+    sessionIdentity,
+  );
   const inputPropRef = useRef(input);
+  const pastesPropRef = useRef(pastes);
   const inputSyncRevisionRef = useRef(inputSyncRevision);
   const draftSessionIdentityRef = useRef(sessionIdentity);
   const resizeFrameRef = useRef<number | null>(null);
@@ -345,7 +358,11 @@ export function Composer({
     localSpeechBusy || voiceUploadPending || voiceInputLocked || Boolean(transcriptionStatus);
   const transcriptionBusy = speechState === "transcribing" || Boolean(transcriptionStatus);
   const hasContent =
-    Boolean(draftInput.trim()) || images.length > 0 || files.length > 0 || hasSupplementalContent;
+    !!draftPastes.pasteBlocks?.length ||
+    Boolean(draftInput.trim()) ||
+    images.length > 0 ||
+    files.length > 0 ||
+    hasSupplementalContent;
   const activeSkillToken =
     !goalMode && !busy && !speechBusy && composerFocused
       ? skillTokenAt(draftInput, skillCaret)
@@ -446,13 +463,18 @@ export function Composer({
     const sessionChanged = draftSessionIdentityRef.current !== sessionIdentity;
     const inputChanged = inputPropRef.current !== input;
     const syncRequested = inputSyncRevisionRef.current !== inputSyncRevision;
-    if (!sessionChanged && !inputChanged && !syncRequested) return;
+    const pastesChanged = !samePastedText(pastesPropRef.current, pastes);
+    if (!sessionChanged && !inputChanged && !syncRequested && !pastesChanged) return;
+    pastesPropRef.current = pastes;
     draftSessionIdentityRef.current = sessionIdentity;
     inputPropRef.current = input;
     inputSyncRevisionRef.current = inputSyncRevision;
     draftInputRef.current = input;
     setDraftInput(input);
-  }, [input, inputSyncRevision, sessionIdentity]);
+    const nextPastes = pastedText(pastes);
+    draftPastesRef.current = nextPastes;
+    setDraftPastes(nextPastes);
+  }, [input, inputSyncRevision, sessionIdentity, pastes]);
 
   useEffect(() => {
     if (nativeFieldSizing) return;
@@ -1182,10 +1204,19 @@ export function Composer({
   }
 
   function publishDraft(value: string) {
+    pasteEditor.change(value);
+  }
+
+  function commitDraft(value: string, nextPastes: PastedText) {
+    const hadPastes = Object.keys(draftPastesRef.current).length > 0;
+    draftPastesRef.current = nextPastes;
+    setDraftPastes(nextPastes);
     draftInputRef.current = value;
     latestPropsRef.current.input = value;
     setDraftInput(value);
-    latestPropsRef.current.onInput(value);
+    if (hadPastes || Object.keys(nextPastes).length)
+      latestPropsRef.current.onInput(value, nextPastes);
+    else latestPropsRef.current.onInput(value);
   }
 
   function scheduleTextareaResize() {
@@ -1329,6 +1360,11 @@ export function Composer({
         />
       )}
       {children}
+      <PasteBlocks
+        blocks={draftPastes.pasteBlocks}
+        onChange={pasteEditor.blocks}
+        disabled={speechBusy || inputUnavailable}
+      />
       <div className="composer-box">
         {skillMenuOpen && (
           <SkillAutocomplete
@@ -1340,7 +1376,9 @@ export function Composer({
             onSelect={insertSkill}
           />
         )}
-        <textarea
+        <PasteTextarea
+          editor={pasteEditor}
+          pasteEnabled={!goalMode}
           ref={textareaRef}
           autoFocus={autoFocus}
           aria-label={running ? t("Направить текущую задачу") : t("Сообщение для Codex")}
@@ -1348,7 +1386,6 @@ export function Composer({
           maxLength={goalMode ? 4_000 : undefined}
           readOnly={speechBusy}
           aria-busy={speechBusy}
-          value={draftInput}
           aria-autocomplete={skillMenuOpen ? "list" : undefined}
           aria-controls={skillMenuOpen ? "composer-skill-list" : undefined}
           aria-expanded={skillMenuOpen || undefined}
@@ -1360,7 +1397,6 @@ export function Composer({
           onChange={(event) => {
             const caret = event.currentTarget.selectionStart;
             const value = event.currentTarget.value;
-            publishDraft(value);
             setSkillCaret(caret);
             setActiveSkillIndex(0);
             setSkillDismissedToken(null);

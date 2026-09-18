@@ -1,3 +1,4 @@
+import type { PastedText } from "@codexnest/protocol";
 import type {
   ActivityItem,
   AppSnapshot,
@@ -44,7 +45,7 @@ export type ClientUserInputDraft = UpdateUserInputDraftRequest & {
   error: string | null;
 };
 
-export type OptimisticMessage = {
+export type OptimisticMessage = PastedText & {
   id: string;
   threadId: string;
   text: string;

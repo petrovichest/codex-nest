@@ -1,4 +1,4 @@
-import type { AppServerState, DeliveryReceipt } from "@codexnest/protocol";
+import type { AppServerState, DeliveryReceipt, MessagePresentation } from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
 import { RpcError } from "./codex/transport";
@@ -38,11 +38,20 @@ export class DurableDelivery {
     method: string,
     params: Record<string, unknown>,
     dispatch?: () => Promise<unknown>,
+    presentation?: MessagePresentation,
   ): Promise<{ turnId: string | null }> {
     const existing = this.store.view().messageReceipts?.[clientId];
     // Never downgrade an in-flight native command: only that receiver can safely replay it.
     if (existing ? existing.deliveryVersion !== 1 : this.bridge.deliveryVersion !== 1) {
-      return this.sendCompatible(threadId, clientId, contentHash, method, params, dispatch);
+      return this.sendCompatible(
+        threadId,
+        clientId,
+        contentHash,
+        method,
+        params,
+        dispatch,
+        presentation,
+      );
     }
     requireDurableReceiver(this.bridge);
     await this.store.update((state) => {
@@ -66,6 +75,7 @@ export class DurableDelivery {
         status: "prepared",
         deliveryVersion: 1,
         request: { method, params: structuredClone(params) },
+        ...(presentation ? { presentation: structuredClone(presentation) } : {}),
       };
     });
     return this.replay(clientId);
@@ -78,6 +88,7 @@ export class DurableDelivery {
     method: string,
     params: Record<string, unknown>,
     dispatch?: () => Promise<unknown>,
+    presentation?: MessagePresentation,
   ): Promise<{ turnId: string | null }> {
     if (this.bridge.ready === false)
       throw new BridgeUnavailableError(this.bridge.state ?? "unavailable");
@@ -104,6 +115,7 @@ export class DurableDelivery {
         createdAt: Date.now(),
         status: "prepared",
         request: { method, params: structuredClone(params) },
+        ...(presentation ? { presentation: structuredClone(presentation) } : {}),
       };
     });
     if (!prepared) return this.replay(clientId);

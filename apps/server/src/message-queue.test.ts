@@ -22,6 +22,35 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("persists paste-only messages and edits, with paste metadata included in idempotency", async () => {
+    const { queue, store, delivery } = await setup("active");
+    delivery.paused.mockReturnValue(true);
+    const pasteBlocks = [{ id: "paste", text: "## Log\n42" }];
+    await queue.enqueue("thread", "", [], "message-paste", { pasteBlocks });
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    expect(reopened.view().messageQueues?.thread?.[0]?.pasteBlocks).toEqual(pasteBlocks);
+    await expect(
+      queue.enqueue("thread", "", [], "message-paste", {
+        pasteBlocks: [{ id: "paste", text: "different" }],
+      }),
+    ).rejects.toThrow("already been used");
+    const changed = await queue.update("thread", "message-paste", "  short  ", {
+      pasteBlocks,
+      inlinePastes: [{ id: "short", start: 2, end: 7 }],
+    });
+    expect(changed.text).toBe("short");
+    expect(changed.inlinePastes).toEqual([{ id: "short", start: 0, end: 5 }]);
+    const cleared = await queue.update("thread", "message-paste", "Typed", {
+      inlinePastes: [],
+      pasteBlocks: [],
+    });
+    expect(cleared.pasteBlocks).toBeUndefined();
+    expect(cleared.inlinePastes).toBeUndefined();
+    await queue.cancel("thread", "message-paste");
+    await expect(queue.enqueue("thread", "Typed", [], "message-paste")).rejects.toThrow("canceled");
+  });
+
   it("delivers an explicit answer after a permanently rejected dismissal", async () => {
     const { queue, store, delivery } = await setup("turn");
     delivery.paused.mockReturnValue(true);

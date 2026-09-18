@@ -1,3 +1,6 @@
+import type { PastedText } from "./pasted-text.js";
+export * from "./pasted-text.js";
+
 export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
 export type RecoveryState =
   "starting" | "syncing" | "recovering" | "ready" | "draining" | "unavailable" | "failed";
@@ -333,7 +336,7 @@ export type UserInputReply = {
   answers: Record<string, string[]>;
 };
 
-export type QueuedMessage = {
+export type QueuedMessage = PastedText & {
   id: string;
   threadId: string;
   text: string;
@@ -408,7 +411,7 @@ export interface DeliveryReceipt {
 }
 
 export type ActivityItem =
-  | {
+  | (PastedText & {
       type: "userMessage" | "agentMessage" | "reasoning" | "plan";
       id: string;
       status: "inProgress" | "completed" | "failed";
@@ -422,7 +425,7 @@ export type ActivityItem =
       questions?: AsyncUserInputQuestion[] | null;
       /** Stable across live/history item renumbering, scoped to the source turn. */
       questionKey?: string;
-    }
+    })
   | {
       type: "command";
       id: string;
@@ -538,7 +541,7 @@ export type ThreadDraftAnnotation = {
   createdAt: number;
 };
 
-export type UpdateThreadDraftRequest = {
+export type UpdateThreadDraftRequest = PastedText & {
   input: string;
   images: ThreadDraftImage[];
   files?: ThreadFileAttachment[];
@@ -1319,7 +1322,7 @@ export type TurnStartResult = {
   goalWarning?: string;
 };
 
-export type StartTurnRequest = {
+export type StartTurnRequest = PastedText & {
   input: string;
   images?: string[];
   files?: ThreadFileAttachment[];
@@ -1327,7 +1330,7 @@ export type StartTurnRequest = {
   clientMessageId?: string;
 };
 
-export type QueueMessageRequest = {
+export type QueueMessageRequest = PastedText & {
   input: string;
   images?: string[];
   files?: ThreadFileAttachment[];
@@ -1338,7 +1341,7 @@ export type QueueMessageRequest = {
   dismissUserInput?: AsyncQuestionReference;
 };
 
-export type UpdateQueuedMessageRequest = {
+export type UpdateQueuedMessageRequest = PastedText & {
   input: string;
 };
 
