@@ -321,6 +321,98 @@ async function chat(
   return { summary, detail, send: (event: ServerEvent) => send(event) };
 }
 
+for (const width of [390, 1440]) {
+  test(`chat follows streamed messages only at the bottom at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const { summary, send } = await chat(page, "light", messageText.repeat(4), {
+      reducedMotion: "no-preference",
+    });
+    const scroll = page.locator(".conversation-scroll");
+    const jump = page.getByRole("button", { name: "Прокрутить к последнему сообщению" });
+    const distance = () =>
+      scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+    await expect.poll(distance).toBeLessThanOrEqual(1);
+    send({ type: "queue.changed", threadId: summary.id, messages: [] });
+    send({
+      type: "thread.upserted",
+      thread: { ...summary, state: "running", currentTurnId: "streaming" },
+    });
+    send({
+      type: "turn.replaced",
+      threadId: summary.id,
+      turn: {
+        ...turn("streaming", ""),
+        status: "inProgress",
+        completedAt: null,
+        items: [
+          {
+            id: "streamed-answer",
+            type: "agentMessage",
+            text: "Начало ответа",
+            images: [],
+            status: "inProgress",
+            timestamp: 3,
+            phase: "commentary",
+          },
+        ],
+      },
+    });
+    const answer = page.locator(".message.agentMessage").filter({ hasText: "Начало ответа" });
+    await expect(answer).toBeVisible();
+    let chunk = 0;
+    const append = async () => {
+      const marker = `Часть ${++chunk}:`;
+      send({
+        type: "activity.delta",
+        threadId: summary.id,
+        turnId: "streaming",
+        itemId: "streamed-answer",
+        activityType: "agentMessage",
+        delta: `\n\n${marker} ${"Продолжение потокового ответа. ".repeat(30)}`,
+      });
+      await expect(answer).toContainText(marker);
+      await waitForVisualReady(page);
+    };
+    await append();
+    await expect.poll(distance).toBeLessThanOrEqual(1);
+
+    // Scrollbar and keyboard scrolling have no preceding wheel/touch event.
+    await scroll.evaluate((el) => {
+      el.scrollTop -= 16;
+    });
+    await expect(jump).toBeVisible();
+    const readingTop = await scroll.evaluate((el) => el.scrollTop);
+    await append();
+    expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(readingTop, 0);
+
+    await scroll.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 8;
+    });
+    await expect.poll(distance).toBeCloseTo(8, 0);
+    await expect(jump).toBeVisible();
+    const nearBottom = await scroll.evaluate((el) => el.scrollTop);
+    await append();
+    expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(nearBottom, 0);
+
+    await scroll.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect(jump).toBeHidden();
+    await append();
+    await expect.poll(distance).toBeLessThanOrEqual(1);
+
+    await scroll.hover({ position: { x: 30, y: 100 } });
+    await page.mouse.wheel(0, -120);
+    await expect(jump).toBeVisible();
+    await expect.poll(distance).toBeGreaterThan(10);
+    await jump.click();
+    await expect.poll(distance).toBeLessThanOrEqual(1);
+    await expect(jump).toBeHidden();
+    await append();
+    await expect.poll(distance).toBeLessThanOrEqual(1);
+  });
+}
+
 for (const width of [320, 390, 1440]) {
   for (const theme of ["light", "dark"] as const) {
     test(`floating composer at ${width}px in ${theme}: overlay, resizing and scroll position`, async ({
@@ -720,112 +812,126 @@ for (const mobile of [false, true]) {
   });
 }
 
-test("sidebar typography and actual title animation use fixed geometry and speed", async ({
-  page,
-}) => {
-  const seed = structuredClone(snapshot);
-  seed.threads.find((thread) => thread.id === mainThread.id)!.title =
-    "Очень длинное название сессии для проверки одинаковой скорости движения текста";
-  seed.threads.find((thread) => thread.id === "session-active")!.title = "Коротко";
-  await installVisualFixture(page, {
-    theme: "dark",
-    snapshot: seed,
-    reducedMotion: "no-preference",
-  });
-  await page.goto("/threads/session-main");
-  await expect(page.locator(".sidebar-control-action").first()).toBeVisible();
-  await waitForVisualReady(page);
-  const fonts = await page.locator(".sidebar-control-action").evaluateAll((elements) =>
-    elements.map((el) => {
-      const s = getComputedStyle(el);
-      return [s.fontSize, s.lineHeight, s.fontFamily];
-    }),
-  );
-  expect(new Set(fonts.map((font) => JSON.stringify(font))).size).toBe(1);
-  expect(fonts[0]![0]).toBe("14px");
-  for (const mode of ["Проекты", "Активные"]) {
-    await page.getByRole("button", { name: mode, exact: true }).click();
-    await page.mouse.move(1000, 850);
-    const row = page.locator('a[href="/threads/session-main"]').locator("..");
-    const title = row.locator(".thread-link-title");
-    const text = title.locator(".thread-link-title-text");
-    const before = await geometry(title);
-    const rowBefore = await geometry(row);
-    // Enter via the menu before the title has ever received a mouseenter.
-    const menu = (await row.locator("summary").boundingBox())!;
-    await page.mouse.move(menu.x + menu.width / 2, menu.y + menu.height / 2);
-    await expect(title).toHaveAttribute("data-overflowing", "true");
-    for (const target of [row.locator("summary"), title, title]) {
-      const box = (await target.boundingBox())!;
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await expect(text).toHaveCSS("animation-name", "thread-title-scroll");
-      const movement = await text.evaluate(async (el) => {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const frames: number[] = [];
-        const started = performance.now();
-        while (performance.now() - started < 300) {
-          await new Promise(requestAnimationFrame);
-          frames.push(range.getBoundingClientRect().x);
-        }
-        return frames;
-      });
-      expect(movement[0]! - movement.at(-1)!).toBeGreaterThan(5);
-      for (let i = 1; i < movement.length; i++) {
-        expect(movement[i]!).toBeLessThanOrEqual(movement[i - 1]! + 0.1);
-      }
-      const positions = await text.evaluate((el) => {
-        const animation = el.getAnimations()[0]!;
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        animation.pause();
-        return [0, 200, 400].map((time) => {
-          animation.currentTime = time;
-          return range.getBoundingClientRect().x;
-        });
-      });
-      expect((positions[0]! - positions[1]!) / 0.2).toBeCloseTo(45, 1);
-      expect((positions[1]! - positions[2]!) / 0.2).toBeCloseTo(45, 1);
-      const end = await text.evaluate((el) => {
-        el.getAnimations()[0]!.finish();
-        return el.getBoundingClientRect().right - el.parentElement!.getBoundingClientRect().right;
-      });
-      expect(Math.abs(end)).toBeLessThanOrEqual(1);
-      unchanged(before, await geometry(title));
-      unchanged(rowBefore, await geometry(row));
+for (const theme of ["light", "dark"] as const) {
+  test(`sidebar ${theme} typography and actual title animation use fixed geometry and speed`, async ({
+    page,
+  }) => {
+    const seed = structuredClone(snapshot);
+    seed.threads.find((thread) => thread.id === mainThread.id)!.title =
+      "Очень длинное название сессии для проверки одинаковой скорости движения текста";
+    seed.threads.find((thread) => thread.id === "session-active")!.title = "Коротко";
+    await installVisualFixture(page, {
+      theme,
+      snapshot: seed,
+      reducedMotion: "no-preference",
+    });
+    await page.goto("/threads/session-main");
+    await expect(page.locator(".sidebar-control-action").first()).toBeVisible();
+    await waitForVisualReady(page);
+    const fonts = await page.locator(".sidebar-control-action").evaluateAll((elements) =>
+      elements.map((el) => {
+        const s = getComputedStyle(el);
+        return [s.fontSize, s.lineHeight, s.fontFamily];
+      }),
+    );
+    expect(new Set(fonts.map((font) => JSON.stringify(font))).size).toBe(1);
+    expect(fonts[0]![0]).toBe("14px");
+    for (const mode of ["Проекты", "Активные"]) {
+      await page.getByRole("button", { name: mode, exact: true }).click();
       await page.mouse.move(1000, 850);
-      await expect(text).toHaveCSS("transform", "none");
-      await expect(text).toHaveCSS("text-overflow", "ellipsis");
+      const row = page.locator('a[href="/threads/session-main"]').locator("..");
+      const title = row.locator(".thread-link-title");
+      const text = title.locator(".thread-link-title-text");
+      const before = await geometry(title);
+      const rowBefore = await geometry(row);
+      await expect(title).toHaveCSS("mask-image", "none");
+      // Enter via the menu before the title has ever received a mouseenter.
+      const menu = (await row.locator("summary").boundingBox())!;
+      await page.mouse.move(menu.x + menu.width / 2, menu.y + menu.height / 2);
+      await expect(title).toHaveAttribute("data-overflowing", "true");
+      for (const [targetIndex, target] of [row.locator("summary"), title, title].entries()) {
+        const box = (await target.boundingBox())!;
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await expect(text).toHaveCSS("animation-name", "thread-title-scroll");
+        await expect(title).toHaveCSS("mask-image", /linear-gradient\(.*12px\)/);
+        const movement = await text.evaluate(async (el) => {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const frames: number[] = [];
+          const started = performance.now();
+          while (performance.now() - started < 300) {
+            await new Promise(requestAnimationFrame);
+            frames.push(range.getBoundingClientRect().x);
+          }
+          return frames;
+        });
+        expect(movement[0]! - movement.at(-1)!).toBeGreaterThan(5);
+        for (let i = 1; i < movement.length; i++) {
+          expect(movement[i]!).toBeLessThanOrEqual(movement[i - 1]! + 0.1);
+        }
+        const positions = await text.evaluate((el) => {
+          const animation = el.getAnimations()[0]!;
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          animation.pause();
+          return [0, 200, 400].map((time) => {
+            animation.currentTime = time;
+            return range.getBoundingClientRect().x;
+          });
+        });
+        expect((positions[0]! - positions[1]!) / 0.2).toBeCloseTo(45, 1);
+        expect((positions[1]! - positions[2]!) / 0.2).toBeCloseTo(45, 1);
+        if (mode === "Активные" && targetIndex === 0) {
+          await expect(row).toHaveScreenshot(`sidebar-title-fade-${theme}.png`, {
+            animations: "allow",
+          });
+        }
+        const end = await text.evaluate((el) => {
+          el.getAnimations()[0]!.finish();
+          return el.getBoundingClientRect().right - el.parentElement!.getBoundingClientRect().right;
+        });
+        expect(Math.abs(end)).toBeLessThanOrEqual(1);
+        unchanged(before, await geometry(title));
+        unchanged(rowBefore, await geometry(row));
+        await page.mouse.move(1000, 850);
+        await expect(text).toHaveCSS("transform", "none");
+        await expect(text).toHaveCSS("text-overflow", "ellipsis");
+        await expect(title).toHaveCSS("mask-image", "none");
+      }
+      await title.hover();
+      await text.evaluate((el) => el.getAnimations()[0]!.finish());
+      await row.locator("summary").click();
+      const distanceError = () =>
+        title.evaluate((el) => {
+          const content = el.firstElementChild!;
+          return (
+            parseFloat(
+              (el as HTMLElement).style.getPropertyValue("--thread-title-scroll-distance"),
+            ) -
+            (content.scrollWidth - el.clientWidth)
+          );
+        });
+      await expect.poll(distanceError).toBe(0);
+      unchanged(rowBefore, await geometry(row));
+      await page.keyboard.press("Escape");
+      await expect(row.locator("summary")).toBeFocused();
+      await expect.poll(distanceError).toBe(0);
+      unchanged(before, await geometry(title));
+      const fittingTitle = page.locator('a[href="/threads/session-active"] .thread-link-title');
+      await fittingTitle.hover();
+      await expect(fittingTitle).not.toHaveAttribute("data-overflowing");
+      await expect(fittingTitle).toHaveCSS("mask-image", "none");
+      await expect(fittingTitle.locator(".thread-link-title-text")).toHaveCSS("transform", "none");
     }
-    await title.hover();
-    await text.evaluate((el) => el.getAnimations()[0]!.finish());
-    await row.locator("summary").click();
-    const distanceError = () =>
-      title.evaluate((el) => {
-        const content = el.firstElementChild!;
-        return (
-          parseFloat((el as HTMLElement).style.getPropertyValue("--thread-title-scroll-distance")) -
-          (content.scrollWidth - el.clientWidth)
-        );
-      });
-    await expect.poll(distanceError).toBe(0);
-    unchanged(rowBefore, await geometry(row));
-    await page.keyboard.press("Escape");
-    await expect(row.locator("summary")).toBeFocused();
-    await expect.poll(distanceError).toBe(0);
-    unchanged(before, await geometry(title));
-    const fittingTitle = page.locator('a[href="/threads/session-active"] .thread-link-title');
-    await fittingTitle.hover();
-    await expect(fittingTitle).not.toHaveAttribute("data-overflowing");
-    await expect(fittingTitle.locator(".thread-link-title-text")).toHaveCSS("transform", "none");
-  }
-  await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.locator('a[href="/threads/session-main"] .thread-link-title').hover();
-  const reducedText = page.locator('a[href="/threads/session-main"] .thread-link-title-text');
-  await expect(reducedText).toHaveCSS("animation-name", "none");
-  await expect(reducedText).toHaveCSS("transform", "none");
-  await expect(reducedText).toHaveCSS("text-overflow", "ellipsis");
-});
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.locator('a[href="/threads/session-main"] .thread-link-title').hover();
+    const reducedText = page.locator('a[href="/threads/session-main"] .thread-link-title-text');
+    await expect(reducedText).toHaveCSS("animation-name", "none");
+    await expect(reducedText).toHaveCSS("transform", "none");
+    await expect(reducedText).toHaveCSS("text-overflow", "ellipsis");
+    await expect(reducedText.locator("..")).toHaveCSS("mask-image", "none");
+  });
+}
 
 test.describe("compact mobile controls", () => {
   test.use({ hasTouch: true });

@@ -448,7 +448,7 @@ function pendingThreadSummary(project: Project, settings: SessionSettings): Thre
 }
 
 const DETAIL_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
-const TAIL_FOLLOW_THRESHOLD_PX = 120;
+const TAIL_FOLLOW_THRESHOLD_PX = 1;
 const SCROLL_GESTURE_THRESHOLD_PX = 6;
 const DRAFT_SAVE_DELAY_MS = 500;
 
@@ -3768,9 +3768,7 @@ export function ThreadPage({
             if (searchTarget) return;
             const node = event.currentTarget;
             const distanceFromTail = node.scrollHeight - node.scrollTop - node.clientHeight;
-            followsTail.current = followsTail.current
-              ? distanceFromTail < TAIL_FOLLOW_THRESHOLD_PX
-              : distanceFromTail <= 1;
+            followsTail.current = distanceFromTail <= TAIL_FOLLOW_THRESHOLD_PX;
             setShowScrollToBottom(!followsTail.current);
             if (node.scrollTop < 160) void loadOlder();
           }}

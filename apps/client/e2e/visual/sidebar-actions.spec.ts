@@ -54,6 +54,90 @@ async function modeButtonBounds(page: Page) {
   );
 }
 
+for (const width of [320, 1440]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`sidebar ${width} ${theme} custom typography preserves shadows and control access`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await installVisualFixture(page, { theme, preserveLocalStorage: true });
+      await page.goto("/threads/session-active");
+      await waitForVisualReady(page);
+      const openDrawer = async () => {
+        if (width <= 820) await page.getByRole("button", { name: "Открыть список задач" }).click();
+      };
+      await openDrawer();
+      const navigation = page.locator(".thread-nav");
+      const normalNav = await navigation.boundingBox();
+      const normalButtons = await modeButtonBounds(page);
+
+      for (const sizes of [{ message: 16 }, { ui: 32, caption: 32 }]) {
+        await page.evaluate(
+          (value) => localStorage.setItem("codexnest.typography", JSON.stringify(value)),
+          sizes,
+        );
+        await page.reload();
+        await waitForVisualReady(page);
+        await openDrawer();
+        const mode = page.locator(".session-list-mode");
+        const active = mode.getByRole("button", { name: "Активные", exact: true });
+        await active.click();
+
+        if ("message" in sizes) {
+          expect(await navigation.boundingBox()).toEqual(normalNav);
+          expect((await modeButtonBounds(page)).map(({ y, height }) => ({ y, height }))).toEqual(
+            normalButtons.map(({ y, height }) => ({ y, height })),
+          );
+          await page.mouse.move(width - 1, 899);
+          const sidebar = (await page.locator(".sidebar").boundingBox())!;
+          const button = (await active.boundingBox())!;
+          const nav = (await navigation.boundingBox())!;
+          await expect(page).toHaveScreenshot(`sidebar-mode-shadow-${width}-${theme}.png`, {
+            clip: {
+              x: sidebar.x,
+              y: button.y - 24,
+              width: sidebar.width,
+              height: nav.y + 70 - (button.y - 24),
+            },
+          });
+        } else {
+          expect(await mode.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeGreaterThan(0);
+          await mode.getByRole("button", { name: "Проекты", exact: true }).click();
+          await expect(mode.getByRole("button", { name: "Проекты", exact: true })).toHaveAttribute(
+            "aria-pressed",
+            "true",
+          );
+          await active.click();
+        }
+
+        const pinned = mode.locator(".pinned-group-toggle");
+        await pinned.click();
+        await expect(pinned).toHaveAttribute("aria-expanded", "false");
+        await pinned.click();
+        await expect(pinned).toHaveAttribute("aria-expanded", "true");
+
+        // The scroller's transparent shadow space must not intercept nearby controls.
+        for (const selector of [".sidebar-control-action", ".codex-limits", ".thread-link"]) {
+          expect(
+            await page
+              .locator(selector)
+              .first()
+              .evaluate((el) => {
+                const box = el.getBoundingClientRect();
+                return el.contains(document.elementFromPoint(box.x + 8, box.y + box.height / 2));
+              }),
+          ).toBe(true);
+        }
+        await page.locator('.thread-link[href="/threads/session-main"]').click();
+        await expect(page).toHaveURL(/\/threads\/session-main$/);
+        await openDrawer();
+        await page.getByRole("link", { name: "Настройки", exact: true }).click();
+        await expect(page).toHaveURL(/\/settings\?section=application$/);
+      }
+    });
+  }
+}
+
 for (const { width, side } of [
   { width: 320, side: "left" },
   { width: 390, side: "right" },

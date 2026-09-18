@@ -5297,67 +5297,103 @@ describe("Activity", () => {
 
     scroll.scrollTop = 400;
     fireEvent.scroll(scroll);
+    expect(button).toBeInTheDocument();
+
+    scroll.scrollTop = 500;
+    fireEvent.scroll(scroll);
     expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
   });
 
-  it("stops following a streamed response when the user scrolls upward", () => {
-    const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
-    const item = {
-      type: "agentMessage" as const,
-      id: "streaming-answer",
-      status: "inProgress" as const,
-      text: "Первая часть ответа",
-      images: [],
-      timestamp: 1,
-      phase: "commentary" as const,
-    };
-    const context = mockThreadConnection(threadApi(), running, {
-      turns: [
-        {
-          id: "turn",
-          status: "inProgress",
-          startedAt: 1,
-          completedAt: null,
-          durationMs: null,
-          progress: progress(),
-          items: [item],
-        },
-      ],
-    });
-    const view = renderThread();
-    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
-    const scrollTo = vi.fn();
-    Object.defineProperties(scroll, {
-      scrollHeight: { configurable: true, value: 1_000 },
-      clientHeight: { configurable: true, value: 500 },
-      scrollTo: { configurable: true, value: scrollTo },
-    });
-    scroll.scrollTop = 500;
-    fireEvent.scroll(scroll);
+  it.each(["scrollbar", "wheel", "touch"])(
+    "follows the stream only at the bottom after %s scrolling",
+    (input) => {
+      const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
+      const item = {
+        type: "agentMessage" as const,
+        id: "streaming-answer",
+        status: "inProgress" as const,
+        text: "Первая часть ответа",
+        images: [],
+        timestamp: 1,
+        phase: "commentary" as const,
+      };
+      const context = mockThreadConnection(threadApi(), running, {
+        turns: [
+          {
+            id: "turn",
+            status: "inProgress",
+            startedAt: 1,
+            completedAt: null,
+            durationMs: null,
+            progress: progress(),
+            items: [item],
+          },
+        ],
+      });
+      const view = renderThread();
+      const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+      const scrollTo = vi.fn();
+      let scrollHeight = 1_000;
+      Object.defineProperties(scroll, {
+        scrollHeight: { configurable: true, get: () => scrollHeight },
+        clientHeight: { configurable: true, value: 500 },
+        scrollTo: { configurable: true, value: scrollTo },
+      });
+      scroll.scrollTop = 500;
+      fireEvent.scroll(scroll);
 
-    fireEvent.touchStart(scroll, { touches: [{ clientX: 100, clientY: 200 }] });
-    fireEvent.touchMove(scroll, { touches: [{ clientX: 102, clientY: 230 }] });
-    scroll.scrollTop = 470;
-    fireEvent.scroll(scroll);
+      if (input === "wheel") fireEvent.wheel(scroll, { deltaY: -30 });
+      if (input === "touch") {
+        fireEvent.touchStart(scroll, { touches: [{ clientX: 100, clientY: 200 }] });
+        fireEvent.touchMove(scroll, { touches: [{ clientX: 102, clientY: 230 }] });
+      }
+      scroll.scrollTop = 470;
+      fireEvent.scroll(scroll);
 
-    expect(
-      screen.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
-    ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
+      ).toBeInTheDocument();
 
-    context.state.details.thread = {
-      ...context.state.details.thread,
-      turns: [
-        {
-          ...context.state.details.thread.turns[0],
-          items: [{ ...item, text: `${item.text}. Продолжение` }],
-        },
-      ],
-    };
-    view.rerender(threadRoute());
+      const appendText = () => {
+        scrollHeight += 100;
+        context.state.details.thread = {
+          ...context.state.details.thread,
+          turns: [
+            {
+              ...context.state.details.thread.turns[0],
+              items: [{ ...item, text: `${item.text}. Продолжение ${scrollHeight}` }],
+            },
+          ],
+        };
+        view.rerender(threadRoute());
+      };
 
-    expect(scrollTo).not.toHaveBeenCalled();
-    expect(scroll.scrollTop).toBe(470);
-  });
+      appendText();
+
+      expect(scrollTo).not.toHaveBeenCalled();
+      expect(scroll.scrollTop).toBe(470);
+
+      // Approaching the bottom is insufficient; reaching it resumes following.
+      scroll.scrollTop = scrollHeight - scroll.clientHeight - 10;
+      fireEvent.scroll(scroll);
+      appendText();
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      scroll.scrollTop = scrollHeight - scroll.clientHeight - 0.5;
+      fireEvent.scroll(scroll);
+      expect(
+        screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" }),
+      ).toBeNull();
+      appendText();
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: scrollHeight, behavior: "auto" });
+
+      scrollTo.mockClear();
+      scroll.scrollTop = scrollHeight - scroll.clientHeight - 2;
+      fireEvent.scroll(scroll);
+      appendText();
+      expect(scrollTo).not.toHaveBeenCalled();
+    },
+  );
 
   it("reloads the open chat after a reconnect snapshot without duplicating the initial read", async () => {
     const api = threadApi();

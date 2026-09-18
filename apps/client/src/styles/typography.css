@@ -95,6 +95,9 @@
 
   .sidebar-controls {
     --sidebar-control-size: max(38px, calc(var(--text-ui) * 1.4 + 12px));
+
+    /* Keep these controls above the mode switcher's extra shadow space. */
+    z-index: 1;
   }
 
   .sidebar-control-action,
@@ -119,6 +122,11 @@
     grid-template-columns: repeat(2, minmax(max-content, 1fr)) max-content;
     overflow-x: auto;
     scrollbar-width: thin;
+    /* Horizontal scrolling clips both axes; reserve room for the button shadows
+       without moving the buttons or the session list. */
+    padding-block: 32px 48px;
+    margin-top: calc(var(--space-2-5) - 28px);
+    margin-bottom: calc(var(--space-0-5) - 44px);
   }
 
   .session-list-mode button {
