@@ -4207,6 +4207,66 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Запустить в режиме оркестратора" })).toBeDisabled();
   });
 
+  it.each(["userInput", "fileChangeApproval"] as const)(
+    "explains a plan blocked by %s and enables all choices once the request and turn end",
+    (kind) => {
+      const api = threadApi();
+      const planThread = {
+        ...summary,
+        settings: { collaborationMode: "plan" as const },
+      };
+      const request: AttentionRequest =
+        kind === "userInput"
+          ? pendingInputRequest()
+          : {
+              id: "approval",
+              kind,
+              threadId: "thread",
+              turnId: "turn",
+              itemId: "files",
+              createdAt: 2,
+              reason: null,
+              grantRoot: null,
+              canAcceptForSession: true,
+            };
+      const context = mockThreadConnection(
+        api,
+        { ...planThread, state: "needsAttention", currentTurnId: "turn" },
+        { ...completedPlanDetail(), attention: [request] },
+      );
+      const view = renderThread();
+      const reason =
+        kind === "userInput"
+          ? "Сначала ответьте на вопросы агента"
+          : "Сначала обработайте запросы, требующие внимания";
+      const buttons = Array.from(view.container.querySelectorAll(".implement-plan"));
+      expect(buttons).toHaveLength(3);
+      expect(screen.getByText(reason)).toBeVisible();
+      expect(screen.getByText(reason)).toHaveAttribute("role", "status");
+      for (const button of buttons) {
+        expect(button).toBeDisabled();
+        expect(button).toHaveAttribute("title", reason);
+        fireEvent.click(button);
+      }
+      expect(api.updateThreadSettings).not.toHaveBeenCalled();
+      expect(api.startTurn).not.toHaveBeenCalled();
+
+      context.state.snapshot.attention = [];
+      context.state.snapshot.threads = [{ ...planThread, state: "running", currentTurnId: "turn" }];
+      view.rerender(threadRoute());
+      expect(screen.queryByText(reason)).toBeNull();
+      for (const button of buttons) expect(button).toBeDisabled();
+
+      context.state.snapshot.threads = [planThread];
+      context.state.details.thread.summary = planThread;
+      view.rerender(threadRoute());
+      for (const button of buttons) {
+        expect(button).toBeEnabled();
+        expect(button).not.toHaveAttribute("title");
+      }
+    },
+  );
+
   it("lets only one completed-plan implementation button start at a time", async () => {
     const api = threadApi();
     const planThread = {

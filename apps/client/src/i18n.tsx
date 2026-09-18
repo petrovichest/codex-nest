@@ -743,6 +743,8 @@ const ENGLISH: Record<string, string> = {
   "План ещё не обновлён после уточнений":
     "The plan has not yet been updated after your clarifications",
   "План не завершён": "The plan is incomplete",
+  "Сначала ответьте на вопросы агента": "Answer the agent's questions first",
+  "Сначала обработайте запросы, требующие внимания": "Handle the pending requests first",
   "Действия с задачей": "Task actions",
   "Для доступа к микрофону откройте CodexNest по HTTPS":
     "Open CodexNest over HTTPS to access the microphone",

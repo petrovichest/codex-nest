@@ -3424,8 +3424,11 @@ export function ThreadPage({
     optimisticMessages.length > 0 ||
     (detail?.queuedMessages.length ?? 0) > 0 ||
     latestPlanHasAnnotations;
-  const planNotice =
-    latestPlan && !workspaceSummary.currentTurnId && latestPlan.turn.status !== "inProgress"
+  const planNotice = attention.length
+    ? attention.every((request) => request.kind === "userInput")
+      ? t("Сначала ответьте на вопросы агента")
+      : t("Сначала обработайте запросы, требующие внимания")
+    : latestPlan && !workspaceSummary.currentTurnId && latestPlan.turn.status !== "inProgress"
       ? latestPlan.needsUpdate
         ? t("План ещё не обновлён после уточнений")
         : !latestPlan.ready
