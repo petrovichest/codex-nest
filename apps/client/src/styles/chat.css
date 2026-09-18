@@ -141,12 +141,49 @@
 }
 
 .thread-workspace :is(.timeline, .session-inspector) button.primary,
-.thread-workspace .timeline .implement-plan,
 .chat-dialog button.primary {
   --chat-button-rest: var(--chat-active);
   --chat-button-hover: var(--chat-control-hover);
   --chat-button-pressed: var(--chat-control-pressed);
   color: var(--text-strong);
+}
+
+.thread-workspace .timeline .implement-plan {
+  --chat-button-hover: var(--color-floating);
+  --chat-button-pressed: var(--chat-active);
+  color: var(--text-strong);
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
+
+  @media (hover: hover) {
+    &:hover:not(:disabled, [aria-disabled="true"]) {
+      box-shadow: var(--chat-shadow);
+    }
+  }
+
+  &:focus-visible:not(:disabled, [aria-disabled="true"]) {
+    background: var(--chat-button-hover);
+    box-shadow: var(--chat-shadow);
+  }
+
+  &:active:not(:disabled, [aria-disabled="true"]) {
+    background: var(--chat-button-pressed);
+    box-shadow: inset 0 2px 4px rgb(39 50 26 / 13%);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+}
+
+:root[data-resolved-theme="dark"]
+  .thread-workspace
+  .timeline
+  .implement-plan:active:not(:disabled, [aria-disabled="true"]) {
+  box-shadow: inset 0 2px 5px rgb(0 0 0 / 32%);
 }
 
 .thread-workspace .timeline button.danger,
