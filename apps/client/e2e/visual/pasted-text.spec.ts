@@ -209,3 +209,19 @@ test("paste events survive typing, undo, draft reload, send and queue editing", 
   await paste(queueField, " plus");
   await expect(queued.locator("mark")).toHaveCount(3);
 });
+
+test("a pasted SSH repository address never becomes an email link", async ({ page }) => {
+  const address = "git@github.com:petrovichest/3d_cad_models.git";
+  const fixture = await setup(page, "light");
+  const field = page.getByRole("textbox", { name: "Сообщение для Codex" });
+  await field.fill("Клонируй ");
+  await paste(field, address);
+  await expect(page.locator(".composer mark")).toHaveText(address);
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect.poll(() => fixture.submitted()?.input).toBe(`Клонируй ${address}`);
+  await page.reload();
+  const queued = page.locator(".queued-message-text");
+  await expect(queued).toHaveText(`Клонируй ${address}`);
+  await expect(queued.locator("a")).toHaveCount(0);
+  expect((await queued.locator("mark").allTextContents()).join("")).toBe(address);
+});

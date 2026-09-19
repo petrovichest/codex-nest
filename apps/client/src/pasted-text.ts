@@ -86,7 +86,7 @@ function htmlToMarkdown(node: Node): string {
   if (tag === "blockquote") return `\n\n${text.trim().replace(/^/gm, "> ")}\n\n`;
   if (tag === "a") {
     const href = node.getAttribute("href") ?? "";
-    if (/^(https?:|mailto:)/i.test(href)) return `[${text}](<${href.replace(/>/g, "%3E")}>)`;
+    if (/^https?:/i.test(href)) return `[${text}](<${href.replace(/>/g, "%3E")}>)`;
   }
   const style = (node as HTMLElement).style;
   if (tag === "strong" || tag === "b" || /^(bold|[6-9]00)$/.test(style?.fontWeight ?? ""))

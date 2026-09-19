@@ -7,6 +7,7 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 
 import { type ArtifactDescriptor, formatArtifactSize, safeArtifactHtml } from "../artifacts";
 import { useI18n } from "../i18n";
+import { allowMarkdownElement } from "../markdown-elements";
 import { ArrowDownIcon, ArrowLeftIcon, FileIcon, RefreshIcon, XIcon } from "./Icons";
 
 export type ArtifactLoadResult =
@@ -206,6 +207,8 @@ function ArtifactContent({ artifact, data }: { artifact: ArtifactDescriptor; dat
       <article className="artifact-document artifact-markdown">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
+          allowElement={allowMarkdownElement}
+          unwrapDisallowed
           components={{
             a({ children, href }) {
               return (

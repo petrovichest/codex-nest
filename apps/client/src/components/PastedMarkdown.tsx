@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import type { Root, RootContent, Text, Emphasis } from "mdast";
 import type { InlinePaste } from "@codexnest/protocol";
 import { useI18n } from "../i18n";
+import { allowMarkdownElement } from "../markdown-elements";
 
 /** Highlight source ranges after Markdown parsing, so formatting and links stay intact. */
 export function pastedRangesPlugin(ranges: InlinePaste[], source: string, title: string) {
@@ -156,7 +157,12 @@ export const PastedMarkdown = memo(function PastedMarkdown({
     [inlinePastes, text, t],
   );
   return (
-    <ReactMarkdown remarkPlugins={plugins} components={components ?? previewComponents}>
+    <ReactMarkdown
+      remarkPlugins={plugins}
+      allowElement={allowMarkdownElement}
+      unwrapDisallowed
+      components={components ?? previewComponents}
+    >
       {text}
     </ReactMarkdown>
   );

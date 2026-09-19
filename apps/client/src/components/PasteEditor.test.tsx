@@ -133,4 +133,19 @@ describe("paste editor", () => {
     expect(result.text).toContain("abc\n  def");
     expect(result.text).not.toMatch(/evil|bad.invalid/);
   });
+
+  it("imports email link labels as text while preserving formatting and web links", () => {
+    const html =
+      '<p><a href="mailto:user@example.com">user@example.com</a> ' +
+      '<a href="MAILTO:user@example.com?subject=Hello"><strong>Email</strong></a> ' +
+      '<a href="https://example.com">Website</a></p>';
+    const plain = "user@example.com Email Website";
+    const result = clipboardText({
+      getData: (type) => (type === "text/html" ? html : plain),
+    });
+    expect(result).toEqual({
+      text: "user@example.com **Email** [Website](<https://example.com>)",
+      plain,
+    });
+  });
 });

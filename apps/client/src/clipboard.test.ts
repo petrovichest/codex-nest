@@ -37,11 +37,14 @@ describe("rich Markdown clipboard", () => {
       configurable: true,
       value: { write, writeText },
     });
-    const copying = copyMarkdown("**bold**");
+    const source = "**bold** user@example.com [Email](mailto:user@example.com)";
+    const copying = copyMarkdown(source);
     expect(write).toHaveBeenCalledOnce();
     await copying;
-    expect(await blobText(await entries["text/plain"]!)).toBe("**bold**");
-    expect(await blobText(await entries["text/html"]!)).toContain("<strong>bold</strong>");
+    expect(await blobText(await entries["text/plain"]!)).toBe(source);
+    const html = await blobText(await entries["text/html"]!);
+    expect(html).toContain("<strong>bold</strong> user@example.com Email");
+    expect(html).not.toContain("<a");
     expect(writeText).not.toHaveBeenCalled();
   });
 
