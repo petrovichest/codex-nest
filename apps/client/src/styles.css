@@ -3620,9 +3620,14 @@ button.message-file:hover:not(:disabled) {
 }
 
 .composer-box:focus-within {
-  box-shadow:
-    var(--composer-shadow),
-    0 0 20px color-mix(in srgb, var(--color-lapis) 8%, transparent);
+  box-shadow: var(--field-focus-shadow);
+}
+
+@media (forced-colors: active) {
+  .composer-box:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 
 .skill-autocomplete {

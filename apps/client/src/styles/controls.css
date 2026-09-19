@@ -28,6 +28,21 @@ button:active:not(:disabled, [aria-disabled="true"]) {
   box-shadow: var(--sidebar-pressed-shadow);
 }
 
+/* Embedded inputs leave elevation to their editor's containing surface. */
+:where(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select) {
+  --field-shadow: var(--sidebar-surface-shadow);
+  outline: none;
+  transition: box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+:where(
+    input:not([type="checkbox"], [type="radio"], [type="file"]),
+    textarea,
+    select
+  ):focus:enabled {
+  --field-shadow: var(--field-focus-shadow);
+}
+
 select:not([multiple], [size]) {
   appearance: none;
   background-image: var(--select-indicator);
@@ -44,6 +59,13 @@ select optgroup {
 }
 
 @media (forced-colors: active) {
+  :where(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select):where(
+    :focus:enabled
+  ) {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
   select:not([multiple], [size]) {
     appearance: auto;
     background-image: none;

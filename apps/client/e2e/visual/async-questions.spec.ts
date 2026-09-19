@@ -123,6 +123,13 @@ test("async replies preserve the composer and survive acceptance and history rel
   await card.getByRole("radio", { name: "Свой ответ" }).check();
   await expect(card.getByRole("textbox")).toHaveCSS("background-color", "rgb(36, 39, 34)");
   await expect(card.getByRole("textbox")).not.toHaveCSS("box-shadow", "none");
+  await composer.focus();
+  const focusedShadow = await page
+    .locator(".composer-box")
+    .evaluate((el) => getComputedStyle(el).boxShadow);
+  await card.getByRole("textbox").click();
+  await expect(card.getByRole("textbox")).toHaveCSS("outline-style", "none");
+  await expect(card.getByRole("textbox")).toHaveCSS("box-shadow", focusedShadow);
   await card.getByRole("radio", { name: "Полный набор проверок" }).check();
   const option = card.locator(".check").first();
   await option.hover();

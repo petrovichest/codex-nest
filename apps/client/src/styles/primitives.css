@@ -57,7 +57,14 @@ button {
   cursor: pointer;
 }
 
-:where(button, input, textarea, select, summary, a):focus-visible {
+:where(
+  button,
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="file"],
+  summary,
+  a
+):focus-visible {
   outline: 2px solid var(--color-lapis);
   outline-offset: 2px;
 }
@@ -90,10 +97,11 @@ select {
   border: 1px solid transparent;
   border-radius: 999px;
   background-color: var(--color-floating);
-  box-shadow: var(--sidebar-surface-shadow);
+  box-shadow: var(--field-shadow);
   font-size: var(--text-input);
   line-height: var(--leading-copy);
   transition:
+    box-shadow var(--motion-fast) var(--motion-ease),
     border-color var(--motion-fast) var(--motion-ease),
     background-color var(--motion-fast) var(--motion-ease);
 }

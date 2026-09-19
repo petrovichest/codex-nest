@@ -26,6 +26,24 @@ for (const theme of ["light", "dark"] as const) {
       await expect(element).toHaveCSS("background-color", surface);
     }
     await expect(page).toHaveScreenshot(`settings-c-${theme}.png`);
+    const order = page.locator("#settings-project-order");
+    const orderBounds = await order.boundingBox();
+    const restingShadow = await order.evaluate((el) => getComputedStyle(el).boxShadow);
+    await order.click();
+    await page.keyboard.press("Escape");
+    await expect(order).toBeFocused();
+    await expect(order).toHaveCSS("outline-style", "none");
+    await expect(order).not.toHaveCSS("box-shadow", restingShadow);
+    expect(await order.boundingBox()).toEqual(orderBounds);
+    await expect(page.locator(".settings-group:visible").first()).toHaveScreenshot(
+      `settings-field-focus-${theme}.png`,
+    );
+    await page.keyboard.press("Shift+Tab");
+    await expect(order).toHaveCSS("box-shadow", restingShadow);
+    await page.keyboard.press("Tab");
+    await expect(order).toBeFocused();
+    await expect(order).toHaveCSS("outline-style", "none");
+    await expect(order).not.toHaveCSS("box-shadow", restingShadow);
     await tabs.getByRole("tab").first().focus();
     await page.keyboard.press("ArrowDown");
     await expect(page.locator("#settings-section-tab-codex")).toBeFocused();
@@ -63,6 +81,10 @@ for (const theme of ["light", "dark"] as const) {
     expect(
       (await new AxeBuilder({ page }).include(".settings-workspace").analyze()).violations,
     ).toEqual([]);
+    await page.emulateMedia({ forcedColors: "active" });
+    await order.focus();
+    await expect(order).toHaveCSS("outline-style", "solid");
+    await expect(order).toHaveCSS("outline-width", "2px");
   });
 
   for (const width of [390, 1440]) {
@@ -107,6 +129,9 @@ for (const theme of ["light", "dark"] as const) {
         });
       });
       await page.goto("/threads/session-main");
+      const composer = page.locator(".composer-box");
+      await composer.locator("textarea").focus();
+      const composerFocus = await composer.evaluate((el) => getComputedStyle(el).boxShadow);
       if (width < 821) await page.getByRole("button", { name: "Открыть список задач" }).click();
       const opener = page.getByRole("button", { name: "Добавить проект", exact: true });
       await opener.click();
@@ -134,12 +159,21 @@ for (const theme of ["light", "dark"] as const) {
       const search = page.locator(".thread-search-dialog");
       const input = search.getByRole("textbox");
       await expect(input).toBeFocused();
+      await expect(input).toHaveCSS("outline-style", "none");
+      await expect(input).toHaveCSS("box-shadow", composerFocus);
       const empty = (await search.boundingBox())!;
       if (width === 1440) {
         expect(empty.width).toBe(740);
         expect(empty.height).toBeLessThan(350);
       } else expect(empty.height).toBeCloseTo(844, 0);
       await expect(search).toHaveScreenshot(`search-s1-${width}-${theme}.png`);
+      await search.getByRole("button", { name: "Закрыть" }).focus();
+      await expect(input).not.toHaveCSS("box-shadow", composerFocus);
+      await page.keyboard.press("Tab");
+      await expect(input).toBeFocused();
+      await expect(input).toHaveCSS("outline-style", "none");
+      await expect(input).toHaveCSS("box-shadow", composerFocus);
+      expect(await search.boundingBox()).toEqual(empty);
       await input.fill("интерфейс");
       await input.press("Enter");
       await expect(search.locator(".thread-search-result")).toHaveCount(30);

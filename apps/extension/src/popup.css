@@ -67,9 +67,7 @@ select:disabled {
   opacity: 0.52;
 }
 
-button:focus-visible,
-input:focus-visible,
-select:focus-visible {
+button:focus-visible {
   outline: 2px solid var(--color-lapis);
   outline-offset: 2px;
 }
@@ -176,7 +174,7 @@ h1 {
   font-size: var(--extension-text-body);
   font-weight: 470;
   background-color: var(--color-floating);
-  box-shadow: var(--sidebar-surface-shadow);
+  box-shadow: var(--field-shadow);
 }
 
 .compact-field {
@@ -445,7 +443,7 @@ h1 {
   border-radius: 999px;
   color: var(--ink);
   background-color: var(--color-floating);
-  box-shadow: var(--sidebar-surface-shadow);
+  box-shadow: var(--field-shadow);
 }
 
 @media (prefers-reduced-motion: reduce) {

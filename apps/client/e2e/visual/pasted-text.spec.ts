@@ -155,6 +155,21 @@ for (const theme of ["light", "dark"] as const)
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       expect(overflow).toBe(false);
       await page.screenshot({ path: info.outputPath(`pasted-${theme}-${width}.png`) });
+      const composer = page.locator(".composer-box");
+      await composer.locator("textarea").focus();
+      const focusedShadow = await composer.evaluate((el) => getComputedStyle(el).boxShadow);
+      const editableCard = page.locator(".composer .paste-card");
+      await editableCard.getByRole("button", { expanded: false }).click();
+      await editableCard.getByRole("button", { name: "Редактировать вставленный текст" }).click();
+      const source = editableCard.getByRole("textbox");
+      await source.click();
+      await expect(source).toHaveCSS("box-shadow", "none");
+      await expect(source).toHaveCSS("outline-style", "none");
+      await expect(editableCard).toHaveCSS("box-shadow", focusedShadow);
+      await expect(composer).not.toHaveCSS("box-shadow", focusedShadow);
+      await page.emulateMedia({ forcedColors: "active" });
+      await expect(source).toHaveCSS("outline-style", "none");
+      await expect(editableCard).toHaveCSS("outline-style", "solid");
     });
   }
 

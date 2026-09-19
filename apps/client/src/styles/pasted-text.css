@@ -19,6 +19,16 @@
   background: var(--color-floating);
   box-shadow: var(--chat-shadow);
   color: var(--text-strong);
+  transition: box-shadow var(--motion-fast) var(--motion-ease);
+}
+.paste-card:has(.paste-card-source:focus:enabled) {
+  box-shadow: var(--field-focus-shadow);
+}
+@media (forced-colors: active) {
+  .paste-card:has(.paste-card-source:focus:enabled) {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 .paste-card-header {
   display: flex;
@@ -106,6 +116,8 @@
   max-height: 240px;
   resize: vertical;
   background: transparent;
+  outline: none;
+  box-shadow: none;
   font: var(--weight-regular) var(--text-input)/var(--leading-copy) var(--font-mono);
 }
 .paste-inline {

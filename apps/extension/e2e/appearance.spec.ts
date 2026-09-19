@@ -89,6 +89,17 @@ for (const locale of ["en-US", "ru-RU"]) {
         await page.emulateMedia({ colorScheme: "light" });
         await expect(page.locator("html")).toHaveAttribute("data-resolved-theme", "light");
         await expect(address).toBeFocused();
+        await expect(address).toHaveCSS("outline-style", "none");
+        const focusShadow = await address.evaluate((el) => getComputedStyle(el).boxShadow);
+        await theme.focus();
+        await expect(theme).toHaveCSS("outline-style", "none");
+        await expect(theme).toHaveCSS("box-shadow", focusShadow);
+        await expect(address).not.toHaveCSS("box-shadow", focusShadow);
+        await page.emulateMedia({ forcedColors: "active" });
+        await expect(theme).toHaveCSS("outline-style", "solid");
+        await address.focus();
+        await expect(address).toHaveCSS("outline-style", "solid");
+        await page.emulateMedia({ forcedColors: "none" });
 
         await theme.selectOption("dark");
         await page.reload();

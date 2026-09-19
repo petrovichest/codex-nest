@@ -247,6 +247,16 @@ for (const theme of ["light", "dark"] as const) {
     await waitForVisualReady(page);
     await expect(page.locator(".attention-card")).not.toHaveCSS("box-shadow", "none");
     await expectFeedback(page, page.locator(".attention-card button.primary"));
+    const composer = page.locator(".composer-box");
+    await composer.locator("textarea").focus();
+    await expect(composer).toHaveCSS("box-shadow", /20px/);
+    const focusedShadow = await composer.evaluate((el) => getComputedStyle(el).boxShadow);
+    const freeform = page.locator(".user-input-freeform");
+    await freeform.locator("input").click();
+    await expect(freeform.locator("input")).toHaveCSS("box-shadow", "none");
+    await expect(freeform.locator("input")).toHaveCSS("outline-style", "none");
+    await expect(freeform).toHaveCSS("outline-style", "none");
+    await expect(freeform).toHaveCSS("box-shadow", focusedShadow);
     await expectFeedback(
       page,
       page.getByRole("button", { name: "Удалить сообщение из очереди", exact: true }),

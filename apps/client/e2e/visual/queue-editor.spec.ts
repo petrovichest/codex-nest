@@ -64,6 +64,7 @@ for (const width of [320, 390, 1440]) {
       await expect(field).toHaveCSS("line-height", "22.5px");
       await expect(field).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await expect(field).toHaveCSS("outline-style", "none");
+      await expect(field).toHaveCSS("box-shadow", "none");
       if (width !== 320) {
         await field.fill(messageText + "!");
         await expect(card).toHaveScreenshot(`queue-editor-${width}-${theme}.png`);

@@ -186,6 +186,8 @@ for (const theme of ["light", "dark"] as const) {
       await expect(input).toHaveCSS("font-weight", "400");
       await expect(input).toHaveCSS("resize", "none");
       await expect(input).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect(input).toHaveCSS("outline-style", "none");
+      await expect(input).toHaveCSS("box-shadow", "none");
       for (const button of [remove, save]) {
         await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
         const bounds = (await button.boundingBox())!;
