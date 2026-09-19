@@ -79,6 +79,7 @@
   --chat-radius-surface: 28px;
   --chat-radius-card: 20px;
   --chat-radius-compact: 24px;
+  --chat-radius-control: 16px;
   --control-height: 34px;
   --control-touch-height: 32px;
   --sidebar-panel-shadow: 0 24px 52px rgb(39 50 26 / 19%), 0 5px 14px rgb(39 50 26 / 8%);

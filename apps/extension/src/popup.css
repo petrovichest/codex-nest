@@ -400,7 +400,7 @@ h1 {
   padding: var(--space-3);
   color: var(--color-danger);
   background: var(--color-danger-soft);
-  border-radius: 16px;
+  border-radius: var(--chat-radius-control);
   font-size: var(--text-caption);
   line-height: 1.35;
 }
