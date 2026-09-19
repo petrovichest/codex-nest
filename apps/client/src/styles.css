@@ -6473,6 +6473,11 @@ button.message-file:hover:not(:disabled) {
     padding: var(--space-6);
   }
 
+  .settings-group-body {
+    /* WebKit can retain stale nested-grid row heights after the viewport narrows. */
+    display: flow-root;
+  }
+
   .settings-group-heading {
     max-width: 620px;
   }
