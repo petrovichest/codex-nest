@@ -13,31 +13,7 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>CodexNest</title>
-    <script>
-      (() => {
-        const themeKey = "codexnest.theme";
-        const darkQuery = "(prefers-color-scheme: dark)";
-        const colorScheme = window.matchMedia(darkQuery);
-        const applyTheme = () => {
-          let theme = "system";
-          try {
-            const candidate = localStorage.getItem(themeKey);
-            if (candidate === "light" || candidate === "dark") theme = candidate;
-          } catch {
-            // Storage can be unavailable in hardened webviews; system remains the safe default.
-          }
-          const resolved =
-            theme === "dark" || (theme === "system" && colorScheme.matches) ? "dark" : "light";
-          document.documentElement.dataset.theme = theme;
-          document.documentElement.dataset.resolvedTheme = resolved;
-          document
-            .querySelector('meta[name="theme-color"]')
-            ?.setAttribute("content", resolved === "dark" ? "#171817" : "#FFFFFF");
-        };
-        applyTheme();
-        colorScheme.addEventListener("change", applyTheme);
-      })();
-    </script>
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

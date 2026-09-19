@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { runInNewContext } from "node:vm";
 
 import { describe, expect, it } from "vitest";
 
@@ -59,6 +60,40 @@ describe("PWA metadata", () => {
 
     expect(readPngSize("/apple-touch-icon.png")).toEqual({ width: 180, height: 180 });
   });
+
+  it("loads a blocking same-origin theme script before the app under production CSP", () => {
+    const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+    const shell = new DOMParser().parseFromString(html, "text/html");
+    const script = shell.head.querySelector('script[src="/theme-init.js"]');
+    expect(script).not.toBeNull();
+    for (const attr of ["async", "defer", "type"]) expect(script?.hasAttribute(attr)).toBe(false);
+    expect(shell.querySelector("script:not([src])")).toBeNull();
+  });
+
+  it.each([
+    { stored: null, dark: true, mode: "system", resolved: "dark" },
+    { stored: "invalid", dark: false, mode: "system", resolved: "light" },
+    { stored: "light", dark: true, mode: "light", resolved: "light" },
+    { stored: "dark", dark: false, mode: "dark", resolved: "dark" },
+  ])(
+    "applies $resolved before React with saved $stored and system dark=$dark",
+    ({ stored, dark, mode, resolved }) => {
+      const shell = new DOMParser().parseFromString(
+        '<meta name="theme-color" content="#FFFFFF">',
+        "text/html",
+      );
+      runInNewContext(readFileSync(resolve(process.cwd(), "public/theme-init.js"), "utf8"), {
+        document: shell,
+        localStorage: { getItem: () => stored },
+        window: { matchMedia: () => ({ matches: dark }) },
+      });
+      expect(shell.documentElement.dataset.theme).toBe(mode);
+      expect(shell.documentElement.dataset.resolvedTheme).toBe(resolved);
+      expect(shell.querySelector('meta[name="theme-color"]')?.getAttribute("content")).toBe(
+        resolved === "dark" ? "#171817" : "#FFFFFF",
+      );
+    },
+  );
 });
 
 function readManifest(): WebAppManifest {

@@ -40,4 +40,31 @@ describe("SetupScreen", () => {
     const secondHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
     expect(secondHeaders.get("Authorization")).toBe("Bearer secret");
   });
+
+  it("announces connection failures and retains the inputs for retry", async () => {
+    let fail!: (error: Error) => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const connected = vi.fn();
+    render(<SetupScreen onConnected={connected} />);
+    fireEvent.change(screen.getByLabelText("Адрес сервера"), {
+      target: { value: "https://pi.local:4310" },
+    });
+    fireEvent.change(screen.getByLabelText("Bearer token"), { target: { value: "test-token" } });
+    expect(screen.queryByText(/HTTP не шифрует token/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Подключиться" }));
+    expect(screen.getByRole("button", { name: "Проверяем…" })).toBeDisabled();
+    fail(new Error("Test connection failure"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to connect to the server");
+    expect(screen.getByRole("button", { name: "Подключиться" })).toBeEnabled();
+    expect(screen.getByLabelText("Адрес сервера")).toHaveValue("https://pi.local:4310");
+    expect(screen.getByLabelText("Bearer token")).toHaveValue("test-token");
+    expect(localStorage.getItem("codexnest.token")).toBeNull();
+    expect(connected).not.toHaveBeenCalled();
+  });
 });

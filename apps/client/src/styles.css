@@ -5468,24 +5468,39 @@ button.message-file:hover:not(:disabled) {
 }
 
 .setup-page {
+  --setup-edge: var(--space-8);
   width: 100%;
-  min-height: 100dvh;
-  display: grid;
-  place-items: center;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
-  padding: var(--space-8);
+  padding: calc(var(--setup-edge) + var(--app-safe-area-top))
+    calc(var(--setup-edge) + var(--app-safe-area-right))
+    calc(var(--setup-edge) + var(--app-safe-area-bottom))
+    calc(var(--setup-edge) + var(--app-safe-area-left));
   background: var(--color-canvas);
 }
 
 .setup-card {
   width: min(430px, 100%);
+  flex: 0 0 auto;
+  min-width: 0;
+  margin: auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4);
   padding: var(--space-8);
   border: 0;
   border-radius: var(--chat-radius-surface);
   background: var(--color-surface);
   box-shadow: var(--sidebar-surface-shadow);
+  overflow-wrap: anywhere;
+}
+
+.setup-heading {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
 
 .setup-identity,
@@ -5497,7 +5512,7 @@ button.message-file:hover:not(:disabled) {
 }
 
 .setup-identity {
-  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 
 .splash {
@@ -5509,9 +5524,10 @@ button.message-file:hover:not(:disabled) {
 }
 
 .setup-card h1 {
-  margin: 0 0 -6px;
+  margin: 0;
   font-size: var(--text-display);
-  line-height: 1.15;
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
 }
 
 .setup-card p {
@@ -5519,9 +5535,28 @@ button.message-file:hover:not(:disabled) {
   line-height: var(--leading-copy);
 }
 
+.setup-card label {
+  min-width: 0;
+  gap: var(--space-2);
+  font-weight: var(--weight-medium);
+}
+
+.setup-card input {
+  min-width: 0;
+  color: var(--color-ink);
+  font-weight: var(--weight-regular);
+}
+
+.setup-card :is(.warning, .error-banner) {
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: var(--chat-radius-card);
+  box-shadow: var(--chat-inner-shadow);
+}
+
 .setup-card button.primary {
   min-height: 40px;
-  margin-top: var(--space-1);
+  padding-block: var(--space-2);
 }
 
 .dialog-eyebrow {
@@ -6294,6 +6329,14 @@ button.message-file:hover:not(:disabled) {
 }
 
 @media (max-width: 820px) {
+  .setup-page {
+    --setup-edge: var(--space-4);
+  }
+
+  .setup-card {
+    padding: var(--space-6);
+  }
+
   :root {
     --header-height: calc(56px + var(--app-safe-area-top));
   }
@@ -7018,14 +7061,6 @@ button.message-file:hover:not(:disabled) {
 
   .button-row button {
     flex: 1 1 42%;
-  }
-
-  .setup-page {
-    padding: var(--space-4);
-  }
-
-  .setup-card {
-    padding: var(--space-6);
   }
 
   .global-attention {

@@ -3,6 +3,7 @@ import { type FormEvent, useState } from "react";
 import { ApiClient } from "../api";
 import { localizeKnownServerText, useI18n } from "../i18n";
 import { normalizeBaseUrl, saveConnectionSettings, type ConnectionSettings } from "../storage";
+import { ActionLabel } from "./ActionLabel";
 
 export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionSettings): void }) {
   const { language, t } = useI18n();
@@ -37,9 +38,11 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
   return (
     <main className="setup-page">
       <form className="setup-card" onSubmit={submit}>
-        <div className="setup-identity">CodexNest</div>
-        <h1>{t("Подключение к CodexNest")}</h1>
-        <p className="muted">{t("Укажите адрес домашнего сервера и bearer token.")}</p>
+        <header className="setup-heading">
+          <div className="setup-identity">CodexNest</div>
+          <h1>{t("Подключение к CodexNest")}</h1>
+          <p className="muted">{t("Укажите адрес домашнего сервера и bearer token.")}</p>
+        </header>
         <label>
           {t("Адрес сервера")}
           <input
@@ -67,9 +70,13 @@ export function SetupScreen({ onConnected }: { onConnected(settings: ConnectionS
             {t("HTTP не шифрует token и содержимое сессий. Используйте только доверенную LAN.")}
           </div>
         )}
-        {error && <div className="error-banner">{error}</div>}
-        <button className="primary" disabled={busy} type="submit">
-          {busy ? t("Проверяем…") : t("Подключиться")}
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+          </div>
+        )}
+        <button className="primary" disabled={busy} aria-busy={busy} type="submit">
+          <ActionLabel idle={t("Подключиться")} busy={t("Проверяем…")} pending={busy} />
         </button>
       </form>
     </main>

@@ -14,6 +14,7 @@ import type {
 } from "@codexnest/protocol";
 
 import { App } from "./App";
+import { useTheme } from "./useTheme";
 import type { ForkOperationSummary } from "./forks";
 import { I18nProvider } from "./i18n";
 
@@ -393,7 +394,7 @@ describe("App routing and navigation", () => {
     context.state.snapshot = snapshot([running, { ...pinned, pinned: false }, archived]);
     view.rerender(
       <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
-        <App
+        <ThemedApp
           settings={{ baseUrl: "https://pi.local", token: "secret" }}
           onDisconnected={() => undefined}
         />
@@ -485,7 +486,7 @@ describe("App routing and navigation", () => {
       context.state.snapshot = snapshot(threads);
       view.rerender(
         <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
-          <App
+          <ThemedApp
             settings={{ baseUrl: "https://pi.local", token: "secret" }}
             onDisconnected={() => undefined}
           />
@@ -983,7 +984,7 @@ describe("App routing and navigation", () => {
       context.state.snapshotEpoch += 1;
       view.rerender(
         <MemoryRouter initialEntries={["/threads/running-first"]} useTransitions={false}>
-          <App
+          <ThemedApp
             settings={{ baseUrl: "https://pi.local", token: "secret" }}
             onDisconnected={() => undefined}
           />
@@ -1085,7 +1086,7 @@ describe("App routing and navigation", () => {
     context.state.snapshotEpoch += 1;
     view.rerender(
       <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
-        <App
+        <ThemedApp
           settings={{ baseUrl: "https://pi.local", token: "secret" }}
           onDisconnected={() => undefined}
         />
@@ -1513,7 +1514,7 @@ describe("App routing and navigation", () => {
     render(
       <I18nProvider>
         <MemoryRouter initialEntries={["/threads/newer"]}>
-          <App
+          <ThemedApp
             settings={{ baseUrl: "https://pi.local", token: "secret" }}
             onDisconnected={() => undefined}
           />
@@ -2147,7 +2148,7 @@ describe("App routing and navigation", () => {
 
     view.rerender(
       <MemoryRouter initialEntries={["/threads/newer"]}>
-        <App
+        <ThemedApp
           settings={{ baseUrl: "https://pi.local", token: "secret" }}
           onDisconnected={() => undefined}
         />
@@ -4670,10 +4671,14 @@ describe("App routing and navigation", () => {
   });
 });
 
+function ThemedApp(props: Omit<React.ComponentProps<typeof App>, "theme" | "onThemeChange">) {
+  return <App {...props} {...useTheme()} />;
+}
+
 function renderApp(path: string, onDisconnected = () => undefined, baseUrl = "https://pi.local") {
   return render(
     <MemoryRouter initialEntries={[path]} useTransitions={false}>
-      <App settings={{ baseUrl, token: "secret" }} onDisconnected={onDisconnected} />
+      <ThemedApp settings={{ baseUrl, token: "secret" }} onDisconnected={onDisconnected} />
     </MemoryRouter>,
   );
 }
