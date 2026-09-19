@@ -17,7 +17,7 @@
         width: 100vw;
         height: 100vh;
         overflow: hidden;
-        background: #eef0e9;
+        background: #f8f9f6;
         color: #292a29;
         font-family: Onest, sans-serif;
       }
@@ -53,14 +53,8 @@
         font-size: 30px;
         letter-spacing: -1px;
       }
-      .rule {
-        width: 48px;
-        height: 5px;
-        margin-top: 36px;
-        background: #4b9ce8;
-      }
       .note {
-        margin-top: 28px;
+        margin-top: 40px;
         font-size: 19px;
         line-height: 1.6;
         color: #6a6c67;
@@ -69,42 +63,22 @@
         position: absolute;
         bottom: 67px;
         left: 72px;
-        font:
-          13px/1.8 ui-monospace,
-          monospace;
+        font-size: 13px;
+        line-height: 1.8;
         letter-spacing: 1px;
         color: #6a6c67;
       }
       .desktop {
         position: absolute;
         width: 936px;
-        top: 134px;
+        top: 150px;
         right: 56px;
-        border: 1px solid #41443f;
-        border-radius: 16px;
+        border-radius: 28px;
         background: #171817;
         overflow: hidden;
-        box-shadow: 0 24px 55px #292a2929;
-      }
-      .chrome {
-        height: 34px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 0 14px;
-        background: #252725;
-        border-bottom: 1px solid #41443f;
-      }
-      .chrome i {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #6a6c67;
-      }
-      .chrome span {
-        margin-left: 12px;
-        color: #b1b4ae;
-        font-size: 11px;
+        box-shadow:
+          0 24px 52px rgb(39 50 26 / 19%),
+          0 5px 14px rgb(39 50 26 / 8%);
       }
       .desktop > img {
         display: block;
@@ -112,19 +86,20 @@
       }
       .phone {
         position: absolute;
-        top: 363px;
+        top: 350px;
         left: 446px;
         width: 230px;
-        padding: 7px;
-        border: 1px solid #d7d8d2;
-        border-radius: 22px;
-        background: #ffffff;
-        box-shadow: 0 20px 46px #292a2938;
+        padding: 8px;
+        border-radius: 32px;
+        background: #f8f9f6;
+        box-shadow:
+          0 24px 52px rgb(39 50 26 / 19%),
+          0 5px 14px rgb(39 50 26 / 8%);
       }
       .phone img {
         display: block;
         width: 100%;
-        border-radius: 15px;
+        border-radius: 24px;
       }
       @media (max-width: 1280px) {
         .brand {
@@ -149,12 +124,9 @@
           margin-top: 20px;
           font-size: 25px;
         }
-        .rule {
-          margin-top: 28px;
-        }
         .note {
           font-size: 16px;
-          margin-top: 22px;
+          margin-top: 32px;
         }
         .platforms {
           bottom: 44px;
@@ -164,21 +136,18 @@
         .desktop {
           width: 670px;
           right: 36px;
-          top: 109px;
-          border-radius: 12px;
-        }
-        .chrome {
-          height: 27px;
+          top: 112px;
+          border-radius: 20px;
         }
         .phone {
           width: 170px;
-          top: 253px;
+          top: 246px;
           left: 449px;
-          padding: 5px;
-          border-radius: 16px;
+          padding: 6px;
+          border-radius: 24px;
         }
         .phone img {
-          border-radius: 11px;
+          border-radius: 18px;
         }
       }
     </style>
@@ -188,12 +157,10 @@
     <div class="copy">
       <h1>Your Codex<br />workspace.</h1>
       <p class="subtitle">Desktop and mobile.</p>
-      <div class="rule"></div>
       <p class="note">Your projects. Your conversations.<br />On your own Linux machine.</p>
     </div>
     <div class="platforms">SELF-HOSTED<br />BROWSER · ANDROID</div>
     <div class="desktop">
-      <div class="chrome"><i></i><i></i><i></i><span>CodexNest / Launchpad</span></div>
       <img src="{{DESKTOP}}" alt="Project search session on desktop" />
     </div>
     <div class="phone"><img src="{{MOBILE}}" alt="The same session on mobile" /></div>

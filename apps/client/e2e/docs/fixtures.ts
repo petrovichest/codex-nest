@@ -217,31 +217,17 @@ const attentionDetail: ThreadDetail = {
         additions: 0,
         deletions: 0,
       },
-      items: [
-        {
-          type: "userMessage",
-          id: "choice-request",
-          status: "completed",
-          text: "Help me choose how project search should work.",
-          images: [],
-          timestamp: NOW - 240_000,
-          phase: null,
-        },
-        {
-          type: "agentMessage",
-          id: "choice-response",
-          status: "completed",
-          text: "Both options work on desktop and mobile. I recommend filtering as you type for this short project list.",
-          images: [],
-          timestamp: NOW - 180_000,
-          phase: "commentary",
-        },
-      ],
+      // Focus this scene on the complete question and queued follow-up.
+      items: [],
     },
   ],
 };
 
-export async function installDocsFixture(page: Page, theme: "light" | "dark") {
+export async function installDocsFixture(
+  page: Page,
+  theme: "light" | "dark",
+  activityOnly = false,
+) {
   await installVisualFixture(page, { theme, snapshot: demoSnapshot });
   // Keep documentation content separate from the visual regression fixtures.
   await page.route(`${ORIGIN}/api/v1/**`, async (route) => {
@@ -254,7 +240,18 @@ export async function installDocsFixture(page: Page, theme: "light" | "dark") {
         body: JSON.stringify(body),
       });
     if (route.request().method() === "OPTIONS") return route.fallback();
-    if (path === "/api/v1/threads/session-main") return json(mainDetail);
+    if (path === "/api/v1/threads/session-main") {
+      return json({
+        ...mainDetail,
+        turns: mainDetail.turns.map((turn) => ({
+          ...turn,
+          // The activity scene keeps commands and patches in view without clipping a plan.
+          items: activityOnly
+            ? turn.items.filter((item) => item.type !== "plan" && item.type !== "planChecklist")
+            : turn.items,
+        })),
+      });
+    }
     if (path === "/api/v1/threads/session-attention") return json(attentionDetail);
     if (path.endsWith("/git-changes")) {
       return json({ state: "dirty", filesChanged: 3, additions: 48, deletions: 7 });

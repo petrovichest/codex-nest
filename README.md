@@ -8,12 +8,12 @@
 
 <p align="center">
   <strong>Your Codex workspace. Desktop and mobile.</strong><br />
-  Manage Codex CLI sessions on your own Linux machine, from your browser or Android phone.
+  Manage projects and Codex CLI conversations on your own Linux machine, from your browser or Android phone.
 </p>
 
 <p align="center">
   <a href="https://github.com/petrovichest/codex-nest/actions/workflows/ci.yml"><img src="https://github.com/petrovichest/codex-nest/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-  <a href="https://github.com/petrovichest/codex-nest/releases/latest"><img src="https://img.shields.io/github/v/release/petrovichest/codex-nest?label=release&amp;color=4b9ce8" alt="Latest release" /></a>
+  <a href="https://github.com/petrovichest/codex-nest/releases/latest"><img src="https://img.shields.io/github/v/release/petrovichest/codex-nest?label=release&amp;color=646660" alt="Latest release" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-292a29" alt="License: Apache 2.0" /></a>
 </p>
 
@@ -55,9 +55,10 @@ to open the browser client or connect the
 - **Run several sessions.** Follow concurrent work and use
   [CodexNest Team](#codexnest-team) for application-managed child tasks.
 - **Take the workspace with you.** Use the browser or Android app, keep drafts
-  and recent session data across temporary disconnects, and choose English or
-  Russian with system, light or dark themes. On iOS, add the HTTPS site to your
-  Home Screen as a web app.
+  and recent session data across temporary disconnects. On iOS, add the HTTPS
+  site to your Home Screen as a web app.
+- **Make it comfortable.** Choose English or Russian, system, light or dark
+  appearance, and separate font sizes for navigation, conversations and editors.
 - **Open the result.** Preview artifacts inside the conversation workspace and
   download the finished files.
 - **Use voice and browser tools.** Dictate prompts, receive completion and
@@ -66,27 +67,31 @@ to open the browser client or connect the
 
 ## Screenshots
 
-The current interface with a prepared **Launchpad** demo: adding project search,
-reviewing progress and opening the result. All projects and conversations shown
-here are demonstration data. Select an image to view it at full size.
+The redesigned interface uses floating panels, a compact composer and consistent
+controls across desktop and mobile. Follow a prepared **Launchpad** demo: adding
+project search, reviewing progress and opening the result. All projects and
+conversations shown here are demonstration data. Select an image to view it at
+full size.
 
 ### A workspace for your projects
 
-Projects and sessions stay alongside the conversation. See the plan, follow
-progress and send the next instruction from the same screen.
+The floating sidebar keeps projects and sessions alongside the conversation.
+Read the plan, follow progress and send the next instruction from the compact
+composer at the bottom of the screen.
 
 [![Dark desktop workspace showing projects, a plan and the completed search task](./docs/assets/desktop-session.png)](./docs/assets/desktop-session.png)
 
 ### Keep the next step in view
 
-Answer a question while a follow-up waits in the queue. The light theme offers
-the same controls and project navigation.
+Choose an answer or write your own while a follow-up waits in the queue.
+The light theme uses the same layout and controls as the dark theme.
 
 [![Light desktop workspace with a clarification question and a queued follow-up](./docs/assets/desktop-queue.png)](./docs/assets/desktop-queue.png)
 
 ### Inspect the work behind the answer
 
-Expand the activity log to review commands, test output and file changes.
+Open the activity log to review commands, test output and file changes alongside
+the answer. Expand individual entries when you need the details.
 
 [![Expanded desktop activity showing a test command, its output and a file patch](./docs/assets/desktop-activity.png)](./docs/assets/desktop-activity.png)
 

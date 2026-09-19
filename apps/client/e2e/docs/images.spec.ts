@@ -40,7 +40,7 @@ test("capture the documentation gallery and covers", async ({ browser }) => {
       failures.push(`Unexpected request: ${url.origin}${url.pathname}`);
       return route.abort();
     });
-    await installDocsFixture(page, theme);
+    await installDocsFixture(page, theme, name === "desktop-activity");
     await page.goto(`http://127.0.0.1:4173/threads/${thread}`);
     await expect(
       page.getByRole("heading", { name: /Add project search|Choose search behavior/ }),
