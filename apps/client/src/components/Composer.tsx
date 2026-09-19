@@ -145,6 +145,7 @@ export function Composer({
   transcriptionError = null,
   error,
   autoFocus = false,
+  initialSelection,
   sessionIdentity,
   inputSyncRevision = 0,
   hasSupplementalContent = false,
@@ -200,6 +201,7 @@ export function Composer({
   transcriptionError?: string | null;
   error: string | null;
   autoFocus?: boolean;
+  initialSelection?: { start: number; end: number } | null;
   sessionIdentity?: string;
   inputSyncRevision?: number;
   hasSupplementalContent?: boolean;
@@ -223,6 +225,7 @@ export function Composer({
   const pastesPropRef = useRef(pastes);
   const inputSyncRevisionRef = useRef(inputSyncRevision);
   const draftSessionIdentityRef = useRef(sessionIdentity);
+  const initialCaretPendingRef = useRef(true);
   const resizeFrameRef = useRef<number | null>(null);
   const nativeFieldSizing = useMemo(
     () =>
@@ -467,6 +470,7 @@ export function Composer({
     const syncRequested = inputSyncRevisionRef.current !== inputSyncRevision;
     const pastesChanged = !samePastedText(pastesPropRef.current, pastes);
     if (!sessionChanged && !inputChanged && !syncRequested && !pastesChanged) return;
+    if (sessionChanged) initialCaretPendingRef.current = true;
     pastesPropRef.current = pastes;
     draftSessionIdentityRef.current = sessionIdentity;
     inputPropRef.current = input;
@@ -505,8 +509,21 @@ export function Composer({
   }, [nativeFieldSizing, sessionIdentity]);
 
   useLayoutEffect(() => {
-    if (autoFocus) textareaRef.current?.focus();
+    if (autoFocus) textareaRef.current?.focus({ preventScroll: true });
   }, [autoFocus, sessionIdentity]);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    // Draft hydration can follow focus or a session change. Wait for the new
+    // value to reach the DOM, and stop restoring once the user takes over.
+    if (!textarea || !initialCaretPendingRef.current || draftInput !== input) return;
+    const length = textarea.value.length;
+    textarea.setSelectionRange(
+      Math.min(initialSelection?.start ?? length, length),
+      Math.min(initialSelection?.end ?? length, length),
+    );
+    if (!initialSelection) textarea.scrollTop = textarea.scrollHeight;
+  }, [draftInput, initialSelection, input, sessionIdentity]);
 
   useEffect(() => {
     if (viewer && viewer.index >= images.length) setViewer(null);
@@ -1398,7 +1415,6 @@ export function Composer({
           editor={pasteEditor}
           pasteEnabled={!goalMode}
           ref={textareaRef}
-          autoFocus={autoFocus}
           aria-label={running ? t("Направить текущую задачу") : t("Сообщение для Codex")}
           rows={1}
           maxLength={goalMode ? 4_000 : undefined}
@@ -1413,6 +1429,7 @@ export function Composer({
               : undefined
           }
           onChange={(event) => {
+            initialCaretPendingRef.current = false;
             const caret = event.currentTarget.selectionStart;
             const value = event.currentTarget.value;
             setSkillCaret(caret);
@@ -1431,7 +1448,16 @@ export function Composer({
             setComposerFocused(false);
             onDraftFlush?.();
           }}
-          onPaste={pasteImages}
+          onPointerDown={() => {
+            initialCaretPendingRef.current = false;
+          }}
+          onKeyDownCapture={() => {
+            initialCaretPendingRef.current = false;
+          }}
+          onPaste={(event) => {
+            initialCaretPendingRef.current = false;
+            pasteImages(event);
+          }}
           onSelect={captureInsertionPoint}
           onKeyDown={keyboardSubmit}
           placeholder={

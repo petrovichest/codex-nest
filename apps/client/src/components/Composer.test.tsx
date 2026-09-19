@@ -114,6 +114,63 @@ beforeEach(() => {
 });
 
 describe("Composer", () => {
+  it("places the caret at the end on opening and after a delayed draft or session change", () => {
+    const view = render(<Harness autoFocus input="Черновик" sessionIdentity="one" />);
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+    const expectEnd = () => {
+      expect(textarea).toHaveFocus();
+      expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([
+        textarea.value.length,
+        textarea.value.length,
+      ]);
+    };
+    expectEnd();
+    view.rerender(<Harness autoFocus input="Поздний\nчерновик" sessionIdentity="one" />);
+    expectEnd();
+    fireEvent.keyDown(textarea, { key: "Home" });
+    textarea.setSelectionRange(0, 0);
+    view.rerender(<Harness autoFocus input="Поздний\nчерновик" sessionIdentity="two" />);
+    expectEnd();
+    view.rerender(<Harness autoFocus input="" sessionIdentity="three" />);
+    expectEnd();
+  });
+
+  it.each(["keyboard", "pointer", "typing"])(
+    "preserves a manually chosen caret after %s interaction and draft synchronization",
+    (interaction) => {
+      const props = { autoFocus: true, input: "Редактируемый текст", sessionIdentity: "one" };
+      const view = render(<Harness {...props} />);
+      const textarea = screen.getByRole("textbox", {
+        name: "Сообщение для Codex",
+      }) as HTMLTextAreaElement;
+      if (interaction === "keyboard") fireEvent.keyDown(textarea, { key: "ArrowLeft" });
+      if (interaction === "pointer") fireEvent.pointerDown(textarea);
+      if (interaction === "typing")
+        fireEvent.change(textarea, { target: { value: "Изменённый текст" } });
+      textarea.setSelectionRange(2, 5);
+      view.rerender(
+        <Harness {...props} input={textarea.value} inputSyncRevision={1} hasSupplementalContent />,
+      );
+      expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([2, 5]);
+    },
+  );
+
+  it("restores an explicit fork selection after its draft arrives, until editing starts", () => {
+    const props = { autoFocus: true, initialSelection: { start: 3, end: 8 } };
+    const view = render(<Harness {...props} input="" />);
+    const textarea = screen.getByRole("textbox", {
+      name: "Сообщение для Codex",
+    }) as HTMLTextAreaElement;
+    view.rerender(<Harness {...props} input="Черновик ответвления" />);
+    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([3, 8]);
+    fireEvent.keyDown(textarea, { key: "ArrowRight" });
+    textarea.setSelectionRange(10, 10);
+    view.rerender(<Harness {...props} input="Черновик ответвления" inputSyncRevision={1} />);
+    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([10, 10]);
+  });
+
   it("keeps the draft editable but disables send and recording until direct input is available", () => {
     installMediaRecorder(async () => ({ getTracks: () => [] }) as unknown as MediaStream);
     const onSubmit = vi.fn();
@@ -1175,6 +1232,8 @@ const transcriptionConfig: TranscriptionConfigResponse = {
 };
 
 function Harness({
+  autoFocus = false,
+  initialSelection,
   busy = false,
   settingsBusy = false,
   settingsDisabled = false,
@@ -1203,6 +1262,8 @@ function Harness({
   transcriptionStatus = null,
   voiceInputLocked = false,
 }: {
+  autoFocus?: boolean;
+  initialSelection?: { start: number; end: number };
   busy?: boolean;
   settingsBusy?: boolean;
   settingsDisabled?: boolean;
@@ -1237,6 +1298,8 @@ function Harness({
   const [settings, setSettings] = useState<SessionSettings>(initialSettings);
   return (
     <Composer
+      autoFocus={autoFocus}
+      initialSelection={initialSelection}
       input={controlledInput ?? input}
       onInput={(value) => {
         onInput?.(value);

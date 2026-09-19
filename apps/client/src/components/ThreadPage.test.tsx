@@ -5319,6 +5319,47 @@ describe("Activity", () => {
     delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
+  it.each(["queue", "turn"] as const)(
+    "returns to the tail after a submitted message appears in the %s and resumes following",
+    async (destination) => {
+      const context = mockThreadConnection(threadApi(), summary);
+      const view = renderThread();
+      const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+      let height = 1_000;
+      Object.defineProperties(scroll, {
+        scrollHeight: { configurable: true, get: () => height },
+        clientHeight: { configurable: true, value: 500 },
+        scrollTo: {
+          configurable: true,
+          value: ({ top }: ScrollToOptions) => {
+            scroll.scrollTop = Math.min(top ?? 0, height - scroll.clientHeight);
+          },
+        },
+      });
+      scroll.scrollTop = 200;
+      fireEvent.scroll(scroll);
+      fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+        target: { value: "Продолжим" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+      await waitFor(() => expect(context.sendReliable).toHaveBeenCalledOnce());
+      const optimistic = context.dispatch.mock.calls.find(
+        ([action]) => action.type === "optimistic.add",
+      )![0].message;
+      context.state.optimisticMessages.thread = [{ ...optimistic, destination }];
+      view.rerender(threadRoute());
+      expect(scroll.scrollTop).toBe(500);
+      expect(
+        screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" }),
+      ).toBeNull();
+      fireEvent.scroll(scroll);
+      height = 1_200;
+      context.state.details.thread = { ...context.state.details.thread };
+      view.rerender(threadRoute());
+      expect(scroll.scrollTop).toBe(700);
+    },
+  );
+
   it("loads older turns near the top and preserves the visible scroll position", async () => {
     const api = threadApi();
     const context = mockThreadConnection(api, summary, { olderTurnsCursor: "older-page" });

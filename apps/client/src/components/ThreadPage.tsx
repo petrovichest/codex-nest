@@ -732,7 +732,6 @@ export function ThreadPage({
   const handledVoiceRemovalsRef = useRef(new Set<string>());
   const [renaming, setRenaming] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const restoredComposerSelectionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
@@ -982,26 +981,6 @@ export function ThreadPage({
     },
     [],
   );
-  useEffect(() => {
-    const selection = (
-      location.state as { restoreComposerSelection?: { start: number; end: number } | null } | null
-    )?.restoreComposerSelection;
-    if (!selection || restoredComposerSelectionRef.current === threadId) return;
-    const frame = window.requestAnimationFrame(() => {
-      const textarea = document.querySelector<HTMLTextAreaElement>(
-        ".thread-workspace .composer textarea",
-      );
-      if (!textarea) return;
-      const length = textarea.value.length;
-      textarea.focus({ preventScroll: true });
-      textarea.setSelectionRange(
-        Math.min(selection.start, length),
-        Math.min(selection.end, length),
-      );
-      restoredComposerSelectionRef.current = threadId;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [detail?.draft?.updatedAt, location.state, threadId]);
   const completedTurnForkActions = useMemo(() => {
     const actions = new Map<
       string,
@@ -2362,11 +2341,7 @@ export function ThreadPage({
     if (!target) return;
     followsTail.current = true;
     setShowScrollToBottom(false);
-    if (typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    } else {
-      scrollToEnd(node, "smooth");
-    }
+    scrollToEnd(node);
     scrollTargetMessageId.current = null;
   }, [detail, optimisticMessages, searchTarget, threadId]);
 
@@ -4171,6 +4146,13 @@ export function ThreadPage({
             autoFocus={
               preparationRef.current.active ||
               (location.state as { focusComposer?: unknown } | null)?.focusComposer === true
+            }
+            initialSelection={
+              (
+                location.state as {
+                  restoreComposerSelection?: { start: number; end: number } | null;
+                } | null
+              )?.restoreComposerSelection
             }
             sessionIdentity={
               initialNewSessionRef.current.active ? "new-session-workspace" : threadId
