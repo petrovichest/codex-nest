@@ -419,7 +419,9 @@ test.describe("CodexNest redesign visual contract", () => {
     });
     const report = viewer.locator(".artifact-markdown");
     await expect(report).toBeVisible();
-    await expect(report).toHaveCSS("background-color", "rgb(36, 39, 34)");
+    await expect(viewer).toHaveCSS("background-color", "rgb(36, 39, 34)");
+    await expect(report).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(report).toHaveCSS("border-width", "0px");
     await expect(report).toHaveCSS("color", "rgb(233, 234, 231)");
     await expect(report.getByRole("heading", { level: 1 })).toHaveCSS(
       "color",

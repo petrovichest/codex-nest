@@ -117,7 +117,9 @@ export function ArtifactViewer({
           <FileIcon />
         </span>
         <span className="artifact-viewer-title">
-          <strong>{result?.fileName ?? artifact.fileName}</strong>
+          <strong title={result?.fileName ?? artifact.fileName}>
+            {result?.fileName ?? artifact.fileName}
+          </strong>
           <span>
             {artifact.format}
             {result ? ` · ${formatArtifactSize(result.size)}` : ""}
@@ -210,6 +212,7 @@ function ArtifactContent({ artifact, data }: { artifact: ArtifactDescriptor; dat
           allowElement={allowMarkdownElement}
           unwrapDisallowed
           components={{
+            table: ArtifactMarkdownTable,
             a({ children, href }) {
               return (
                 <a href={href} target="_blank" rel="noopener noreferrer">
@@ -235,6 +238,15 @@ function ArtifactContent({ artifact, data }: { artifact: ArtifactDescriptor; dat
     );
   }
   return <pre className="artifact-document artifact-text">{text}</pre>;
+}
+
+function ArtifactMarkdownTable({ children }: { children?: ReactNode }) {
+  const { t } = useI18n();
+  return (
+    <div className="markdown-table-scroll" role="group" aria-label={t("Таблица")} tabIndex={0}>
+      <table>{children}</table>
+    </div>
+  );
 }
 
 function ImageArtifact({ artifact, data }: { artifact: ArtifactDescriptor; data: ArrayBuffer }) {
