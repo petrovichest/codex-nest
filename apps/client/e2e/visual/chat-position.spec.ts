@@ -46,11 +46,17 @@ function turn(id: string, text: string): TurnView {
   };
 }
 
-async function setup(page: Page, running = false, draft = "", draftReady = Promise.resolve()) {
+async function setup(
+  page: Page,
+  running = false,
+  draft = "",
+  draftReady = Promise.resolve(),
+  asking = false,
+) {
   const summary: ThreadSummary = {
     ...mainThread,
-    state: running ? "running" : "completed",
-    currentTurnId: running ? "history" : null,
+    state: asking ? "needsAttention" : running ? "running" : "completed",
+    currentTurnId: running || asking ? "history" : null,
     settings: { collaborationMode: "default" },
   };
   const other: ThreadSummary = {
@@ -60,7 +66,9 @@ async function setup(page: Page, running = false, draft = "", draftReady = Promi
     relation: { kind: "session", sessionId: "other" },
   };
   const seed = structuredClone(snapshot);
-  seed.attention = [];
+  seed.attention = asking
+    ? [{ ...seed.attention[0]!, threadId: mainThread.id, turnId: "history" }]
+    : [];
   seed.threads = [summary, other];
   const detail: ThreadDetail = {
     summary,
@@ -98,7 +106,25 @@ async function setup(page: Page, running = false, draft = "", draftReady = Promi
       if (frame.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
     });
   });
-  return { send: (event: ServerEvent) => send(event) };
+  return { detail, send: (event: ServerEvent) => send(event) };
+}
+
+async function readHistory(page: Page) {
+  const scroll = page.locator(".conversation-scroll");
+  const top = await scroll.evaluate((el) => el.scrollTop);
+  await scroll.hover({ position: { x: 20, y: 200 } });
+  await page.mouse.wheel(0, -600);
+  await expect.poll(() => scroll.evaluate((el) => el.scrollTop)).toBeLessThan(top - 100);
+  await expect
+    .poll(async () => {
+      const previous = await scroll.evaluate((el) => el.scrollTop);
+      await waitForVisualReady(page);
+      return Math.abs((await scroll.evaluate((el) => el.scrollTop)) - previous);
+    })
+    .toBe(0);
+  await expect(
+    page.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
+  ).toBeVisible();
 }
 
 async function openChat(page: Page, id: string) {
@@ -138,9 +164,7 @@ for (const width of [390, 1440]) {
           await field.fill(text);
           await waitForVisualReady(page);
           if (fromHistory) {
-            await scroll.evaluate((el) => {
-              el.scrollTop = 300;
-            });
+            await readHistory(page);
             await expect(jump).toBeVisible();
           }
           if (submit === "Enter") await field.press("Enter");
@@ -176,9 +200,8 @@ for (const width of [390, 1440]) {
           const box = (await message.boundingBox())!;
           expect(box.y + box.height).toBeLessThanOrEqual(bubble.y);
 
-          await scroll.evaluate((el) => {
-            el.scrollTop = 300;
-          });
+          await readHistory(page);
+          const historyTop = await scroll.evaluate((el) => el.scrollTop);
           await expect(jump).toBeVisible();
           send({
             type: "activity.delta",
@@ -190,7 +213,7 @@ for (const width of [390, 1440]) {
           });
           await expect(page.locator(".timeline")).toContainText("Читаем историю");
           await waitForVisualReady(page);
-          expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(300, 0);
+          expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(historyTop, 0);
         }
       } finally {
         accepted.resolve();
@@ -255,6 +278,150 @@ for (const width of [390, 1440]) {
       } finally {
         loaded.resolve();
       }
+    });
+  }
+}
+
+for (const width of [390, 1440]) {
+  for (const cached of [false, true]) {
+    test(`a question stays at the tail after ${cached ? "reopening" : "opening"} and late updates at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 844 });
+      let history = deferred();
+      let image = deferred();
+      const { detail } = await setup(page, false, "", Promise.resolve(), true);
+      const historyText = "Абзац истории для проверки прокрутки.\n\n".repeat(80);
+      detail.turns[0]!.items = turn(
+        "history",
+        `${historyText}![Фото](https://image.visual/late.svg)`,
+      ).items;
+      await page.route("**/api/v1/threads/session-main", async (route) => {
+        if (route.request().method() === "OPTIONS") return route.fallback();
+        await history.promise;
+        return json(route, detail);
+      });
+      await page.route("https://image.visual/late.svg", async (route) => {
+        await image.promise;
+        return route.fulfill({
+          contentType: "image/svg+xml",
+          body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1600"><rect width="800" height="1600" fill="gray"/></svg>',
+        });
+      });
+      const scroll = page.locator(".conversation-scroll");
+      const distance = () =>
+        scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+      const input = page.locator(".user-input-freeform input");
+      const jump = page.getByRole("button", { name: "Прокрутить к последнему сообщению" });
+      try {
+        if (cached) {
+          history.resolve();
+          image.resolve();
+          await page.goto("/threads/session-main");
+          await expect(page.locator(".gallery-thumbnail.is-ready")).toHaveCount(1);
+          await openChat(page, "other");
+          history = deferred();
+          image = deferred();
+          await openChat(page, "session-main");
+        } else await page.goto("/threads/session-main");
+        await expect(input).toBeVisible();
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+        await input.evaluate((el: HTMLInputElement) => el.focus({ preventScroll: true }));
+        await page.keyboard.type("Сохранить мой ответ");
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+        history.resolve();
+        await expect(page.locator(".timeline")).toContainText("Абзац истории");
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+        image.resolve();
+        await expect(page.locator(".gallery-thumbnail.is-ready")).toHaveCount(1);
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+
+        // Reproduce a late native viewport adjustment without any user gesture.
+        await scroll.evaluate((el) => {
+          el.scrollTop -= 600;
+        });
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+        await expect(jump).toBeHidden();
+        await expect(input).toHaveValue("Сохранить мой ответ");
+        await expect(input).toBeFocused();
+
+        await readHistory(page);
+        const top = await scroll.evaluate((el) => el.scrollTop);
+        await waitForVisualReady(page);
+        expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+        await jump.click();
+        await expect.poll(distance).toBeLessThanOrEqual(1);
+      } finally {
+        history.resolve();
+        image.resolve();
+      }
+    });
+  }
+
+  for (const gesture of ["keyboard", "scrollbar", "touch"] as const) {
+    test(`${gesture} scrolling can leave a question at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      const { send } = await setup(page, false, "", Promise.resolve(), true);
+      await page.goto("/threads/session-main");
+      await expect(page.locator(".timeline")).toContainText("Абзац истории");
+      const scroll = page.locator(".conversation-scroll");
+      const jump = page.getByRole("button", { name: "Прокрутить к последнему сообщению" });
+      await expect
+        .poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
+        .toBeLessThanOrEqual(1);
+      if (gesture === "keyboard") {
+        await scroll.evaluate((el: HTMLElement) => {
+          el.tabIndex = -1;
+          el.focus({ preventScroll: true });
+        });
+        await page.keyboard.press("PageUp");
+      } else {
+        // Browser automation cannot drag overlay scrollbars or perform native
+        // touch scrolling consistently across Chromium and WebKit.
+        if (gesture === "scrollbar")
+          await scroll.dispatchEvent("pointerdown", { pointerType: "mouse" });
+        else {
+          await scroll.dispatchEvent("touchstart", {
+            touches: [{ identifier: 1, clientX: 100, clientY: 200 }],
+          });
+          await scroll.dispatchEvent("touchmove", {
+            touches: [{ identifier: 1, clientX: 100, clientY: 400 }],
+          });
+        }
+        await scroll.evaluate((el) => {
+          el.scrollTop -= 600;
+        });
+      }
+      await expect(jump).toBeVisible();
+      await expect
+        .poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
+        .toBeGreaterThan(100);
+      // Wait for native keyboard scrolling to finish before measuring.
+      await expect
+        .poll(async () => {
+          const top = await scroll.evaluate((el) => el.scrollTop);
+          await waitForVisualReady(page);
+          return Math.abs((await scroll.evaluate((el) => el.scrollTop)) - top);
+        })
+        .toBe(0);
+      const top = await scroll.evaluate((el) => el.scrollTop);
+      send({
+        type: "activity.delta",
+        threadId: mainThread.id,
+        turnId: "history",
+        itemId: "history-answer",
+        activityType: "agentMessage",
+        delta: "\n\nНовое сообщение во время чтения истории.",
+      });
+      await expect(page.locator(".timeline")).toContainText(
+        "Новое сообщение во время чтения истории.",
+      );
+      await waitForVisualReady(page);
+      expect(await scroll.evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+      await jump.click();
+      await expect
+        .poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
+        .toBeLessThanOrEqual(1);
     });
   }
 }

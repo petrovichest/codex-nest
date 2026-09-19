@@ -2868,6 +2868,7 @@ describe("Activity", () => {
     expect(api.readGoal).not.toHaveBeenCalled();
     expect(api.updateThreadDraft).not.toHaveBeenCalled();
     const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    fireEvent.wheel(scroll, { deltaY: -30 });
     scroll.scrollTop = 0;
     fireEvent.scroll(scroll);
     expect(context.loadOlderDetail).not.toHaveBeenCalled();
@@ -3520,6 +3521,7 @@ describe("Activity", () => {
       scrollHeight: { configurable: true, value: 1_000 },
       clientHeight: { configurable: true, value: 100 },
     });
+    fireEvent.wheel(scroll, { deltaY: -30 });
     scroll.scrollTop = 0;
     fireEvent.scroll(scroll);
 
@@ -5336,6 +5338,7 @@ describe("Activity", () => {
           },
         },
       });
+      fireEvent.wheel(scroll, { deltaY: -30 });
       scroll.scrollTop = 200;
       fireEvent.scroll(scroll);
       fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
@@ -5389,6 +5392,7 @@ describe("Activity", () => {
     const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, get: () => scrollHeight });
     Object.defineProperty(scroll, "clientHeight", { configurable: true, get: () => 500 });
+    fireEvent.wheel(scroll, { deltaY: -30 });
     scroll.scrollTop = 50;
 
     fireEvent.scroll(scroll);
@@ -5397,6 +5401,115 @@ describe("Activity", () => {
       expect(context.loadOlderDetail).toHaveBeenCalledWith("thread", "older-page"),
     );
     await waitFor(() => expect(scroll.scrollTop).toBe(350));
+  });
+
+  it("corrects a late browser scroll without loading older history or losing tail following", async () => {
+    const context = mockThreadConnection(threadApi(), summary, { olderTurnsCursor: "older" });
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    let height = 1_500;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, get: () => height },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTo: {
+        configurable: true,
+        value: ({ top }: ScrollToOptions) => {
+          scroll.scrollTop = Math.min(top ?? 0, height - scroll.clientHeight);
+        },
+      },
+    });
+    scroll.scrollTop = 1_000;
+    fireEvent.scroll(scroll);
+    // A late browser/layout adjustment is not a request to read old messages.
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    fireEvent.scroll(scroll);
+    await waitFor(() => expect(scroll.scrollTop).toBe(1_000));
+    expect(context.loadOlderDetail).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
+
+    height = 1_800;
+    context.state.details.thread = { ...context.state.details.thread };
+    view.rerender(threadRoute());
+    expect(scroll.scrollTop).toBe(1_300);
+  });
+
+  it.each(["wheel", "unmount", "session switch"])(
+    "cancels a pending tail correction on %s",
+    async (action) => {
+      const context = mockThreadConnection(threadApi(), summary);
+      const other = { ...summary, id: "other" };
+      context.state.snapshot.threads.push(other);
+      Object.assign(context.state.details, {
+        other: { ...context.state.details.thread, summary: other },
+      });
+      const view = render(voiceThreadRoute());
+      const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+      const scrollTo = vi.fn();
+      Object.defineProperties(scroll, {
+        scrollHeight: { configurable: true, value: 1_000 },
+        clientHeight: { configurable: true, value: 500 },
+        scrollTo: { configurable: true, value: scrollTo },
+      });
+      const cancelled = vi.spyOn(window, "cancelAnimationFrame");
+      try {
+        scroll.scrollTop = 250;
+        fireEvent.scroll(scroll);
+        if (action === "wheel") fireEvent.wheel(scroll, { deltaY: -30 });
+        else if (action === "session switch") {
+          fireEvent.click(screen.getByText("Открыть B"));
+          scrollTo.mockClear();
+        } else view.unmount();
+        expect(cancelled).toHaveBeenCalled();
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        expect(scrollTo).not.toHaveBeenCalled();
+      } finally {
+        cancelled.mockRestore();
+      }
+    },
+  );
+
+  it("respects manual scrolling before the initial history arrives", () => {
+    const context = mockThreadConnection(threadApi(), summary, {
+      attention: [pendingInputRequest()],
+    });
+    const detail = context.state.details.thread;
+    delete (context.state.details as Record<string, ThreadDetail>).thread;
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1_500 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    fireEvent.wheel(scroll, { deltaY: -30 });
+    scroll.scrollTop = 600;
+    fireEvent.scroll(scroll);
+    context.state.details.thread = detail;
+    view.rerender(threadRoute());
+    expect(scroll.scrollTop).toBe(600);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("lets focus reveal a question without correcting its scroll back to the tail", async () => {
+    mockThreadConnection(threadApi(), summary, { attention: [pendingInputRequest()] });
+    const view = renderThread();
+    const scroll = view.container.querySelector(".conversation-scroll") as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1_500 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    scroll.scrollTop = 600;
+    fireEvent.scroll(scroll);
+    const input = screen.getByRole("textbox", { name: "Свой ответ" });
+    act(() => input.focus());
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    expect(input).toHaveFocus();
+    expect(scroll.scrollTop).toBe(600);
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it("shows a button away from the latest message and smoothly scrolls back", () => {
@@ -5411,6 +5524,7 @@ describe("Activity", () => {
       scrollTo: { configurable: true, value: scrollTo },
     });
 
+    fireEvent.wheel(scroll, { deltaY: -30 });
     scroll.scrollTop = 250;
     fireEvent.scroll(scroll);
 
@@ -5429,7 +5543,7 @@ describe("Activity", () => {
     expect(screen.queryByRole("button", { name: "Прокрутить к последнему сообщению" })).toBeNull();
   });
 
-  it.each(["scrollbar", "wheel", "touch"])(
+  it.each(["scrollbar", "wheel", "touch", "keyboard"])(
     "follows the stream only at the bottom after %s scrolling",
     (input) => {
       const running = { ...summary, state: "running" as const, currentTurnId: "turn" };
@@ -5467,6 +5581,8 @@ describe("Activity", () => {
       scroll.scrollTop = 500;
       fireEvent.scroll(scroll);
 
+      if (input === "scrollbar") fireEvent.pointerDown(scroll);
+      if (input === "keyboard") fireEvent.keyDown(scroll, { key: "PageUp" });
       if (input === "wheel") fireEvent.wheel(scroll, { deltaY: -30 });
       if (input === "touch") {
         fireEvent.touchStart(scroll, { touches: [{ clientX: 100, clientY: 200 }] });
@@ -5513,6 +5629,7 @@ describe("Activity", () => {
       expect(scrollTo).toHaveBeenLastCalledWith({ top: scrollHeight, behavior: "auto" });
 
       scrollTo.mockClear();
+      fireEvent.wheel(scroll, { deltaY: -2 });
       scroll.scrollTop = scrollHeight - scroll.clientHeight - 2;
       fireEvent.scroll(scroll);
       appendText();

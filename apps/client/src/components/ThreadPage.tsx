@@ -735,6 +735,8 @@ export function ThreadPage({
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
+  const tailCorrectionFrame = useRef<number | null>(null);
+  const smoothTailScroll = useRef(false);
   const scrollTouchOrigin = useRef<{ x: number; y: number } | null>(null);
   const locationNoticeHandled = useRef<string | null>(null);
   const scrollTargetMessageId = useRef<string | null>(null);
@@ -2281,10 +2283,23 @@ export function ThreadPage({
 
   function pauseTailFollowing() {
     if (searchTarget) return;
+    cancelTailCorrection();
+    smoothTailScroll.current = false;
     if (!followsTail.current) return;
     followsTail.current = false;
     setShowScrollToBottom(true);
   }
+
+  function cancelTailCorrection() {
+    if (tailCorrectionFrame.current === null) return;
+    window.cancelAnimationFrame(tailCorrectionFrame.current);
+    tailCorrectionFrame.current = null;
+  }
+
+  useLayoutEffect(() => {
+    smoothTailScroll.current = false;
+    return cancelTailCorrection;
+  }, [searchTarget, threadId]);
 
   const handleComposerLayoutChange = useCallback(() => {
     if (!searchTarget && followsTail.current) scrollToEnd(scrollRef.current);
@@ -2305,10 +2320,10 @@ export function ThreadPage({
   useLayoutEffect(() => {
     if (searchTarget) return;
     if (initialScrollThread.current === threadId) return;
+    initialScrollThread.current = threadId;
     followsTail.current = true;
     setShowScrollToBottom(false);
     if (!detail) return;
-    initialScrollThread.current = threadId;
     scrollToEnd(scrollRef.current);
   }, [detail, searchTarget, threadId]);
 
@@ -3732,6 +3747,38 @@ export function ThreadPage({
           onWheel={(event) => {
             if (event.deltaY < 0) pauseTailFollowing();
           }}
+          onPointerDown={(event) => {
+            // The scrollbar belongs to the scroll container, not its content.
+            if (event.target === event.currentTarget && event.pointerType !== "touch") {
+              pauseTailFollowing();
+            }
+          }}
+          onKeyDown={(event) => {
+            const target = event.target as HTMLElement;
+            if (event.defaultPrevented || event.altKey) return;
+            if (event.key === "Tab" && !event.ctrlKey && !event.metaKey) {
+              pauseTailFollowing();
+              return;
+            }
+            if (target.closest("input, textarea, select, [contenteditable=true]")) return;
+            if (
+              ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+              (event.key === " " && event.shiftKey)
+            ) {
+              pauseTailFollowing();
+            }
+          }}
+          onFocusCapture={(event) => {
+            // Keyboard focus can enter the history from outside the scroller
+            // (for example Shift+Tab from the composer). Respect its reveal.
+            const node = event.currentTarget;
+            if (
+              event.target !== node &&
+              node.scrollHeight - node.scrollTop - node.clientHeight > TAIL_FOLLOW_THRESHOLD_PX
+            ) {
+              pauseTailFollowing();
+            }
+          }}
           onTouchStart={(event) => {
             const touch = event.touches[0];
             scrollTouchOrigin.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
@@ -3756,9 +3803,24 @@ export function ThreadPage({
             if (searchTarget) return;
             const node = event.currentTarget;
             const distanceFromTail = node.scrollHeight - node.scrollTop - node.clientHeight;
-            followsTail.current = distanceFromTail <= TAIL_FOLLOW_THRESHOLD_PX;
-            setShowScrollToBottom(!followsTail.current);
-            if (node.scrollTop < 160) void loadOlder();
+            if (distanceFromTail <= TAIL_FOLLOW_THRESHOLD_PX) {
+              cancelTailCorrection();
+              smoothTailScroll.current = false;
+              followsTail.current = true;
+              setShowScrollToBottom(false);
+            } else if (followsTail.current) {
+              // History/layout updates can move the viewport after our layout
+              // effects. Only a user gesture should turn off tail following.
+              if (!smoothTailScroll.current && tailCorrectionFrame.current === null) {
+                tailCorrectionFrame.current = window.requestAnimationFrame(() => {
+                  tailCorrectionFrame.current = null;
+                  if (followsTail.current) scrollToEnd(node);
+                });
+              }
+            } else {
+              setShowScrollToBottom(true);
+              if (node.scrollTop < 160) void loadOlder();
+            }
           }}
         >
           <section className="timeline" aria-live="polite">
@@ -4297,8 +4359,16 @@ export function ThreadPage({
                 className="scroll-to-bottom"
                 aria-label={t("Прокрутить к последнему сообщению")}
                 onClick={() => {
+                  cancelTailCorrection();
                   followsTail.current = true;
-                  scrollToEnd(scrollRef.current, "smooth");
+                  const node = scrollRef.current;
+                  smoothTailScroll.current = Boolean(
+                    node &&
+                    node.scrollHeight - node.scrollTop - node.clientHeight >
+                      TAIL_FOLLOW_THRESHOLD_PX,
+                  );
+                  setShowScrollToBottom(smoothTailScroll.current);
+                  scrollToEnd(node, "smooth");
                 }}
               >
                 <ArrowDownIcon />

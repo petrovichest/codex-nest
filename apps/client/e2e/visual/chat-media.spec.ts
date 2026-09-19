@@ -337,6 +337,7 @@ for (const readingAbove of [false, true]) {
       { exact: true },
     );
     if (readingAbove) {
+      await scroll.dispatchEvent("wheel", { deltaY: -600 });
       await anchor.evaluate((el) => el.scrollIntoView({ block: "center" }));
       await expect(
         page.getByRole("button", { name: "Прокрутить к последнему сообщению" }),
