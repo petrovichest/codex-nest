@@ -735,6 +735,7 @@ export function ThreadPage({
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScrollThread = useRef<string | null>(null);
   const followsTail = useRef(true);
+  const waitingForScrollAway = useRef(false);
   const tailCorrectionFrame = useRef<number | null>(null);
   const smoothTailScroll = useRef(false);
   const scrollTouchOrigin = useRef<{ x: number; y: number } | null>(null);
@@ -2286,6 +2287,10 @@ export function ThreadPage({
     cancelTailCorrection();
     smoothTailScroll.current = false;
     if (!followsTail.current) return;
+    const node = scrollRef.current;
+    waitingForScrollAway.current = Boolean(
+      node && node.scrollHeight - node.scrollTop - node.clientHeight <= TAIL_FOLLOW_THRESHOLD_PX,
+    );
     followsTail.current = false;
     setShowScrollToBottom(true);
   }
@@ -3803,7 +3808,12 @@ export function ThreadPage({
             if (searchTarget) return;
             const node = event.currentTarget;
             const distanceFromTail = node.scrollHeight - node.scrollTop - node.clientHeight;
+            if (distanceFromTail > TAIL_FOLLOW_THRESHOLD_PX) waitingForScrollAway.current = false;
             if (distanceFromTail <= TAIL_FOLLOW_THRESHOLD_PX) {
+              // A queued scroll event at the old bottom can arrive after the
+              // user's gesture but before its actual viewport movement.
+              if (!followsTail.current && waitingForScrollAway.current) return;
+              waitingForScrollAway.current = false;
               cancelTailCorrection();
               smoothTailScroll.current = false;
               followsTail.current = true;

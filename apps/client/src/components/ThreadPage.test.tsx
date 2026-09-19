@@ -5588,6 +5588,8 @@ describe("Activity", () => {
         fireEvent.touchStart(scroll, { touches: [{ clientX: 100, clientY: 200 }] });
         fireEvent.touchMove(scroll, { touches: [{ clientX: 102, clientY: 230 }] });
       }
+      // A queued event from the previous automatic scroll must not undo the gesture.
+      fireEvent.scroll(scroll);
       scroll.scrollTop = 470;
       fireEvent.scroll(scroll);
 
