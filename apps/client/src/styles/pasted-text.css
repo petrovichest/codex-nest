@@ -17,14 +17,34 @@
   width: 100%;
   border-radius: var(--chat-radius-card);
   background: var(--color-floating);
-  box-shadow: var(--chat-shadow);
+  box-shadow: var(--chat-inner-shadow);
   color: var(--text-strong);
-  transition: box-shadow var(--motion-fast) var(--motion-ease);
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+/* Only the disclosure raises/presses the card; editor and action buttons stay independent. */
+@media (hover: hover) {
+  .paste-card:has(.paste-card-toggle:hover:not(:disabled)) {
+    background: var(--color-floating);
+    box-shadow: var(--sidebar-surface-shadow);
+  }
+}
+.paste-card:has(.paste-card-toggle:focus-visible:not(:disabled)) {
+  background: var(--color-floating);
+  box-shadow: var(--sidebar-surface-shadow);
+  outline: 2px solid var(--color-lapis);
+  outline-offset: 2px;
+}
+.paste-card:has(.paste-card-toggle:active:not(:disabled)) {
+  background: var(--sidebar-control-active);
+  box-shadow: var(--sidebar-pressed-shadow);
 }
 .paste-card:has(.paste-card-source:focus:enabled) {
   box-shadow: var(--field-focus-shadow);
 }
 @media (forced-colors: active) {
+  .paste-card:has(.paste-card-toggle:focus-visible:not(:disabled)),
   .paste-card:has(.paste-card-source:focus:enabled) {
     outline: 2px solid Highlight;
     outline-offset: 2px;
@@ -168,15 +188,16 @@
   grid-column: 1 / -1;
 }
 @media (prefers-reduced-motion: reduce) {
+  .paste-card,
   .paste-card-chevron {
     transition: none;
   }
 }
 
-.paste-card-toggle:hover:not(:disabled),
-.paste-card-toggle:active:not(:disabled) {
+.paste-card .paste-card-header > .paste-card-toggle:is(:hover, :active, :focus-visible) {
   background: transparent;
   box-shadow: none;
+  outline: none;
 }
 .thread-workspace .message-with-pastes > .paste-blocks {
   margin-bottom: 12px;

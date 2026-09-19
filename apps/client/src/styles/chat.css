@@ -99,7 +99,7 @@
     .artifact-viewer,
     .input-availability-notice
   )
-  :is(button, summary),
+  :is(button, summary):not(:where(.paste-card-toggle)),
 .thread-workspace :is(.new-session-retry, .team-session-upgrade, .scroll-to-bottom),
 .chat-dialog button,
 .chat-image-viewer .image-viewer-control {

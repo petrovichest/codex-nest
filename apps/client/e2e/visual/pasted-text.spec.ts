@@ -137,6 +137,32 @@ for (const theme of ["light", "dark"] as const)
       for (const pasteCard of [card, page.locator(".composer .paste-card")]) {
         await expect(pasteCard).toHaveCSS("border-radius", "20px");
         await expect(pasteCard.locator(".paste-card-toggle")).toHaveCSS("border-radius", "16px");
+        const toggle = pasteCard.locator(".paste-card-toggle");
+        await toggle.scrollIntoViewIfNeeded();
+        await page.mouse.move(0, 0);
+        const restingShadow = await pasteCard.evaluate((el) => getComputedStyle(el).boxShadow);
+        const bounds = await pasteCard.boundingBox();
+        await toggle.hover();
+        await expect(pasteCard).not.toHaveCSS("box-shadow", restingShadow);
+        await expect(toggle).toHaveCSS("box-shadow", "none");
+        await expect(toggle).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await page.mouse.down();
+        await expect(pasteCard).toHaveCSS("box-shadow", /inset/);
+        await expect(toggle).toHaveCSS("box-shadow", "none");
+        expect(await pasteCard.boundingBox()).toEqual(bounds);
+        // Cancel the click so the existing disclosure flow below still starts collapsed.
+        await page.mouse.move(0, 0);
+        await page.mouse.up();
+        await toggle.focus();
+        await page.keyboard.press("Tab");
+        await page.keyboard.press("Shift+Tab");
+        await expect(toggle).toBeFocused();
+        await expect(toggle).toHaveCSS("outline-style", "none");
+        await expect(pasteCard).toHaveCSS("outline-style", "solid");
+        await page.emulateMedia({ forcedColors: "active" });
+        await expect(pasteCard).toHaveCSS("outline-style", "solid");
+        await expect(toggle).toHaveCSS("outline-style", "none");
+        await page.emulateMedia({ forcedColors: "none" });
         await pasteCard.getByRole("button", { expanded: false }).click();
         await expect(pasteCard.getByRole("table")).toHaveCSS("font-size", "14px");
         await expect(pasteCard.locator("pre code")).toHaveCSS("font-size", "14px");
@@ -160,6 +186,13 @@ for (const theme of ["light", "dark"] as const)
       const focusedShadow = await composer.evaluate((el) => getComputedStyle(el).boxShadow);
       const editableCard = page.locator(".composer .paste-card");
       await editableCard.getByRole("button", { expanded: false }).click();
+      const edit = editableCard.getByRole("button", { name: "Редактировать вставленный текст" });
+      await edit.hover();
+      await page.mouse.down();
+      await expect(edit).toHaveCSS("box-shadow", /inset/);
+      await expect(editableCard).not.toHaveCSS("box-shadow", /inset/);
+      await page.mouse.move(0, 0);
+      await page.mouse.up();
       await editableCard.getByRole("button", { name: "Редактировать вставленный текст" }).click();
       const source = editableCard.getByRole("textbox");
       await source.click();

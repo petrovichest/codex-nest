@@ -217,11 +217,14 @@ h1 {
 .icon-button {
   display: inline-grid;
   place-items: center;
-  min-width: var(--control-height);
+  width: var(--extension-button-height);
+  min-width: var(--extension-button-height);
+  height: var(--extension-button-height);
   padding: 0;
   color: var(--ink);
   background: transparent;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
+  border-radius: 50%;
 }
 
 .text-button {
@@ -394,10 +397,10 @@ h1 {
 
 .error-notice {
   margin: 0 0 11px;
-  padding: var(--space-2) 9px;
+  padding: var(--space-3);
   color: var(--color-danger);
   background: var(--color-danger-soft);
-  border-radius: var(--radius-sm);
+  border-radius: 16px;
   font-size: var(--text-caption);
   line-height: 1.35;
 }
