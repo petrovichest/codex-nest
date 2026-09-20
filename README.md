@@ -3,7 +3,7 @@
 <p align="center">English · <a href="./README.ru.md">Русский</a></p>
 
 <p align="center">
-  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: the same project search session on desktop and mobile" /></a>
+  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: one ChatGPT account on a headless Linux host, with a shared workspace across your browser and Android devices" /></a>
 </p>
 
 <p align="center">
@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="https://github.com/petrovichest/codex-nest/releases/latest/download/CodexNest-latest.apk">Android APK</a> ·
   <a href="./deploy/DEPLOYMENT.md">Documentation</a>
@@ -64,6 +65,25 @@ to open the browser client or connect the
 - **Use voice and browser tools.** Dictate prompts, receive completion and
   attention notifications, and attach Chrome tabs through the
   [browser extension](#browser-extension).
+
+## How it works
+
+**One ChatGPT account. All your devices.** Run Codex and the CodexNest backend
+on your own Linux computer, mini-PC or server. The host can run headless, without
+a desktop interface. Sign in to ChatGPT through Codex on that host; project files,
+development tools and running tasks stay there.
+
+[![One headless Linux host runs Codex and the CodexNest backend, connected to any number of the owner's browser and Android clients through a private VPN or trusted LAN](./docs/assets/how-it-works.png)](./docs/assets/how-it-works.png)
+
+Connect as many of **your own devices** as you need, using the Android APK or a
+browser. Reach the host through WireGuard, Tailscale, another private VPN, or a
+fully trusted LAN. Clients need no Codex installation, development tools or
+project checkout.
+
+Connected clients share projects, conversation history and live execution state;
+each device can navigate independently. Settings, credentials, drafts and recent
+session data may be stored locally, while the development environment stays on
+the host.
 
 ## Screenshots
 

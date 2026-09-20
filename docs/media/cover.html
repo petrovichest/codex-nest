@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>CodexNest — desktop and mobile</title>
+    <title>CodexNest — one ChatGPT account, all your devices</title>
     <style>
       @font-face {
         font-family: Onest;
@@ -17,152 +17,179 @@
         width: 100vw;
         height: 100vh;
         overflow: hidden;
-        background: #f8f9f6;
+        background: #ffffff;
         color: #292a29;
         font-family: Onest, sans-serif;
+        text-align: center;
       }
       .brand {
         position: absolute;
-        top: 64px;
-        left: 72px;
+        top: 38px;
+        left: 60px;
         display: flex;
         align-items: center;
-        gap: 16px;
-        font-size: 32px;
-        font-weight: 650;
-        letter-spacing: -1px;
+        gap: 12px;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: -0.6px;
       }
       .brand img {
-        width: 52px;
-        height: 52px;
-      }
-      .copy {
-        position: absolute;
-        top: 208px;
-        left: 72px;
-      }
-      h1 {
-        margin: 0;
-        font-size: 76px;
-        font-weight: 600;
-        line-height: 1.06;
-        letter-spacing: -4px;
-      }
-      .subtitle {
-        margin: 26px 0 0;
-        font-size: 30px;
-        letter-spacing: -1px;
-      }
-      .note {
-        margin-top: 40px;
-        font-size: 19px;
-        line-height: 1.6;
-        color: #6a6c67;
+        width: 40px;
+        height: 40px;
       }
       .platforms {
         position: absolute;
-        bottom: 67px;
-        left: 72px;
-        font-size: 13px;
-        line-height: 1.8;
-        letter-spacing: 1px;
-        color: #6a6c67;
+        top: 47px;
+        right: 60px;
+        margin: 0;
+        color: #646660;
+        font-size: 17px;
       }
-      .desktop {
+      header {
         position: absolute;
-        width: 936px;
-        top: 150px;
-        right: 56px;
-        border-radius: 28px;
-        background: #171817;
-        overflow: hidden;
-        box-shadow:
-          0 24px 52px rgb(39 50 26 / 19%),
-          0 5px 14px rgb(39 50 26 / 8%);
+        inset: 115px 40px auto;
+        z-index: 1;
       }
-      .desktop > img {
+      h1 {
+        margin: 0;
+        color: #181918;
+        font-size: 64px;
+        line-height: 1.08;
+        font-weight: 600;
+        letter-spacing: -2.4px;
+      }
+      .subtitle {
+        margin: 16px 0 0;
+        color: #646660;
+        font-size: 25px;
+        line-height: 34px;
+      }
+      .scene {
+        position: absolute;
+        top: 293px;
+        left: 160px;
+        width: 1280px;
+      }
+      .illustration {
         display: block;
         width: 100%;
+        height: auto;
       }
-      .phone {
+      .host {
         position: absolute;
-        top: 350px;
-        left: 446px;
-        width: 230px;
-        padding: 8px;
-        border-radius: 32px;
-        background: #f8f9f6;
-        box-shadow:
-          0 24px 52px rgb(39 50 26 / 19%),
-          0 5px 14px rgb(39 50 26 / 8%);
+        top: 345px;
+        left: 50%;
+        width: 410px;
+        transform: translateX(-50%);
+        font-size: 23px;
+        line-height: 32px;
+        font-weight: 500;
       }
-      .phone img {
+      .host small {
         display: block;
-        width: 100%;
-        border-radius: 24px;
+        color: #646660;
+        font-size: 18px;
+        font-weight: 400;
+        line-height: 27px;
+      }
+      .unlimited {
+        position: absolute;
+        top: 422px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #20211f;
+        font-size: 64px;
+        line-height: 50px;
+      }
+      footer {
+        position: absolute;
+        inset: auto 50px 34px;
+        color: #646660;
+        font-size: 19px;
+        line-height: 29px;
+      }
+      footer p {
+        margin: 0;
+      }
+      footer p:first-child {
+        color: #292a29;
+        font-weight: 500;
       }
       @media (max-width: 1280px) {
         .brand {
-          top: 44px;
-          left: 52px;
-          font-size: 28px;
-          gap: 13px;
+          top: 28px;
+          left: 44px;
+          gap: 10px;
+          font-size: 23px;
         }
         .brand img {
-          width: 46px;
-          height: 46px;
-        }
-        .copy {
-          top: 157px;
-          left: 52px;
-        }
-        h1 {
-          font-size: 62px;
-          letter-spacing: -3px;
-        }
-        .subtitle {
-          margin-top: 20px;
-          font-size: 25px;
-        }
-        .note {
-          font-size: 16px;
-          margin-top: 32px;
+          width: 34px;
+          height: 34px;
         }
         .platforms {
-          bottom: 44px;
-          left: 52px;
-          font-size: 11px;
+          top: 35px;
+          right: 44px;
+          font-size: 15px;
         }
-        .desktop {
-          width: 670px;
-          right: 36px;
-          top: 112px;
-          border-radius: 20px;
+        header {
+          top: 82px;
         }
-        .phone {
-          width: 170px;
-          top: 246px;
-          left: 449px;
-          padding: 6px;
-          border-radius: 24px;
+        h1 {
+          font-size: 49px;
+          letter-spacing: -1.8px;
         }
-        .phone img {
-          border-radius: 18px;
+        .subtitle {
+          margin-top: 10px;
+          font-size: 20px;
+          line-height: 28px;
+        }
+        .scene {
+          top: 204px;
+          left: 175px;
+          width: 930px;
+        }
+        .host {
+          top: 253px;
+          width: 360px;
+          font-size: 19px;
+          line-height: 26px;
+        }
+        .host small {
+          font-size: 15px;
+          line-height: 24px;
+        }
+        .unlimited {
+          top: 311px;
+          font-size: 49px;
+          line-height: 38px;
+        }
+        footer {
+          bottom: 22px;
+          font-size: 15px;
+          line-height: 24px;
         }
       }
     </style>
   </head>
   <body>
     <div class="brand"><img src="{{LOGO}}" alt="" />CodexNest</div>
-    <div class="copy">
-      <h1>Your Codex<br />workspace.</h1>
-      <p class="subtitle">Desktop and mobile.</p>
-      <p class="note">Your projects. Your conversations.<br />On your own Linux machine.</p>
-    </div>
-    <div class="platforms">SELF-HOSTED<br />BROWSER · ANDROID</div>
-    <div class="desktop">
-      <img src="{{DESKTOP}}" alt="Project search session on desktop" />
-    </div>
-    <div class="phone"><img src="{{MOBILE}}" alt="The same session on mobile" /></div>
+    <p class="platforms">Self-hosted · Browser · Android</p>
+    <header>
+      <h1>One ChatGPT account.<br />All your devices.</h1>
+      <p class="subtitle">Shared projects, conversations and progress.</p>
+    </header>
+    <main class="scene">
+      <img
+        class="illustration"
+        src="{{ILLUSTRATION}}"
+        alt="Four thin clients connected to one headless Linux host"
+      />
+      <div class="host">Codex + CodexNest backend<small>On your headless Linux host</small></div>
+      <div class="unlimited">∞</div>
+    </main>
+    <footer>
+      <p>Your development environment stays on the server.</p>
+      <p>Connect through WireGuard, Tailscale or a trusted LAN.</p>
+    </footer>
   </body>
 </html>

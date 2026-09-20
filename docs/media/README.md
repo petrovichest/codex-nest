@@ -26,14 +26,33 @@ requests fail the capture.
 The separate documentation suite lives in `apps/client/e2e/docs`. It reuses the
 visual fixture infrastructure without updating visual regression snapshots and
 does not run as part of `npm test` or `test:visual`. The filename filter above
-captures only the README gallery and covers; omit it to also refresh the separate
-font-settings documentation images.
+captures only the README gallery, architecture infographics and covers; omit it
+to also refresh the separate font-settings documentation images.
 
-`cover.html` composes the dark desktop and light mobile screenshots of the same
-session with the existing CN logo and Onest font. Its neutral colors, rounded
-surfaces and shadows follow the [design kit](../design-kit.md). The same command
-renders two layouts:
+To regenerate only the architecture infographics and covers, leaving the actual
+UI screenshots unchanged:
 
+```bash
+npm run docs:images -w @codexnest/client -- images.spec.ts -g 'render the architecture'
+```
+
+`architecture-illustration.png` is the selected artwork from the built-in
+`imagegen` tool; its [final prompt](./illustration-prompt.md) is preserved alongside
+it. The illustration shows a compact headless Linux host and four examples of
+thin clients. The infinity symbol means any number of the owner's devices, not
+four clients or four accounts. Client screens contain abstract conversation
+marks, not application screenshots. Codex, the CodexNest backend, ChatGPT sign-in
+and the working development environment belong on the host.
+
+`how-it-works.html` and `cover.html` compose this artwork with the existing CN logo
+and the real Onest font. Labels, colors and layout are rendered deterministically;
+generation is not invoked by the capture command. The palette follows the
+[design kit](../design-kit.md): white canvas, `#f8f9f6` surfaces, graphite text and
+neutral gray connectors, without decorative green accents. Translations are in
+`apps/client/e2e/docs/images.spec.ts`. The command renders four layouts:
+
+- `docs/assets/how-it-works.png` — 1200 × 880, English architecture infographic.
+- `docs/assets/how-it-works-ru.png` — 1200 × 880, Russian architecture infographic.
 - `docs/assets/cover.png` — 1600 × 900, used by both READMEs.
 - `docs/assets/social-preview.png` — 1280 × 640, prepared for the repository's
   Social preview setting on GitHub. Generating it does not change that setting.
@@ -43,6 +62,10 @@ the repository's **Settings → Social preview → Edit → Upload an image**. K
 the PNG under 1 MB. See [GitHub's social preview instructions](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
 
 Review all images after capture, especially wording, clipped content and loading
-states. Keep screenshot captions in both READMEs in sync. The PNGs are intentional
+states. Check the architecture labels at full size and at README display width;
+both languages must describe the same headless host, account and shared state.
+Local client settings, credentials and caches are not the development environment,
+so avoid claiming that clients store literally nothing. Keep screenshot captions
+in both READMEs in sync. The PNGs are intentional
 documentation assets and should be committed alongside the README changes when
 publishing an update.

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="{{LANG}}">
+  <head>
+    <meta charset="utf-8" />
+    <title>CodexNest — {{TITLE}}</title>
+    <style>
+      @font-face {
+        font-family: Onest;
+        src: url("{{FONT}}") format("woff2");
+        font-weight: 100 900;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        width: 1200px;
+        height: 880px;
+        overflow: hidden;
+        background: #ffffff;
+        color: #292a29;
+        font-family: Onest, sans-serif;
+        text-align: center;
+      }
+      header {
+        position: absolute;
+        inset: 28px 40px auto;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+      }
+      .brand img {
+        width: 30px;
+        height: 30px;
+      }
+      h1 {
+        margin: 18px 0 10px;
+        color: #181918;
+        font-size: 48px;
+        line-height: 1.12;
+        font-weight: 600;
+        letter-spacing: -1.8px;
+      }
+      .subtitle {
+        margin: 0;
+        color: #646660;
+        font-size: 21px;
+        line-height: 1.4;
+      }
+      .scene {
+        position: absolute;
+        top: 225px;
+        left: 40px;
+        width: 1120px;
+        height: 487px;
+      }
+      .illustration {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .device {
+        position: absolute;
+        width: 300px;
+        transform: translateX(-50%);
+        margin: 0;
+        font-size: 18px;
+        line-height: 26px;
+        color: #646660;
+      }
+      .laptop,
+      .android {
+        left: 18%;
+      }
+      .tablet,
+      .phone {
+        left: 82.5%;
+      }
+      .laptop,
+      .tablet {
+        top: 221px;
+      }
+      .android,
+      .phone {
+        top: 432px;
+      }
+      .host {
+        position: absolute;
+        top: 301px;
+        left: 50%;
+        width: 410px;
+        transform: translateX(-50%);
+      }
+      .host strong {
+        display: block;
+        font-size: 21px;
+        font-weight: 600;
+        line-height: 28px;
+      }
+      .host p {
+        margin: 4px 0 3px;
+        font-size: 19px;
+        line-height: 26px;
+      }
+      .host small {
+        color: #646660;
+        font-size: 16px;
+        line-height: 24px;
+      }
+      .unlimited {
+        position: absolute;
+        top: 393px;
+        left: 50%;
+        width: 400px;
+        transform: translateX(-50%);
+        color: #646660;
+        font-size: 17px;
+        line-height: 26px;
+      }
+      .unlimited span {
+        display: block;
+        height: 43px;
+        color: #20211f;
+        font-size: 52px;
+        line-height: 43px;
+        font-weight: 400;
+      }
+      footer {
+        position: absolute;
+        inset: auto 40px 36px;
+      }
+      .network {
+        margin: 0 0 20px;
+        font-size: 20px;
+        font-weight: 500;
+        line-height: 28px;
+      }
+      .explanation {
+        margin: 0;
+        font-size: 20px;
+        line-height: 30px;
+        color: #646660;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="brand"><img src="{{LOGO}}" alt="" />CodexNest</div>
+      <h1>{{HEADLINE}}</h1>
+      <p class="subtitle">{{SUBTITLE}}</p>
+    </header>
+    <main class="scene">
+      <img class="illustration" src="{{ILLUSTRATION}}" alt="{{ILLUSTRATION_ALT}}" />
+      <p class="device laptop">{{LAPTOP}}</p>
+      <p class="device tablet">{{TABLET}}</p>
+      <p class="device android">Android · APK</p>
+      <p class="device phone">{{PHONE}}</p>
+      <div class="host">
+        <strong>Linux · headless</strong>
+        <p>Codex + CodexNest backend</p>
+        <small>{{ACCOUNT}}</small>
+      </div>
+      <div class="unlimited"><span>∞</span>{{UNLIMITED}}</div>
+    </main>
+    <footer>
+      <p class="network">WireGuard · Tailscale · {{NETWORK}}</p>
+      <p class="explanation">{{CLIENTS}}<br />{{SERVER}}</p>
+    </footer>
+  </body>
+</html>

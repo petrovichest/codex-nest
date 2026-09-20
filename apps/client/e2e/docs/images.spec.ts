@@ -9,7 +9,7 @@ import { installDocsFixture } from "./fixtures";
 const root = resolve(import.meta.dirname, "../../../..");
 const assets = resolve(root, "docs/assets");
 
-test("capture the documentation gallery and covers", async ({ browser }) => {
+test("capture the documentation gallery", async ({ browser }) => {
   await mkdir(assets, { recursive: true });
   const failures: string[] = [];
 
@@ -97,28 +97,72 @@ test("capture the documentation gallery and covers", async ({ browser }) => {
     await expect(page.getByRole("heading", { name: "Project search", exact: true })).toBeVisible();
   });
   expect(failures).toEqual([]);
+});
 
+test("render the architecture infographics and covers", async ({ browser }) => {
+  await mkdir(assets, { recursive: true });
   const replacements: Record<string, string> = {
     FONT: `data:font/woff2;base64,${(await readFile(resolve(root, "apps/client/src/assets/fonts/onest-variable.woff2"))).toString("base64")}`,
     LOGO: `data:image/svg+xml;base64,${(await readFile(resolve(root, "apps/client/public/favicon.svg"))).toString("base64")}`,
-    DESKTOP: `data:image/png;base64,${(await readFile(resolve(assets, "desktop-session.png"))).toString("base64")}`,
-    MOBILE: `data:image/png;base64,${(await readFile(resolve(assets, "mobile-session.png"))).toString("base64")}`,
+    ILLUSTRATION: `data:image/png;base64,${(await readFile(resolve(root, "docs/media/architecture-illustration.png"))).toString("base64")}`,
   };
-  const template = await readFile(resolve(root, "docs/media/cover.html"), "utf8");
-  for (const [name, width, height] of [
-    ["cover", 1600, 900],
-    ["social-preview", 1280, 640],
+  const translations: Record<string, Record<string, string>> = {
+    en: {
+      LANG: "en",
+      TITLE: "How it works",
+      HEADLINE: "One ChatGPT account.<br />All your devices.",
+      SUBTITLE: "Shared projects, conversations and progress.",
+      ILLUSTRATION_ALT: "Four thin clients connected to one headless Linux host",
+      LAPTOP: "Laptop · browser",
+      TABLET: "Tablet · browser",
+      PHONE: "Phone · browser",
+      ACCOUNT: "ChatGPT signed in on this host",
+      UNLIMITED: "As many of your devices as you need",
+      NETWORK: "private VPN or trusted LAN",
+      CLIENTS: "Clients only need the APK or a browser.",
+      SERVER: "Codex, project files and development tools stay on the server.",
+    },
+    ru: {
+      LANG: "ru",
+      TITLE: "Как это работает",
+      HEADLINE: "Один аккаунт ChatGPT.<br />Все ваши устройства.",
+      SUBTITLE: "Общие проекты, диалоги и состояние работы.",
+      ILLUSTRATION_ALT: "Четыре тонких клиента подключены к одному headless Linux-серверу",
+      LAPTOP: "Ноутбук · браузер",
+      TABLET: "Планшет · браузер",
+      PHONE: "Телефон · браузер",
+      ACCOUNT: "Вход в ChatGPT выполнен на сервере",
+      UNLIMITED: "Любое число ваших устройств",
+      NETWORK: "приватная VPN или доверенная LAN",
+      CLIENTS: "На клиентах — только APK или браузер.",
+      SERVER: "Codex, файлы проектов и инструменты — на сервере.",
+    },
+  };
+  for (const [name, templateName, language, width, height] of [
+    ["how-it-works", "how-it-works", "en", 1200, 880],
+    ["how-it-works-ru", "how-it-works", "ru", 1200, 880],
+    ["cover", "cover", "en", 1600, 900],
+    ["social-preview", "cover", "en", 1280, 640],
   ] as const) {
+    const template = await readFile(resolve(root, `docs/media/${templateName}.html`), "utf8");
+    const values = { ...replacements, ...translations[language] };
+    const html = template.replace(/\{\{(\w+)\}\}/gu, (_, key: string) => {
+      if (!(key in values)) throw new Error(`Missing media template value: ${key}`);
+      return values[key]!;
+    });
     const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
     await page.route("**/*", (route) => route.abort());
-    await page.setContent(
-      template.replace(/\{\{(\w+)\}\}/gu, (_, key: string) => replacements[key]!),
-    );
+    await page.setContent(html);
     await page.evaluate(async () => {
       await document.fonts.ready;
       await Promise.all([...document.images].map((image) => image.decode()));
     });
-    await page.screenshot({ path: resolve(assets, `${name}.png`) });
+    expect(await page.evaluate(() => document.fonts.check("21px Onest"))).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    const image = await page.screenshot({ path: resolve(assets, `${name}.png`) });
+    if (name === "social-preview") expect(image.byteLength).toBeLessThan(1_000_000);
     await page.close();
   }
 });
