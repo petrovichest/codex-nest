@@ -3,7 +3,7 @@
 <p align="center"><a href="./README.md">English</a> · Русский</p>
 
 <p align="center">
-  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: один аккаунт ChatGPT на headless Linux-сервере и общее рабочее пространство в браузере и Android-приложении на ваших устройствах" /></a>
+  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: одна сессия с поиском по проектам на компьютере и телефоне" /></a>
 </p>
 
 <p align="center">

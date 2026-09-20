@@ -44,16 +44,21 @@ four clients or four accounts. Client screens contain abstract conversation
 marks, not application screenshots. Codex, the CodexNest backend, ChatGPT sign-in
 and the working development environment belong on the host.
 
-`how-it-works.html` and `cover.html` compose this artwork with the existing CN logo
-and the real Onest font. Labels, colors and layout are rendered deterministically;
-generation is not invoked by the capture command. The palette follows the
+`how-it-works.html` and `architecture-cover.html` compose this artwork with the
+existing CN logo and the real Onest font. `cover.html` keeps the original desktop
+and mobile screenshot composition at the top of both READMEs. Labels, colors and
+layout are rendered deterministically; generation is not invoked by the capture
+command. The architecture artwork follows the
 [design kit](../design-kit.md): white canvas, `#f8f9f6` surfaces, graphite text and
 neutral gray connectors, without decorative green accents. Translations are in
-`apps/client/e2e/docs/images.spec.ts`. The command renders four layouts:
+`apps/client/e2e/docs/images.spec.ts`. The command renders five layouts:
 
 - `docs/assets/how-it-works.png` — 1200 × 880, English architecture infographic.
 - `docs/assets/how-it-works-ru.png` — 1200 × 880, Russian architecture infographic.
-- `docs/assets/cover.png` — 1600 × 900, used by both READMEs.
+- [docs/assets/cover.png](../assets/cover.png) — 1600 × 900, the original screenshot
+  cover used by both READMEs.
+- [docs/assets/architecture-cover.png](../assets/architecture-cover.png) — 1600 × 900,
+  the alternative architecture cover, kept as a separate asset.
 - `docs/assets/social-preview.png` — 1280 × 640, prepared for the repository's
   Social preview setting on GitHub. Generating it does not change that setting.
 

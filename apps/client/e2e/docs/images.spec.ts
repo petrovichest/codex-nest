@@ -104,6 +104,8 @@ test("render the architecture infographics and covers", async ({ browser }) => {
   const replacements: Record<string, string> = {
     FONT: `data:font/woff2;base64,${(await readFile(resolve(root, "apps/client/src/assets/fonts/onest-variable.woff2"))).toString("base64")}`,
     LOGO: `data:image/svg+xml;base64,${(await readFile(resolve(root, "apps/client/public/favicon.svg"))).toString("base64")}`,
+    DESKTOP: `data:image/png;base64,${(await readFile(resolve(assets, "desktop-session.png"))).toString("base64")}`,
+    MOBILE: `data:image/png;base64,${(await readFile(resolve(assets, "mobile-session.png"))).toString("base64")}`,
     ILLUSTRATION: `data:image/png;base64,${(await readFile(resolve(root, "docs/media/architecture-illustration.png"))).toString("base64")}`,
   };
   const translations: Record<string, Record<string, string>> = {
@@ -142,7 +144,8 @@ test("render the architecture infographics and covers", async ({ browser }) => {
     ["how-it-works", "how-it-works", "en", 1200, 880],
     ["how-it-works-ru", "how-it-works", "ru", 1200, 880],
     ["cover", "cover", "en", 1600, 900],
-    ["social-preview", "cover", "en", 1280, 640],
+    ["architecture-cover", "architecture-cover", "en", 1600, 900],
+    ["social-preview", "architecture-cover", "en", 1280, 640],
   ] as const) {
     const template = await readFile(resolve(root, `docs/media/${templateName}.html`), "utf8");
     const values = { ...replacements, ...translations[language] };

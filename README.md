@@ -3,7 +3,7 @@
 <p align="center">English · <a href="./README.ru.md">Русский</a></p>
 
 <p align="center">
-  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: one ChatGPT account on a headless Linux host, with a shared workspace across your browser and Android devices" /></a>
+  <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: the same project search session on desktop and mobile" /></a>
 </p>
 
 <p align="center">
