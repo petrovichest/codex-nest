@@ -933,10 +933,11 @@ export function ThreadPage({
   activeMessageFingerprintsRef.current = activeMessageFingerprints;
   const latestPlan = useMemo(
     () =>
-      !isSubagent && summary?.settings.collaborationMode === "plan"
+      !isSubagent &&
+      (summary?.settings.collaborationMode === "plan" || summary?.awaitingPlanResponse)
         ? findLatestPlan(detail?.turns)
         : null,
-    [detail?.turns, isSubagent, summary?.settings.collaborationMode],
+    [detail?.turns, isSubagent, summary?.settings.collaborationMode, summary?.awaitingPlanResponse],
   );
   const groupedTurnActivities = useMemo(
     () =>
@@ -3104,24 +3105,17 @@ export function ThreadPage({
     setBusy(true);
     setError(null);
     setTeamUpgradeRequired(false);
-    let changedMode = false;
-    let deliveryCommitted = false;
     try {
-      const thread = await api.updateThreadSettings(threadId, {
-        collaborationMode: targetMode === "team" ? "team" : "default",
-      });
-      changedMode = true;
-      dispatch({ type: "thread", thread });
       scrollTargetMessageId.current = clientMessageId;
       await sendReliable(
         threadId,
         {
           input: implementationMessage,
           clientMessageId,
+          planImplementationMode: targetMode,
           ...(goalMode ? { goal: true } : {}),
         },
         () => {
-          deliveryCommitted = true;
           dispatch({
             type: "optimistic.add",
             message: {
@@ -3140,12 +3134,6 @@ export function ThreadPage({
       releaseSubmittedMessageClaim(messageClaimKey);
     } catch (caught) {
       releaseSubmittedMessageClaim(messageClaimKey, clientMessageId);
-      if (changedMode && !deliveryCommitted) {
-        await api
-          .updateThreadSettings(threadId, { collaborationMode: "plan" })
-          .then((thread) => dispatch({ type: "thread", thread }))
-          .catch(() => undefined);
-      }
       setError(
         caught instanceof Error
           ? localizeKnownServerText(language, caught.message)
@@ -4052,6 +4040,9 @@ export function ThreadPage({
                                     {isLatestPlan && (
                                       <>
                                         {planNotice && <p role="status">{planNotice}</p>}
+                                        {planAcceptanceInFlightRef.current && (
+                                          <p role="status">{t("Запускаем выполнение плана…")}</p>
+                                        )}
                                         <div className="implement-plan-actions">
                                           <button
                                             className="implement-plan"

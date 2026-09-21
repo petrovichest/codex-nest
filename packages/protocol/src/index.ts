@@ -281,6 +281,8 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   currentTurnId: string | null;
+  /** A completed plan still needs a user response, even if its mode was changed. */
+  awaitingPlanResponse?: boolean;
   queuedMessageCount: number;
   browserStatus: BrowserThreadStatus;
   settings: SessionSettings;
@@ -343,6 +345,8 @@ export type UserInputReply = {
   answers: Record<string, string[]>;
 };
 
+export type PlanImplementationMode = "default" | "goal" | "team";
+
 export type QueuedMessage = PastedText & {
   id: string;
   threadId: string;
@@ -350,6 +354,7 @@ export type QueuedMessage = PastedText & {
   images?: string[];
   files?: ThreadFileAttachment[];
   goal?: boolean;
+  planImplementationMode?: PlanImplementationMode;
   createdAt: number;
   status: "queued" | "dispatching";
   deliveryVersion?: 1;
@@ -1345,6 +1350,7 @@ export type QueueMessageRequest = PastedText & {
   images?: string[];
   files?: ThreadFileAttachment[];
   goal?: boolean;
+  planImplementationMode?: PlanImplementationMode;
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;

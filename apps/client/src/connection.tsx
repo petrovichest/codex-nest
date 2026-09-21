@@ -669,6 +669,9 @@ export function ConnectionProvider({
                     ...(message.images.length ? { images: message.images } : {}),
                     ...(message.files?.length ? { files: message.files } : {}),
                     ...(message.goal ? { goal: true } : {}),
+                    ...(message.planImplementationMode
+                      ? { planImplementationMode: message.planImplementationMode }
+                      : {}),
                     clientMessageId: message.id,
                     ...(message.replyToAsyncQuestion
                       ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
@@ -773,6 +776,9 @@ export function ConnectionProvider({
         images: body.images ?? [],
         files: body.files ?? [],
         goal: body.goal ?? false,
+        ...(body.planImplementationMode
+          ? { planImplementationMode: body.planImplementationMode }
+          : {}),
         ...(body.replyToAsyncQuestion ? { replyToAsyncQuestion: body.replyToAsyncQuestion } : {}),
         ...(body.replyToUserInput ? { replyToUserInput: body.replyToUserInput } : {}),
         ...(body.dismissUserInput ? { dismissUserInput: body.dismissUserInput } : {}),

@@ -58,7 +58,7 @@ import { RpcError } from "./codex/transport";
 import { HistoryCache, type CachedTurnsPage } from "./history-cache";
 import { pathContains, projectForCwd } from "./projects";
 import { isMissingThreadError, isThreadNotLoadedError, removeThreadState } from "./thread-state";
-import { recoverUserInputAnchors } from "./timeline-rollout";
+import { recoverTimelineOrder } from "./timeline-rollout";
 import type {
   CodexNestState,
   CodexNestStateView,
@@ -854,7 +854,7 @@ export class AppProjection extends EventEmitter {
     const artifacts = Object.fromEntries(
       response.data.map((turn) => [turn.id, this.timelineArtifacts(id, turn.id)]),
     );
-    await recoverUserInputAnchors(this.rolloutPath(id), response.data, artifacts);
+    await recoverTimelineOrder(this.rolloutPath(id), response.data, artifacts);
     const ordered = direction === "desc" ? response.data.slice().reverse() : response.data;
     const page: CachedTurnsPage = {
       threadId: id,
@@ -1176,7 +1176,7 @@ export class AppProjection extends EventEmitter {
       const turn = page.data.find((candidate) => candidate.id === turnId);
       if (turn) {
         const artifacts = { [turnId]: this.timelineArtifacts(threadId, turnId) };
-        await recoverUserInputAnchors(this.rolloutPath(threadId), [turn], artifacts);
+        await recoverTimelineOrder(this.rolloutPath(threadId), [turn], artifacts);
         items = normalizeTurn(
           turn,
           this.progress.get(turnKey(threadId, turnId)),
@@ -2519,6 +2519,10 @@ export class AppProjection extends EventEmitter {
       }
     }
     await this.clearUserInputsForTurn(threadId, turn.id);
+    const rolloutPath = this.rolloutPath(threadId);
+    if (rolloutPath && turn.items.some((item) => item.type === "plan")) {
+      await recoverTimelineOrder(rolloutPath, [turn], {});
+    }
     if (recovered && cached?.currentTurnId !== turn.id) return null;
     if (cached?.currentTurnId && cached.currentTurnId !== turn.id) return null;
     if (cached) {
@@ -2874,6 +2878,16 @@ export class AppProjection extends EventEmitter {
             item = { ...item, id: previous.id } as ActivityItem;
           }
         }
+        if (
+          item.type === "plan" &&
+          previous?.type === "plan" &&
+          previous.status === "completed" &&
+          item.timestamp !== null &&
+          previous.timestamp !== null &&
+          item.timestamp > previous.timestamp
+        ) {
+          this.activity.delete(key);
+        }
         this.activity.set(key, item);
         this.publishActivityUpsert(notification.params.threadId, notification.params.turnId, item);
         this.touchThreadActivity(notification.params.threadId, eventTimestamp);
@@ -3145,6 +3159,7 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
+      awaitingPlanResponse: meta.awaitingPlanResponse ?? false,
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
       browserStatus: this.browserStatusProvider(cached.thread.id),
       settings: sessionSettings(meta.settings),
@@ -3844,6 +3859,16 @@ function mergeMaterializedTurn(current: TurnView, incoming: TurnView): TurnView 
       items[index] = item;
     }
   }
+  for (const [index, item] of incoming.items.entries()) {
+    if (item.type !== "plan") continue;
+    const preceding = incoming.items[index - 1];
+    const position = items.findIndex((candidate) => candidate.id === item.id);
+    const anchor = items.findIndex((candidate) => candidate.id === preceding?.id);
+    if (anchor > position) {
+      const [revised] = items.splice(position, 1);
+      items.splice(anchor, 0, revised!);
+    }
+  }
   const incomingIsTerminal = incoming.status !== "inProgress";
   const currentIsTerminal = current.status !== "inProgress";
   return {
@@ -3903,6 +3928,18 @@ function mergeLiveActivities(
         ...fresherLiveActivity(canonical, projectedItem, turnStatus),
         id: canonical.id,
       } as ActivityItem;
+      if (item.type === "plan") {
+        const precedingId = liveActivities
+          .slice(0, itemIndex)
+          .reverse()
+          .map((candidate) => canonicalMatchByLiveId.get(candidate.id))
+          .find((id) => id !== undefined && result.some((candidate) => candidate.id === id));
+        const precedingIndex = result.findIndex((candidate) => candidate.id === precedingId);
+        if (precedingIndex > existing) {
+          const [revised] = result.splice(existing, 1);
+          result.splice(precedingIndex, 0, revised!);
+        }
+      }
       continue;
     }
     if (

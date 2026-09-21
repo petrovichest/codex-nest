@@ -65,6 +65,7 @@ export class MessageQueue {
     messageId: string = randomUUID(),
     options: PastedText & {
       goal?: boolean;
+      planImplementationMode?: QueuedMessage["planImplementationMode"];
       files?: ThreadFileAttachment[];
       completeVoiceTranscriptionId?: string;
       replyToAsyncQuestion?: AsyncQuestionReference;
@@ -80,6 +81,9 @@ export class MessageQueue {
       ...(images.length ? { images } : {}),
       ...(options.files?.length ? { files: options.files } : {}),
       ...(options.goal ? { goal: true } : {}),
+      ...(options.planImplementationMode
+        ? { planImplementationMode: options.planImplementationMode }
+        : {}),
       ...(options.replyToAsyncQuestion
         ? { replyToAsyncQuestion: options.replyToAsyncQuestion }
         : {}),
@@ -178,6 +182,7 @@ export class MessageQueue {
     const activeTurnId = this.delivery.currentTurnId(threadId);
     if (
       !stored.replyToAsyncQuestion &&
+      !stored.planImplementationMode &&
       activeTurnId &&
       this.delivery.shouldSteerQueuedMessage(threadId, activeTurnId)
     ) {
@@ -422,6 +427,9 @@ export class MessageQueue {
     if (this.delivery.acceptsInput?.(threadId) === false)
       throw new MessageQueueInputUnavailableError();
     const activeTurnId = message.replyToUserInput?.turnId ?? this.delivery.currentTurnId(threadId);
+    if (activeTurnId && message.planImplementationMode) {
+      throw new MessageQueueConflictError("Wait for the current turn before implementing the plan");
+    }
     if (activeTurnId && !allowSteer) return activeTurnId;
     await this.setStatus(threadId, message.id, "dispatching");
     let turnId: string;
@@ -550,6 +558,7 @@ export class MessageQueue {
     const missing = isMissingThreadError(error);
     const retryable =
       !missing &&
+      !(error instanceof MessageQueueValidationError) &&
       !(error instanceof DeliveryContractError) &&
       !(
         error instanceof RpcError &&
@@ -559,7 +568,7 @@ export class MessageQueue {
     await this.setStatus(threadId, messageId, status, {
       message: missing
         ? "Сессия недоступна. Сообщение сохранено."
-        : error instanceof DeliveryContractError
+        : error instanceof DeliveryContractError || error instanceof MessageQueueValidationError
           ? error.message
           : status === "dispatching"
             ? "Проверяем, было ли сообщение отправлено."
@@ -609,7 +618,8 @@ export function messageContentHash(
   goal: boolean,
   reply?: unknown,
   dismissUserInput?: AsyncQuestionReference,
-  pastes: PastedText = {},
+  pastes: PastedText & Pick<QueuedMessage, "planImplementationMode"> = {},
+  planImplementationMode = pastes.planImplementationMode,
 ): string {
   const content: unknown[] = dismissUserInput
     ? [text.trim(), images, files, goal, reply ?? null, { dismissUserInput }]
@@ -620,5 +630,6 @@ export function messageContentHash(
         : [text.trim(), images, goal];
   const normalized = pastedText(trimPastedMessage(text, pastes));
   if (Object.keys(normalized).length) content.push(normalized);
+  if (planImplementationMode) content.push({ planImplementationMode });
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }

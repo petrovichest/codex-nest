@@ -4033,33 +4033,53 @@ describe("Activity", () => {
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).not.toHaveFocus();
   });
 
-  it("accepts a completed plan without offering a reject action", async () => {
-    const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    mockThreadConnection(api, planThread, completedPlanDetail());
+  it.each([
+    ["default", "Да, реализуй этот план"],
+    ["goal", "Запустить в режиме цели"],
+    ["team", "Запустить в режиме оркестратора"],
+  ] as const)(
+    "durably submits a completed plan in %s mode without a settings request",
+    async (mode, label) => {
+      const api = threadApi();
+      const context = mockThreadConnection(
+        api,
+        {
+          ...summary,
+          settings: { collaborationMode: "plan" },
+        },
+        completedPlanDetail(),
+      );
+      renderThread();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      await waitFor(() =>
+        expect(context.sendReliable).toHaveBeenCalledWith(
+          "thread",
+          expect.objectContaining({
+            planImplementationMode: mode,
+            clientMessageId: expect.any(String),
+            ...(mode === "goal" ? { goal: true } : {}),
+          }),
+          expect.any(Function),
+        ),
+      );
+      expect(api.updateThreadSettings).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: /Отклонить/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it("restores plan actions after a previous client changed mode without delivering acceptance", () => {
+    mockThreadConnection(
+      threadApi(),
+      {
+        ...summary,
+        state: "needsAttention",
+        awaitingPlanResponse: true,
+        settings: { collaborationMode: "default" },
+      },
+      completedPlanDetail(),
+    );
     renderThread();
-
-    expect(screen.queryByRole("button", { name: /Отклонить/ })).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Запустить в режиме оркестратора" }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Да, реализуй этот план" }));
-
-    await waitFor(() =>
-      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
-        collaborationMode: "default",
-      }),
-    );
-    expect(api.startTurn).toHaveBeenCalledWith(
-      "thread",
-      expect.objectContaining({
-        input: "Да, реализуй этот план",
-        clientMessageId: expect.any(String),
-      }),
-    );
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeEnabled();
   });
 
   it("keeps the latest plan in chronological order when switching out of Plan mode", () => {
@@ -4386,35 +4406,34 @@ describe("Activity", () => {
 
   it("lets only one completed-plan implementation button start at a time", async () => {
     const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    let resolveSettings: ((thread: ThreadSummary) => void) | undefined;
-    api.updateThreadSettings.mockImplementationOnce(
+    const context = mockThreadConnection(
+      api,
+      {
+        ...summary,
+        settings: { collaborationMode: "plan" },
+      },
+      completedPlanDetail(),
+    );
+    let resolveDelivery!: (value: string) => void;
+    context.sendReliable.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          resolveSettings = resolve;
+          resolveDelivery = resolve;
         }),
     );
-    mockThreadConnection(api, planThread, completedPlanDetail());
     renderThread();
     const defaultButton = screen.getByRole("button", { name: "Да, реализуй этот план" });
     const teamButton = screen.getByRole("button", { name: "Запустить в режиме оркестратора" });
-
     act(() => {
       defaultButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       teamButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-
-    expect(api.updateThreadSettings).toHaveBeenCalledTimes(1);
-    expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
-      collaborationMode: "default",
-    });
+    expect(context.sendReliable).toHaveBeenCalledOnce();
+    expect(api.updateThreadSettings).not.toHaveBeenCalled();
     expect(screen.getByText("Это сообщение уже отправлено")).toBeInTheDocument();
-
-    resolveSettings?.({ ...planThread, settings: { collaborationMode: "default" } });
-    await waitFor(() => expect(api.startTurn).toHaveBeenCalledOnce());
+    expect(screen.getByText("Запускаем выполнение плана…")).toBeInTheDocument();
+    await act(async () => resolveDelivery("pending"));
+    expect(screen.queryByText("Запускаем выполнение плана…")).not.toBeInTheDocument();
   });
 
   it("does not mutate Plan settings when its implementation message is already active", async () => {
@@ -4444,128 +4463,29 @@ describe("Activity", () => {
     expect(api.startTurn).not.toHaveBeenCalled();
   });
 
-  it("releases a failed completed-plan claim so acceptance can be retried", async () => {
-    const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    const context = mockThreadConnection(api, planThread, completedPlanDetail());
-    context.sendReliable.mockRejectedValueOnce(new Error("Не удалось сохранить сообщение"));
-    renderThread();
-    const button = screen.getByRole("button", { name: "Да, реализуй этот план" });
-
-    fireEvent.click(button);
-    await waitFor(() =>
-      expect(api.updateThreadSettings).toHaveBeenNthCalledWith(2, "thread", {
-        collaborationMode: "plan",
-      }),
-    );
-
-    fireEvent.click(button);
-
-    await waitFor(() => expect(context.sendReliable).toHaveBeenCalledTimes(2));
-    expect(api.updateThreadSettings).toHaveBeenNthCalledWith(3, "thread", {
-      collaborationMode: "default",
-    });
-  });
-
-  it("starts a completed plan in orchestrator mode", async () => {
-    const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    mockThreadConnection(api, planThread, completedPlanDetail());
-    renderThread();
-
-    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
-
-    await waitFor(() =>
-      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
-        collaborationMode: "team",
-      }),
-    );
-    expect(api.startTurn).toHaveBeenCalledWith(
-      "thread",
-      expect.objectContaining({
-        input: "Да, реализуй этот план в режиме оркестратора",
-        clientMessageId: expect.any(String),
-      }),
-    );
-  });
-
-  it("starts a completed plan in goal mode", async () => {
-    const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    mockThreadConnection(api, planThread, completedPlanDetail());
-    renderThread();
-
-    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме цели" }));
-
-    await waitFor(() =>
-      expect(api.updateThreadSettings).toHaveBeenCalledWith("thread", {
-        collaborationMode: "default",
-      }),
-    );
-    expect(api.startTurn).toHaveBeenCalledWith(
-      "thread",
-      expect.objectContaining({
-        input: "Да, реализуй этот план в режиме цели",
-        goal: true,
-        clientMessageId: expect.any(String),
-      }),
-    );
-  });
-
-  it("returns to Plan mode when orchestrator implementation fails to start", async () => {
-    const api = threadApi();
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    const context = mockThreadConnection(api, planThread, completedPlanDetail());
-    context.sendReliable.mockRejectedValueOnce(new Error("Не удалось сохранить сообщение"));
-    renderThread();
-
-    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
-
-    await waitFor(() =>
-      expect(api.updateThreadSettings).toHaveBeenNthCalledWith(2, "thread", {
-        collaborationMode: "plan",
-      }),
-    );
-    expect(screen.getByText("Не удалось сохранить сообщение")).toBeInTheDocument();
-  });
-
-  it("does not migrate an incompatible Plan session when starting the orchestrator", async () => {
-    const api = threadApi();
-    api.updateThreadSettings.mockRejectedValueOnce(
-      new Error("Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию."),
-    );
-    const planThread = {
-      ...summary,
-      settings: { collaborationMode: "plan" as const },
-    };
-    mockThreadConnection(api, planThread, completedPlanDetail());
-    renderThread();
-
-    fireEvent.click(screen.getByRole("button", { name: "Запустить в режиме оркестратора" }));
-
-    expect(
-      await screen.findByText(
-        "Эта сессия создана до появления managed Team tools. Создайте новую Team-сессию.",
-      ),
-    ).toBeInTheDocument();
-    expect(api.startTurn).not.toHaveBeenCalled();
-    expect(api.updateThreadSettings).toHaveBeenCalledTimes(1);
-    expect(
-      screen.queryByRole("button", { name: "Создать новую Team-сессию" }),
-    ).not.toBeInTheDocument();
-  });
+  it.each(["Да, реализуй этот план", "Запустить в режиме цели", "Запустить в режиме оркестратора"])(
+    "keeps Plan mode and allows retry if %s cannot be saved",
+    async (label) => {
+      const api = threadApi();
+      const context = mockThreadConnection(
+        api,
+        {
+          ...summary,
+          settings: { collaborationMode: "plan" },
+        },
+        completedPlanDetail(),
+      );
+      context.sendReliable.mockRejectedValueOnce(new Error("Не удалось сохранить сообщение"));
+      renderThread();
+      const button = screen.getByRole("button", { name: label });
+      fireEvent.click(button);
+      expect(await screen.findByText("Не удалось сохранить сообщение")).toBeInTheDocument();
+      await waitFor(() => expect(button).toBeEnabled());
+      fireEvent.click(button);
+      await waitFor(() => expect(context.sendReliable).toHaveBeenCalledTimes(2));
+      expect(api.updateThreadSettings).not.toHaveBeenCalled();
+    },
+  );
 
   it("sends plan annotations as revision feedback and blocks plan acceptance", async () => {
     const api = threadApi();

@@ -770,6 +770,7 @@ const ENGLISH: Record<string, string> = {
   "Выполнены действия": "Actions completed",
   "Выполнены команды": "Commands executed",
   "Да, реализуй этот план": "Yes, implement this plan",
+  "Запускаем выполнение плана…": "Starting plan implementation…",
   "Да, реализуй этот план в режиме цели": "Yes, implement this plan in goal mode",
   "Да, реализуй этот план в режиме оркестратора": "Yes, implement this plan in orchestrator mode",
   "План ещё не обновлён после уточнений":

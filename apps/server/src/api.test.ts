@@ -60,6 +60,133 @@ afterEach(async () =>
   ),
 );
 
+describe("durable plan acceptance", () => {
+  it.each(["default", "goal", "team"] as const)(
+    "persists %s acceptance before switching mode, and replays it once",
+    async (mode) => {
+      const { app, bridge, headers, store, projection } = await createTeamHarness();
+      await projection.setSettings("thread", { collaborationMode: "plan", model: "gpt-a" });
+      await store.update((state) => {
+        state.threadMeta.thread!.awaitingPlanResponse = true;
+      });
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (method === "turn/start") {
+          expect(store.view().messageQueues?.thread).toEqual([
+            expect.objectContaining({ id: "accept-plan", planImplementationMode: mode }),
+          ]);
+          expect(store.view().threadMeta.thread?.settings?.collaborationMode).toBe(
+            mode === "team" ? "team" : "default",
+          );
+        }
+        return original(method, params);
+      });
+      const payload = {
+        input: "Implement the plan",
+        clientMessageId: "accept-plan",
+        planImplementationMode: mode,
+      };
+      try {
+        const accepted = await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/queue",
+          headers,
+          payload,
+        });
+        expect(accepted.statusCode).toBe(202);
+        expect(accepted.json()).toMatchObject({ planImplementationMode: mode });
+        await vi.waitFor(() =>
+          expect(store.view().messageReceipts?.["accept-plan"]?.status).toBe("delivered"),
+        );
+        expect(projection.summary("thread")).toMatchObject({
+          currentTurnId: "turn",
+          state: "running",
+          awaitingPlanResponse: false,
+        });
+        const start = bridge.request.mock.calls.find(([method]) => method === "turn/start")![1];
+        expect(start).toMatchObject({ collaborationMode: { mode: "default" } });
+        expect(start.additionalContext).not.toHaveProperty("codexnest.plan");
+        if (mode === "goal") expect(bridge.goal?.status).toBe("active");
+        const replay = await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/queue",
+          headers,
+          payload,
+        });
+        expect(replay.statusCode).toBe(202);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+        ).toHaveLength(1);
+        const conflict = await app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/queue",
+          headers,
+          payload: { ...payload, planImplementationMode: mode === "team" ? "default" : "team" },
+        });
+        expect(conflict.statusCode).toBe(409);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it("keeps an incompatible Team request visible and leaves the session in Plan mode", async () => {
+    const { app, bridge, headers, store, projection } = await createTeamHarness();
+    await projection.setSettings("thread", { collaborationMode: "plan", model: "gpt-a" });
+    await store.update((state) => {
+      delete state.threadMeta.thread!.managedTeamToolsAvailable;
+    });
+    try {
+      const accepted = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: {
+          input: "Implement",
+          clientMessageId: "bad-team",
+          planImplementationMode: "team",
+        },
+      });
+      expect(accepted.statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(store.view().messageQueues?.thread?.[0]?.deliveryError).toMatchObject({
+          retryable: false,
+          message: expect.stringContaining("managed Team tools"),
+        }),
+      );
+      expect(projection.summary("thread")?.settings.collaborationMode).toBe("plan");
+      expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    { planImplementationMode: "plan" },
+    { planImplementationMode: "team", goal: true },
+    {
+      planImplementationMode: "default",
+      replyToAsyncQuestion: { turnId: "turn", itemId: "question" },
+    },
+  ])("rejects an invalid plan command before changing settings: %j", async (extra) => {
+    const { app, bridge, headers, projection } = await createTeamHarness();
+    await projection.setSettings("thread", { collaborationMode: "plan", model: "gpt-a" });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers,
+        payload: { input: "Implement", clientMessageId: "invalid-plan", ...extra },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(projection.summary("thread")?.settings.collaborationMode).toBe("plan");
+      expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe("pasted text delivery", () => {
   it("keeps full context for the model and original Markdown in history and drafts", async () => {
     const { app, bridge, headers } = await createSkillsHarness();

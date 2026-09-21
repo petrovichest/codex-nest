@@ -22,6 +22,37 @@ afterEach(async () => {
 });
 
 describe("MessageQueue", () => {
+  it("retains plan mode across storage recovery and binds it to the message ID", async () => {
+    const { queue, store, delivery } = await setup("active");
+    delivery.paused.mockReturnValue(true);
+    await queue.enqueue("thread", "Implement", [], "accept-plan", {
+      planImplementationMode: "team",
+    });
+    const reopened = new StateStore(store.path);
+    await reopened.load();
+    expect(reopened.view().messageQueues?.thread?.[0]).toMatchObject({
+      planImplementationMode: "team",
+    });
+    await expect(
+      queue.enqueue("thread", "Implement", [], "accept-plan", {
+        planImplementationMode: "default",
+      }),
+    ).rejects.toThrow("already been used");
+    delivery.paused.mockReturnValue(false);
+    await expect(queue.sendNow("thread", "accept-plan")).rejects.toThrow("current turn");
+    expect(delivery.steer).not.toHaveBeenCalled();
+    delivery.currentTurnId.mockReturnValue(null);
+    await queue.drain("thread");
+    expect(delivery.start).toHaveBeenCalledWith(
+      "thread",
+      expect.objectContaining({ planImplementationMode: "team" }),
+    );
+    await expect(
+      queue.enqueue("thread", "Implement", [], "accept-plan", {
+        planImplementationMode: "default",
+      }),
+    ).rejects.toThrow("already been used");
+  });
   it("persists paste-only messages and edits, with paste metadata included in idempotency", async () => {
     const { queue, store, delivery } = await setup("active");
     delivery.paused.mockReturnValue(true);

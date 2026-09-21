@@ -17,7 +17,7 @@ import { AttentionManager } from "./attention";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
 import { RpcError, type JsonlTransport } from "./codex/transport";
-import type { Thread } from "./codex/generated/v2/index";
+import type { Thread, ThreadItem } from "./codex/generated/v2/index";
 import { AppProjection, diffStats } from "./projection";
 import { StateStore } from "./state/store";
 
@@ -114,6 +114,133 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("keeps a revised plan after clarification in live, completed and restored history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-revised-plan-"));
+    directories.push(directory);
+    const path = join(directory, "rollout.jsonl");
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const plan = { type: "plan" as const, id: "revision-plan", text: "Original" };
+    const reply = {
+      type: "userMessage" as const,
+      id: "reply",
+      clientId: "reply-client",
+      content: [{ type: "text" as const, text: "All bots", text_elements: [] }],
+    };
+    const commentary = {
+      type: "agentMessage" as const,
+      id: "commentary",
+      text: "Updating",
+      phase: "commentary" as const,
+      memoryCitation: null,
+    };
+    const revised = { ...plan, text: "Updated" };
+    const source = {
+      ...testTurn("revision", "inProgress"),
+      itemsView: "full" as const,
+      items: [plan, reply, commentary],
+    };
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/turns/list")
+        return { data: [structuredClone(source)], nextCursor: null, backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread({
+      ...thread("one", "/work", 10, { type: "active", activeFlags: [] }, [source]),
+      path,
+    });
+    await projection.setSettings("one", { collaborationMode: "plan" });
+    const emit = (method: string, item: ThreadItem, time: number) =>
+      bridge.emit("notification", {
+        method,
+        params: {
+          threadId: "one",
+          turnId: source.id,
+          item,
+          startedAtMs: time,
+          completedAtMs: time,
+        },
+      });
+    emit("item/completed", plan, 100);
+    emit("item/completed", reply, 200);
+    emit("item/completed", commentary, 300);
+    emit("item/started", { ...plan, text: "" }, 350);
+    emit("item/completed", revised, 400);
+    source.items[0] = revised;
+    const check = (items: ActivityItem[]) => {
+      expect(
+        items
+          .filter((item) => ["plan", "userMessage", "agentMessage"].includes(item.type))
+          .map((item) => item.id),
+      ).toEqual(["reply-client", "commentary", "revision-plan"]);
+      expect(items.find((item) => item.type === "plan")).toMatchObject({ text: "Updated" });
+    };
+    check((await projection.readThread("one")).turns[0]!.items);
+    await writeFile(
+      path,
+      [
+        { type: "event_msg", payload: { type: "task_started", turn_id: source.id } },
+        {
+          type: "response_item",
+          payload: { type: "message", id: "reply", role: "user", content: [{ text: "All bots" }] },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: "commentary",
+            role: "assistant",
+            content: [{ text: "Updating" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: "final",
+            role: "assistant",
+            content: [{ text: "<proposed_plan>Updated</proposed_plan>" }],
+          },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+    );
+    source.status = "completed";
+    source.completedAt = 12;
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event) => events.push(event));
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: structuredClone(source) },
+    });
+    await vi.waitFor(() => {
+      const event = events.findLast((event) => event.type === "turn.replaced");
+      expect(event?.type).toBe("turn.replaced");
+      if (event?.type === "turn.replaced") check(event.turn.items);
+    });
+    check((await projection.readThread("one", { refresh: true })).turns[0]!.items);
+    await store.flushed();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    restored.upsertThread({
+      ...thread("one", "/work", projection.summary("one")!.updatedAt / 1000),
+      path,
+    });
+    check((await restored.readThread("one")).turns[0]!.items);
+    const reads = bridge.request.mock.calls.length;
+    check((await restored.readThread("one")).turns[0]!.items);
+    expect(bridge.request).toHaveBeenCalledTimes(reads);
+  });
   it("keeps three tool screenshots in live, completed and cached history without extra RPCs", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-tool-images-"));
     directories.push(directory);

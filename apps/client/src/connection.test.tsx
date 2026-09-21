@@ -275,6 +275,71 @@ describe("ConnectionProvider", () => {
     view.unmount();
   });
 
+  it("preserves plan implementation mode through outbox restoration and retries", async () => {
+    const planImplementationMode = "team" as const;
+    const message: OutboxMessage = {
+      id: "answer",
+      threadId: "thread",
+      connectionKey: "https://codexnest.example",
+      input: "Ответ",
+      images: [],
+      goal: false,
+      createdAt: 1,
+      attempts: 0,
+      lastError: null,
+      planImplementationMode,
+    };
+    const actual = await import("./offline-store");
+    message.connectionKey = actual.connectionCacheKey({
+      baseUrl: "https://codexnest.example",
+      token: "token",
+    });
+    listOutboxMessages.mockResolvedValue([message]);
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "answer",
+            threadId: "thread",
+            text: "Ответ",
+            status: "queued",
+            createdAt: 1,
+            planImplementationMode,
+          }),
+          { status: 202 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe onConnection={(value) => (controls = value)} />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(putOutboxMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ planImplementationMode, attempts: 1 }),
+      ),
+    );
+    await act(async () => {
+      await controls!.retryReliableMessage("thread", "answer");
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, request] of fetchMock.mock.calls)
+      expect(JSON.parse(request.body)).toMatchObject({
+        clientMessageId: "answer",
+        planImplementationMode,
+      });
+    expect(acknowledgeOutboxMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "answer", accepted: true, planImplementationMode }),
+    );
+    view.unmount();
+  });
+
   it("preserves paste provenance through offline outbox restoration and retries", async () => {
     const pastes = {
       inlinePastes: [{ id: "short", start: 0, end: 5 }],

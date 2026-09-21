@@ -4,6 +4,7 @@ import type {
   AsyncQuestionReference,
   UserInputReply,
   SessionSettings,
+  PlanImplementationMode,
   ThreadDetail,
   ThreadDraft,
   ThreadGoal,
@@ -83,6 +84,7 @@ export type OutboxMessage = PastedText & {
   images: string[];
   files?: ThreadFileAttachment[];
   goal: boolean;
+  planImplementationMode?: PlanImplementationMode;
   createdAt: number;
   attempts: number;
   lastError: string | null;
@@ -334,6 +336,7 @@ export function outboxMessageIntent(value: OutboxMessage): string {
     value.replyToUserInput,
     value.dismissUserInput,
     pastedText(value),
+    value.planImplementationMode,
   ]);
 }
 

@@ -2057,6 +2057,8 @@ function isQueuedMessage(value: unknown, threadId: string): value is QueuedMessa
     (value.files === undefined ||
       (Array.isArray(value.files) && value.files.every(isStoredFileAttachment))) &&
     (value.goal === undefined || typeof value.goal === "boolean") &&
+    (value.planImplementationMode === undefined ||
+      ["default", "goal", "team"].includes(String(value.planImplementationMode))) &&
     (value.dismissUserInput === undefined || isUserInputReference(value.dismissUserInput)) &&
     (value.deliveryVersion === undefined || value.deliveryVersion === 1) &&
     (value.replyToUserInput === undefined ||

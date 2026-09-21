@@ -38,6 +38,61 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("moves a reused plan ID after its clarification and starts a fresh streaming revision", () => {
+    const plan: ActivityItem = {
+      type: "plan",
+      id: "plan",
+      text: "Original",
+      status: "completed",
+      timestamp: 10,
+      images: [],
+      phase: null,
+    };
+    const reply: ActivityItem = {
+      ...plan,
+      type: "userMessage",
+      id: "reply",
+      text: "Broaden scope",
+      timestamp: 20,
+    };
+    let state = clientReducer(initialState, { type: "snapshot", snapshot });
+    state = clientReducer(state, {
+      type: "detail",
+      detail: {
+        summary: baseThread,
+        queuedMessages: [],
+        olderTurnsCursor: null,
+        turns: [{ ...turn("turn"), items: [plan, reply] }],
+      },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...plan, status: "inProgress", text: "", timestamp: 30 },
+      },
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["reply", "plan"]);
+    expect(state.details.one?.turns[0]?.items[1]).toMatchObject({ status: "inProgress", text: "" });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 6 },
+      event: {
+        type: "activity.upserted",
+        threadId: "one",
+        turnId: "turn",
+        item: { ...plan, text: "Revised", timestamp: 40 },
+      },
+    });
+    expect(state.details.one?.turns[0]?.items.map((item) => item.id)).toEqual(["reply", "plan"]);
+    expect(state.details.one?.turns[0]?.items[1]).toMatchObject({
+      status: "completed",
+      text: "Revised",
+    });
+  });
   it("restores cached limits and applies only current, ordered server updates", () => {
     const codexRateLimits = {
       limits: {

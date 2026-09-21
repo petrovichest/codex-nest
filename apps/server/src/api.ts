@@ -39,6 +39,7 @@ import type {
   ModelOption,
   MoveProjectRequest,
   PermissionPreset,
+  PlanImplementationMode,
   Project,
   QueueMessageRequest,
   QueuedMessage,
@@ -558,6 +559,75 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   };
   const durableDelivery = new DurableDelivery(store, bridge);
 
+  const updateThreadSettings = async (
+    threadId: string,
+    patch: UpdateThreadSettingsRequest,
+  ): Promise<ThreadSummary> => {
+    const summary = projection.summary(threadId);
+    if (!summary) throw new ProjectNotFoundError("Thread not found");
+    assertWritableThread(summary);
+    if (
+      patch.collaborationMode !== undefined &&
+      patch.collaborationMode !== "team" &&
+      summary.settings.collaborationMode === "team" &&
+      teamOrchestrationHasWork(store, threadId)
+    ) {
+      throw new ProjectConflictError(
+        "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
+      );
+    }
+    if (summary.currentTurnId) {
+      throw new ProjectConflictError("Settings cannot be changed while a turn is running");
+    }
+    const settings = mergeSettings(summary.settings, patch, projection.availableModels);
+    if (
+      settings.collaborationMode === "team" &&
+      summary.settings.collaborationMode !== "team" &&
+      store.view().threadMeta[threadId]?.managedTeamToolsAvailable !== true
+    ) {
+      throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
+    }
+    if (
+      settings.collaborationMode === "team" &&
+      summary.settings.collaborationMode !== "team" &&
+      (await readThreadGoal(bridge, threadId))
+    ) {
+      throw new ProjectConflictError("Team mode cannot be combined with a goal");
+    }
+    if (settings.collaborationMode === "team" && summary.settings.collaborationMode !== "team") {
+      const resumeParams = {
+        threadId,
+        cwd: summary.cwd,
+        excludeTurns: true,
+        ...threadSettings(settings),
+        ...(store.view().threadMeta[threadId]?.sessionArtifactsVersion === 1
+          ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
+          : {}),
+        config:
+          browserExtension?.runtimeConfig(threadId, teamRuntimeConfig()) ?? teamRuntimeConfig(),
+      };
+      try {
+        await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
+      } catch (error) {
+        if (!projection.isUnmaterialized(threadId) || !isMissingRolloutError(error)) {
+          throw error;
+        }
+        // Codex does not persist an empty thread until its first durable metadata update.
+        // Materialize the rollout without starting a model turn or assigning a fake title.
+        await bridge.request("thread/metadata/update", {
+          threadId,
+          gitInfo: { sha: null },
+        });
+        await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
+      }
+    }
+    const thread = await projection.setSettings(threadId, settings);
+    if (patch.reasoningEffort !== undefined) {
+      await projection.setDefaultReasoningEffort(settings.reasoningEffort);
+    }
+    return thread;
+  };
+
   const startTurnUnlocked = async (
     threadId: string,
     input: string,
@@ -568,6 +638,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     replyToAsyncQuestion?: AsyncQuestionReference,
     dismissUserInput?: AsyncQuestionReference,
     pastes: PastedText = {},
+    planImplementationMode?: PlanImplementationMode,
   ): Promise<TurnStartResult> => {
     if (clientMessageId) {
       const receipt = store.view().messageReceipts?.[clientMessageId];
@@ -586,6 +657,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               replyToAsyncQuestion,
               dismissUserInput,
               pastes,
+              planImplementationMode,
             )
         ) {
           throw new MessageQueueConflictError("Message id has already been used");
@@ -600,6 +672,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     assertWritableThread(summary);
     const validatedFiles = await attachments.validate(threadId, files);
     assertDirectInput(summary);
+    if (planImplementationMode) {
+      try {
+        summary = await updateThreadSettings(threadId, {
+          collaborationMode: planImplementationMode === "team" ? "team" : "default",
+        });
+      } catch (error) {
+        if (error instanceof ProjectConflictError || error instanceof ProjectValidationError) {
+          throw new MessageQueueValidationError(error.message);
+        }
+        throw error;
+      }
+    }
     if (summary.settings.collaborationMode === "team") {
       const automaticContinuation =
         !clientMessageId && !input.trim() && !images.length && !validatedFiles.length;
@@ -705,6 +789,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             replyToAsyncQuestion,
             dismissUserInput,
             pastes,
+            planImplementationMode,
           ),
           "turn/start",
           startParams,
@@ -800,6 +885,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     replyToAsyncQuestion?: AsyncQuestionReference,
     dismissUserInput?: AsyncQuestionReference,
     pastes: PastedText = {},
+    planImplementationMode?: PlanImplementationMode,
   ): Promise<TurnStartResult> => {
     return withKeyLock(turnStartLocks, threadId, async () => {
       const release = codexManager?.beginTurn();
@@ -814,8 +900,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           replyToAsyncQuestion,
           dismissUserInput,
           pastes,
+          planImplementationMode,
         );
       const result =
+        planImplementationMode === "team" ||
         projection.summary(threadId)?.settings.collaborationMode === "team"
           ? withKeyLock(teamParentLocks, threadId, run)
           : run();
@@ -1311,6 +1399,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.replyToAsyncQuestion,
         message.dismissUserInput,
         message,
+        message.planImplementationMode,
       ).then((result) => result.turnId),
     steer: (threadId, turnId, message) =>
       steerTurn(
@@ -3959,6 +4048,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const operation = store.view().forkOperations?.[request.params.id];
       if (!operation) return apiError(reply, 404, "not_found", "Fork operation not found");
       const body = validateQueueMessageBody(request.body);
+      if (body.planImplementationMode) {
+        throw new ProjectValidationError("Plan implementation requires an existing session");
+      }
       if (operation.status === "ready" && operation.targetThreadId) {
         const files = await attachments.validate(operation.targetThreadId, body.files);
         const message = await queue.enqueue(
@@ -4219,75 +4311,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (Object.keys(patch).length === 0) {
         return apiError(reply, 400, "validation_failed", "At least one setting is required");
       }
-      const summary = projection.summary(request.params.id);
-      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      assertWritableThread(summary);
-      if (
-        patch.collaborationMode !== undefined &&
-        patch.collaborationMode !== "team" &&
-        summary.settings.collaborationMode === "team" &&
-        teamOrchestrationHasWork(store, request.params.id)
-      ) {
-        throw new ProjectConflictError(
-          "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
-        );
-      }
-      if (summary.currentTurnId) {
-        return apiError(
-          reply,
-          409,
-          "conflict",
-          "Settings cannot be changed while a turn is running",
-        );
-      }
-      const settings = mergeSettings(summary.settings, patch, projection.availableModels);
-      if (
-        settings.collaborationMode === "team" &&
-        summary.settings.collaborationMode !== "team" &&
-        store.view().threadMeta[request.params.id]?.managedTeamToolsAvailable !== true
-      ) {
-        throw new ProjectConflictError(TEAM_SESSION_UPGRADE_MESSAGE);
-      }
-      if (
-        settings.collaborationMode === "team" &&
-        summary.settings.collaborationMode !== "team" &&
-        (await readThreadGoal(bridge, request.params.id))
-      ) {
-        throw new ProjectConflictError("Team mode cannot be combined with a goal");
-      }
-      if (settings.collaborationMode === "team" && summary.settings.collaborationMode !== "team") {
-        const resumeParams = {
-          threadId: request.params.id,
-          cwd: summary.cwd,
-          excludeTurns: true,
-          ...threadSettings(settings),
-          ...(store.view().threadMeta[request.params.id]?.sessionArtifactsVersion === 1
-            ? { developerInstructions: SESSION_ARTIFACT_INSTRUCTIONS }
-            : {}),
-          config:
-            browserExtension?.runtimeConfig(request.params.id, teamRuntimeConfig()) ??
-            teamRuntimeConfig(),
-        };
-        try {
-          await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
-        } catch (error) {
-          if (!projection.isUnmaterialized(request.params.id) || !isMissingRolloutError(error)) {
-            throw error;
-          }
-          // Codex does not persist an empty thread until its first durable metadata update.
-          // Materialize the rollout without starting a model turn or assigning a fake title.
-          await bridge.request("thread/metadata/update", {
-            threadId: request.params.id,
-            gitInfo: { sha: null },
-          });
-          await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
-        }
-      }
-      const thread = await projection.setSettings(request.params.id, settings);
-      if (patch.reasoningEffort !== undefined) {
-        await projection.setDefaultReasoningEffort(settings.reasoningEffort);
-      }
-      return thread;
+      return withKeyLock(turnStartLocks, request.params.id, () =>
+        updateThreadSettings(request.params.id, patch),
+      );
     },
   );
 
@@ -4351,6 +4377,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         body.clientMessageId,
         {
           goal: body.goal,
+          planImplementationMode: body.planImplementationMode,
           ...pastedText(body),
           files,
           replyToAsyncQuestion: body.replyToAsyncQuestion,
@@ -7948,6 +7975,7 @@ function validateQueueMessageBody(value: unknown): PastedText & {
   images: string[];
   files: ThreadFileAttachment[];
   goal: boolean;
+  planImplementationMode?: PlanImplementationMode;
   clientMessageId?: string;
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
@@ -7964,6 +7992,7 @@ function validateQueueMessageBody(value: unknown): PastedText & {
           "images",
           "files",
           "goal",
+          "planImplementationMode",
           "clientMessageId",
           "replyToAsyncQuestion",
           "replyToUserInput",
@@ -7989,7 +8018,19 @@ function validateQueueMessageBody(value: unknown): PastedText & {
   if (body.goal !== undefined && typeof body.goal !== "boolean") {
     throw new ProjectValidationError("goal must be boolean");
   }
-  if (body.goal && (!body.input.trim() || body.input.trim().length > 4_000)) {
+  const planImplementationMode = body.planImplementationMode;
+  if (
+    planImplementationMode !== undefined &&
+    (!["default", "goal", "team"].includes(planImplementationMode) ||
+      body.replyToAsyncQuestion ||
+      body.replyToUserInput ||
+      body.dismissUserInput ||
+      (body.goal !== undefined && body.goal !== (planImplementationMode === "goal")))
+  ) {
+    throw new ProjectValidationError("Invalid plan implementation mode");
+  }
+  const goal = planImplementationMode ? planImplementationMode === "goal" : (body.goal ?? false);
+  if (goal && (!body.input.trim() || body.input.trim().length > 4_000)) {
     throw new ProjectValidationError("goal objective must be 1-4000 characters");
   }
   if (body.clientMessageId !== undefined && clientMessageId === null) {
@@ -8041,7 +8082,8 @@ function validateQueueMessageBody(value: unknown): PastedText & {
     ...pastedText(body),
     images,
     files,
-    goal: body.goal ?? false,
+    goal,
+    ...(planImplementationMode ? { planImplementationMode } : {}),
     ...(clientMessageId ? { clientMessageId } : {}),
     ...(replyToAsyncQuestion ? { replyToAsyncQuestion } : {}),
     ...(replyToUserInput ? { replyToUserInput } : {}),

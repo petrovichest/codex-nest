@@ -985,6 +985,21 @@ function upsertActivity(
   const allowPhaseMismatch = canonicalItemsLoaded === false;
   const existing = items.findIndex((candidate) => candidate.id === item.id);
   if (existing >= 0) {
+    const previous = items[existing]!;
+    if (
+      item.type === "plan" &&
+      previous.type === "plan" &&
+      previous.status === "completed" &&
+      item.timestamp !== null &&
+      previous.timestamp !== null &&
+      item.timestamp > previous.timestamp
+    ) {
+      // A second proposed_plan in one turn reuses its ID. This starts a new
+      // revision after the clarification, rather than editing the old position.
+      const next = items.filter((candidate) => candidate.id !== item.id);
+      next.splice(chronologicalActivityPosition(next, item), 0, item);
+      return next;
+    }
     const next = [...items];
     const completedLiveItem =
       reconcileCompletedAlias &&
