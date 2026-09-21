@@ -93,6 +93,8 @@ project search, reviewing progress and opening the result. All projects and
 conversations shown here are demonstration data. Select an image to view it at
 full size.
 
+Captured from the v0.1.9 interface at [`b8805aa`](https://github.com/petrovichest/codex-nest/commit/b8805aa0ee30e5617de06497ff310d0bbc0c24cc), on September 21, 2026.
+
 ### A workspace for your projects
 
 The floating sidebar keeps projects and sessions alongside the conversation.
@@ -107,6 +109,13 @@ Choose an answer or write your own while a follow-up waits in the queue.
 The light theme uses the same layout and controls as the dark theme.
 
 [![Light desktop workspace with a clarification question and a queued follow-up](./docs/assets/desktop-queue.png)](./docs/assets/desktop-queue.png)
+
+### Keep decisions in context
+
+Submitted answers keep the full question beside your choice, grouped in one
+floating card. Return to the conversation to see what was agreed and why.
+
+[![Light desktop workspace showing submitted answers with their full questions in one floating card](./docs/assets/desktop-answers.png)](./docs/assets/desktop-answers.png)
 
 ### Inspect the work behind the answer
 

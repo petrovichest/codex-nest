@@ -40,7 +40,15 @@ test("capture the documentation gallery", async ({ browser }) => {
       failures.push(`Unexpected request: ${url.origin}${url.pathname}`);
       return route.abort();
     });
-    await installDocsFixture(page, theme, name === "desktop-activity");
+    await installDocsFixture(
+      page,
+      theme,
+      name === "desktop-activity"
+        ? "activity"
+        : name === "desktop-answers"
+          ? "answers"
+          : "conversation",
+    );
     await page.goto(`http://127.0.0.1:4173/threads/${thread}`);
     await expect(
       page.getByRole("heading", { name: /Add project search|Choose search behavior/ }),
@@ -66,6 +74,12 @@ test("capture the documentation gallery", async ({ browser }) => {
   await screen("desktop-session", "dark", false, "session-main");
   await screen("desktop-queue", "light", false, "session-attention", async (page) => {
     await expect(page.getByText("Also check the empty state on a narrow screen.")).toBeVisible();
+  });
+  await screen("desktop-answers", "light", false, "session-main", async (page) => {
+    const answers = page.locator(".user-input-response");
+    await expect(answers.locator("section")).toHaveCount(2);
+    await expect(answers).toContainText("When should the project list update");
+    await expect(answers).not.toContainText("(Recommended)");
   });
   await screen("desktop-activity", "dark", false, "session-main", async (page) => {
     await page.locator(".turn-activity-toggle").click();

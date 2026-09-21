@@ -3,7 +3,7 @@ import type { AppSnapshot, ThreadDetail } from "@codexnest/protocol";
 
 import { installVisualFixture, snapshot } from "../visual/fixtures";
 
-const NOW = Date.UTC(2026, 7, 3, 12);
+const NOW = Date.UTC(2026, 8, 21, 12);
 const ORIGIN = "https://codexnest.visual";
 
 export const report = `# Project search
@@ -189,6 +189,44 @@ const mainDetail: ThreadDetail = {
   ],
 };
 
+const answersDetail: ThreadDetail = {
+  ...mainDetail,
+  turns: mainDetail.turns.map((turn) => ({
+    ...turn,
+    items: [
+      turn.items[0]!,
+      {
+        type: "userInputResponse",
+        id: "search-decisions",
+        status: "completed",
+        timestamp: NOW - 720_000,
+        afterItemId: "search-request",
+        entries: [
+          {
+            header: "Search behavior",
+            question: "When should the project list update while you enter a search?",
+            answers: ["As you type (Recommended)"],
+          },
+          {
+            header: "Mobile layout",
+            question: "How should clearing a search work on a narrow screen?",
+            answers: ["Keep a clear button next to the search field."],
+          },
+        ],
+      },
+      {
+        type: "agentMessage",
+        id: "search-decisions-result",
+        status: "completed",
+        text: "Search now filters as you type. The clear button stays beside the field on desktop and mobile.",
+        images: [],
+        timestamp: NOW - 600_000,
+        phase: "final_answer",
+      },
+    ],
+  })),
+};
+
 const attentionDetail: ThreadDetail = {
   summary: summary("session-attention"),
   olderTurnsCursor: null,
@@ -226,9 +264,12 @@ const attentionDetail: ThreadDetail = {
 export async function installDocsFixture(
   page: Page,
   theme: "light" | "dark",
-  activityOnly = false,
+  scene: "conversation" | "activity" | "answers" = "conversation",
 ) {
   await installVisualFixture(page, { theme, snapshot: demoSnapshot });
+  await page.addInitScript((now) => {
+    Date.now = () => now;
+  }, NOW);
   // Keep documentation content separate from the visual regression fixtures.
   await page.route(`${ORIGIN}/api/v1/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -241,14 +282,16 @@ export async function installDocsFixture(
       });
     if (route.request().method() === "OPTIONS") return route.fallback();
     if (path === "/api/v1/threads/session-main") {
+      const detail = scene === "answers" ? answersDetail : mainDetail;
       return json({
-        ...mainDetail,
-        turns: mainDetail.turns.map((turn) => ({
+        ...detail,
+        turns: detail.turns.map((turn) => ({
           ...turn,
           // The activity scene keeps commands and patches in view without clipping a plan.
-          items: activityOnly
-            ? turn.items.filter((item) => item.type !== "plan" && item.type !== "planChecklist")
-            : turn.items,
+          items:
+            scene === "activity"
+              ? turn.items.filter((item) => item.type !== "plan" && item.type !== "planChecklist")
+              : turn.items,
         })),
       });
     }
