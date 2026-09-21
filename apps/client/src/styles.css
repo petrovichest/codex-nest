@@ -4792,6 +4792,8 @@ button.message-file:hover:not(:disabled) {
 }
 
 .session-inspector {
+  /* Paint the floating shadow above the adjacent conversation's background. */
+  z-index: 1;
   width: 352px;
   max-width: 352px;
   flex: 0 0 352px;

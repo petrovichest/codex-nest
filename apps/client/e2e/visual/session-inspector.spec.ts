@@ -115,6 +115,21 @@ for (const theme of ["light", "dark"] as const) {
         await toggle.click();
         const inspector = page.locator(".session-inspector");
         await expect(inspector).toHaveCSS("box-shadow", panelShadow);
+        if (width === 1440) {
+          // Equal shadow tokens are not enough: the chat must not paint over the shadow.
+          const bounds = (await inspector.boundingBox())!;
+          const clip = {
+            x: bounds.x - 16,
+            y: bounds.y + bounds.height / 2,
+            width: 12,
+            height: 40,
+          };
+          const shadow = await page.screenshot({ clip });
+          await inspector.evaluate((element) => (element.style.boxShadow = "none"));
+          const noShadow = await page.screenshot({ clip });
+          await inspector.evaluate((element) => element.style.removeProperty("box-shadow"));
+          expect(shadow.equals(noShadow), "panel shadow remains visible over the chat").toBe(false);
+        }
         if (route.startsWith("/threads/")) {
           await inspector.getByRole("tab", { name: /^Артефакты/u }).click();
           await expect(inspector.locator(".inspector-artifact-list")).toBeVisible();
