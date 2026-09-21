@@ -254,6 +254,8 @@ const ENGLISH: Record<string, string> = {
   "Повторить обновление лимитов Codex": "Retry refreshing Codex limits",
   "Показать лимиты Codex": "Show Codex limits",
   "Обновить лимиты Codex: {{text}}": "Refresh Codex limits: {{text}}",
+  "Последнее обновление: {{time}}": "Last updated: {{time}}",
+  "Не удалось обновить лимиты Codex": "Could not refresh Codex limits",
   Подключено: "Connected",
   "Подключение…": "Connecting…",
   "Нет связи": "Offline",

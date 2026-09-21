@@ -110,6 +110,13 @@ export type CodexRateLimitsResponse = {
   rateLimitReachedType?: string | null;
 };
 
+export type CodexRateLimitsState = {
+  limits: CodexRateLimitsResponse | null;
+  updatedAt: number | null;
+  refreshing: boolean;
+  refreshError: boolean;
+};
+
 export type SkillScope = "user" | "repo" | "system" | "admin";
 
 export type SkillCatalogItem = {
@@ -889,6 +896,7 @@ export type AppSnapshot = {
   sequence: number;
   uiLanguage: UiLanguage;
   connection: ConnectionView;
+  codexRateLimits?: CodexRateLimitsState;
   projects: Project[];
   threads: ThreadSummary[];
   attention: AttentionRequest[];
@@ -901,6 +909,7 @@ export type AppSnapshot = {
 
 export type ServerEvent =
   | { type: "connection.changed"; connection: ConnectionView }
+  | { type: "codexRateLimits.changed"; codexRateLimits: CodexRateLimitsState }
   | { type: "project.upserted"; project: Project }
   | { type: "projects.reordered"; projects: Project[] }
   | { type: "project.removed"; projectId: string }

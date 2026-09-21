@@ -704,20 +704,34 @@ function Sidebar({
     serverBaseUrl,
     byParent: new Map(),
   });
-  const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
-  const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
-  const [rateLimitsError, setRateLimitsError] = useState(false);
+  const [legacyRateLimits, setLegacyRateLimits] = useState<CodexRateLimitsResponse | null>(null);
+  const [legacyRateLimitsUpdatedAt, setLegacyRateLimitsUpdatedAt] = useState<number | null>(null);
+  const [manualRateLimitsLoading, setManualRateLimitsLoading] = useState(false);
+  const [manualRateLimitsError, setManualRateLimitsError] = useState(false);
+  const sharedRateLimits = state.snapshot?.codexRateLimits;
+  const rateLimits = sharedRateLimits ? sharedRateLimits.limits : legacyRateLimits;
+  const rateLimitsUpdatedAt = sharedRateLimits
+    ? sharedRateLimits.updatedAt
+    : legacyRateLimitsUpdatedAt;
+  const rateLimitsLoading = manualRateLimitsLoading || sharedRateLimits?.refreshing === true;
+  const rateLimitsError = manualRateLimitsError || sharedRateLimits?.refreshError === true;
   const [searchOpen, setSearchOpen] = useState(false);
   const rateLimitsGeneration = useRef(0);
+  const rateLimitsRequestPending = useRef(false);
   useEffect(() => {
     rateLimitsGeneration.current++;
-    setRateLimits(null);
-    setRateLimitsError(false);
-    setRateLimitsLoading(false);
+    rateLimitsRequestPending.current = false;
+    setLegacyRateLimits(null);
+    setLegacyRateLimitsUpdatedAt(null);
+    setManualRateLimitsError(false);
+    setManualRateLimitsLoading(false);
     return () => {
       rateLimitsGeneration.current++;
     };
   }, [api, state.snapshot?.instanceId]);
+  useEffect(() => {
+    setManualRateLimitsError(false);
+  }, [sharedRateLimits]);
   if (activeFeedRunningOrderRef.current.serverBaseUrl !== serverBaseUrl) {
     activeFeedRunningOrderRef.current = { serverBaseUrl, byParent: new Map() };
   }
@@ -1322,22 +1336,37 @@ function Sidebar({
   }
 
   async function refreshRateLimits() {
-    if (rateLimitsLoading) return;
+    if (rateLimitsLoading || rateLimitsRequestPending.current) return;
     const generation = ++rateLimitsGeneration.current;
-    setRateLimitsLoading(true);
-    setRateLimitsError(false);
+    rateLimitsRequestPending.current = true;
+    setManualRateLimitsLoading(true);
+    setManualRateLimitsError(false);
     try {
       const limits = await api.readCodexRateLimits();
       if (generation !== rateLimitsGeneration.current) return;
-      setRateLimits(limits);
+      if (!sharedRateLimits) {
+        setLegacyRateLimits(limits);
+        setLegacyRateLimitsUpdatedAt(Date.now());
+      }
     } catch {
-      if (generation === rateLimitsGeneration.current) setRateLimitsError(true);
+      if (generation === rateLimitsGeneration.current) setManualRateLimitsError(true);
     } finally {
-      if (generation === rateLimitsGeneration.current) setRateLimitsLoading(false);
+      if (generation === rateLimitsGeneration.current) {
+        rateLimitsRequestPending.current = false;
+        setManualRateLimitsLoading(false);
+      }
     }
   }
 
   const rateLimitsText = rateLimitsLabel(rateLimits, rateLimitsError, language, t);
+  const rateLimitsDescription = rateLimitsAriaLabel(
+    rateLimitsText,
+    rateLimitsLoading,
+    rateLimitsError,
+    rateLimitsUpdatedAt,
+    language,
+    t,
+  );
   const projectDragTargets = projectDrag
     ? displayedProjectIds.filter((projectId) => projectId !== projectDrag.projectId)
     : [];
@@ -1387,7 +1416,8 @@ function Sidebar({
         </NavLink>
         <button
           aria-busy={rateLimitsLoading}
-          aria-label={rateLimitsAriaLabel(rateLimitsText, rateLimitsLoading, rateLimitsError, t)}
+          aria-label={rateLimitsDescription}
+          title={rateLimitsDescription}
           className="sidebar-control-action codex-limits"
           disabled={rateLimitsLoading}
           onClick={() => void refreshRateLimits()}
@@ -2390,8 +2420,7 @@ function rateLimitsLabel(
   language: UiLanguage,
   t: Translate,
 ): string {
-  if (error) return t("Повторить лимиты");
-  if (!limits) return t("Лимиты Codex");
+  if (!limits) return error ? t("Повторить лимиты") : t("Лимиты Codex");
   const windows = [limits.primary, limits.secondary]
     .filter((window): window is CodexRateLimitWindow => window !== null)
     .map((window) => formatRateLimitWindow(window, language, t));
@@ -2425,12 +2454,33 @@ function rateLimitDuration(minutes: number | null, t: Translate): string {
   return t("{{count}} мин", { count: minutes });
 }
 
-function rateLimitsAriaLabel(text: string, loading: boolean, error: boolean, t: Translate): string {
-  if (loading) return t("Обновляем лимиты Codex");
-  if (error) return t("Повторить обновление лимитов Codex");
-  return text === t("Лимиты Codex")
-    ? t("Показать лимиты Codex")
-    : t("Обновить лимиты Codex: {{text}}", { text });
+function rateLimitsAriaLabel(
+  text: string,
+  loading: boolean,
+  error: boolean,
+  updatedAt: number | null,
+  language: UiLanguage,
+  t: Translate,
+): string {
+  const action = loading
+    ? t("Обновляем лимиты Codex")
+    : error
+      ? t("Повторить обновление лимитов Codex")
+      : text === t("Лимиты Codex")
+        ? t("Показать лимиты Codex")
+        : t("Обновить лимиты Codex: {{text}}", { text });
+  if (updatedAt === null) return action;
+  const time = new Intl.DateTimeFormat(language === "ru" ? "ru-RU" : "en-US", {
+    dateStyle: "short",
+    timeStyle: "medium",
+  }).format(updatedAt);
+  return [
+    action,
+    t("Последнее обновление: {{time}}", { time }),
+    error ? t("Не удалось обновить лимиты Codex") : null,
+  ]
+    .filter(Boolean)
+    .join(". ");
 }
 
 function ConnectionDot({ state }: { state: "connecting" | "connected" | "offline" }) {

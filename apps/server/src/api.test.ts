@@ -1816,7 +1816,8 @@ describe("file downloads", () => {
         projectRoot: workspace,
       },
     );
-    const requests = vi.spyOn(bridge, "request");
+    await app.ready();
+    const requests = vi.spyOn(bridge, "request").mockClear();
     const issue = (path: string, threadId = "images") =>
       app.inject({
         method: "POST",
@@ -3612,6 +3613,7 @@ describe("thread settings", () => {
 
   it("validates native search requests and returns compatibility failures explicitly", async () => {
     const { app, bridge, headers } = await createForkHarness();
+    await app.ready();
     bridge.request.mockClear();
     for (const url of [
       "/api/v1/threads/search?q=",
@@ -4982,7 +4984,7 @@ describe("thread settings", () => {
 
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     const rateLimits = await app.inject({ url: "/api/v1/codex/rate-limits", headers });
     expect(rateLimits.statusCode).toBe(200);
     expect(rateLimits.json()).toEqual({
@@ -4998,7 +5000,10 @@ describe("thread settings", () => {
     });
     expect(
       bridge.request.mock.calls.filter(([method]) => method === "account/rateLimits/read"),
-    ).toEqual([["account/rateLimits/read", undefined]]);
+    ).toEqual([
+      ["account/rateLimits/read", undefined],
+      ["account/rateLimits/read", undefined],
+    ]);
 
     const management = await app.inject({ url: "/api/v1/settings/codex", headers });
     expect(management.statusCode).toBe(200);
@@ -8196,8 +8201,8 @@ describe.each([1, 0])("reliable first messages (delivery version %s)", (delivery
         bridge.request.mock.calls
           .filter(
             ([method, params]) =>
-              params.threadId === id &&
-              ["turn/start", "thread/resume", "thread/turns/list"].includes(method),
+              ["turn/start", "thread/resume", "thread/turns/list"].includes(method) &&
+              params.threadId === id,
           )
           .map(([method]) => method),
       ).toEqual(["turn/start"]);

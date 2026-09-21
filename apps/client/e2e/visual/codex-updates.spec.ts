@@ -1,6 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Route } from "@playwright/test";
-import type { ThreadDetail, ThreadSearchOccurrence, TurnView } from "@codexnest/protocol";
+import { expect, test, type Route, type WebSocketRoute } from "@playwright/test";
+import type {
+  CodexRateLimitsState,
+  ThreadDetail,
+  ThreadSearchOccurrence,
+  TurnView,
+} from "@codexnest/protocol";
 import {
   installVisualFixture,
   mainThread,
@@ -329,32 +334,74 @@ for (const mobile of [false, true]) {
 }
 
 for (const mobile of [false, true]) {
-  test(`quota button only refreshes inline values on ${mobile ? "mobile" : "desktop"}`, async ({
+  test(`quota values stream and survive refresh failures on ${mobile ? "mobile" : "desktop"}`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
     await installVisualFixture(page, { theme: mobile ? "dark" : "light" });
+    let limits: CodexRateLimitsState = {
+      limits: {
+        primary: { usedPercent: 8, windowDurationMins: 10_080, resetsAt: Date.UTC(2026, 8, 25) },
+        secondary: null,
+      },
+      updatedAt: Date.UTC(2026, 8, 21, 12),
+      refreshing: false,
+      refreshError: false,
+    };
+    let sequence = snapshot.sequence;
+    let socket: WebSocketRoute;
+    await page.routeWebSocket("wss://codexnest.visual/api/v1/events", (ws) => {
+      socket = ws;
+      ws.onMessage((message) => {
+        const frame = JSON.parse(message.toString());
+        if (frame.type === "authenticate") {
+          ws.send(
+            JSON.stringify({
+              type: "snapshot",
+              snapshot: {
+                ...snapshot,
+                instanceId: "limits-server",
+                sequence,
+                codexRateLimits: limits,
+              },
+            }),
+          );
+        } else if (frame.type === "ping") {
+          ws.send(JSON.stringify({ type: "pong" }));
+        }
+      });
+    });
+    const publish = (next: CodexRateLimitsState) => {
+      limits = next;
+      sequence++;
+      socket.send(
+        JSON.stringify({
+          type: "event",
+          sequence,
+          version: { instanceId: "limits-server", sequence },
+          event: { type: "codexRateLimits.changed", codexRateLimits: limits },
+        }),
+      );
+    };
     let reads = 0;
     await page.route("https://codexnest.visual/api/v1/codex/rate-limits", async (route) => {
       if (route.request().method() === "OPTIONS") return route.fallback();
       reads++;
-      if (reads === 2)
+      if (reads === 1) {
+        publish({ ...limits, refreshError: true });
         return json(
           route,
           { error: { code: "app_server_unavailable", message: "Unavailable" } },
           503,
         );
-      return json(route, {
-        primary: {
-          usedPercent: reads === 1 ? 8 : 12,
-          windowDurationMins: 10_080,
-          resetsAt: Date.UTC(2026, 8, 19),
-        },
-        secondary: null,
-        ordinaryUsageAllowed: true,
-        spendControlReached: false,
-        rateLimitReachedType: null,
+      }
+      publish({
+        ...limits,
+        refreshError: false,
+        updatedAt: limits.updatedAt! + 300_000,
+        limits: { ...limits.limits!, primary: { ...limits.limits!.primary!, usedPercent: 12 } },
       });
+      return json(route, limits.limits);
     });
     await page.goto("/threads/session-main");
     await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
@@ -362,18 +409,32 @@ for (const mobile of [false, true]) {
     expect(reads).toBe(0);
     const button = page.locator(".codex-limits");
     const dialog = page.getByRole("dialog", { name: "Лимиты Codex" });
+    await expect(button).toHaveText("25.09 92%");
+    publish({ ...limits, refreshing: true });
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveText("25.09 92%");
+    publish({
+      ...limits,
+      refreshing: false,
+      updatedAt: limits.updatedAt! + 300_000,
+      limits: { ...limits.limits!, primary: { ...limits.limits!.primary!, usedPercent: 10 } },
+    });
+    await expect(button).toHaveText("25.09 90%");
+    expect(reads).toBe(0);
     await button.click();
-    await expect(button).toHaveText("19.09 92%");
+    await expect(button).toHaveText("25.09 90%");
+    await expect(button).toHaveAttribute("title", /Не удалось обновить лимиты Codex/);
     await expect(dialog).toHaveCount(0);
     expect(reads).toBe(1);
     await button.click();
-    await expect(button).toHaveText("Повторить лимиты");
+    await expect(button).toHaveText("25.09 88%");
     await expect(dialog).toHaveCount(0);
     expect(reads).toBe(2);
-    await button.click();
-    await expect(button).toHaveText("19.09 88%");
-    await expect(dialog).toHaveCount(0);
-    expect(reads).toBe(3);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Полировка мастерской" })).toBeVisible();
+    if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
+    await expect(button).toHaveText("25.09 88%");
+    expect(reads).toBe(2);
     await page.screenshot({ path: testInfo.outputPath("inline-limits.png") });
   });
 }

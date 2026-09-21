@@ -1419,7 +1419,103 @@ describe("App routing and navigation", () => {
     expect(indicator).toHaveAttribute("href", "/settings?section=maintenance");
   });
 
-  it("loads and refreshes inline Codex limits only when clicked, without opening a dialog", async () => {
+  it("shows shared limits immediately and keeps them through refreshes, errors and reconnects", async () => {
+    const limits = {
+      limits: {
+        primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+      },
+      updatedAt: Date.UTC(2026, 8, 21, 12),
+      refreshing: false,
+      refreshError: false,
+    };
+    const api = mockConnection({ ...snapshot([baseThread]), codexRateLimits: limits });
+    const view = renderApp("/threads/newer");
+    const context = connection.mock.results.at(-1)!.value;
+    const rerender = () =>
+      view.rerender(
+        <MemoryRouter initialEntries={["/threads/newer"]} useTransitions={false}>
+          <ThemedApp
+            settings={{ baseUrl: "https://pi.local", token: "secret" }}
+            onDisconnected={() => undefined}
+          />
+        </MemoryRouter>,
+      );
+    expect(screen.getByText("5 ч 75%")).toBeInTheDocument();
+    expect(api.readCodexRateLimits).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Обновить лимиты Codex/ })).toHaveAttribute(
+      "title",
+      expect.stringContaining("Последнее обновление:"),
+    );
+    context.state.snapshot = {
+      ...context.state.snapshot,
+      codexRateLimits: { ...limits, refreshing: true },
+    };
+    rerender();
+    expect(screen.getByRole("button", { name: /Обновляем лимиты Codex/ })).toBeDisabled();
+    expect(screen.getByText("5 ч 75%")).toBeInTheDocument();
+    context.state.snapshot = {
+      ...context.state.snapshot,
+      codexRateLimits: { ...limits, refreshError: true },
+    };
+    rerender();
+    const retry = screen.getByRole("button", { name: /Повторить обновление лимитов Codex/ });
+    expect(retry).toHaveTextContent("5 ч 75%");
+    expect(retry).toHaveAttribute(
+      "title",
+      expect.stringContaining("Не удалось обновить лимиты Codex"),
+    );
+    context.state.network = "offline";
+    rerender();
+    expect(retry).toHaveTextContent("5 ч 75%");
+    context.state.network = "connected";
+    context.state.snapshot = {
+      ...context.state.snapshot,
+      instanceId: "reconnected",
+      codexRateLimits: limits,
+    };
+    rerender();
+    expect(screen.getByText("5 ч 75%")).toBeInTheDocument();
+    expect(api.readCodexRateLimits).not.toHaveBeenCalled();
+    view.unmount();
+    renderApp("/threads/newer");
+    expect(screen.getByText("5 ч 75%")).toBeInTheDocument();
+  });
+
+  it("uses server events after manual refresh and does not overwrite them with a late HTTP reply", async () => {
+    const shared = {
+      limits: {
+        primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+      },
+      updatedAt: Date.now(),
+      refreshing: false,
+      refreshError: false,
+    };
+    const api = mockConnection({ ...snapshot([baseThread]), codexRateLimits: shared });
+    let resolve!: (value: unknown) => void;
+    api.readCodexRateLimits.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    renderApp("/threads/newer");
+    fireEvent.click(screen.getByRole("button", { name: /Обновить лимиты Codex/ }));
+    const context = connection.mock.results.at(-1)!.value;
+    context.state.snapshot = {
+      ...context.state.snapshot,
+      codexRateLimits: {
+        ...shared,
+        limits: { ...shared.limits, primary: { ...shared.limits.primary, usedPercent: 40 } },
+      },
+    };
+    await act(async () => resolve(shared.limits));
+    expect(screen.getByText("5 ч 60%")).toBeInTheDocument();
+    expect(api.readCodexRateLimits).toHaveBeenCalledOnce();
+  });
+
+  it("loads and refreshes inline Codex limits on click when connected to an older server", async () => {
     const api = mockConnection(snapshot([baseThread]));
     const primaryReset = Date.UTC(2026, 6, 28, 12, 30);
     const secondaryReset = Date.UTC(2026, 7, 3, 8);

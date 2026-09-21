@@ -2976,11 +2976,80 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.get("/api/v1/codex/rate-limits", async (): Promise<CodexRateLimitsResponse> => {
-    return parseAccountRateLimits(
-      await bridge.request<unknown>("account/rateLimits/read", undefined),
-    );
+  let rateLimitsRequest: Promise<CodexRateLimitsResponse> | undefined;
+  let rateLimitsGeneration = 0;
+  let rateLimitsClosed = false;
+  let rateLimitsTimer: NodeJS.Timeout | undefined;
+  const refreshRateLimits = (): Promise<CodexRateLimitsResponse> => {
+    if (rateLimitsRequest) return rateLimitsRequest;
+    if (rateLimitsClosed) return Promise.reject(new BridgeUnavailableError(bridge.state));
+    const generation = ++rateLimitsGeneration;
+    projection.setCodexRateLimits({
+      ...projection.codexRateLimits,
+      refreshing: true,
+      refreshError: false,
+    });
+    rateLimitsRequest = bridge
+      .request<unknown>("account/rateLimits/read", undefined)
+      .then(parseAccountRateLimits)
+      .then((limits) => {
+        if (generation === rateLimitsGeneration) {
+          projection.setCodexRateLimits({
+            limits,
+            updatedAt: Date.now(),
+            refreshing: false,
+            refreshError: false,
+          });
+        }
+        return limits;
+      })
+      .catch((error: unknown) => {
+        if (generation === rateLimitsGeneration) {
+          projection.setCodexRateLimits({
+            ...projection.codexRateLimits,
+            refreshing: false,
+            refreshError: true,
+          });
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (generation === rateLimitsGeneration) rateLimitsRequest = undefined;
+      });
+    return rateLimitsRequest;
+  };
+  const pollRateLimits = () => {
+    if (rateLimitsClosed || bridge.state !== "ready") return;
+    void refreshRateLimits().catch((error: unknown) => {
+      app.log.warn({ err: safeError(error) }, "Failed to refresh Codex rate limits");
+    });
+  };
+  const rateLimitsBridgeStateHandler = (state: string) => {
+    if (state === "ready") {
+      pollRateLimits();
+      return;
+    }
+    rateLimitsGeneration++;
+    rateLimitsRequest = undefined;
+    projection.setCodexRateLimits({
+      ...projection.codexRateLimits,
+      refreshing: false,
+      refreshError: true,
+    });
+  };
+  app.addHook("onReady", async () => {
+    bridge.on("state", rateLimitsBridgeStateHandler);
+    rateLimitsTimer = setInterval(pollRateLimits, 300_000);
+    rateLimitsTimer.unref();
+    pollRateLimits();
   });
+  app.addHook("onClose", async () => {
+    rateLimitsClosed = true;
+    rateLimitsGeneration++;
+    clearInterval(rateLimitsTimer);
+    bridge.off("state", rateLimitsBridgeStateHandler);
+  });
+  app.get("/api/v1/codex/rate-limits", refreshRateLimits);
 
   app.get("/api/v1/settings/permissions", async () => readPermissionSettings(bridge));
 

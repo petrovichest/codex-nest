@@ -477,6 +477,9 @@ function applyVersionedEvent(
     case "connection.changed":
       snapshot.connection = event.connection;
       break;
+    case "codexRateLimits.changed":
+      snapshot.codexRateLimits = event.codexRateLimits;
+      break;
     case "project.upserted":
       snapshot.projects = upsert(snapshot.projects, event.project);
       break;

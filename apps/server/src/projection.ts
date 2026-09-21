@@ -10,6 +10,7 @@ import type {
   AttentionResponse,
   AppSnapshot,
   BrowserThreadStatus,
+  CodexRateLimitsState,
   ForkOperationSummary,
   ModelOption,
   Project,
@@ -122,6 +123,12 @@ export class AppProjection extends EventEmitter {
   private readonly removedThreads = new Set<string>();
   private missingThreadCleanup?: (threadId: string) => Promise<void> | void;
   private models: ModelOption[] = [];
+  private rateLimits: CodexRateLimitsState = {
+    limits: null,
+    updatedAt: null,
+    refreshing: false,
+    refreshError: false,
+  };
   private sequence = 0;
   private readonly instanceId = randomUUID();
   private syncedAt: string | null = null;
@@ -234,6 +241,16 @@ export class AppProjection extends EventEmitter {
     };
   }
 
+  get codexRateLimits(): CodexRateLimitsState {
+    return this.rateLimits;
+  }
+
+  setCodexRateLimits(state: CodexRateLimitsState): void {
+    if (isDeepStrictEqual(this.rateLimits, state)) return;
+    this.rateLimits = state;
+    this.publish({ type: "codexRateLimits.changed", codexRateLimits: state });
+  }
+
   snapshot(): AppSnapshot {
     const state = this.store.view();
     const threads = this.sortedThreads(state).filter(
@@ -245,6 +262,7 @@ export class AppProjection extends EventEmitter {
       sequence: this.sequence,
       uiLanguage: state.uiLanguage,
       connection: this.connection,
+      codexRateLimits: this.rateLimits,
       projects: cloneView<Project[]>(state.projects),
       threads,
       attention: this.attention

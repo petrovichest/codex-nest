@@ -38,6 +38,48 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("restores cached limits and applies only current, ordered server updates", () => {
+    const codexRateLimits = {
+      limits: {
+        primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+      },
+      updatedAt: 1000,
+      refreshing: false,
+      refreshError: false,
+    };
+    let state = clientReducer(initialState, {
+      type: "hydrate",
+      snapshot: { ...snapshot, codexRateLimits },
+      goals: {},
+    });
+    expect(state.snapshot?.codexRateLimits).toEqual(codexRateLimits);
+    const event = {
+      type: "codexRateLimits.changed" as const,
+      codexRateLimits: { ...codexRateLimits, refreshError: true },
+    };
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "legacy", sequence: 5 },
+      event,
+    });
+    expect(state.snapshot?.codexRateLimits).toEqual(event.codexRateLimits);
+    expect(state.snapshot?.sequence).toBe(5);
+    for (const version of [
+      { instanceId: "legacy", sequence: 4 },
+      { instanceId: "old", sequence: 6 },
+    ]) {
+      expect(clientReducer(state, { type: "event", version, event })).toBe(state);
+    }
+    state = clientReducer(state, {
+      type: "snapshot",
+      snapshot: { ...snapshot, sequence: 6, codexRateLimits },
+    });
+    expect(state.snapshot?.codexRateLimits).toEqual(codexRateLimits);
+    state = clientReducer(state, { type: "network", network: "offline" });
+    expect(state.snapshot?.codexRateLimits).toEqual(codexRateLimits);
+  });
+
   it("keeps cached messages and the history cursor when a partial history read fails", () => {
     const original: ThreadDetail = {
       summary: baseThread,
