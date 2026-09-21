@@ -288,6 +288,11 @@
   box-shadow: var(--chat-shadow);
 }
 
+.thread-workspace .message.userMessage.user-input-response > .message-body {
+  padding: var(--chat-padding);
+  border-radius: var(--chat-radius);
+}
+
 .thread-workspace .timeline .message.voice-transcription-message {
   width: fit-content;
   max-width: 100%;

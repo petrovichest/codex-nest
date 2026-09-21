@@ -361,6 +361,41 @@ describe("Activity", () => {
     expect(screen.getByText("secret-value")).toBeInTheDocument();
   });
 
+  it("hides only the trailing recommendation marker while copying the original answers", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const answers = [
+      "По сумме продажи (Recommended)",
+      "Первая строка\n\nВторая строка",
+      "Пометка (Recommended) внутри ответа",
+      "(Recommended)",
+    ];
+    const view = render(
+      <Activity
+        item={{
+          type: "userInputResponse",
+          id: "answers",
+          status: "completed",
+          entries: [{ header: "Тейк-профит", question: "Как фиксировать?", answers }],
+          timestamp: Date.now(),
+          afterItemId: null,
+        }}
+      />,
+    );
+
+    expect(
+      Array.from(view.container.querySelectorAll(".user-input-answer"), (node) => node.textContent),
+    ).toEqual(["По сумме продажи", ...answers.slice(1)]);
+    fireEvent.click(screen.getByRole("button", { name: "Копировать сообщение" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(["Как фиксировать?", ...answers].join("\n")),
+    );
+    expect(answers[0]).toBe("По сумме продажи (Recommended)");
+  });
+
   it("renders delivered subagent results as links in the timeline", () => {
     render(
       <MemoryRouter>

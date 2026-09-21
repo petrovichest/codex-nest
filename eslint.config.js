@@ -8,6 +8,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/dist/**",
       "**/coverage/**",
+      "output/**",
       "apps/server/src/codex/generated/**",
       "apps/client/android/**",
     ],

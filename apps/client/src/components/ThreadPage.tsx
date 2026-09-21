@@ -5308,11 +5308,11 @@ export function Activity({
         <div className="message-body">
           {item.entries.map((entry, index) => (
             <section key={`${index}:${entry.header}:${entry.question}`}>
-              <strong>{entry.header}</strong>
-              <p>{entry.question}</p>
+              <div className="user-input-topic">{entry.header}</div>
+              <p className="user-input-question">{entry.question}</p>
               {entry.answers.map((answer, answerIndex) => (
                 <div className="user-input-answer" key={`${answerIndex}:${answer}`}>
-                  {answer}
+                  {answer.replace(/[ \t]+\(Recommended\)$/u, "")}
                 </div>
               ))}
             </section>

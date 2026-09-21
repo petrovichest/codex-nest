@@ -3286,28 +3286,41 @@ button.message-file:hover:not(:disabled) {
 
 .user-input-response > .message-body {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-6);
 }
 
-.user-input-response section + section {
-  padding-top: 11px;
-  border-top: 1px solid var(--line);
+.user-input-response section {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.user-input-response strong,
-.user-input-response p {
-  display: block;
-  margin: 0 0 var(--space-1);
+.user-input-topic {
+  margin-bottom: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-small);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-copy);
 }
 
-.user-input-response p {
+.user-input-question {
+  margin: 0 0 var(--space-2-5);
   color: var(--muted-strong);
-  font-size: var(--text-label);
+  font-size: var(--text-message);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-copy);
+  white-space: pre-wrap;
 }
 
 .user-input-answer {
-  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  font-size: var(--text-message);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-copy);
   white-space: pre-wrap;
+}
+
+.user-input-answer + .user-input-answer {
+  margin-top: var(--space-2);
 }
 
 .message.plan-checklist {
