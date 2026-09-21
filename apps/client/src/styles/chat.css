@@ -1024,7 +1024,7 @@
   border: 0;
   border-radius: var(--chat-radius-surface);
   background: var(--color-floating);
-  box-shadow: var(--chat-shadow);
+  box-shadow: var(--sidebar-panel-shadow);
 }
 
 .thread-workspace .inspector-heading {
@@ -1127,6 +1127,16 @@
 
 .thread-workspace .inspector-artifact-progress {
   overflow-wrap: anywhere;
+}
+
+@media (max-width: 1279px) {
+  .thread-workspace .inspector-backdrop,
+  .thread-workspace .inspector-backdrop:is(:hover, :focus-visible, :active) {
+    background: transparent;
+    box-shadow: none;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
 }
 
 @media (max-width: 1279px) and (min-width: 821px) {

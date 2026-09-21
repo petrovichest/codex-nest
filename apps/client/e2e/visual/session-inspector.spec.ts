@@ -32,6 +32,7 @@ for (const theme of ["light", "dark"] as const) {
             exact: true,
           })
           .click();
+        await page.mouse.move(0, 0);
         await waitForVisualReady(page);
         const inspector = page.locator(".session-inspector");
         const surface = theme === "light" ? "rgb(248, 249, 246)" : "rgb(36, 39, 34)";
@@ -54,8 +55,19 @@ for (const theme of ["light", "dark"] as const) {
           "rgba(0, 0, 0, 0)",
         );
         expect(await inspector.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-        if (language === "ru" && (width === 390 || width === 1440)) {
-          await expect(inspector).toHaveScreenshot(`inspector-c-${width}-${theme}.png`);
+        if (language === "ru" && width >= 390) {
+          const bounds = (await inspector.boundingBox())!;
+          const x = Math.max(0, bounds.x - 64);
+          const y = Math.max(0, bounds.y - 64);
+          // Include the surrounding chat so panel elevation and backdrop blur are visible.
+          await expect(page).toHaveScreenshot(`inspector-c-${width}-${theme}.png`, {
+            clip: {
+              x,
+              y,
+              width: Math.min(width, bounds.x + bounds.width + 64) - x,
+              height: Math.min(900, bounds.y + bounds.height + 64) - y,
+            },
+          });
         }
         const copy = inspector.locator(".inspector-path-copy");
         const before = await copy.boundingBox();
@@ -71,6 +83,72 @@ for (const theme of ["light", "dark"] as const) {
         expect(await copy.boundingBox()).toEqual(before);
       });
     }
+  }
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const { width, sidebarSide } of [
+    { width: 390, sidebarSide: "left" },
+    { width: 1024, sidebarSide: "right" },
+    { width: 1440, sidebarSide: "right" },
+  ] as const) {
+    test(`inspector floating effects at ${width}px, ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await installVisualFixture(page, { theme, sidebarSide });
+      await page.route("http://127.0.0.1:4310/**", (route) => route.abort());
+
+      for (const route of ["/threads/session-main", "/new?projectId=project-nest"]) {
+        await page.goto(route);
+        await waitForVisualReady(page);
+        if (width === 390) {
+          await page.getByRole("button", { name: "Открыть список задач" }).click();
+        }
+        const panelShadow = await page
+          .locator(".sidebar")
+          .evaluate((element) => getComputedStyle(element).boxShadow);
+        expect(panelShadow).not.toBe("none");
+        if (width === 390) {
+          await page.locator(".drawer-backdrop").click({ position: { x: width - 2, y: 2 } });
+        }
+
+        const toggle = page.getByRole("button", { name: "Показать сведения", exact: true });
+        await toggle.click();
+        const inspector = page.locator(".session-inspector");
+        await expect(inspector).toHaveCSS("box-shadow", panelShadow);
+        if (route.startsWith("/threads/")) {
+          await inspector.getByRole("tab", { name: /^Артефакты/u }).click();
+          await expect(inspector.locator(".inspector-artifact-list")).toBeVisible();
+          await expect(inspector).toHaveCSS("box-shadow", panelShadow);
+        }
+        await inspector.getByRole("button", { name: "Закрыть сведения" }).click();
+        await expect(inspector).toHaveCount(0);
+        await toggle.click();
+
+        const backdrop = page.locator(".inspector-backdrop");
+        if (width === 1440) {
+          await expect(backdrop).toBeHidden();
+          continue;
+        }
+        const expectBlurOnly = async () => {
+          await expect(backdrop).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+          await expect(backdrop).toHaveCSS("box-shadow", "none");
+          await expect(backdrop).toHaveCSS("backdrop-filter", "blur(8px)");
+        };
+        await expectBlurOnly();
+        await backdrop.hover({ position: { x: 2, y: 2 } });
+        await expectBlurOnly();
+        await page.keyboard.press("Tab");
+        await backdrop.focus();
+        await expect(backdrop).toBeFocused();
+        await expect(backdrop).toHaveCSS("outline-style", "solid");
+        await expectBlurOnly();
+        await page.mouse.down();
+        await expectBlurOnly();
+        await page.mouse.up();
+        await expect(inspector).toHaveCount(0);
+        await expect(backdrop).toHaveCount(0);
+      }
+    });
   }
 }
 
