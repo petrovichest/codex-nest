@@ -533,6 +533,8 @@ describe("Composer", () => {
 
     fireEvent.click(toggle);
     const dialog = screen.getByRole("dialog", { name: "Настройки модели" });
+    expect(within(dialog).queryByRole("heading", { name: "Настройки модели" })).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Закрыть" })).toHaveFocus();
     const modelOptions = within(dialog).getByRole("radiogroup", { name: "Модель" });
     const effortOptions = within(dialog).getByRole("radiogroup", {
       name: "Уровень рассуждений",
@@ -562,6 +564,15 @@ describe("Composer", () => {
     );
 
     fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Настройки модели" })).toBeNull();
+    expect(toggle).toHaveFocus();
+
+    fireEvent.click(toggle);
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Настройки модели" })).getByRole("button", {
+        name: "Закрыть",
+      }),
+    );
     expect(screen.queryByRole("dialog", { name: "Настройки модели" })).toBeNull();
     expect(toggle).toHaveFocus();
   });

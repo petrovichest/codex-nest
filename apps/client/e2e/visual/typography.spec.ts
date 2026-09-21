@@ -44,7 +44,10 @@ for (const theme of ["light", "dark"] as const) {
 
         await page.locator(".model-toggle").click();
         const dialog = page.getByRole("dialog");
-        await expect(dialog.locator(".dialog-heading h2")).toHaveCSS("font-size", "14px");
+        await expect(dialog.locator(".model-settings-section h3").first()).toHaveCSS(
+          "font-size",
+          "12px",
+        );
         await expect(dialog.locator(".model-settings-option strong").first()).toHaveCSS(
           "font-size",
           "14px",

@@ -244,23 +244,19 @@ function ModelSettingsPopup({
       returnFocusRef={openerRef}
       onClose={onClose}
     >
-      <div className="dialog-header">
-        <div className="dialog-heading">
-          <h2>{t("Настройки модели")}</h2>
-        </div>
-        <button
-          ref={closeButtonRef}
-          type="button"
-          className="icon-button"
-          aria-label={t("Закрыть")}
-          onClick={onClose}
-        >
-          <XIcon />
-        </button>
-      </div>
-
       <section className="model-settings-section">
-        <h3>{t("Модель")}</h3>
+        <div className="model-settings-section-header">
+          <h3>{t("Модель")}</h3>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            className="icon-button"
+            aria-label={t("Закрыть")}
+            onClick={onClose}
+          >
+            <XIcon />
+          </button>
+        </div>
         <div className="model-settings-options" role="radiogroup" aria-label={t("Модель")}>
           <SelectionOption
             title={t("По умолчанию")}

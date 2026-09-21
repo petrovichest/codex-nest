@@ -114,7 +114,10 @@ for (const theme of ["light", "dark"] as const) {
           ).toBe(true);
           await page.locator(".model-toggle").click();
           const dialog = page.getByRole("dialog");
-          await expect(dialog.locator("h2")).toHaveCSS("font-size", `${sizes.dialog}px`);
+          await expect(dialog.locator(".model-settings-section h3").first()).toHaveCSS(
+            "font-size",
+            `${sizes.caption}px`,
+          );
           expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
           await dialog.locator(".model-settings-option").last().scrollIntoViewIfNeeded();
           await expect(dialog.locator(".model-settings-option").last()).toBeInViewport();

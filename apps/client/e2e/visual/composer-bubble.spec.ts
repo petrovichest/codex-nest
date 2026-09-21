@@ -114,6 +114,14 @@ for (const theme of ["light", "dark"] as const) {
       "background-color",
       surface,
     );
+    const option = popup.locator(".model-settings-option:not(.active)").first();
+    const optionBounds = await option.boundingBox();
+    await option.hover();
+    await expect(option).toHaveCSS("background-color", surface);
+    await expect(option).toHaveCSS("box-shadow", shadow);
+    expect(await option.boundingBox()).toEqual(optionBounds);
+    await page.mouse.move(1, 1);
+    await expect(option).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await page.keyboard.press("Escape");
     await expect(popup).toHaveCount(0);
     await expect(page.locator(".composer .model-toggle")).toBeFocused();
