@@ -83,7 +83,6 @@
 }
 
 .thread-workspace:not(.pending-fork-workspace) .workspace-title p {
-  max-width: 40%;
   margin: 0;
   font-size: var(--text-small);
 }
