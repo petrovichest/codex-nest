@@ -19,6 +19,7 @@ import {
 } from "@codexnest/protocol";
 import { clipboardText } from "../pasted-text";
 import { useI18n } from "../i18n";
+import { Capacitor } from "@capacitor/core";
 
 type Snapshot = MessagePresentation & { selection?: [number, number] };
 
@@ -76,6 +77,9 @@ export function usePasteEditor(
   }
   function paste(data: Pick<DataTransfer, "getData">, start: number, end: number): number | null {
     const { text, plain } = clipboardText(data);
+    return pasteText(text, start, end, plain);
+  }
+  function pasteText(text: string, start: number, end: number, plain = text): number | null {
     if (!text) return null;
     const before = current.current;
     const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
@@ -114,6 +118,7 @@ export function usePasteEditor(
   return {
     change,
     paste,
+    pasteText,
     undo,
     blocks: (pasteBlocks: NonNullable<PastedText["pasteBlocks"]>) =>
       commit({ ...current.current, pasteBlocks }),
@@ -123,6 +128,35 @@ export function usePasteEditor(
 
 function presentation(value: Snapshot): MessagePresentation {
   return { input: value.input, ...pastedText(value) };
+}
+
+function inputReplacement(before: string, after: string, selection?: [number, number]) {
+  if (selection) {
+    const [start, end] = selection;
+    const suffix = before.slice(end);
+    if (
+      after.length >= before.length - (end - start) &&
+      after.startsWith(before.slice(0, start)) &&
+      after.endsWith(suffix)
+    )
+      return { start, end, text: after.slice(start, after.length - suffix.length) };
+  }
+  // Some Android IMEs deliver only input. Recover that operation, not the whole draft.
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = before.length;
+  let nextEnd = after.length;
+  while (end > start && nextEnd > start && before[end - 1] === after[nextEnd - 1]) {
+    end--;
+    nextEnd--;
+  }
+  // A differing emoji may share its leading surrogate with the previous character.
+  if (start > 0 && /[\uDC00-\uDFFF]/u.test(after.charAt(start))) start--;
+  if (nextEnd < after.length && /[\uDC00-\uDFFF]/u.test(after.charAt(nextEnd))) {
+    end++;
+    nextEnd++;
+  }
+  return { start, end, text: after.slice(start, nextEnd) };
 }
 
 type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value"> & {
@@ -146,6 +180,7 @@ export function PasteTextarea({
   const layer = useRef<HTMLDivElement>(null);
   const selection = useRef<[number, number] | undefined>(undefined);
   const inputType = useRef("");
+  const composing = useRef(false);
   const { t } = useI18n();
   const { message: messageFontSize } = useTypography();
   const { input, inlinePastes } = editor.value;
@@ -232,17 +267,49 @@ export function PasteTextarea({
           else if (ref) ref.current = node;
         }}
         value={input}
+        onCompositionStart={(event) => {
+          composing.current = true;
+          props.onCompositionStart?.(event);
+        }}
+        onCompositionEnd={(event) => {
+          composing.current = false;
+          props.onCompositionEnd?.(event);
+        }}
         onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
           let replaced = selection.current;
+          const native = event.nativeEvent as InputEvent;
+          const type = native.inputType || inputType.current;
+          selection.current = undefined;
+          inputType.current = "";
+          const explicitPaste = type === "insertFromPaste" || type === "insertFromPasteAsQuotation";
+          if (
+            pasteEnabled &&
+            !props.readOnly &&
+            !props.disabled &&
+            !composing.current &&
+            !native.isComposing &&
+            (explicitPaste || (type === "insertText" && Capacitor.getPlatform() === "android"))
+          ) {
+            const insertion = inputReplacement(input, event.currentTarget.value, replaced);
+            if (
+              insertion.text &&
+              (explicitPaste ||
+                (!isInlinePaste(insertion.text) && /[^\r\n\u2028\u2029]/u.test(insertion.text)))
+            ) {
+              const caret = editor.pasteText(insertion.text, insertion.start, insertion.end)!;
+              // Restore the controlled field before notifying the composer about its caret.
+              if (!isInlinePaste(insertion.text)) event.currentTarget.value = input;
+              event.currentTarget.setSelectionRange(caret, caret);
+              onChange?.(event);
+              return;
+            }
+          }
           const removed = input.length - event.currentTarget.value.length;
           if (replaced && replaced[0] === replaced[1] && removed > 0) {
-            if (inputType.current.endsWith("Backward"))
-              replaced = [replaced[0] - removed, replaced[1]];
-            else if (inputType.current.endsWith("Forward"))
-              replaced = [replaced[0], replaced[1] + removed];
+            if (type.endsWith("Backward")) replaced = [replaced[0] - removed, replaced[1]];
+            else if (type.endsWith("Forward")) replaced = [replaced[0], replaced[1] + removed];
           }
           editor.change(event.currentTarget.value, replaced);
-          selection.current = undefined;
           onChange?.(event);
         }}
         onPaste={(event) => {
@@ -254,6 +321,7 @@ export function PasteTextarea({
           if (caret === null) return;
           event.preventDefault();
           selection.current = undefined;
+          inputType.current = "";
           requestAnimationFrame(() => field.current?.setSelectionRange(caret, caret));
         }}
         onKeyDown={(event) => {

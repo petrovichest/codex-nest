@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import type {
   QueueMessageRequest,
   ThreadDetail,
+  UpdateQueuedMessageRequest,
   UpdateThreadDraftRequest,
 } from "@codexnest/protocol";
 import { installVisualFixture, mainThread, snapshot, waitForVisualReady } from "./fixtures";
@@ -93,6 +94,16 @@ async function setup(page: Page, theme: "light" | "dark", withContent = false) {
       detail.draft = null;
       draft = null;
       return route.fulfill({ status: 202, json: message, headers });
+    }
+    if (path.includes("/queue/") && request.method() === "PATCH") {
+      const update = request.postDataJSON() as UpdateQueuedMessageRequest;
+      const message = detail.queuedMessages.find((item) => path.endsWith(`/${item.id}`))!;
+      Object.assign(message, {
+        text: update.input,
+        inlinePastes: update.inlinePastes,
+        pasteBlocks: update.pasteBlocks,
+      });
+      return route.fulfill({ json: message, headers });
     }
     if (path === "/api/v1/threads/session-main")
       return route.fulfill({
@@ -257,4 +268,57 @@ test("a pasted SSH repository address never becomes an email link", async ({ pag
   await expect(queued).toHaveText(`Клонируй ${address}`);
   await expect(queued.locator("a")).toHaveCount(0);
   expect((await queued.locator("mark").allTextContents()).join("")).toBe(address);
+});
+
+test("Android keyboard fragments become blocks through draft reload, send and queue editing", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const fixture = await setup(page, "dark");
+  // Exercise the Android input policy without requiring a native plugin bridge.
+  const androidKeyboard = () =>
+    page.evaluate(() => {
+      const cap = (window as unknown as { Capacitor: { getPlatform(): string } }).Capacitor;
+      cap.getPlatform = () => "android";
+    });
+  await androidKeyboard();
+  const field = page.getByRole("textbox", { name: "Сообщение для Codex" });
+  await field.fill("Проверь ");
+  await field.press("End");
+  // insertText uses the browser input path, without dispatching a ClipboardEvent.
+  await page.keyboard.insertText(pasteBlocks[0]!.text);
+  await expect(field).toHaveValue("Проверь ");
+  await expect(page.locator(".composer .paste-card")).toHaveCount(1);
+  await field.pressSequentially("расчёт");
+  await expect(field).toHaveValue("Проверь расчёт");
+  await expect.poll(() => fixture.draft()?.pasteBlocks?.[0]?.text).toBe(pasteBlocks[0]!.text);
+  await field.blur();
+  await expect.poll(() => fixture.draft()?.input).toBe("Проверь расчёт");
+  await page.reload();
+  await expect(field).toHaveValue("Проверь расчёт");
+  await expect(page.locator(".composer .paste-card")).toHaveCount(1);
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect.poll(() => fixture.submitted()?.input).toBe("Проверь расчёт");
+  expect(fixture.submitted()?.pasteBlocks?.map((block) => block.text)).toEqual([
+    pasteBlocks[0]!.text,
+  ]);
+  await expect(field).toHaveValue("");
+  await page.reload();
+  await androidKeyboard();
+  const queued = page.locator(".queued-message");
+  await queued.getByRole("button", { name: "Изменить сообщение в очереди" }).click();
+  const queueField = queued.getByRole("textbox", { name: "Текст сообщения в очереди" });
+  await queueField.press("End");
+  await page.keyboard.insertText("Дополнительный лог\nPnL: 42 USDT");
+  await expect(queueField).toHaveValue("Проверь расчёт");
+  await expect(queued.locator(".paste-card")).toHaveCount(2);
+  await queueField.press("ControlOrMeta+z");
+  await expect(queued.locator(".paste-card")).toHaveCount(1);
+  await queueField.press("ControlOrMeta+Shift+z");
+  await expect(queued.locator(".paste-card")).toHaveCount(2);
+  await queued.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await expect(queueField).toHaveCount(0);
+  await page.reload();
+  await expect(queued.locator(".paste-card")).toHaveCount(2);
+  await expect(queued.locator(".queued-message-text")).toHaveText("Проверь расчёт");
 });
