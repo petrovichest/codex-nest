@@ -8,11 +8,14 @@ import type { ReasoningEffort } from "../ReasoningEffort";
 import type { ActivePermissionProfile } from "./ActivePermissionProfile";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
-import type { DeliveryReceipt } from "./DeliveryReceipt";
 import type { SandboxPolicy } from "./SandboxPolicy";
 import type { Thread } from "./Thread";
 
-export type ThreadStartResponse = { thread: Thread, deliveryReceipt: DeliveryReceipt | null, model: string, modelProvider: string, serviceTier: string | null, cwd: AbsolutePathBuf,
+export type ThreadStartResponse = { thread: Thread, model: string, modelProvider: string, serviceTier: string | null,
+/**
+ * Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
+ */
+disabledPluginIds: Array<string>, cwd: AbsolutePathBuf,
 /**
  * Thread-scoped runtime workspace roots used to materialize
  * `:workspace_roots`.

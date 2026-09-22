@@ -48,7 +48,7 @@ export type CodexManagerOptions = {
   activeTurnCount(): number;
   bridgeState(): AppServerState;
   bridgeVersion(): string | undefined;
-  deliveryVersion?(): number | undefined;
+  pendingNativeDeliveryCount?(): number;
   runCommand?: RunCommand;
 };
 
@@ -186,13 +186,14 @@ export class CodexManager {
 
   async update(): Promise<CodexManagementStatus> {
     this.assertSupported();
-    if (this.options.deliveryVersion) {
-      throw new CodexManagementError(
-        "unsupported",
-        "Для этой сборки Codex требуется совместимое обновление с подтверждением доставки.",
-      );
-    }
     const diagnostics = await this.runMaintenance("updating", async () => {
+      const pendingNativeDeliveries = this.options.pendingNativeDeliveryCount?.() ?? 0;
+      if (pendingNativeDeliveries > 0) {
+        throw new CodexManagementError(
+          "busy",
+          `Сначала дождитесь подтверждения незавершённой доставки Codex: ${pendingNativeDeliveries}.`,
+        );
+      }
       await this.runManaged(["update"], 300_000);
       const checked = await this.runDoctor(this.options.proxyEnvFile);
       await this.restartDaemonAndWait();

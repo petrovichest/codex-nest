@@ -80,7 +80,13 @@ const codexManager = new CodexManager({
     projection.snapshot().threads.filter((thread) => thread.currentTurnId !== null).length,
   bridgeState: () => bridge.state,
   bridgeVersion: () => bridge.actualVersion,
-  deliveryVersion: () => bridge.deliveryVersion,
+  pendingNativeDeliveryCount: () =>
+    Object.values(store.view().messageReceipts ?? {}).filter(
+      (receipt) =>
+        receipt.deliveryVersion === 1 &&
+        receipt.turnId === null &&
+        (receipt.status === undefined || receipt.status === "prepared"),
+    ).length,
 });
 let emergencyShutdownRequested = false;
 const appManager = new AppManager({

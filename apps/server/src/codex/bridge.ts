@@ -134,7 +134,9 @@ export class CodexBridge extends EventEmitter {
     });
 
     try {
-      const initialized = await transport.request<InitializeResponse>(
+      const initialized = await transport.request<
+        InitializeResponse & { durableDeliveryVersion?: number | null }
+      >(
         "initialize",
         {
           clientInfo: { name: "codexnest", title: "CodexNest", version: "0.1.0" },

@@ -4131,7 +4131,9 @@ function normalizeActivity(
             .map((part) => part.text)
             .join("\n"),
         ),
-        images: item.content.filter((part) => part.type === "image").map((part) => part.url),
+        images: item.content
+          .filter((part) => part.type === "image" && "url" in part)
+          .map((part) => part.url),
         ...(files.length ? { files } : {}),
         timestamp,
         phase: null,

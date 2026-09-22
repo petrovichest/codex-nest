@@ -6111,6 +6111,7 @@ function liveThread(updatedAt = 5): Thread {
           content: [
             { type: "text", text: "Запрос", text_elements: [] },
             { type: "image", url: "data:image/png;base64,aW1hZ2U=" },
+            { type: "image", fileId: "uploaded-image" },
           ],
         },
         {

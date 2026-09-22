@@ -15,11 +15,7 @@ import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStartSource } from "./ThreadStartSource";
 import type { TurnEnvironmentParams } from "./TurnEnvironmentParams";
 
-export type ThreadStartParams = {
-/**
- * Idempotency key retained across connection loss and process restarts.
- */
-clientCreationId?: string | null, model?: string | null, modelProvider?: string | null,
+export type ThreadStartParams = { model?: string | null, modelProvider?: string | null,
 /**
  * Allow a provider with an authoritative static model catalog to replace an unavailable
  * requested model with its default.
@@ -37,7 +33,11 @@ approvalsReviewer?: ApprovalsReviewer | null, sandbox?: SandboxMode | null,
 /**
  * Named profile id for this thread. Cannot be combined with `sandbox`.
  */
-permissions?: string | null, config?: { [key in string]?: JsonValue } | null, serviceName?: string | null, baseInstructions?: string | null, developerInstructions?: string | null, personality?: Personality | null,
+permissions?: string | null, config?: { [key in string]?: JsonValue } | null, serviceName?: string | null, baseInstructions?: string | null, developerInstructions?: string | null,
+/**
+ * @deprecated `friendly` and `pragmatic` no longer select a style.
+ */
+personality?: Personality | null,
 /**
  * @deprecated Ignored. Use Ultra reasoning effort for proactive multi-agent behavior.
  */
@@ -55,6 +55,12 @@ threadSource?: ThreadSource | null,
  * the assignment; ephemeral threads expose it only in live responses.
  */
 projectId?: string | null,
+/**
+ * Initial Daybreak choice for this persistent thread. Omitted or null
+ * leaves it unset. This does not select a turn's `cyberAccessProgram`
+ * or grant access. Not supported for ephemeral threads.
+ */
+daybreakEnabled?: boolean | null,
 /**
  * Optional sticky environments for this thread.
  *

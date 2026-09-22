@@ -56,25 +56,22 @@ describe("parseProxy", () => {
 });
 
 describe("CodexManager", () => {
-  it.each([undefined, 1])(
-    "prevents an incompatible update while the durable receiver reports %s",
-    async (version) => {
-      const runCommand = vi.fn();
-      const manager = new CodexManager({
-        codexBin: "/fake/codex",
-        managementBin: "/fake/wrapper",
-        proxyEnvFile: "/unused",
-        transport: "daemon",
-        activeTurnCount: () => 0,
-        bridgeState: () => (version ? "ready" : "restarting"),
-        bridgeVersion: () => undefined,
-        deliveryVersion: () => version,
-        runCommand,
-      });
-      await expect(manager.update()).rejects.toThrow("совместимое обновление");
-      expect(runCommand).not.toHaveBeenCalled();
-    },
-  );
+  it("prevents an update while a native delivery is still pending", async () => {
+    const runCommand = vi.fn();
+    const manager = new CodexManager({
+      codexBin: "/fake/codex",
+      managementBin: "/fake/wrapper",
+      proxyEnvFile: "/unused",
+      transport: "daemon",
+      activeTurnCount: () => 0,
+      bridgeState: () => "ready",
+      bridgeVersion: () => undefined,
+      pendingNativeDeliveryCount: () => 1,
+      runCommand,
+    });
+    await expect(manager.update()).rejects.toThrow("незавершённой доставки");
+    expect(runCommand).not.toHaveBeenCalled();
+  });
 
   it("checks a candidate, writes a private env file, restarts, and never exposes the password", async () => {
     const directory = await temporaryDirectory();
@@ -297,6 +294,7 @@ function createManager(
     activeTurnCount,
     bridgeState: () => "ready",
     bridgeVersion,
+    pendingNativeDeliveryCount: () => 0,
     runCommand,
   });
 }
