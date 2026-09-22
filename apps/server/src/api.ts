@@ -1,4 +1,5 @@
 import {
+  copyPastedMessage,
   pastedText,
   trimPastedMessage,
   rebasePastedText,
@@ -863,7 +864,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       projection.publishThreadState(threadId);
       scheduleTeamTasks(threadId);
     }
-    if (shouldGenerateTitle) scheduleThreadTitle(threadId, input, summary);
+    if (shouldGenerateTitle) {
+      scheduleThreadTitle(threadId, copyPastedMessage(input, pastes), summary);
+    }
     if (!goal) return { turnId };
     try {
       await setThreadGoal(bridge, threadId, { status: "active" });

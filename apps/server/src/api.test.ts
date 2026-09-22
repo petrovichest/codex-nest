@@ -3638,6 +3638,37 @@ describe("task defaults", () => {
     await harness.app.close();
   });
 
+  it("generates a first-turn title from block-only pasted text", async () => {
+    const harness = await createForkHarness();
+    await harness.projection.markUnmaterialized("thread");
+    const pastedSource = "Длинный вставленный текст для новой задачи";
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/threads/thread/queue",
+      headers: harness.headers,
+      payload: {
+        clientMessageId: "pasted-title-message",
+        input: "",
+        pasteBlocks: [{ id: "pasted-title", text: pastedSource }],
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    await vi.waitFor(() => {
+      expect(harness.threadTitles.generate).toHaveBeenCalledWith(pastedSource, {
+        cwd: "/work",
+        model: "gpt-b",
+        effort: "low",
+      });
+      expect(harness.bridge.request).toHaveBeenCalledWith("thread/name/set", {
+        threadId: "thread",
+        name: "Готовая реализация",
+      });
+    });
+    await harness.app.close();
+  });
+
   it("preserves omitted defaults and clears explicit null values", async () => {
     const harness = await createForkHarness();
     const save = (payload: Record<string, string | null>) =>
