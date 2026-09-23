@@ -283,6 +283,8 @@ export type ThreadSummary = {
   currentTurnId: string | null;
   /** A completed plan still needs a user response, even if its mode was changed. */
   awaitingPlanResponse?: boolean;
+  /** The completed plan whose response requirement the user dismissed. */
+  dismissedPlanTurnId?: string;
   queuedMessageCount: number;
   browserStatus: BrowserThreadStatus;
   settings: SessionSettings;
@@ -1381,6 +1383,11 @@ export type UpdateThreadRequest = {
 };
 
 export type MarkReadRequest = {
+  observedUpdatedAt: number;
+};
+
+export type DismissPlanRequest = {
+  turnId: string;
   observedUpdatedAt: number;
 };
 

@@ -1,7 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { QueueMessageRequest, ThreadDetail } from "@codexnest/protocol";
 
-import { installVisualFixture, mainThread, snapshot } from "./fixtures";
+import {
+  DESKTOP_VIEWPORT,
+  PHONE_VIEWPORT,
+  installVisualFixture,
+  mainThread,
+  snapshot,
+} from "./fixtures";
 
 const labels = {
   default: "Да, реализуй этот план",
@@ -62,6 +68,84 @@ async function installPlan(page: Page, legacy = false) {
     return route.abort();
   });
   return { detail, settingsPatches };
+}
+
+for (const viewport of [DESKTOP_VIEWPORT, PHONE_VIEWPORT]) {
+  for (const legacy of [false, true]) {
+    test(`dismisses a plan without an agent turn at ${viewport.width}px (legacy mode: ${legacy})`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize(viewport);
+      const { detail, settingsPatches } = await installPlan(page, legacy);
+      const commands: QueueMessageRequest[] = [];
+      const dismissals: unknown[] = [];
+      await page.route("**/api/v1/threads/session-main/queue", (route) => {
+        if (route.request().method() === "OPTIONS") return route.fallback();
+        const command = route.request().postDataJSON() as QueueMessageRequest;
+        commands.push(command);
+        return route.fulfill({
+          json: {
+            id: command.clientMessageId,
+            threadId: "session-main",
+            text: command.input,
+            planImplementationMode: command.planImplementationMode,
+            status: "queued",
+            createdAt: Date.now(),
+          },
+          headers: { "access-control-allow-origin": "*" },
+        });
+      });
+      await page.route("**/api/v1/threads/session-main/plan/dismiss", (route) => {
+        if (route.request().method() === "OPTIONS") return route.fallback();
+        dismissals.push(route.request().postDataJSON());
+        Object.assign(detail.summary, {
+          state: "completed",
+          unread: true,
+          unseen: false,
+          awaitingPlanResponse: false,
+          dismissedPlanTurnId: "turn-plan",
+        });
+        return route.fulfill({
+          json: detail.summary,
+          headers: { "access-control-allow-origin": "*" },
+        });
+      });
+      await page.goto("/threads/session-main");
+      const dismiss = page.getByRole("button", { name: "Отказаться от плана", exact: true });
+      await expect(dismiss).toBeEnabled();
+      await dismiss.scrollIntoViewIfNeeded();
+      for (const button of await page.locator(".implement-plan-actions button").all()) {
+        const box = (await button.boundingBox())!;
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      }
+      await page.screenshot({ path: testInfo.outputPath("plan-dismissal.png") });
+      await dismiss.click();
+      await expect(dismiss).toHaveCount(0);
+      expect(dismissals).toEqual([
+        { turnId: "turn-plan", observedUpdatedAt: detail.summary.updatedAt },
+      ]);
+      expect(commands).toEqual([]);
+      expect(settingsPatches).toEqual([]);
+      await expect(page.getByRole("button", { name: "Закончить", exact: true })).toBeVisible();
+      await expect(
+        page.locator('a[href="/threads/session-main"] .status-completed-unread').first(),
+      ).toHaveCount(1);
+      await page.reload();
+      await expect(dismiss).toHaveCount(0);
+      await expect(
+        page.getByText("Исправить выполнение плана и проверить повторную отправку.", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      for (const name of Object.values(labels))
+        await expect(page.getByRole("button", { name, exact: true })).toBeEnabled();
+      expect(commands).toEqual([]);
+      await page.getByRole("button", { name: labels.default, exact: true }).click();
+      await expect.poll(() => commands.length).toBe(1);
+      expect(commands[0]?.planImplementationMode).toBe("default");
+    });
+  }
 }
 
 for (const mode of ["default", "goal", "team"] as const) {

@@ -239,6 +239,7 @@ export interface ThreadMetaState {
   settings?: SessionSettings;
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
+  dismissedPlanTurnId?: string;
   timelineArtifacts?: Record<string, TimelineArtifact[]>;
   /** Historical state key retained for backwards compatibility. */
   interruptedReasoning?: Record<string, InterruptedTextActivityState[]>;
@@ -1176,6 +1177,7 @@ function validateState(value: unknown): CodexNestState {
       (meta.settings !== undefined && !isSessionSettings(meta.settings)) ||
       (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
+      (meta.dismissedPlanTurnId !== undefined && typeof meta.dismissedPlanTurnId !== "string") ||
       (meta.timelineArtifacts !== undefined && !isTimelineArtifacts(meta.timelineArtifacts)) ||
       (meta.interruptedReasoning !== undefined &&
         !isInterruptedReasoning(meta.interruptedReasoning)) ||

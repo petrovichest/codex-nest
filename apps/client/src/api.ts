@@ -11,6 +11,7 @@ import type {
   CreateProjectRequest,
   CreateProjectThreadResponse,
   DirectoryListing,
+  DismissPlanRequest,
   ForceRestartAccepted,
   GitChangesSummary,
   GlobalPermissionSettings,
@@ -580,6 +581,13 @@ export class ApiClient {
 
   markRead(id: string, body: MarkReadRequest): Promise<void> {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/read`, { method: "PUT", body });
+  }
+
+  dismissPlan(id: string, body: DismissPlanRequest): Promise<ThreadSummary> {
+    return this.request(`/api/v1/threads/${encodeURIComponent(id)}/plan/dismiss`, {
+      method: "POST",
+      body,
+    });
   }
 
   markViewed(id: string, body: MarkViewedRequest): Promise<void> {

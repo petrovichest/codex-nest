@@ -771,6 +771,11 @@ const ENGLISH: Record<string, string> = {
   "Выполнены команды": "Commands executed",
   "Да, реализуй этот план": "Yes, implement this plan",
   "Запускаем выполнение плана…": "Starting plan implementation…",
+  "Отказаться от плана": "Dismiss plan",
+  "Отказываемся от плана…": "Dismissing plan…",
+  "Не удалось отказаться от плана": "Failed to dismiss the plan",
+  "Состояние сессии изменилось. Обновите сессию и повторите отказ от плана.":
+    "The session changed. Refresh it and try dismissing the plan again.",
   "Да, реализуй этот план в режиме цели": "Yes, implement this plan in goal mode",
   "Да, реализуй этот план в режиме оркестратора": "Yes, implement this plan in orchestrator mode",
   "План ещё не обновлён после уточнений":

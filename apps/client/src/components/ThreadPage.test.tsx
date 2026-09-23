@@ -4102,6 +4102,110 @@ describe("Activity", () => {
     },
   );
 
+  it.each(["plan", "default"] as const)(
+    "dismisses a plan in %s mode and keeps implementation and finish actions",
+    async (mode) => {
+      const api = threadApi();
+      const pending = {
+        ...summary,
+        state: "needsAttention" as const,
+        awaitingPlanResponse: true,
+        settings: { collaborationMode: mode },
+      };
+      const dismissed = {
+        ...pending,
+        state: "completed" as const,
+        unread: true,
+        awaitingPlanResponse: false,
+        dismissedPlanTurnId: "plan-turn",
+      };
+      let resolve!: (thread: ThreadSummary) => void;
+      api.dismissPlan.mockReturnValueOnce(
+        new Promise<ThreadSummary>((done) => {
+          resolve = done;
+        }),
+      );
+      const context = mockThreadConnection(api, pending, completedPlanDetail());
+      const view = renderThread();
+      const button = screen.getByRole("button", { name: "Отказаться от плана" });
+      fireEvent.click(button);
+      fireEvent.click(button);
+      expect(api.dismissPlan).toHaveBeenCalledExactlyOnceWith("thread", {
+        turnId: "plan-turn",
+        observedUpdatedAt: summary.updatedAt,
+      });
+      expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "Да, реализуй этот план" }));
+      await act(async () => resolve(dismissed));
+      expect(context.dispatch).toHaveBeenCalledWith({ type: "thread", thread: dismissed });
+      expect(context.sendReliable).not.toHaveBeenCalled();
+      expect(api.updateThreadSettings).not.toHaveBeenCalled();
+      expect(api.markRead).not.toHaveBeenCalled();
+      context.state.snapshot.threads = [dismissed];
+      context.state.details.thread.summary = dismissed;
+      view.rerender(threadRoute());
+      expect(screen.queryByRole("button", { name: "Отказаться от плана" })).toBeNull();
+      expect(screen.getByText("Сделать")).toBeInTheDocument();
+      for (const name of [
+        "Да, реализуй этот план",
+        "Запустить в режиме цели",
+        "Запустить в режиме оркестратора",
+      ]) {
+        expect(screen.getByRole("button", { name })).toBeEnabled();
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Закончить" }));
+      await waitFor(() => expect(api.markRead).toHaveBeenCalled());
+    },
+  );
+
+  it("allows dismissal with an unsent draft and plan annotations, retaining both on failure and success", async () => {
+    const api = threadApi();
+    api.dismissPlan.mockRejectedValueOnce(new Error("Не удалось отказаться от плана"));
+    const pending = {
+      ...summary,
+      state: "needsAttention" as const,
+      awaitingPlanResponse: true,
+      settings: { collaborationMode: "plan" as const },
+    };
+    api.dismissPlan.mockResolvedValueOnce({
+      ...pending,
+      state: "completed",
+      awaitingPlanResponse: false,
+      dismissedPlanTurnId: "plan-turn",
+    });
+    const annotation = pendingAnnotation({
+      messageId: "plan",
+      source: "plan",
+      quote: "Сделать",
+      startOffset: 8,
+      endOffset: 15,
+    });
+    const context = mockThreadConnection(api, pending, {
+      ...completedPlanDetail(),
+      draft: {
+        input: "Позже обсудим",
+        images: [],
+        annotations: [annotation],
+        goalMode: false,
+        updatedAt: 1,
+      },
+    });
+    renderThread();
+    const input = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Отказаться от плана" }));
+    await screen.findByText("Не удалось отказаться от плана");
+    expect(input).toHaveValue("Позже обсудим");
+    expect(screen.getByRole("button", { name: "Отказаться от плана" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Отказаться от плана" }));
+    await waitFor(() =>
+      expect(context.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "thread" })),
+    );
+    expect(input).toHaveValue("Позже обсудим");
+    expect(screen.getByRole("button", { name: "Да, реализуй этот план" })).toBeDisabled();
+    expect(context.sendReliable).not.toHaveBeenCalled();
+  });
+
   it("restores plan actions after a previous client changed mode without delivering acceptance", () => {
     mockThreadConnection(
       threadApi(),
@@ -6634,6 +6738,11 @@ function threadApi() {
     ),
     archive: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
+    dismissPlan: vi
+      .fn<
+        (id: string, body: { turnId: string; observedUpdatedAt: number }) => Promise<ThreadSummary>
+      >()
+      .mockResolvedValue(summary),
     markViewed: vi.fn().mockResolvedValue(undefined),
     readGitChanges: vi
       .fn()

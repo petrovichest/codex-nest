@@ -60,6 +60,208 @@ afterEach(async () =>
   ),
 );
 
+describe("plan dismissal", () => {
+  async function harness() {
+    const context = await createTeamHarness();
+    const turn: Turn = {
+      ...testTurn("plan-turn", "completed"),
+      itemsView: "full",
+      items: [{ type: "plan", id: "plan", text: "Implementation plan" }],
+    };
+    context.bridge.threadTurns.set("thread", [turn]);
+    context.projection.upsertThread({ ...testThread(), updatedAt: 10, turns: [turn] });
+    await context.store.update((state) => {
+      Object.assign(state.threadMeta.thread!, {
+        settings: { collaborationMode: "plan" },
+        awaitingPlanResponse: true,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 10_000,
+        lastReadUpdatedAt: 0,
+        lastViewedUpdatedAt: 10_000,
+      });
+    });
+    await context.projection.readThread("thread");
+    await context.app.ready();
+    await nextImmediate();
+    context.bridge.request.mockClear();
+    return context;
+  }
+  const payload = { turnId: "plan-turn", observedUpdatedAt: 10_000 };
+  const url = "/api/v1/threads/thread/plan/dismiss";
+
+  it("persists dismissal without RPCs, messages, mode changes or finishing the session", async () => {
+    const { app, bridge, headers, store, projection } = await harness();
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+    try {
+      const before = store.snapshot().threadMeta.thread!;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await app.inject({ method: "POST", url, headers, payload });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+          state: "completed",
+          unread: true,
+          unseen: false,
+          awaitingPlanResponse: false,
+          dismissedPlanTurnId: "plan-turn",
+          currentTurnId: null,
+          queuedMessageCount: 0,
+          settings: before.settings,
+        });
+      }
+      expect(bridge.request).not.toHaveBeenCalled();
+      expect(store.view().messageQueues?.thread ?? []).toEqual([]);
+      expect(store.view().threadMeta.thread!.lastReadUpdatedAt).toBe(before.lastReadUpdatedAt);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "thread.upserted",
+          thread: expect.objectContaining({ state: "completed" }),
+        }),
+      );
+      const reloaded = new StateStore(store.path);
+      await reloaded.load();
+      expect(reloaded.view().threadMeta.thread).toMatchObject({
+        awaitingPlanResponse: false,
+        dismissedPlanTurnId: "plan-turn",
+      });
+      const finish = await app.inject({
+        method: "PUT",
+        url: "/api/v1/threads/thread/read",
+        headers,
+        payload: { observedUpdatedAt: 10_000 },
+      });
+      expect(finish.statusCode).toBe(204);
+      expect(projection.summary("thread")).toMatchObject({ state: "completed", unread: false });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps an imported plan green until Finish and does not reopen it on a retry", async () => {
+    const { app, headers, store, projection } = await harness();
+    await store.update((state) => {
+      state.threadMeta.thread!.lastReadUpdatedAt = 10_000;
+    });
+    try {
+      const response = await app.inject({ method: "POST", url, headers, payload });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ state: "completed", unread: true });
+      await projection.markRead("thread", 10_000);
+      const retry = await app.inject({ method: "POST", url, headers, payload });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json()).toMatchObject({ state: "completed", unread: false });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each(["old-turn", "old-version", "running", "queued", "new-plan"])(
+    "rejects %s without clearing attention",
+    async (scenario) => {
+      const { app, headers, store, projection, bridge } = await harness();
+      const request = { ...payload };
+      if (scenario === "old-turn") request.turnId = "old-plan";
+      if (scenario === "old-version") request.observedUpdatedAt = 9_000;
+      if (scenario === "running") await projection.setCurrentTurn("thread", "working");
+      if (scenario === "queued")
+        await store.update((state) => {
+          state.messageQueues = {
+            thread: [
+              {
+                id: "queued",
+                threadId: "thread",
+                text: "Clarification",
+                createdAt: 1,
+                status: "queued",
+              },
+            ],
+          };
+        });
+      if (scenario === "new-plan") {
+        const turn: Turn = {
+          ...testTurn("new-plan", "completed"),
+          itemsView: "full",
+          items: [{ type: "plan", id: "new", text: "New plan" }],
+        };
+        bridge.threadTurns.set("thread", [turn]);
+        projection.upsertThread({ ...testThread(), updatedAt: 10, turns: [turn] });
+      }
+      const before = store.view().threadMeta.thread!.awaitingPlanResponse;
+      try {
+        const response = await app.inject({ method: "POST", url, headers, payload: request });
+        expect(response.statusCode).toBe(409);
+        expect(store.view().threadMeta.thread).toMatchObject({ awaitingPlanResponse: before });
+        expect(store.view().threadMeta.thread!.dismissedPlanTurnId).toBeUndefined();
+        expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it("validates the request and thread before dismissing", async () => {
+    const { app, headers, store } = await harness();
+    try {
+      for (const body of [
+        {},
+        { ...payload, turnId: "" },
+        { ...payload, observedUpdatedAt: "10000" },
+      ]) {
+        expect((await app.inject({ method: "POST", url, headers, payload: body })).statusCode).toBe(
+          400,
+        );
+      }
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/v1/threads/missing/plan/dismiss",
+            headers,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(404);
+      expect(store.view().threadMeta.thread!.awaitingPlanResponse).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not dismiss while a turn start holds the session lock", async () => {
+    const { app, headers, bridge, store } = await harness();
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    bridge.parentTurnStartEntered = started;
+    bridge.parentTurnStartGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const start = app
+        .inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/turns",
+          headers,
+          payload: { input: "Continue", clientMessageId: "continue-plan" },
+        })
+        .then((response) => response);
+      await entered;
+      const dismissal = app
+        .inject({ method: "POST", url, headers, payload })
+        .then((response) => response);
+      release();
+      expect((await start).statusCode).toBe(201);
+      expect((await dismissal).statusCode).toBe(409);
+      expect(store.view().threadMeta.thread!.dismissedPlanTurnId).toBeUndefined();
+    } finally {
+      release();
+      await app.close();
+    }
+  });
+});
+
 describe("durable plan acceptance", () => {
   it.each(["default", "goal", "team"] as const)(
     "persists %s acceptance before switching mode, and replays it once",

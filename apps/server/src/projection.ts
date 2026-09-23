@@ -11,6 +11,7 @@ import type {
   AppSnapshot,
   BrowserThreadStatus,
   CodexRateLimitsState,
+  DismissPlanRequest,
   ForkOperationSummary,
   ModelOption,
   Project,
@@ -988,6 +989,65 @@ export class AppProjection extends EventEmitter {
       state.threadMeta[threadId] = meta;
     });
     this.publishThread(threadId);
+  }
+
+  async dismissPlan(threadId: string, request: DismissPlanRequest): Promise<ThreadSummary> {
+    const conflict = () =>
+      new ThreadHistoryConflictError(
+        "Состояние сессии изменилось. Обновите сессию и повторите отказ от плана.",
+      );
+    const assertIdle = (state: CodexNestStateView) => {
+      const cached = this.threads.get(threadId);
+      if (!cached) throw conflict();
+      const summary = this.toSummary(cached, state);
+      if (
+        summary.currentTurnId ||
+        !["needsAttention", "completed"].includes(summary.state) ||
+        summary.queuedMessageCount > 0 ||
+        this.attention.list().some((item) => item.threadId === threadId)
+      )
+        throw conflict();
+      return summary;
+    };
+    assertIdle(this.store.view());
+    const revision = this.historyRevision(threadId);
+    const detail = await this.readThread(threadId);
+    const turn = detail.turns.at(-1);
+    let planIndex = -1;
+    turn?.items.forEach((item, index) => {
+      if (item.type === "plan" && item.text.trim()) planIndex = index;
+    });
+    if (
+      turn?.id !== request.turnId ||
+      turn.status !== "completed" ||
+      planIndex < 0 ||
+      turn.items[planIndex]?.status !== "completed" ||
+      turn.items
+        .slice(planIndex + 1)
+        .some((item) => item.type === "userMessage" || item.type === "userInputResponse")
+    )
+      throw conflict();
+    await this.store.update((state) => {
+      const summary = assertIdle(state);
+      const meta = state.threadMeta[threadId];
+      if (
+        !meta ||
+        this.historyRevision(threadId) !== revision ||
+        summary.updatedAt !== detail.summary.updatedAt ||
+        (meta.dismissedPlanTurnId === request.turnId && meta.awaitingPlanResponse) ||
+        (meta.dismissedPlanTurnId !== request.turnId &&
+          (!meta.awaitingPlanResponse || summary.updatedAt !== request.observedUpdatedAt))
+      )
+        throw conflict();
+      // Imported sessions may already have this timestamp marked read. Keep the
+      // newly dismissed plan in Active until Finish, without reopening it on retry.
+      if (meta.dismissedPlanTurnId !== request.turnId) {
+        meta.lastReadUpdatedAt = Math.min(meta.lastReadUpdatedAt, summary.updatedAt - 1);
+      }
+      meta.dismissedPlanTurnId = request.turnId;
+      meta.awaitingPlanResponse = false;
+    });
+    return this.publishThread(threadId)!;
   }
 
   async markViewed(threadId: string, observedUpdatedAt: number): Promise<void> {
@@ -2491,7 +2551,8 @@ export class AppProjection extends EventEmitter {
         };
         item.lastOutcome = outcome;
         item.outcomeUpdatedAt = updatedAt;
-        item.awaitingPlanResponse = awaitingPlanResponse;
+        item.awaitingPlanResponse =
+          awaitingPlanResponse && item.dismissedPlanTurnId !== latestTurn?.id;
         draft.threadMeta[cached.thread.id] = item;
       });
     }
@@ -2566,6 +2627,7 @@ export class AppProjection extends EventEmitter {
         const artifacts = meta.timelineArtifacts?.[turn.id];
         meta.awaitingPlanResponse =
           outcome === "completed" &&
+          meta.dismissedPlanTurnId !== turn.id &&
           ((meta.settings?.collaborationMode === "plan" && hasPlan) ||
             latestPlanChecklistIsIncomplete(artifacts));
         if (artifacts) {
@@ -3160,6 +3222,7 @@ export class AppProjection extends EventEmitter {
       updatedAt,
       currentTurnId: cached.currentTurnId,
       awaitingPlanResponse: meta.awaitingPlanResponse ?? false,
+      ...(meta.dismissedPlanTurnId ? { dismissedPlanTurnId: meta.dismissedPlanTurnId } : {}),
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
       browserStatus: this.browserStatusProvider(cached.thread.id),
       settings: sessionSettings(meta.settings),

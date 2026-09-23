@@ -35,6 +35,7 @@ import type {
   CreateProjectThreadResponse,
   GlobalPermissionSettings,
   InterruptTurnRequest,
+  DismissPlanRequest,
   MarkReadRequest,
   MarkViewedRequest,
   ModelOption,
@@ -4507,6 +4508,31 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return reply.code(204).send();
     });
   }
+
+  app.post<{ Params: { id: string }; Body: DismissPlanRequest }>(
+    "/api/v1/threads/:id/plan/dismiss",
+    async (request, reply) => {
+      const body = requireRecord<DismissPlanRequest>(request.body);
+      if (
+        typeof body.turnId !== "string" ||
+        !body.turnId.trim() ||
+        typeof body.observedUpdatedAt !== "number" ||
+        !Number.isFinite(body.observedUpdatedAt)
+      )
+        return apiError(
+          reply,
+          400,
+          "validation_failed",
+          "turnId and observedUpdatedAt are required",
+        );
+      return withKeyLock(turnStartLocks, request.params.id, async () => {
+        const summary = projection.summary(request.params.id);
+        if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+        assertWritableThread(summary);
+        return projection.dismissPlan(request.params.id, body);
+      });
+    },
+  );
 
   app.put<{ Params: { id: string }; Body: MarkReadRequest }>(
     "/api/v1/threads/:id/read",

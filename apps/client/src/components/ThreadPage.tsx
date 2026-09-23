@@ -627,6 +627,7 @@ export function ThreadPage({
   const activeMessageFingerprintsRef = useRef(new Set<string>());
   const submittedGoalMessageIdsRef = useRef(new Set<string>());
   const planAcceptanceInFlightRef = useRef(false);
+  const planDismissalInFlightRef = useRef(false);
   const composerEditRevisionRef = useRef(0);
   const createdInWorkspaceRef = useRef<string | null>(null);
   const skipInitialCreatedDetailRef = useRef<string | null>(null);
@@ -931,14 +932,21 @@ export function ThreadPage({
     }
   }
   activeMessageFingerprintsRef.current = activeMessageFingerprints;
-  const latestPlan = useMemo(
-    () =>
-      !isSubagent &&
-      (summary?.settings.collaborationMode === "plan" || summary?.awaitingPlanResponse)
-        ? findLatestPlan(detail?.turns)
-        : null,
-    [detail?.turns, isSubagent, summary?.settings.collaborationMode, summary?.awaitingPlanResponse],
-  );
+  const latestPlan = useMemo(() => {
+    if (isSubagent) return null;
+    const plan = findLatestPlan(detail?.turns);
+    return summary?.settings.collaborationMode === "plan" ||
+      summary?.awaitingPlanResponse ||
+      (plan?.ready && summary?.dismissedPlanTurnId === plan.turn.id)
+      ? plan
+      : null;
+  }, [
+    detail?.turns,
+    isSubagent,
+    summary?.settings.collaborationMode,
+    summary?.awaitingPlanResponse,
+    summary?.dismissedPlanTurnId,
+  ]);
   const groupedTurnActivities = useMemo(
     () =>
       new Map(
@@ -3094,7 +3102,7 @@ export function ThreadPage({
       setError(t("Это сообщение уже отправлено"));
       return;
     }
-    if (planAcceptanceDisabled) return;
+    if (planAcceptanceDisabled || planDismissalInFlightRef.current) return;
     const clientMessageId = createClientMessageId();
     const messageClaimKey = claimSubmittedMessage(
       { text: implementationMessage, images: [], files: [], goal: goalMode },
@@ -3145,6 +3153,35 @@ export function ThreadPage({
       );
     } finally {
       planAcceptanceInFlightRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function dismissPlan() {
+    if (
+      planDismissalDisabled ||
+      !latestPlan ||
+      planDismissalInFlightRef.current ||
+      planAcceptanceInFlightRef.current
+    )
+      return;
+    planDismissalInFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const thread = await api.dismissPlan(threadId, {
+        turnId: latestPlan.turn.id,
+        observedUpdatedAt: summary!.updatedAt,
+      });
+      dispatch({ type: "thread", thread });
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? localizeKnownServerText(language, caught.message)
+          : t("Не удалось отказаться от плана"),
+      );
+    } finally {
+      planDismissalInFlightRef.current = false;
       setBusy(false);
     }
   }
@@ -3478,7 +3515,7 @@ export function ThreadPage({
   const latestPlanHasAnnotations = Boolean(
     latestPlan && annotations.some((annotation) => annotation.messageId === latestPlan.item.id),
   );
-  const planAcceptanceDisabled =
+  const planActionsDisabled =
     busy ||
     settingsBusy ||
     !latestPlan?.ready ||
@@ -3486,8 +3523,10 @@ export function ThreadPage({
     workspaceSummary.state === "running" ||
     attention.length > 0 ||
     optimisticMessages.length > 0 ||
-    (detail?.queuedMessages.length ?? 0) > 0 ||
-    latestPlanHasAnnotations;
+    workspaceSummary.queuedMessageCount > 0 ||
+    (detail?.queuedMessages.length ?? 0) > 0;
+  const planAcceptanceDisabled = planActionsDisabled || latestPlanHasAnnotations;
+  const planDismissalDisabled = planActionsDisabled || !workspaceSummary.awaitingPlanResponse;
   const planNotice = attention.length
     ? attention.every((request) => request.kind === "userInput")
       ? t("Сначала ответьте на вопросы агента")
@@ -4073,6 +4112,18 @@ export function ThreadPage({
                                             <TeamIcon />
                                             {t("Запустить в режиме оркестратора")}
                                           </button>
+                                          {workspaceSummary.awaitingPlanResponse && (
+                                            <button
+                                              className="implement-plan"
+                                              disabled={planDismissalDisabled}
+                                              type="button"
+                                              onClick={() => void dismissPlan()}
+                                            >
+                                              {planDismissalInFlightRef.current
+                                                ? t("Отказываемся от плана…")
+                                                : t("Отказаться от плана")}
+                                            </button>
+                                          )}
                                         </div>
                                       </>
                                     )}

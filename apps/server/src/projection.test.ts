@@ -114,6 +114,114 @@ afterEach(async () =>
 );
 
 describe("AppProjection", () => {
+  it("keeps a dismissed plan completed through restart, reconciliation and duplicate completion, but asks for a new plan", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-dismissed-plan-"));
+    directories.push(directory);
+    const statePath = join(directory, "state.json");
+    const store = new StateStore(statePath);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 10_000,
+        awaitingPlanResponse: true,
+        settings: { collaborationMode: "plan" },
+      };
+    });
+    let terminal = {
+      ...testTurn("plan-turn", "completed"),
+      itemsView: "full" as const,
+      items: [{ type: "plan" as const, id: "plan", text: "Do the work" }],
+    };
+    let updatedAt = 10;
+    const makeBridge = () => {
+      const bridge = new FakeBridge();
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params) => {
+        if (method === "thread/list")
+          return {
+            data: params.archived ? [] : [thread("one", "/work", updatedAt)],
+            nextCursor: null,
+            backwardsCursor: null,
+          };
+        if (method === "thread/turns/list")
+          return { data: [terminal], nextCursor: null, backwardsCursor: null };
+        return original(method, params);
+      });
+      return bridge;
+    };
+    const bridge = makeBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    const request = { turnId: terminal.id, observedUpdatedAt: 10_000 };
+    await projection.dismissPlan("one", request);
+    expect(projection.summary("one")).toMatchObject({
+      state: "completed",
+      unread: true,
+      awaitingPlanResponse: false,
+    });
+
+    const reloaded = new StateStore(statePath);
+    await reloaded.load();
+    const nextBridge = makeBridge();
+    const restoredAttention = new AttentionManager();
+    const restored = new AppProjection(
+      nextBridge as unknown as CodexBridge,
+      reloaded,
+      restoredAttention,
+    );
+    // A different thread timestamp forces outcome reconstruction from the same plan.
+    updatedAt = 11;
+    await restored.sync();
+    expect(restored.summary("one")).toMatchObject({
+      state: "completed",
+      dismissedPlanTurnId: terminal.id,
+      awaitingPlanResponse: false,
+    });
+    let completions = 0;
+    restored.on("event", (_sequence, event: ServerEvent) => {
+      if (event.type === "thread.upserted") completions += 1;
+    });
+    nextBridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: terminal },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(completions).toBeGreaterThan(0));
+    expect(restored.summary("one")).toMatchObject({
+      state: "completed",
+      awaitingPlanResponse: false,
+    });
+    await restored.setCurrentTurn("one", "next-plan");
+    terminal = { ...terminal, id: "next-plan" };
+    nextBridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: terminal },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(restored.summary("one")?.awaitingPlanResponse).toBe(true));
+    await expect(restored.dismissPlan("one", request)).rejects.toThrow(
+      "Состояние сессии изменилось",
+    );
+    expect(restored.summary("one")?.state).toBe("needsAttention");
+    const pending = restoredAttention.receive(
+      {
+        id: "approval",
+        method: "item/commandExecution/requestApproval",
+        params: { threadId: "one", turnId: terminal.id, itemId: "command" },
+      },
+      { respond: vi.fn(), respondError: vi.fn() } as unknown as JsonlTransport,
+    );
+    await expect(
+      restored.dismissPlan("one", {
+        turnId: terminal.id,
+        observedUpdatedAt: restored.summary("one")!.updatedAt,
+      }),
+    ).rejects.toThrow("Состояние сессии изменилось");
+    expect(restoredAttention.get(pending.id)).toBeDefined();
+  });
+
   it("keeps a revised plan after clarification in live, completed and restored history", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-revised-plan-"));
     directories.push(directory);
