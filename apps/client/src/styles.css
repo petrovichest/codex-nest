@@ -2710,6 +2710,26 @@
   font-size: var(--text-label);
 }
 
+.voice-transcription-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.voice-transcription-message-with-content > .message-body {
+  width: 100%;
+  display: block;
+  padding: var(--space-3) var(--space-4);
+}
+
+.voice-transcription-content {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  color: var(--text-strong);
+  font-size: var(--text-message);
+}
+
 .voice-transcription-icon {
   width: 17px;
   height: 17px;
@@ -7460,7 +7480,7 @@ button.message-file:hover:not(:disabled) {
   scrollbar-gutter: stable;
 }
 
-.voice-transcription-message .message-body > span:nth-child(2) {
+.voice-transcription-status-label {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;

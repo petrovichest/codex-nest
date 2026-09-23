@@ -6227,7 +6227,16 @@ describe("Activity", () => {
     const context = mockThreadConnection(
       api,
       { ...summary, state: "needsAttention", currentTurnId: "turn" },
-      { attention: [pendingInputRequest()] },
+      {
+        attention: [pendingInputRequest()],
+        draft: {
+          input: "Текст к записи",
+          images: [],
+          goalMode: false,
+          annotations: [],
+          updatedAt: 1,
+        },
+      },
     );
     const view = render(voiceThreadRoute());
     fireEvent.change(screen.getByRole("textbox", { name: "Свой ответ" }), {
@@ -6244,8 +6253,14 @@ describe("Activity", () => {
       ),
     );
     expect(screen.queryByRole("region", { name: "Требуется внимание" })).toBeNull();
+    const uploading = await screen.findByRole("status", { name: "Отправляем запись" });
+    expect(uploading).toHaveTextContent("Текст к записи");
+    expect(composer.getByRole("textbox", { name: "Направить текущую задачу" })).toHaveValue("");
     await act(async () => rejectUpload(new Error("Upload failed")));
     expect(screen.getByRole("textbox", { name: "Свой ответ" })).toHaveValue("Несохранённый ответ");
+    expect(composer.getByRole("textbox", { name: "Направить текущую задачу" })).toHaveValue(
+      "Текст к записи",
+    );
   });
 
   it.each(["failed", "cancelled", "draft"])("restores questions for a %s voice job", (outcome) => {
@@ -6285,7 +6300,15 @@ describe("Activity", () => {
   });
 
   it("blocks for a remote voice job without presenting it as a local recording", async () => {
-    const context = mockThreadConnection(threadApi(), summary);
+    const context = mockThreadConnection(threadApi(), summary, {
+      draft: {
+        input: "Оставить в поле",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      },
+    });
     context.state.snapshot.voiceTranscriptions = [
       {
         id: "voice",
@@ -6305,6 +6328,9 @@ describe("Activity", () => {
     expect(microphone).not.toBeNull();
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
       "readonly",
+    );
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+      "Оставить в поле",
     );
     expect(microphone!).toBeDisabled();
     expect(within(microphone!).queryByText("0:00")).not.toBeInTheDocument();
@@ -6359,8 +6385,123 @@ describe("Activity", () => {
     },
   );
 
+  it.each(["failed", "cancelled"] as const)(
+    "shows the pending voice draft in the chat and restores it when %s",
+    async (outcome) => {
+      const draft: ThreadDraft = {
+        input: "Проверь этот скриншот",
+        images: [{ id: "image", name: "screen.png", url: "data:image/png;base64,AA==" }],
+        files: [
+          {
+            id: "file",
+            name: "notes.txt",
+            path: "/work/project/notes.txt",
+            size: 12,
+            mediaType: "text/plain",
+          },
+        ],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      };
+      const context = mockThreadConnection(threadApi(), summary, { draft });
+      context.state.snapshot.voiceTranscriptions = [
+        {
+          id: "voice",
+          threadId: "thread",
+          mode: "send",
+          status: "transcribing",
+          createdAt: Date.now(),
+          startedAt: Date.now(),
+          audioDurationMs: 2_000,
+          estimatedTotalSeconds: null,
+          error: null,
+        },
+      ];
+      const view = render(voiceThreadRoute());
+
+      const progress = await screen.findByRole("status", { name: "Распознаём" });
+      expect(progress).toHaveTextContent("Проверь этот скриншот");
+      expect(within(progress).getByRole("button", { name: "Открыть изображение 1" })).toBeVisible();
+      expect(within(progress).getByRole("button", { name: "notes.txt" })).toBeVisible();
+      expect(
+        progress
+          .querySelector(".voice-transcription-status")!
+          .compareDocumentPosition(within(progress).getByText("Проверь этот скриншот")) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveAttribute(
+        "readonly",
+      );
+      expect(view.container.querySelector(".composer-attachments")).toBeNull();
+
+      if (outcome === "failed") {
+        context.state.snapshot.voiceTranscriptions[0] = {
+          ...context.state.snapshot.voiceTranscriptions[0]!,
+          status: "failed",
+          error: "No speech",
+        };
+      } else {
+        context.state.snapshot.voiceTranscriptions = [];
+      }
+      view.rerender(voiceThreadRoute());
+
+      expect(screen.queryByRole("status", { name: "Распознаём" })).toBeNull();
+      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+        "Проверь этот скриншот",
+      );
+      expect(screen.getByRole("button", { name: "Открыть изображение screen.png" })).toBeVisible();
+      expect(screen.getByText("notes.txt")).toBeVisible();
+    },
+  );
+
+  it("shows a recovered local draft in the voice bubble when history is unavailable", async () => {
+    const context = mockThreadConnection(threadApi(), summary);
+    Reflect.deleteProperty(context.state.details, "thread");
+    context.refreshDetail.mockRejectedValue(
+      new ApiClientError("not_found", "Session history is unavailable", 404),
+    );
+    loadLocalDraft.mockResolvedValue({
+      value: {
+        input: "Сохранённый текст",
+        images: [{ id: "image", name: "screen.png", url: "data:image/png;base64,AA==" }],
+        goalMode: false,
+        annotations: [],
+      },
+      updatedAt: 2,
+    });
+    context.state.snapshot.voiceTranscriptions = [
+      {
+        id: "voice",
+        threadId: "thread",
+        mode: "send",
+        status: "transcribing",
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+        audioDurationMs: 2_000,
+        estimatedTotalSeconds: null,
+        error: null,
+      },
+    ];
+    render(voiceThreadRoute());
+
+    const progress = await screen.findByRole("status", { name: "Распознаём" });
+    await waitFor(() => expect(progress).toHaveTextContent("Сохранённый текст"));
+    expect(within(progress).getByRole("button", { name: "Открыть изображение 1" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Повторить загрузку истории" })).toBeVisible();
+  });
+
   it("hides an automatic transcription bubble once its queued message materializes", () => {
     const context = mockThreadConnection(threadApi(), summary, {
+      draft: {
+        input: "Черновик",
+        images: [],
+        goalMode: false,
+        annotations: [],
+        updatedAt: 1,
+      },
       queuedMessages: [
         {
           id: "voice",
@@ -6388,6 +6529,7 @@ describe("Activity", () => {
 
     expect(view.container.querySelector(".voice-transcription-message")).toBeNull();
     expect(screen.getByText("Распознанный текст")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
   });
 
   it("restores a failed voice job without keeping the composer locked", async () => {

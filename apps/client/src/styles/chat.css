@@ -307,6 +307,10 @@
   line-height: 20px;
 }
 
+.thread-workspace .timeline .message.voice-transcription-message-with-content > .message-body {
+  display: block;
+}
+
 .thread-workspace .voice-transcription-timer {
   font-weight: var(--weight-medium);
 }

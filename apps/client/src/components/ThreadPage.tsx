@@ -1050,6 +1050,12 @@ export function ThreadPage({
   const autoVoiceProgressKey = autoVoiceProgress
     ? `${activeVoiceJob?.id ?? `upload:${threadId}`}:${autoVoiceProgress.status}`
     : null;
+  const pendingVoiceSendRemoval =
+    voiceRemoval?.outcome === "send" && !handledVoiceRemovalsRef.current.has(voiceRemoval.jobId);
+  const hideVoiceDraftInComposer =
+    (activeVoiceJob !== null && activeVoiceJob.mode !== "draft") ||
+    (voiceUpload !== null && voiceUpload.mode !== "draft") ||
+    pendingVoiceSendRemoval;
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
     : undefined;
@@ -4193,7 +4199,14 @@ export function ThreadPage({
                       </div>
                     ))}
                     {!isSubagent && autoVoiceProgress && (
-                      <VoiceTranscriptionBubble progress={autoVoiceProgress} />
+                      <VoiceTranscriptionBubble
+                        progress={autoVoiceProgress}
+                        draft={activeComposerDraft}
+                        cwd={workspaceSummary.cwd}
+                        onDownload={downloadFile}
+                        onOpenArtifact={openLinkedArtifact}
+                        onLoadImage={loadLocalImage}
+                      />
                     )}
                     <AttentionPanel
                       requests={attention.filter(
@@ -4272,15 +4285,15 @@ export function ThreadPage({
               initialNewSessionRef.current.active ? "new-session-workspace" : threadId
             }
             inputSyncRevision={composerInputSyncRevision}
-            input={input}
+            input={hideVoiceDraftInComposer ? "" : input}
             onInput={setInput}
-            pastes={activeComposerDraft}
+            pastes={hideVoiceDraftInComposer ? emptyComposerDraft() : activeComposerDraft}
             onDraftFlush={onDraftFlush}
             cwd={workspaceSummary.cwd}
             skillsEpoch={state.skillsEpoch}
-            images={images}
+            images={hideVoiceDraftInComposer ? [] : images}
             onImagesChange={setImages}
-            files={files}
+            files={hideVoiceDraftInComposer ? [] : files}
             onFilesChange={setFiles}
             onUploadFiles={uploadFiles}
             onDeleteFile={deleteFile}
@@ -4323,7 +4336,7 @@ export function ThreadPage({
             transcriptionConfig={transcriptionConfig}
             transcriptionProvider={transcriptionProvider}
             voiceUploadPending={Boolean(voiceUpload)}
-            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload)}
+            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload || pendingVoiceSendRemoval)}
             onCancelVoiceTranscription={
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
@@ -4513,8 +4526,25 @@ function effectiveDefaultModel(models: ModelOption[]): ModelOption | undefined {
   return models.find((candidate) => candidate.isDefault) ?? models[0];
 }
 
-export function VoiceTranscriptionBubble({ progress }: { progress: VoiceProgress }) {
+export function VoiceTranscriptionBubble({
+  progress,
+  draft,
+  cwd,
+  onDownload,
+  onOpenArtifact,
+  onLoadImage,
+}: {
+  progress: VoiceProgress;
+  draft: UpdateThreadDraftRequest;
+  cwd?: string;
+  onDownload?(path: string): Promise<void>;
+  onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
+  onLoadImage?: LocalImageLoader;
+}) {
   const { t } = useI18n();
+  const hasContent = Boolean(
+    draft.input.trim() || draft.pasteBlocks?.length || draft.images.length || draft.files?.length,
+  );
   const label =
     progress.status === "uploading"
       ? t("Отправляем запись")
@@ -4527,28 +4557,54 @@ export function VoiceTranscriptionBubble({ progress }: { progress: VoiceProgress
     progress.status === "transcribing"
       ? formatVoiceTranscriptionTimer(progress.elapsedSeconds, progress.estimatedTotalSeconds)
       : formatVoiceClock(progress.elapsedSeconds);
+  const status = (
+    <>
+      <span className="voice-transcription-icon" aria-hidden="true">
+        {progress.status === "uploading" || progress.status === "applying" ? (
+          <span className="spinner small" />
+        ) : progress.status === "queued" ? (
+          <CheckIcon />
+        ) : (
+          <MicrophoneIcon />
+        )}
+      </span>
+      <span className="voice-transcription-status-label">{label}</span>
+      <span className="voice-transcription-timer" aria-hidden="true">
+        {timer}
+      </span>
+    </>
+  );
 
   return (
     <article
       aria-label={label}
       aria-live="polite"
-      className="message userMessage voice-transcription-message"
+      className={`message userMessage voice-transcription-message${hasContent ? " voice-transcription-message-with-content" : ""}`}
       role="status"
     >
       <div className="message-body">
-        <span className="voice-transcription-icon" aria-hidden="true">
-          {progress.status === "uploading" || progress.status === "applying" ? (
-            <span className="spinner small" />
-          ) : progress.status === "queued" ? (
-            <CheckIcon />
-          ) : (
-            <MicrophoneIcon />
-          )}
-        </span>
-        <span>{label}</span>
-        <span className="voice-transcription-timer" aria-hidden="true">
-          {timer}
-        </span>
+        {hasContent ? <div className="voice-transcription-status">{status}</div> : status}
+        {hasContent && (
+          <div className="voice-transcription-content">
+            <PasteBlocks blocks={draft.pasteBlocks} />
+            {draft.input.trim() && (
+              <MarkdownContent
+                text={draft.input}
+                inlinePastes={draft.inlinePastes}
+                cwd={cwd}
+                onDownload={onDownload}
+                onOpenArtifact={onOpenArtifact}
+                onLoadImage={onLoadImage}
+              />
+            )}
+            {draft.images.length > 0 && (
+              <MessageImages images={draft.images.map((image) => image.url)} />
+            )}
+            {(draft.files?.length ?? 0) > 0 && (
+              <MessageFiles files={draft.files ?? []} onDownload={onDownload} />
+            )}
+          </div>
+        )}
       </div>
     </article>
   );

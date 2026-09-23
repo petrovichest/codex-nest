@@ -1,6 +1,74 @@
 import { expect, test } from "@playwright/test";
 import type { AttentionRequest, ServerEvent, ThreadDetail } from "@codexnest/protocol";
-import { attentionThread, installVisualFixture, snapshot, waitForVisualReady } from "./fixtures";
+import {
+  attentionThread,
+  installVisualFixture,
+  mainThread,
+  snapshot,
+  waitForVisualReady,
+} from "./fixtures";
+
+test("mobile voice draft moves into the status bubble", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const seed = structuredClone(snapshot);
+  seed.voiceTranscriptions = [
+    {
+      id: "voice-with-draft",
+      threadId: mainThread.id,
+      mode: "send",
+      status: "transcribing",
+      createdAt: Date.UTC(2026, 7, 3, 11, 59, 53),
+      startedAt: Date.UTC(2026, 7, 3, 11, 59, 53),
+      audioDurationMs: 7_000,
+      estimatedTotalSeconds: 12,
+      error: null,
+    },
+  ];
+  const image = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" rx="12" fill="#252725"/></svg>')}`;
+  const detail: ThreadDetail = {
+    summary: mainThread,
+    turns: [],
+    queuedMessages: [],
+    olderTurnsCursor: null,
+    draft: {
+      input: "Проверь, пожалуйста, этот скриншот.",
+      images: [{ id: "screenshot", name: "screen.svg", url: image }],
+      files: [
+        {
+          id: "notes",
+          name: "notes.txt",
+          path: "/work/codex-nest/notes.txt",
+          size: 12,
+          mediaType: "text/plain",
+        },
+      ],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
+    },
+  };
+  await installVisualFixture(page, { theme: "light", snapshot: seed });
+  await page.route("**/api/v1/threads/session-main", (route) =>
+    route.fulfill({ json: detail, headers: { "access-control-allow-origin": "*" } }),
+  );
+  await page.goto("/threads/session-main");
+  await waitForVisualReady(page);
+
+  const bubble = page.locator(".voice-transcription-message");
+  await expect(bubble.locator(".voice-transcription-status")).toContainText("Распознаём");
+  await expect(bubble).toContainText("Проверь, пожалуйста, этот скриншот.");
+  await expect(bubble.locator(".message-image-preview")).toHaveCount(1);
+  await expect(bubble.locator(".message-file")).toContainText("notes.txt");
+  await expect(page.locator(".composer textarea")).toHaveValue("");
+  await expect(page.locator(".composer-attachments")).toHaveCount(0);
+  await expect(bubble.locator(".message-body")).toHaveCSS("display", "block");
+  const status = (await bubble.locator(".voice-transcription-status").boundingBox())!;
+  const content = (await bubble.locator(".voice-transcription-content").boundingBox())!;
+  expect(content.y).toBeGreaterThanOrEqual(status.y + status.height);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await bubble.screenshot({ path: testInfo.outputPath("voice-draft-mobile.png") });
+  await page.screenshot({ path: testInfo.outputPath("voice-draft-page.png") });
+});
 
 for (const theme of ["light", "dark"] as const) {
   for (const language of ["ru", "en"] as const) {
