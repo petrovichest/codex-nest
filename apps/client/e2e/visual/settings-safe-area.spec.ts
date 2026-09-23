@@ -14,9 +14,7 @@ const layouts = [
 ];
 
 for (const theme of ["light", "dark"] as const) {
-  test(`${theme}: mobile settings keep navigation in the floating header`, async ({
-    page,
-  }) => {
+  test(`${theme}: mobile settings keep navigation in the floating header`, async ({ page }) => {
     await installVisualFixture(page, { theme });
     await page.goto("/settings?section=application");
     await waitForVisualReady(page);
