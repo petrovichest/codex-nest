@@ -64,6 +64,9 @@ for (const theme of ["light", "dark"] as const) {
         "aria-orientation",
         width >= 1280 ? "vertical" : "horizontal",
       );
+      await expect(
+        page.locator(".settings-workspace .workspace-header [role=tablist]"),
+      ).toHaveCount(width <= 820 ? 1 : 0);
       await expect(address).toHaveValue("http://unsaved.example/inference");
       expect(await address.evaluate((node, before) => node === before, original)).toBe(true);
       expect(
@@ -72,6 +75,7 @@ for (const theme of ["light", "dark"] as const) {
     }
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(tabs).toHaveAttribute("aria-orientation", "horizontal");
+    await expect(page.locator(".settings-scroll [role=tablist]")).toHaveCount(0);
     await tabs.getByRole("tab").first().focus();
     await page.keyboard.press("ArrowRight");
     await expect(page.locator("#settings-section-tab-codex")).toBeFocused();

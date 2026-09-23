@@ -87,6 +87,7 @@ type SettingsSection = (typeof SETTINGS_SECTIONS)[number]["id"];
 type EditableTaskDefaults = Omit<TaskDefaults, "serviceTier">;
 const EMPTY_MODELS: ModelOption[] = [];
 const VERTICAL_SECTIONS_QUERY = "(min-width: 1280px)";
+const MOBILE_SECTIONS_QUERY = "(max-width: 820px)";
 
 function isSettingsSection(value: string | null): value is SettingsSection {
   return SETTINGS_SECTIONS.some((section) => section.id === value);
@@ -132,6 +133,10 @@ export function SettingsPage({
   const [verticalSections, setVerticalSections] = useState(
     () => window.matchMedia?.(VERTICAL_SECTIONS_QUERY).matches ?? false,
   );
+  const [mobileSections, setMobileSections] = useState(
+    () => window.matchMedia?.(MOBILE_SECTIONS_QUERY).matches ?? false,
+  );
+  const sectionTabsRef = useRef<HTMLDivElement>(null);
   const sectionTabRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
@@ -176,6 +181,15 @@ export function SettingsPage({
   }, []);
 
   useEffect(() => {
+    const query = window.matchMedia?.(MOBILE_SECTIONS_QUERY);
+    if (!query) return;
+    const update = () => setMobileSections(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
     if (sectionParam === activeSection) return;
     const canonicalParams = new URLSearchParams(searchParams);
     canonicalParams.set("section", activeSection);
@@ -187,7 +201,35 @@ export function SettingsPage({
       block: "nearest",
       inline: "nearest",
     });
-  }, [activeSection, verticalSections]);
+  }, [activeSection, mobileSections, verticalSections]);
+
+  useEffect(() => {
+    if (!mobileSections) return;
+    const tabs = sectionTabsRef.current;
+    if (!tabs) return;
+
+    const updateScrollFades = () => {
+      const maxScroll = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+      const scrollLeft = Math.max(0, Math.min(maxScroll, tabs.scrollLeft));
+      const fadeSize = Math.min(28, tabs.clientWidth / 2);
+      tabs.style.setProperty("--settings-tabs-fade-left", `${Math.min(fadeSize, scrollLeft)}px`);
+      tabs.style.setProperty(
+        "--settings-tabs-fade-right",
+        `${Math.min(fadeSize, maxScroll - scrollLeft)}px`,
+      );
+    };
+
+    updateScrollFades();
+    tabs.addEventListener("scroll", updateScrollFades, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateScrollFades);
+    observer?.observe(tabs);
+    for (const tab of tabs.children) observer?.observe(tab);
+    return () => {
+      tabs.removeEventListener("scroll", updateScrollFades);
+      observer?.disconnect();
+    };
+  }, [language, mobileSections]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -335,44 +377,50 @@ export function SettingsPage({
     sectionTabRefs.current[nextSection]?.focus();
   }
 
+  const sectionTabs = (
+    <div className="settings-section-shelf">
+      <div
+        aria-label={t("Разделы настроек")}
+        aria-orientation={verticalSections ? "vertical" : "horizontal"}
+        className="settings-section-tabs"
+        ref={sectionTabsRef}
+        role="tablist"
+      >
+        {SETTINGS_SECTIONS.map(({ id, label, Icon }, index) => (
+          <button
+            aria-controls={`settings-section-panel-${id}`}
+            aria-selected={activeSection === id}
+            className="settings-section-tab"
+            id={`settings-section-tab-${id}`}
+            key={id}
+            ref={(element) => {
+              sectionTabRefs.current[id] = element;
+            }}
+            role="tab"
+            tabIndex={activeSection === id ? 0 : -1}
+            type="button"
+            onClick={() => selectSection(id)}
+            onKeyDown={(event) => handleSectionKeyDown(event, index)}
+          >
+            <Icon />
+            <span>{t(label)}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="settings-workspace">
       <WorkspaceHeader
+        actions={mobileSections ? sectionTabs : undefined}
         leadingIcon={<SlidersIcon />}
         title={t("Настройки")}
         subtitle={t("Приложение, Codex и сервер")}
         onOpenNavigation={onOpenNavigation}
       />
       <section aria-label={t("Настройки")} className="settings-scroll" ref={settingsScrollRef}>
-        <div className="settings-section-shelf">
-          <div
-            aria-label={t("Разделы настроек")}
-            aria-orientation={verticalSections ? "vertical" : "horizontal"}
-            className="settings-section-tabs"
-            role="tablist"
-          >
-            {SETTINGS_SECTIONS.map(({ id, label, Icon }, index) => (
-              <button
-                aria-controls={`settings-section-panel-${id}`}
-                aria-selected={activeSection === id}
-                className="settings-section-tab"
-                id={`settings-section-tab-${id}`}
-                key={id}
-                ref={(element) => {
-                  sectionTabRefs.current[id] = element;
-                }}
-                role="tab"
-                tabIndex={activeSection === id ? 0 : -1}
-                type="button"
-                onClick={() => selectSection(id)}
-                onKeyDown={(event) => handleSectionKeyDown(event, index)}
-              >
-                <Icon />
-                <span>{t(label)}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+        {!mobileSections && sectionTabs}
         <CodexSettingsProvider onStatusChange={setCodexManagementStatus}>
           <div
             aria-labelledby="settings-section-tab-application"

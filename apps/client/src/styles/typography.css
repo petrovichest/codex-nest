@@ -264,6 +264,15 @@
   }
 
   @media (max-width: 820px) {
+    .settings-workspace {
+      --settings-header-height: max(44px, calc(var(--text-ui) * 1.5 + 16px));
+    }
+
+    .settings-workspace .workspace-header {
+      height: var(--settings-header-height);
+      min-height: var(--settings-header-height);
+    }
+
     .thread-workspace:not(.pending-fork-workspace) {
       --chat-project-line: calc(var(--text-small) * 1.285714);
       --chat-header-height: max(
