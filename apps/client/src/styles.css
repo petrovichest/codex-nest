@@ -41,6 +41,11 @@
 
 .app-frame {
   --sidebar-gutter: var(--space-5);
+  --sidebar-width: clamp(
+    240px,
+    var(--sidebar-preferred-width, 292px),
+    min(440px, calc(100vw - 460px))
+  );
   --sidebar-footprint: calc(var(--sidebar-width) + 2 * var(--sidebar-gutter));
 
   width: 100%;
@@ -75,6 +80,36 @@
   border: 0;
   border-radius: var(--chat-radius-surface);
   box-shadow: var(--sidebar-panel-shadow);
+}
+
+.sidebar-resize-handle {
+  position: fixed;
+  inset: var(--space-2) auto var(--sidebar-gutter)
+    calc(var(--sidebar-gutter) + var(--sidebar-width));
+  z-index: 31;
+  width: var(--sidebar-gutter);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resize-handle::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--muted-strong);
+  content: "";
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+
+.sidebar-resize-handle:is(:hover, :focus-visible)::before {
+  opacity: 1;
 }
 
 :root[data-resolved-theme="dark"] .sidebar {
@@ -1091,6 +1126,11 @@
   inset: var(--space-2) var(--sidebar-gutter) var(--sidebar-gutter) auto;
   border-right: 0;
   border-left: 0;
+}
+
+.app-frame[data-sidebar-side="right"] .sidebar-resize-handle {
+  right: calc(var(--sidebar-gutter) + var(--sidebar-width));
+  left: auto;
 }
 
 .app-frame[data-sidebar-side="right"] .content {
@@ -6476,6 +6516,10 @@ button.message-file:hover:not(:disabled) {
     box-shadow: none;
     transition: transform 180ms ease;
     will-change: transform;
+  }
+
+  .sidebar-resize-handle {
+    display: none;
   }
 
   .artifact-viewer {

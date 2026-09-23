@@ -367,6 +367,7 @@ const ENGLISH: Record<string, string> = {
   "Светлая тема": "Light theme",
   "Тёмная тема": "Dark theme",
   "Боковая панель": "Sidebar",
+  "Ширина боковой панели": "Sidebar width",
   "Расположение списка проектов и задач.": "Placement of the project and task list.",
   Слева: "Left",
   Справа: "Right",

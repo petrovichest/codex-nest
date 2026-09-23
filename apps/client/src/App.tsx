@@ -1,5 +1,6 @@
 import {
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type TouchEvent as ReactTouchEvent,
@@ -73,6 +74,13 @@ import { useDrawerNavigation } from "./useDrawerNavigation";
 import type { ThemeMode } from "./useTheme";
 
 const SIDEBAR_SIDE_KEY = "codexnest.sidebarSide";
+const SIDEBAR_WIDTH_KEY = "codexnest.sidebarWidth";
+const DEFAULT_SIDEBAR_WIDTH = 292;
+const MIN_SIDEBAR_WIDTH = 240;
+const MAX_SIDEBAR_WIDTH = 440;
+const MIN_WORKSPACE_WIDTH = 420;
+const DESKTOP_SIDEBAR_GUTTERS = 40;
+const SIDEBAR_KEYBOARD_STEP = 10;
 const PROJECT_LIST_DIRECTION_KEY = "codexnest.projectListDirection";
 const LAYOUT_DEFAULTS_VERSION_KEY = "codexnest.layoutDefaultsVersion";
 const LAYOUT_DEFAULTS_VERSION = "1";
@@ -89,6 +97,14 @@ const SESSION_LIST_MODE_KEY = "codexnest.sessionListMode";
 
 type ListExpansion = number | "all";
 type SessionListMode = "projects" | "active";
+
+type SidebarResizeGesture = {
+  pointerId: number;
+  startX: number;
+  startWidth: number;
+  startPreferredWidth: number;
+  width: number;
+};
 
 type SidebarTreeState = {
   collapsedProjectIds: Set<string>;
@@ -159,6 +175,7 @@ export function App({
   const [newProject, setNewProject] = useState(false);
   const [initialLayout] = useState(readLayoutPreferences);
   const [sidebarSide, setSidebarSide] = useState<SidebarSide>(initialLayout.sidebarSide);
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectListDirection, setProjectListDirection] = useState<ProjectListDirection>(
     initialLayout.projectListDirection,
   );
@@ -338,6 +355,7 @@ export function App({
       className={`app-frame${drawerDragging ? " drawer-dragging" : ""}`}
       data-sidebar-side={sidebarSide}
       ref={frameRef}
+      style={{ "--sidebar-preferred-width": `${sidebarWidth}px` } as CSSProperties}
     >
       {settings.baseUrl.startsWith("http://") && (
         <div className="http-warning">
@@ -354,6 +372,13 @@ export function App({
         projectListDirection={projectListDirection}
         serverBaseUrl={settings.baseUrl}
         updateAvailable={updateAvailable}
+      />
+      <SidebarResizeHandle
+        frameRef={frameRef}
+        onWidthCommit={setSidebarWidth}
+        preferredWidth={sidebarWidth}
+        side={sidebarSide}
+        sidebarRef={sidebarRef}
       />
       {(drawer || drawerDragging) && (
         <button
@@ -483,6 +508,137 @@ export function App({
         </Dialog>
       )}
     </div>
+  );
+}
+
+function readSidebarWidth(): number {
+  const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (stored === null) return DEFAULT_SIDEBAR_WIDTH;
+  const width = Number(stored);
+  return Number.isInteger(width) && width >= MIN_SIDEBAR_WIDTH && width <= MAX_SIDEBAR_WIDTH
+    ? width
+    : DEFAULT_SIDEBAR_WIDTH;
+}
+
+function maxSidebarWidth(): number {
+  return Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH - DESKTOP_SIDEBAR_GUTTERS),
+  );
+}
+
+function clampSidebarWidth(width: number): number {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxSidebarWidth(), Math.round(width)));
+}
+
+function SidebarResizeHandle({
+  frameRef,
+  onWidthCommit,
+  preferredWidth,
+  side,
+  sidebarRef,
+}: {
+  frameRef: RefObject<HTMLDivElement | null>;
+  onWidthCommit(width: number): void;
+  preferredWidth: number;
+  side: SidebarSide;
+  sidebarRef: RefObject<HTMLElement | null>;
+}) {
+  const { t } = useI18n();
+  const gestureRef = useRef<SidebarResizeGesture | null>(null);
+  const handleRef = useRef<HTMLDivElement>(null);
+  const [liveWidth, setLiveWidth] = useState(preferredWidth);
+  const [maximumWidth, setMaximumWidth] = useState(maxSidebarWidth);
+
+  useEffect(() => setLiveWidth(preferredWidth), [preferredWidth]);
+  useEffect(() => {
+    const update = () => setMaximumWidth(maxSidebarWidth());
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  function showWidth(width: number) {
+    frameRef.current?.style.setProperty("--sidebar-preferred-width", `${width}px`);
+    setLiveWidth(width);
+  }
+
+  function finishDrag(pointerId: number, commit: boolean) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== pointerId) return;
+    gestureRef.current = null;
+    if (commit && gesture.width !== gesture.startWidth) {
+      onWidthCommit(gesture.width);
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(gesture.width));
+    } else {
+      showWidth(gesture.startPreferredWidth);
+    }
+    const handle = handleRef.current;
+    if (handle?.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+  }
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape" && gestureRef.current) {
+      event.preventDefault();
+      finishDrag(gestureRef.current.pointerId, false);
+      return;
+    }
+    const step = side === "left" ? SIDEBAR_KEYBOARD_STEP : -SIDEBAR_KEYBOARD_STEP;
+    const next =
+      event.key === "ArrowRight"
+        ? clampSidebarWidth(liveWidth + step)
+        : event.key === "ArrowLeft"
+          ? clampSidebarWidth(liveWidth - step)
+          : event.key === "Home"
+            ? MIN_SIDEBAR_WIDTH
+            : event.key === "End"
+              ? maxSidebarWidth()
+              : null;
+    if (next === null || gestureRef.current) return;
+    event.preventDefault();
+    showWidth(next);
+    onWidthCommit(next);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next));
+  }
+
+  return (
+    <div
+      aria-controls="sidebar-navigation"
+      aria-label={t("Ширина боковой панели")}
+      aria-orientation="vertical"
+      aria-valuemax={maximumWidth}
+      aria-valuemin={MIN_SIDEBAR_WIDTH}
+      aria-valuenow={Math.min(liveWidth, maximumWidth)}
+      className="sidebar-resize-handle"
+      onKeyDown={onKeyDown}
+      onLostPointerCapture={(event) => finishDrag(event.pointerId, false)}
+      onPointerCancel={(event) => finishDrag(event.pointerId, false)}
+      onPointerDown={(event) => {
+        if (!event.isPrimary || event.button !== 0 || gestureRef.current) return;
+        event.preventDefault();
+        event.currentTarget.focus();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        const startWidth =
+          sidebarRef.current?.getBoundingClientRect().width || clampSidebarWidth(preferredWidth);
+        gestureRef.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startWidth,
+          startPreferredWidth: preferredWidth,
+          width: startWidth,
+        };
+      }}
+      onPointerMove={(event) => {
+        const gesture = gestureRef.current;
+        if (!gesture || gesture.pointerId !== event.pointerId) return;
+        const delta = (event.clientX - gesture.startX) * (side === "left" ? 1 : -1);
+        gesture.width = clampSidebarWidth(gesture.startWidth + delta);
+        showWidth(gesture.width);
+      }}
+      onPointerUp={(event) => finishDrag(event.pointerId, true)}
+      ref={handleRef}
+      role="separator"
+      tabIndex={0}
+    />
   );
 }
 
@@ -1395,7 +1551,7 @@ function Sidebar({
   );
 
   return (
-    <aside className={`sidebar ${drawer ? "open" : ""}`} ref={containerRef}>
+    <aside className={`sidebar ${drawer ? "open" : ""}`} id="sidebar-navigation" ref={containerRef}>
       <div className="sidebar-controls">
         <NavLink className="sidebar-control-action" to="/settings" onClick={onClose}>
           <SlidersIcon />

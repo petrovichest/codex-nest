@@ -285,6 +285,60 @@ describe("App routing and navigation", () => {
     ).toBeInTheDocument();
   });
 
+  it("restores the saved sidebar width and persists a left-side drag on release", () => {
+    localStorage.setItem("codexnest.sidebarWidth", "340");
+    mockConnection(snapshot([baseThread]));
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const handle = screen.getByRole("separator", { name: "Ширина боковой панели" });
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({ width: 340 } as DOMRect);
+
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("340px");
+    fireProjectPointer(handle, "pointerdown", { clientX: 360, clientY: 400, pointerId: 1 });
+    fireProjectPointer(handle, "pointermove", { clientX: 410, clientY: 400, pointerId: 1 });
+
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("390px");
+    expect(handle).toHaveAttribute("aria-valuenow", "390");
+    expect(localStorage.getItem("codexnest.sidebarWidth")).toBe("340");
+
+    fireProjectPointer(handle, "pointerup", { clientX: 410, clientY: 400, pointerId: 1 });
+    expect(localStorage.getItem("codexnest.sidebarWidth")).toBe("390");
+  });
+
+  it("reverses resize direction on the right and cancels an unfinished drag", () => {
+    localStorage.setItem("codexnest.layoutDefaultsVersion", "1");
+    localStorage.setItem("codexnest.sidebarSide", "right");
+    mockConnection(snapshot([baseThread]));
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    const sidebar = view.container.querySelector(".sidebar") as HTMLElement;
+    const handle = screen.getByRole("separator", { name: "Ширина боковой панели" });
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({ width: 292 } as DOMRect);
+
+    fireProjectPointer(handle, "pointerdown", { clientX: 1128, clientY: 400, pointerId: 2 });
+    fireProjectPointer(handle, "pointermove", { clientX: 1078, clientY: 400, pointerId: 2 });
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("342px");
+
+    fireProjectPointer(handle, "pointercancel", { clientX: 1078, clientY: 400, pointerId: 2 });
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("292px");
+    expect(localStorage.getItem("codexnest.sidebarWidth")).toBeNull();
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("302px");
+    expect(localStorage.getItem("codexnest.sidebarWidth")).toBe("302");
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("240px");
+  });
+
+  it("ignores an invalid saved sidebar width", () => {
+    localStorage.setItem("codexnest.sidebarWidth", "999");
+    mockConnection(snapshot([baseThread]));
+    const view = renderApp("/threads/newer");
+    const frame = view.container.querySelector(".app-frame") as HTMLDivElement;
+    expect(frame.style.getPropertyValue("--sidebar-preferred-width")).toBe("292px");
+  });
+
   it("defaults to projects and orders the display switch above the project list", () => {
     mockConnection(snapshot([baseThread]));
 
