@@ -2986,6 +2986,7 @@ button.message-file:hover:not(:disabled) {
   display: grid;
   place-items: center;
   overflow: hidden;
+  touch-action: none;
 }
 
 .image-viewer-image {
@@ -3000,6 +3001,15 @@ button.message-file:hover:not(:disabled) {
   box-shadow: 0 12px 42px rgb(0 0 0 / 32%);
   transform: translate(-50%, -50%);
   user-select: none;
+  -webkit-user-drag: none;
+}
+
+.image-viewer-image.is-zoomed {
+  cursor: grab;
+}
+
+.image-viewer-image.is-zoomed:active {
+  cursor: grabbing;
 }
 
 .image-viewer-control {

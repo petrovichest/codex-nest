@@ -167,6 +167,188 @@ for (const theme of ["light", "dark"] as const) {
   }
 }
 
+for (const type of ["agentMessage", "userMessage"] as const) {
+  test(`image viewer zooms and pans ${type} images`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openChat(page, "dark", "", [imageSource(1200, 1200), imageSource(1201, 1201)], type);
+    const opener = page
+      .locator(type === "agentMessage" ? ".gallery-thumbnail.is-ready" : ".message-image-preview")
+      .first();
+    await opener.click();
+    const viewer = page.getByRole("dialog", { name: "Просмотр изображений" });
+    const image = viewer.locator(".image-viewer-image");
+    await expect(image).toBeVisible();
+    const scale = () =>
+      image.evaluate((element) => new DOMMatrixReadOnly(getComputedStyle(element).transform).a);
+
+    await page.keyboard.press("=");
+    await expect.poll(scale).toBeCloseTo(1.5, 1);
+    await page.keyboard.press("-");
+    await expect.poll(scale).toBe(1);
+    const wheelPrevented = await image.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return !element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          deltaY: -200,
+          clientX: bounds.left + bounds.width / 2,
+          clientY: bounds.top + bounds.height / 2,
+        }),
+      );
+    });
+    expect(wheelPrevented).toBe(true);
+    await expect.poll(scale).toBeGreaterThan(1);
+    await page.keyboard.press("0");
+    await expect.poll(scale).toBe(1);
+
+    const gesturePrevented = await image.evaluate((element) => {
+      const gesture = (name: string, scale: number) => {
+        const event = Object.assign(new Event(name, { bubbles: true, cancelable: true }), {
+          scale,
+        });
+        return !element.dispatchEvent(event);
+      };
+      gesture("gesturestart", 1);
+      const prevented = gesture("gesturechange", 2);
+      gesture("gestureend", 2);
+      return prevented;
+    });
+    expect(gesturePrevented).toBe(true);
+    await expect.poll(scale).toBeCloseTo(2, 1);
+    await page.keyboard.press("0");
+
+    await viewer.locator(".image-viewer-stage").evaluate((stage) => {
+      // Synthetic touch events cannot own pointer capture in the browser.
+      stage.setPointerCapture = () => undefined;
+      stage.hasPointerCapture = () => false;
+    });
+    await image.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const x = bounds.left + bounds.width / 2;
+      const y = bounds.top + bounds.height / 2;
+      const pointer = (name: string, id: number, clientX: number, target = element) =>
+        target.dispatchEvent(
+          new PointerEvent(name, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: id,
+            pointerType: "touch",
+            clientX,
+            clientY: y,
+          }),
+        );
+      pointer("pointerdown", 1, x - 40);
+      pointer("pointerdown", 2, x + 40, element.parentElement!);
+      pointer("pointermove", 2, x + 120);
+      pointer("pointerup", 1, x - 40);
+      pointer("pointerup", 2, x + 120);
+    });
+    await expect.poll(scale).toBeCloseTo(2, 1);
+    const beforeTouchPan = await image.boundingBox();
+    await image.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const x = bounds.left + bounds.width / 2;
+      const y = bounds.top + bounds.height / 2;
+      for (const [name, clientX] of [
+        ["pointerdown", x],
+        ["pointermove", x - 60],
+        ["pointerup", x - 60],
+      ] as const) {
+        element.dispatchEvent(
+          new PointerEvent(name, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 3,
+            pointerType: "touch",
+            clientX,
+            clientY: y,
+          }),
+        );
+      }
+    });
+    const afterTouchPan = await image.boundingBox();
+    expect(afterTouchPan!.x).toBeLessThan(beforeTouchPan!.x - 20);
+    const beforePan = await image.boundingBox();
+    const center = {
+      x: beforePan!.x + beforePan!.width / 2,
+      y: beforePan!.y + beforePan!.height / 2,
+    };
+    await page.mouse.move(center.x, center.y);
+    await page.mouse.down();
+    await page.mouse.move(center.x + 80, center.y + 40, { steps: 4 });
+    await page.mouse.up();
+    const afterPan = await image.boundingBox();
+    expect(afterPan!.x).toBeGreaterThan(beforePan!.x + 20);
+    const stage = (await viewer.locator(".image-viewer-stage").boundingBox())!;
+    expect(afterPan!.x).toBeLessThanOrEqual(stage.x + 1);
+    expect(afterPan!.x + afterPan!.width).toBeGreaterThanOrEqual(stage.x + stage.width - 1);
+
+    await page.keyboard.press("0");
+    const doubleTap = () =>
+      image.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const x = bounds.left + bounds.width / 2;
+        const y = bounds.top + bounds.height / 2;
+        for (let i = 0; i < 2; i++) {
+          element.dispatchEvent(
+            new PointerEvent("pointerdown", {
+              bubbles: true,
+              cancelable: true,
+              pointerId: 10 + i,
+              pointerType: "touch",
+              clientX: x,
+              clientY: y,
+            }),
+          );
+          element.dispatchEvent(
+            new PointerEvent("pointerup", {
+              bubbles: true,
+              cancelable: true,
+              pointerId: 10 + i,
+              pointerType: "touch",
+              clientX: x,
+              clientY: y,
+            }),
+          );
+        }
+      });
+    await doubleTap();
+    await expect.poll(scale).toBeCloseTo(3, 1);
+    await doubleTap();
+    await expect.poll(scale).toBe(1);
+    await doubleTap();
+    await expect.poll(scale).toBeCloseTo(3, 1);
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(scale).toBe(1);
+    for (let i = 0; i < 8; i++) await page.keyboard.press("=");
+    await expect.poll(scale).toBe(6);
+    await page.keyboard.press("Escape");
+    await expect(opener).toBeFocused();
+    await opener.click();
+    await viewer.locator(".image-viewer-stage").evaluate((stage) => {
+      stage.setPointerCapture = () => undefined;
+      stage.hasPointerCapture = () => false;
+      const bounds = stage.getBoundingClientRect();
+      for (const name of ["pointerdown", "pointerup"]) {
+        stage.dispatchEvent(
+          new PointerEvent(name, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 20,
+            pointerType: "touch",
+            clientX: bounds.left + 8,
+            clientY: bounds.top + 8,
+          }),
+        );
+      }
+    });
+    await expect(viewer).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+}
+
 for (const theme of ["light", "dark"] as const) {
   for (const width of [320, 1440]) {
     test(`annotation B at ${width}px in ${theme}: sizing, focus, saving and keyboard viewport`, async ({
