@@ -247,9 +247,9 @@ chunked to at most 512 KiB. An exchange that cannot be captured completely or
 exceeds a limit is dropped as a whole and included in the reported drop count.
 
 Detaching preserves the tabs, removes their CodexNest group, and disconnects the
-browser adapter. The server retains ownership of the binding so only the same
-extension instance can attach it again. Losing the extension profile storage
-has no takeover or recovery flow.
+browser adapter. A detached session remains Browser-enabled and can be attached
+from another Chrome profile or computer. Attaching it there replaces the old
+binding; an active binding stays with its current extension until detached.
 
 ## Notifications
 

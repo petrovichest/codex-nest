@@ -156,12 +156,29 @@ describe("browser extension transport", () => {
           attachedAt: 1,
         },
       };
+      state.threadMeta["detached-binding"] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        browserEnabled: true,
+        browserBinding: {
+          bindingId: "detached-binding-id",
+          instanceId: "extension-instance-2",
+          attachedAt: 1,
+          detachedAt: 2,
+        },
+      };
     });
+    harness.projection.summaries.set("detached-binding", summary("detached-binding"));
 
     const extension = await connect(harness.app, "extension-instance-1");
     const hello = await extension.nextType("server.hello");
 
-    expect(hello.threads.map((thread) => thread.id)).toEqual(["running", "idle", "completed-read"]);
+    expect(hello.threads.map((thread) => thread.id)).toEqual([
+      "running",
+      "idle",
+      "completed-read",
+      "detached-binding",
+    ]);
     expect(hello.projects.map((project) => project.id)).toEqual(["project"]);
 
     extension.socket.close();
@@ -201,6 +218,21 @@ describe("browser extension transport", () => {
     const attachedBinding = bindingSummary("thread");
     first.socket.send(JSON.stringify({ type: "binding.updated", binding: attachedBinding }));
     await vi.waitFor(() => expect(harness.status("thread")).toBe("connected"));
+    const originalBindingId = harness.store.view().threadMeta.thread?.browserBinding?.bindingId;
+
+    const other = await connect(harness.app, "extension-instance-2");
+    expect((await other.nextType("server.hello")).threads).toEqual([]);
+    other.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-active",
+        target: { kind: "existing", threadId: "thread" },
+        tab: tabSummary(2),
+      }),
+    );
+    expect(await other.nextType("session.error")).toMatchObject({
+      error: { code: "owned_by_another_instance" },
+    });
 
     first.socket.send(
       JSON.stringify({
@@ -215,21 +247,14 @@ describe("browser extension transport", () => {
     );
     expect(harness.store.view().threadMeta.thread?.browserEnabled).toBe(true);
     expect(harness.status("thread")).toBe("disconnected");
-
-    const other = await connect(harness.app, "extension-instance-2");
-    await other.next();
-    other.socket.send(
-      JSON.stringify({
-        type: "session.request",
-        requestId: "attach-other",
-        target: { kind: "existing", threadId: "thread" },
-        tab: tabSummary(2),
-      }),
-    );
-    expect(await other.nextType("session.error")).toMatchObject({
-      error: { code: "owned_by_another_instance" },
+    harness.projection.emit("event", 2, {
+      type: "thread.upserted",
+      thread: harness.projection.summary("thread")!,
     });
 
+    expect((await other.nextType("catalog.updated")).threads.map((thread) => thread.id)).toEqual([
+      "thread",
+    ]);
     first.socket.send(
       JSON.stringify({
         type: "session.request",
@@ -239,9 +264,59 @@ describe("browser extension transport", () => {
       }),
     );
     expect(await first.nextType("session.result")).toMatchObject({ action: "attached" });
+    expect(harness.store.view().threadMeta.thread?.browserBinding?.bindingId).toBe(
+      originalBindingId,
+    );
     first.socket.send(JSON.stringify({ type: "binding.updated", binding: attachedBinding }));
     await vi.waitFor(() => expect(harness.status("thread")).toBe("connected"));
     expect(harness.store.view().threadMeta.thread?.browserBinding?.detachedAt).toBeUndefined();
+
+    first.socket.send(JSON.stringify({ type: "binding.detached", binding: attachedBinding }));
+    await vi.waitFor(() =>
+      expect(harness.store.view().threadMeta.thread?.browserBinding?.detachedAt).toEqual(
+        expect.any(Number),
+      ),
+    );
+    harness.projection.emit("event", 3, {
+      type: "thread.upserted",
+      thread: harness.projection.summary("thread")!,
+    });
+    await other.nextType("catalog.updated");
+    other.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-other",
+        target: { kind: "existing", threadId: "thread" },
+        tab: tabSummary(2),
+      }),
+    );
+    expect(await other.nextType("session.result")).toMatchObject({ action: "attached" });
+    expect(harness.store.view().threadMeta.thread?.browserBinding).toMatchObject({
+      instanceId: "extension-instance-2",
+    });
+    expect(harness.store.view().threadMeta.thread?.browserBinding?.bindingId).not.toBe(
+      originalBindingId,
+    );
+    expect(await first.nextType("binding.detach")).toMatchObject({ threadId: "thread" });
+    const oldBindingResponse = await harness.mcp(originalBindingId!, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(oldBindingResponse.json()).toMatchObject({
+      error: { message: "Browser binding not found" },
+    });
+    first.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "reattach-old-owner",
+        target: { kind: "existing", threadId: "thread" },
+        tab: tabSummary(),
+      }),
+    );
+    expect(await first.nextType("session.error")).toMatchObject({
+      error: { code: "owned_by_another_instance" },
+    });
 
     await harness.browser.deleteBinding("thread");
     expect(harness.store.view().threadMeta.thread?.browserBinding).toBeUndefined();
@@ -787,7 +862,7 @@ async function createHarness(options: { disconnectWaitMs?: number } = {}) {
         throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
       }
       const existing = current.browserBinding;
-      if (existing && existing.instanceId !== instanceId) {
+      if (existing && existing.instanceId !== instanceId && existing.detachedAt === undefined) {
         throw new BrowserExtensionError(
           "owned_by_another_instance",
           "Browser binding belongs to another extension instance",
@@ -795,7 +870,11 @@ async function createHarness(options: { disconnectWaitMs?: number } = {}) {
       }
       await store.update((state) => {
         const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
-        meta.browserBinding = { bindingId, instanceId, attachedAt: Date.now() };
+        meta.browserBinding = {
+          bindingId: existing?.instanceId === instanceId ? existing.bindingId : bindingId,
+          instanceId,
+          attachedAt: Date.now(),
+        };
         state.threadMeta[threadId] = meta;
       });
       return projection.summaries.get(threadId) ?? summary(threadId);

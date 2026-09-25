@@ -131,7 +131,10 @@ test("keeps the session select stable across background catalog updates", async 
     threads: [],
   });
   await expect(
-    page.getByText("Enable Browser in a CodexNest session to attach this tab.", { exact: true }),
+    page.getByText(
+      "Enable Browser in a CodexNest session, or detach its tabs in another Chrome profile.",
+      { exact: true },
+    ),
   ).toBeVisible();
   await expect(page.locator("select optgroup")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Attach current tab" })).toBeDisabled();

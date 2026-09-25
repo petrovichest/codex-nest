@@ -1051,13 +1051,14 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           );
         }
         const existing = meta.browserBinding;
-        if (existing && existing.instanceId !== instanceId) {
+        if (existing && existing.instanceId !== instanceId && existing.detachedAt === undefined) {
           throw new BrowserExtensionError(
             "owned_by_another_instance",
             "Browser binding belongs to another extension instance",
           );
         }
-        const effectiveBindingId = existing?.bindingId ?? bindingId;
+        const transferring = existing !== undefined && existing.instanceId !== instanceId;
+        const effectiveBindingId = transferring ? bindingId : (existing?.bindingId ?? bindingId);
         const baseConfig = summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {};
         const baselineConfig = existing
           ? browserExtension.mcpConfig(existing.bindingId, baseConfig)
@@ -1073,14 +1074,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               throw new BrowserExtensionError("not_enabled", "Browser access is not enabled");
             }
             const current = meta.browserBinding;
-            if (current && current.instanceId !== instanceId) {
+            if (
+              (existing &&
+                (current?.bindingId !== existing.bindingId ||
+                  current.instanceId !== existing.instanceId)) ||
+              (!existing && current)
+            ) {
+              throw new BrowserExtensionError("conflict", "Browser binding changed");
+            }
+            if (current && current.instanceId !== instanceId && current.detachedAt === undefined) {
               throw new BrowserExtensionError(
                 "owned_by_another_instance",
                 "Browser binding belongs to another extension instance",
               );
             }
             meta.browserBinding = {
-              bindingId: current?.bindingId ?? effectiveBindingId,
+              bindingId: effectiveBindingId,
               instanceId,
               attachedAt: Date.now(),
             };

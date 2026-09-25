@@ -56,7 +56,8 @@ const copy = {
     detach: "Detach",
     open: "Open in CodexNest",
     otherSessions: "Other browser sessions",
-    emptyCatalog: "Enable Browser in a CodexNest session to attach this tab.",
+    emptyCatalog:
+      "Enable Browser in a CodexNest session, or detach its tabs in another Chrome profile.",
     editSetup: "Edit connection",
     openSidePanel: "Open side panel",
     savePending: "Saving…",
@@ -88,7 +89,8 @@ const copy = {
     detach: "Отключить",
     open: "Открыть в CodexNest",
     otherSessions: "Другие браузерные сессии",
-    emptyCatalog: "Включите Browser в сессии CodexNest, чтобы подключить эту вкладку.",
+    emptyCatalog:
+      "Включите Browser в сессии CodexNest или отключите её вкладки в другом профиле Chrome.",
     editSetup: "Изменить подключение",
     openSidePanel: "Открыть сбоку",
     savePending: "Сохранение…",

@@ -635,7 +635,8 @@ export class BrowserExtensionServer {
         throw new BrowserExtensionError("unavailable", "Browser lifecycle unavailable");
       }
       const existing = this.bindingForThread(frame.target.threadId);
-      const bindingId = existing?.bindingId ?? randomUUID();
+      const bindingId =
+        existing?.instanceId === connection.instanceId ? existing.bindingId : randomUUID();
       this.pendingBindingThreads.set(bindingId, frame.target.threadId);
       let thread: ThreadSummary;
       try {
@@ -648,6 +649,9 @@ export class BrowserExtensionServer {
         if (this.pendingBindingThreads.get(bindingId) === frame.target.threadId) {
           this.pendingBindingThreads.delete(bindingId);
         }
+      }
+      if (existing && existing.instanceId !== connection.instanceId) {
+        this.detachConnection(frame.target.threadId, existing);
       }
       this.send(connection.socket, {
         type: "session.result",
@@ -718,7 +722,7 @@ export class BrowserExtensionServer {
         meta?.browserEnabled !== true ||
         thread.archived ||
         !thread.projectId ||
-        (binding && binding.instanceId !== instanceId)
+        (binding && binding.instanceId !== instanceId && binding.detachedAt === undefined)
       ) {
         return [];
       }

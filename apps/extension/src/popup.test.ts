@@ -197,7 +197,7 @@ describe("popup session catalog", () => {
 
     expect(document.querySelectorAll("optgroup")).toHaveLength(0);
     expect(document.body.textContent).toContain(
-      "Enable Browser in a CodexNest session to attach this tab.",
+      "Enable Browser in a CodexNest session, or detach its tabs in another Chrome profile.",
     );
     expect(document.body.textContent).not.toContain("No projects");
   });

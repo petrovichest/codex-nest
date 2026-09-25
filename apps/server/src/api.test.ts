@@ -5726,6 +5726,153 @@ describe("browser thread lifecycle", () => {
     socket.terminate();
     await app.close();
   });
+
+  it("moves an explicitly detached binding to another extension and keeps it on resume failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-transfer-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+      state.projects.push({
+        id: "project",
+        displayName: "Project",
+        path: "/work",
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      });
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      { bridge: bridge as unknown as CodexBridge, store, projection, attention },
+    );
+    await app.ready();
+
+    const enabled = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/threads/thread",
+      headers: { authorization: "Bearer correct" },
+      payload: { browserEnabled: true },
+    });
+    expect(enabled.statusCode).toBe(200);
+
+    const connect = async (instanceId: string) => {
+      const socket = await app.injectWS(BROWSER_EXTENSION_WEBSOCKET_PATH, {
+        headers: { origin: "http://localhost" },
+      });
+      const frames = websocketFrames(socket);
+      socket.send(
+        JSON.stringify({
+          type: "client.hello",
+          protocol: BROWSER_EXTENSION_PROTOCOL,
+          version: BROWSER_EXTENSION_PROTOCOL_VERSION,
+          token: "correct",
+          instanceId,
+          extensionVersion: "0.1.9",
+          browser: { name: "chrome", version: "128" },
+          capabilities: {
+            tools: BROWSER_TOOL_NAMES,
+            maxProjectFileBytes: 100 * 1024 * 1024,
+            screenshots: ["image/jpeg", "image/png"],
+          },
+          bindings: [],
+        }),
+      );
+      return { socket, frames, hello: await frames.nextType("server.hello") };
+    };
+    const first = await connect("extension-instance-1");
+    expect(first.hello.threads).toEqual([expect.objectContaining({ id: "thread" })]);
+    first.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "attach-first",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await first.frames.nextType("session.result")).toMatchObject({
+      requestId: "attach-first",
+    });
+    const original = structuredClone(store.view().threadMeta.thread?.browserBinding);
+    expect(original).toMatchObject({ instanceId: "extension-instance-1" });
+    const binding = {
+      threadId: "thread",
+      projectId: "project",
+      title: "thread",
+      groupId: 1,
+      tabIds: [1],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    first.socket.send(JSON.stringify({ type: "binding.updated", binding }));
+    await vi.waitFor(() => expect(projection.summary("thread")?.browserStatus).toBe("connected"));
+    const second = await connect("extension-instance-2");
+    expect(second.hello.threads).toEqual([]);
+    first.socket.send(JSON.stringify({ type: "binding.detached", binding }));
+    await vi.waitFor(() =>
+      expect(store.view().threadMeta.thread?.browserBinding?.detachedAt).toEqual(
+        expect.any(Number),
+      ),
+    );
+    expect((await second.frames.nextType("catalog.updated")).threads).toEqual([
+      expect.objectContaining({ id: "thread" }),
+    ]);
+    const detached = structuredClone(store.view().threadMeta.thread?.browserBinding);
+
+    bridge.failBrowserResumeOnce = true;
+    second.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "transfer-failed",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await second.frames.nextType("session.error")).toMatchObject({
+      requestId: "transfer-failed",
+    });
+    expect(store.view().threadMeta.thread?.browserBinding).toEqual(detached);
+
+    second.socket.send(
+      JSON.stringify({
+        type: "session.request",
+        requestId: "transfer-success",
+        target: { kind: "existing", threadId: "thread" },
+        tab: browserTabSummary(),
+      }),
+    );
+    expect(await second.frames.nextType("session.result")).toMatchObject({
+      requestId: "transfer-success",
+    });
+    const transferred = store.view().threadMeta.thread?.browserBinding;
+    expect(transferred?.instanceId).toBe("extension-instance-2");
+    expect(transferred?.bindingId).not.toBe(original?.bindingId);
+    expect(transferred?.detachedAt).toBeUndefined();
+    expect(await first.frames.nextType("binding.detach")).toMatchObject({ threadId: "thread" });
+    expect(
+      bridge.request.mock.calls.findLast(([method]) => method === "thread/resume")?.[1],
+    ).toMatchObject({
+      config: {
+        mcp_servers: {
+          codexnest_browser: {
+            url: expect.stringContaining(transferred!.bindingId),
+          },
+        },
+      },
+    });
+
+    first.socket.close();
+    second.socket.close();
+    await app.close();
+  });
 });
 
 describe("explicit session artifacts", () => {
