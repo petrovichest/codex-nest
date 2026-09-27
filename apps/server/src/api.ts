@@ -3456,7 +3456,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.get<{ Querystring: { q?: string; archived?: string; cursor?: string } }>(
+  app.get<{ Querystring: { q?: string; archived?: string; cursor?: string; scope?: string } }>(
     "/api/v1/threads/search",
     async (request) => {
       const { q, cursor } = validateSearchQuery(request.query);
@@ -3466,7 +3466,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         request.query.archived !== "false"
       )
         throw new ProjectValidationError("archived must be true or false");
-      return projection.searchThreads(q, request.query.archived === "true", cursor);
+      const scope = request.query.scope ?? "messages";
+      if (scope !== "titles" && scope !== "messages")
+        throw new ProjectValidationError("scope must be titles or messages");
+      return projection.searchThreads(q, request.query.archived === "true", cursor, scope);
     },
   );
   app.get<{ Params: { id: string }; Querystring: { q?: string; cursor?: string } }>(

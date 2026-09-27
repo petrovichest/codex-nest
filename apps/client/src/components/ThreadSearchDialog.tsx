@@ -4,6 +4,7 @@ import type {
   ThreadOccurrencesPage,
   ThreadSearchOccurrence,
   ThreadSearchPage,
+  ThreadSearchScope,
   ThreadSummary,
 } from "@codexnest/protocol";
 
@@ -32,7 +33,19 @@ export function searchTargetFromState(state: unknown, threadId: string): SearchT
 }
 
 type PageState<T> = { page: T | null; loading: boolean; error: string | null };
-const emptyGroup = (): PageState<ThreadSearchPage> => ({ page: null, loading: false, error: null });
+type SearchPageRequest = { scope: ThreadSearchScope; cursor?: string };
+type SearchGroup = {
+  data: Array<ThreadSearchPage["data"][number] & { scope: ThreadSearchScope }>;
+  next: SearchPageRequest | null;
+  loading: boolean;
+  error: string | null;
+};
+const emptyGroup = (): SearchGroup => ({
+  data: [],
+  next: { scope: "titles" },
+  loading: false,
+  error: null,
+});
 
 export function ThreadSearchDialog({
   open,
@@ -84,36 +97,41 @@ export function ThreadSearchDialog({
     index: number,
     term: string,
     requestGeneration: number,
-    cursor?: string,
+    request: SearchPageRequest = { scope: "titles" },
   ) {
     setGroups((previous) =>
       previous.map((group, i) => (i === index ? { ...group, loading: true, error: null } : group)),
     );
     try {
-      const page = await api.searchThreads(term, index === 1, cursor);
+      const page = await api.searchThreads(term, index === 1, request.cursor, request.scope);
       if (requestGeneration !== generation.current) return;
+      const startMessages = request.scope === "titles" && !page.nextCursor;
+      const next: SearchPageRequest | null = page.nextCursor
+        ? { scope: request.scope, cursor: page.nextCursor }
+        : startMessages
+          ? { scope: "messages" }
+          : null;
       setGroups((previous) =>
-        previous.map((group, i) =>
-          i === index
-            ? {
-                page: {
-                  ...page,
-                  data: cursor
-                    ? [
-                        ...(group.page?.data ?? []),
-                        ...page.data.filter(
-                          (entry) =>
-                            !group.page?.data.some((old) => old.thread.id === entry.thread.id),
-                        ),
-                      ]
-                    : page.data,
-                },
-                loading: false,
-                error: null,
-              }
-            : group,
-        ),
+        previous.map((group, i) => {
+          if (i !== index) return group;
+          const seen = new Set(group.data.map((entry) => entry.thread.id));
+          const additions = page.data.filter(({ thread }) => {
+            if (seen.has(thread.id)) return false;
+            seen.add(thread.id);
+            return true;
+          });
+          return {
+            data: [
+              ...group.data,
+              ...additions.map((entry) => ({ ...entry, scope: request.scope })),
+            ],
+            next,
+            loading: startMessages,
+            error: null,
+          };
+        }),
       );
+      if (startMessages) await loadGroup(index, term, requestGeneration, { scope: "messages" });
     } catch (error) {
       if (requestGeneration !== generation.current) return;
       setGroups((previous) =>
@@ -288,36 +306,33 @@ export function ThreadSearchDialog({
           groups.map((group, index) => (
             <section key={index} aria-label={index ? t("Архив") : t("Не в архиве")}>
               <h3>{index ? t("Архив") : t("Не в архиве")}</h3>
-              {group.page?.data.map(({ thread, snippet }) => (
+              {group.data.map(({ thread, snippet, scope }) => (
                 <button
                   type="button"
                   className="thread-search-result"
                   key={thread.id}
-                  onClick={() => void loadOccurrences(thread)}
+                  onClick={() =>
+                    scope === "titles" ? openThread(thread) : void loadOccurrences(thread)
+                  }
                 >
-                  <span className="search-snippet">{snippet || thread.title}</span>
+                  {scope === "messages" && (
+                    <span className="search-snippet">{snippet || thread.title}</span>
+                  )}
                   <span className="search-result-title">{thread.title}</span>
                   <span className="search-context">
                     {thread.cwd} · {new Date(thread.updatedAt).toLocaleDateString(language)}
                   </span>
                 </button>
               ))}
-              {!group.loading && group.page?.data.length === 0 && (
+              {!group.loading && !group.error && !group.next && group.data.length === 0 && (
                 <p className="search-context">{t("Совпадений нет")}</p>
               )}
               {group.error && <p role="alert">{group.error}</p>}
-              {(group.error || group.page?.nextCursor) && (
+              {group.next && (
                 <button
                   type="button"
                   disabled={group.loading}
-                  onClick={() =>
-                    void loadGroup(
-                      index,
-                      query,
-                      generation.current,
-                      group.page?.nextCursor ?? undefined,
-                    )
-                  }
+                  onClick={() => void loadGroup(index, query, generation.current, group.next!)}
                 >
                   {group.error ? t("Повторить") : t("Показать ещё")}
                 </button>

@@ -29,6 +29,7 @@ import type {
   ThreadState,
   ThreadSummary,
   ThreadSearchPage,
+  ThreadSearchScope,
   ThreadOccurrencesPage,
   ThreadSearchTurn,
   TurnItemsResponse,
@@ -362,20 +363,26 @@ export class AppProjection extends EventEmitter {
     searchTerm: string,
     archived: boolean,
     cursor: string | null,
+    scope: ThreadSearchScope = "messages",
   ): Promise<ThreadSearchPage> {
-    const page = parseThreadSearch(
-      await this.searchRequest("thread/search", {
-        searchTerm,
-        archived,
-        cursor,
-        limit: 20,
-        sortKey: "updated_at",
-        sortDirection: "desc",
-        sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
-      }),
+    const params = {
+      searchTerm,
+      archived,
+      cursor,
+      limit: 20,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+      sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+    };
+    const page =
+      scope === "titles"
+        ? parseThreadList(await this.searchRequest("thread/list", params))
+        : parseThreadSearch(await this.searchRequest("thread/search", params));
+    const entries = page.data.map((entry) =>
+      "thread" in entry ? entry : { thread: entry, snippet: "" },
     );
     return {
-      data: page.data
+      data: entries
         .filter(({ thread }) => this.isSearchVisible(thread))
         .map(({ thread, snippet }) => ({
           thread: this.toSummary({ thread, archived, currentTurnId: activeTurnId(thread) }),

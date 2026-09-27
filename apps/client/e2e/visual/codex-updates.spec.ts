@@ -163,6 +163,73 @@ for (const { mobile, theme, sidebarSide, updateAvailable } of [
 }
 
 for (const mobile of [false, true]) {
+  test(`title search opens an unloaded session on ${mobile ? "mobile" : "desktop"}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile ? PHONE_VIEWPORT : DESKTOP_VIEWPORT);
+    const searchSnapshot = { ...snapshot, instanceId: "title-search-fixture" };
+    await installVisualFixture(page, {
+      theme: mobile ? "dark" : "light",
+      snapshot: searchSnapshot,
+    });
+    const found = {
+      ...mainThread,
+      id: "title-only",
+      title: "Обновить хедеры MEXC и задеплоить",
+      preview: "надо обновить хедерсы",
+      relation: { kind: "session" as const, sessionId: "title-only" },
+    };
+    let occurrenceReads = 0;
+    const scopes: string[] = [];
+    await page.route("https://codexnest.visual/api/v1/**", async (route) => {
+      if (route.request().method() === "OPTIONS") return route.fallback();
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/v1/threads/search") {
+        scopes.push(url.searchParams.get("scope")!);
+        expect(url.searchParams.get("q")).toBe("хедеры");
+        return json(route, {
+          data:
+            url.searchParams.get("scope") === "titles" &&
+            url.searchParams.get("archived") === "false"
+              ? [{ thread: found, snippet: "" }]
+              : [],
+          nextCursor: null,
+        });
+      }
+      if (url.pathname === "/api/v1/threads/title-only/search") {
+        occurrenceReads++;
+        return json(
+          route,
+          { error: { code: "app_server_unavailable", message: "not supported" } },
+          503,
+        );
+      }
+      if (url.pathname === "/api/v1/threads/title-only")
+        return json(route, {
+          version: { instanceId: searchSnapshot.instanceId, sequence: searchSnapshot.sequence },
+          summary: found,
+          turns: [],
+          queuedMessages: [],
+          olderTurnsCursor: null,
+          draft: null,
+        } satisfies ThreadDetail);
+      return route.fallback();
+    });
+    await page.goto("/threads/session-main");
+    if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
+    await page.getByRole("button", { name: "Поиск по диалогам", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Поиск по диалогам" });
+    await dialog.getByRole("textbox").fill("хедеры");
+    await dialog.getByRole("button", { name: "Найти", exact: true }).click();
+    await expect(dialog.getByText(found.title, { exact: true })).toHaveCount(1);
+    await expect.poll(() => scopes.length).toBe(4);
+    await dialog.getByRole("button", { name: /Обновить хедеры MEXC/ }).click();
+    await expect(page).toHaveURL(/\/threads\/title-only$/);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: "Сообщение для Codex" })).toBeVisible();
+    expect(occurrenceReads).toBe(0);
+  });
+
   test(`global history search and rich copy on ${mobile ? "mobile" : "desktop"}`, async ({
     page,
   }, testInfo) => {
@@ -249,7 +316,8 @@ for (const mobile of [false, true]) {
         searches.push(url.search);
         return json(route, {
           data:
-            url.searchParams.get("archived") === "true"
+            url.searchParams.get("archived") === "true" &&
+            url.searchParams.get("scope") === "messages"
               ? [{ thread: found, snippet: occurrence.snippet }]
               : [],
           nextCursor: null,
@@ -292,7 +360,7 @@ for (const mobile of [false, true]) {
     await expect(dialog.locator(".search-result-title")).toHaveCSS("font-size", "14px");
     await expect(dialog.locator(".search-snippet")).toHaveCSS("font-size", "14px");
     await expect(dialog.locator(".search-context").first()).toHaveCSS("font-size", "14px");
-    expect(searches).toHaveLength(2);
+    expect(searches).toHaveLength(4);
     await page.screenshot({ path: testInfo.outputPath("history-search.png") });
     expect(
       (await new AxeBuilder({ page }).include(".thread-search-dialog").analyze()).violations,
@@ -329,7 +397,7 @@ for (const mobile of [false, true]) {
     if (mobile) await page.getByRole("button", { name: "Открыть список задач" }).click();
     await page.getByRole("button", { name: "Поиск по диалогам", exact: true }).click();
     await expect(dialog.getByRole("textbox")).toHaveValue("редкий фрагмент");
-    expect(searches).toHaveLength(2);
+    expect(searches).toHaveLength(4);
   });
 }
 

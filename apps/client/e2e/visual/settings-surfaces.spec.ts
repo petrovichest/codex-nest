@@ -118,7 +118,8 @@ for (const theme of ["light", "dark"] as const) {
           headers: { "access-control-allow-origin": "*" },
           json: {
             data:
-              new URL(route.request().url()).searchParams.get("archived") === "true"
+              new URL(route.request().url()).searchParams.get("archived") === "true" ||
+              new URL(route.request().url()).searchParams.get("scope") === "titles"
                 ? []
                 : Array.from({ length: 30 }, (_, index) => ({
                     thread: {

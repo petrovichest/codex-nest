@@ -3978,6 +3978,8 @@ describe("thread settings", () => {
     for (const url of [
       "/api/v1/threads/search?q=",
       "/api/v1/threads/search?q=x&archived=wrong",
+      "/api/v1/threads/search?q=x&scope=wrong",
+      "/api/v1/threads/search?q=x&scope=",
       "/api/v1/threads/thread/search?q=x&cursor=",
       "/api/v1/threads/thread/turns/turn",
     ]) {
@@ -3997,6 +3999,41 @@ describe("thread settings", () => {
       data: [{ thread: { id: "outside", archived: true }, snippet: "text" }],
       nextCursor: "next",
     });
+    expect(bridge.request).toHaveBeenLastCalledWith(
+      "thread/search",
+      expect.objectContaining({ searchTerm: "text", archived: true }),
+      30_000,
+    );
+    bridge.request.mockResolvedValueOnce({
+      data: [
+        {
+          ...testThread("old-session"),
+          name: "Обновить хедеры MEXC и задеплоить",
+          preview: "надо обновить хедерсы",
+          historyMode: "legacy",
+        },
+      ],
+      nextCursor: "titles-next",
+    });
+    const titles = await app.inject({
+      url: `/api/v1/threads/search?q=${encodeURIComponent("хедеры")}&scope=titles&archived=true&cursor=titles-page`,
+      headers,
+    });
+    expect(titles.statusCode).toBe(200);
+    expect(titles.json()).toMatchObject({
+      data: [
+        {
+          thread: { id: "old-session", title: "Обновить хедеры MEXC и задеплоить", archived: true },
+          snippet: "",
+        },
+      ],
+      nextCursor: "titles-next",
+    });
+    expect(bridge.request).toHaveBeenLastCalledWith(
+      "thread/list",
+      expect.objectContaining({ searchTerm: "хедеры", archived: true, cursor: "titles-page" }),
+      30_000,
+    );
     bridge.request.mockRejectedValueOnce(new RpcError(-32601, "not found"));
     expect((await app.inject({ url: "/api/v1/threads/search?q=text", headers })).statusCode).toBe(
       503,

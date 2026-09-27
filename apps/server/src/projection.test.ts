@@ -743,92 +743,108 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 
-  it("searches unloaded roots without expanding the snapshot and isolates targeted turn history", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
-    directories.push(directory);
-    const store = new StateStore(join(directory, "state.json"));
-    await store.load();
-    await store.update((state) => {
-      state.dismissedProjectPaths = ["/dismissed"];
-    });
-    const bridge = new FakeBridge();
-    const projection = new AppProjection(
-      bridge as unknown as CodexBridge,
-      store,
-      new AttentionManager(),
-    );
-    projection.upsertThread(thread("one", "/work", 5));
-    const occurrence = {
-      turnId: "old",
-      itemId: "answer",
-      snippet: "😀needle",
-      snippetMatchRange: { start: 2, end: 8 },
-      turnCursor: "target-cursor",
-    };
-    const oldTurn = {
-      ...testTurn("old", "completed"),
-      itemsView: "full" as const,
-      items: [
+  it.each(["titles", "messages"] as const)(
+    "searches unloaded roots by %s without expanding the snapshot and isolates targeted turn history",
+    async (scope) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      await store.update((state) => {
+        state.dismissedProjectPaths = ["/dismissed"];
+      });
+      const bridge = new FakeBridge();
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+      );
+      projection.upsertThread(thread("one", "/work", 5));
+      const occurrence = {
+        turnId: "old",
+        itemId: "answer",
+        snippet: "😀needle",
+        snippetMatchRange: { start: 2, end: 8 },
+        turnCursor: "target-cursor",
+      };
+      const oldTurn = {
+        ...testTurn("old", "completed"),
+        itemsView: "full" as const,
+        items: [
+          {
+            type: "agentMessage" as const,
+            id: "answer",
+            text: "needle",
+            phase: "final_answer" as const,
+            memoryCitation: null,
+          },
+        ],
+      };
+      bridge.request.mockImplementation(async (method) => {
+        if (method === (scope === "titles" ? "thread/list" : "thread/search"))
+          return {
+            data: [
+              thread("outside", "/work", 6),
+              { ...thread("child", "/work", 5), parentThreadId: "one" },
+              { ...thread("internal", "/work", 5), threadSource: "codexnest-fork-temp:abc" },
+              { ...thread("ephemeral", "/work", 5), ephemeral: true },
+              thread("dismissed", "/dismissed", 5),
+            ].map((thread) => (scope === "titles" ? thread : { thread, snippet: "needle" })),
+            nextCursor: "next",
+          };
+        if (method === "thread/read") return { thread: thread("outside", "/work", 6) };
+        if (method === "thread/searchOccurrences") return { data: [occurrence], nextCursor: null };
+        if (method === "thread/turns/list")
+          return { data: [oldTurn], nextCursor: "older", backwardsCursor: null };
+        throw new Error(`Unexpected ${method}`);
+      });
+      expect(
+        (await projection.searchThreads("needle", true, "page", scope)).data.map(
+          (entry) => entry.thread.id,
+        ),
+      ).toEqual(["outside"]);
+      expect(bridge.request).toHaveBeenCalledExactlyOnceWith(
+        scope === "titles" ? "thread/list" : "thread/search",
         {
-          type: "agentMessage" as const,
-          id: "answer",
-          text: "needle",
-          phase: "final_answer" as const,
-          memoryCitation: null,
+          searchTerm: "needle",
+          archived: true,
+          cursor: "page",
+          limit: 20,
+          sortKey: "updated_at",
+          sortDirection: "desc",
+          sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
         },
-      ],
-    };
-    bridge.request.mockImplementation(async (method) => {
-      if (method === "thread/search")
-        return {
-          data: [
-            thread("outside", "/work", 6),
-            { ...thread("child", "/work", 5), parentThreadId: "one" },
-            { ...thread("internal", "/work", 5), threadSource: "codexnest-fork-temp:abc" },
-            thread("dismissed", "/dismissed", 5),
-          ].map((thread) => ({ thread, snippet: "needle" })),
-          nextCursor: "next",
-        };
-      if (method === "thread/read") return { thread: thread("outside", "/work", 6) };
-      if (method === "thread/searchOccurrences") return { data: [occurrence], nextCursor: null };
-      if (method === "thread/turns/list")
-        return { data: [oldTurn], nextCursor: "older", backwardsCursor: null };
-      throw new Error(`Unexpected ${method}`);
-    });
-    expect(
-      (await projection.searchThreads("needle", true, "page")).data.map((entry) => entry.thread.id),
-    ).toEqual(["outside"]);
-    expect(bridge.request).toHaveBeenCalledExactlyOnceWith(
-      "thread/search",
-      expect.objectContaining({ searchTerm: "needle", archived: true, cursor: "page", limit: 20 }),
-      30_000,
-    );
-    expect(projection.summary("outside")).toBeUndefined();
-    expect(await projection.searchOccurrences("outside", "needle", null)).toMatchObject({
-      data: [occurrence],
-    });
-    const result = await projection.readSearchTurn("outside", "old", "target-cursor");
-    expect(result.turn.items).toEqual([expect.objectContaining({ id: "answer", text: "needle" })]);
-    expect(bridge.request).toHaveBeenLastCalledWith(
-      "thread/turns/list",
-      {
-        threadId: "outside",
-        cursor: "target-cursor",
-        limit: 1,
-        sortDirection: "asc",
-        itemsView: "full",
-      },
-      30_000,
-    );
-    expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["one"]);
-    await expect(projection.readSearchTurn("outside", "gone", "target-cursor")).rejects.toThrow(
-      "Search result changed",
-    );
-    bridge.request.mockRejectedValueOnce(new RpcError(-32601, "method not found"));
-    await expect(projection.searchThreads("needle", false, null)).rejects.toThrow(
-      "Поиск недоступен",
-    );
-  });
+        30_000,
+      );
+      expect(projection.summary("outside")).toBeUndefined();
+      expect(await projection.searchOccurrences("outside", "needle", null)).toMatchObject({
+        data: [occurrence],
+      });
+      const result = await projection.readSearchTurn("outside", "old", "target-cursor");
+      expect(result.turn.items).toEqual([
+        expect.objectContaining({ id: "answer", text: "needle" }),
+      ]);
+      expect(bridge.request).toHaveBeenLastCalledWith(
+        "thread/turns/list",
+        {
+          threadId: "outside",
+          cursor: "target-cursor",
+          limit: 1,
+          sortDirection: "asc",
+          itemsView: "full",
+        },
+        30_000,
+      );
+      expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["one"]);
+      await expect(projection.readSearchTurn("outside", "gone", "target-cursor")).rejects.toThrow(
+        "Search result changed",
+      );
+      bridge.request.mockRejectedValueOnce(new RpcError(-32601, "method not found"));
+      await expect(projection.searchThreads("needle", false, null, scope)).rejects.toThrow(
+        "Поиск недоступен",
+      );
+    },
+  );
   it("preserves async questions through streaming, item renumbering, and history reload", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-async-question-test-"));
     directories.push(directory);

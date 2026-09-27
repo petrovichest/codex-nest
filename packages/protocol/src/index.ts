@@ -294,6 +294,8 @@ export type ThreadSummary = {
   codexSettings?: { model: string | null; reasoningEffort: string | null };
 };
 
+export type ThreadSearchScope = "titles" | "messages";
+
 export type ThreadSearchPage = {
   data: Array<{ thread: ThreadSummary; snippet: string }>;
   nextCursor: string | null;

@@ -34,6 +34,7 @@ import type {
   ThreadHistoryPage,
   ThreadSummary,
   ThreadSearchPage,
+  ThreadSearchScope,
   ThreadOccurrencesPage,
   ThreadSearchTurn,
   TurnItemsResponse,
@@ -79,8 +80,13 @@ export class ApiClient {
     return this.request("/api/v1/summary");
   }
 
-  searchThreads(query: string, archived: boolean, cursor?: string): Promise<ThreadSearchPage> {
-    const params = new URLSearchParams({ q: query, archived: String(archived) });
+  searchThreads(
+    query: string,
+    archived: boolean,
+    cursor?: string,
+    scope: ThreadSearchScope = "messages",
+  ): Promise<ThreadSearchPage> {
+    const params = new URLSearchParams({ q: query, archived: String(archived), scope });
     if (cursor) params.set("cursor", cursor);
     return this.request(`/api/v1/threads/search?${params}`);
   }
