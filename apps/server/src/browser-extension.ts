@@ -187,19 +187,26 @@ export class BrowserExtensionServer {
         connection.socket.close(1008, "Token rotated");
       }
     };
+    let catalogUpdate: NodeJS.Immediate | undefined;
     const catalogChanged = (_sequence: number, event: ServerEvent) => {
-      if (!isBrowserCatalogEvent(event)) return;
-      for (const connection of this.connections.values()) {
-        this.send(connection.socket, {
-          type: "catalog.updated",
-          ...this.catalog(connection.instanceId),
-        });
-      }
+      if (!isBrowserCatalogEvent(event) || !this.connections.size || catalogUpdate) return;
+      catalogUpdate = setImmediate(() => {
+        catalogUpdate = undefined;
+        if (!this.connections.size) return;
+        const snapshot = this.projection.snapshot();
+        for (const connection of this.connections.values()) {
+          this.send(connection.socket, {
+            type: "catalog.updated",
+            ...this.catalog(connection.instanceId, snapshot),
+          });
+        }
+      });
     };
     this.store.on("authRotated", authRotated);
     this.projection.on("event", catalogChanged);
     this.app.addHook("onClose", async () => {
       if (this.heartbeat) clearInterval(this.heartbeat);
+      if (catalogUpdate) clearImmediate(catalogUpdate);
       this.store.off("authRotated", authRotated);
       this.projection.off("event", catalogChanged);
       for (const pending of this.pendingTools.values()) {
@@ -708,11 +715,13 @@ export class BrowserExtensionServer {
     await this.detach(connection.instanceId, binding.threadId).catch(() => undefined);
   }
 
-  private catalog(instanceId: string): {
+  private catalog(
+    instanceId: string,
+    snapshot = this.projection.snapshot(),
+  ): {
     projects: BrowserExtensionProjectSummary[];
     threads: BrowserExtensionThreadSummary[];
   } {
-    const snapshot = this.projection.snapshot();
     const threads = snapshot.threads.flatMap((thread) => {
       const meta = this.store.view().threadMeta[thread.id];
       const binding = meta?.browserBinding;

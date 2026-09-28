@@ -61,7 +61,7 @@ export class AttentionManager extends EventEmitter {
     const result = mapResponse(pending.request, response, pending.legacy, pending.serverRequest);
     this.pending.delete(id);
     pending.transport.respond(pending.rpcId, result);
-    this.emit("removed", id);
+    this.emit("removed", id, pending.request);
     return pending.request;
   }
 
@@ -69,7 +69,7 @@ export class AttentionManager extends EventEmitter {
     const found = [...this.pending.entries()].find(([, item]) => item.rpcId === rpcId);
     if (!found) return null;
     this.pending.delete(found[0]);
-    this.emit("removed", found[0]);
+    this.emit("removed", found[0], found[1].request);
     return found[1].request;
   }
 
@@ -78,14 +78,14 @@ export class AttentionManager extends EventEmitter {
     const pending = this.pending.get(id);
     if (!pending) return null;
     this.pending.delete(id);
-    this.emit("removed", id);
+    this.emit("removed", id, pending.request);
     return pending.request;
   }
 
   expireAll(): void {
-    const ids = [...this.pending.keys()];
+    const pending = [...this.pending.entries()];
     this.pending.clear();
-    for (const id of ids) this.emit("removed", id);
+    for (const [id, { request }] of pending) this.emit("removed", id, request);
   }
 }
 

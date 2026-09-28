@@ -3890,6 +3890,73 @@ describe("AppProjection", () => {
     },
   );
 
+  it.each(["answer", "expire", "rpc"] as const)(
+    "updates only the question's session among 1000 others on %s",
+    async (removal) => {
+      const { attention, projection, bridge, receive, events, store } =
+        await createUserInputLifecycleHarness(1000);
+      const first = receive();
+      const second = receive();
+      events.length = 0;
+
+      if (removal === "answer")
+        attention.resolve(first.id, { kind: "userInput", answers: { choice: ["First"] } });
+      else if (removal === "expire") attention.expire(first.id);
+      else attention.expireByRpcId(900);
+
+      expect(events).toEqual([
+        { type: "attention.removed", attentionId: first.id },
+        {
+          type: "thread.upserted",
+          thread: expect.objectContaining({ id: "one", state: "needsAttention" }),
+        },
+      ]);
+      expect(projection.summary("one")?.state).toBe("needsAttention");
+      events.length = 0;
+      attention.expire(second.id);
+      expect(events).toEqual([
+        { type: "attention.removed", attentionId: second.id },
+        {
+          type: "thread.upserted",
+          thread: expect.objectContaining({ id: "one", state: "running" }),
+        },
+      ]);
+      expect(bridge.request).not.toHaveBeenCalled();
+      await store.flushed();
+    },
+  );
+
+  it("updates only sessions with retired requests when clearing all attention", async () => {
+    const { attention, projection, receive, events, store } =
+      await createUserInputLifecycleHarness(1000);
+    const first = receive();
+    const second = receive("other-turn", "unrelated-0");
+    const global = attention.receive(
+      { id: 1001, method: "future/globalRequest", params: {} } as unknown as ServerRequest,
+      { respondError: vi.fn() } as unknown as JsonlTransport,
+    );
+    expect(global.threadId).toBeNull();
+    events.length = 0;
+
+    attention.expireAll();
+
+    expect(events).toEqual([
+      { type: "attention.removed", attentionId: first.id },
+      {
+        type: "thread.upserted",
+        thread: expect.objectContaining({ id: "one", state: "running" }),
+      },
+      { type: "attention.removed", attentionId: second.id },
+      {
+        type: "thread.upserted",
+        thread: expect.objectContaining({ id: "unrelated-0", state: "running" }),
+      },
+      { type: "attention.removed", attentionId: global.id },
+    ]);
+    expect(projection.snapshot().attention).toEqual([]);
+    await store.flushed();
+  });
+
   it.each(["completed", "failed", "interrupted", "stop"] as const)(
     "retires questions on %s and rejects late requests without answering them",
     async (outcome) => {
@@ -6072,11 +6139,32 @@ describe("AppProjection", () => {
   });
 });
 
-async function createUserInputLifecycleHarness() {
+async function createUserInputLifecycleHarness(unrelatedThreads = 0) {
   const directory = await mkdtemp(join(tmpdir(), "codexnest-input-lifecycle-test-"));
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
   await store.load();
+  if (unrelatedThreads) {
+    await store.update((state) => {
+      for (let index = 0; index < unrelatedThreads; index += 1) {
+        const id = `unrelated-${index}`;
+        state.threadMeta[id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          sessionSnapshot: {
+            sessionId: id,
+            name: id,
+            preview: id,
+            cwd: "/work",
+            createdAt: 1,
+            updatedAt: 1,
+            archived: false,
+            currentTurnId: null,
+          },
+        };
+      }
+    });
+  }
   const bridge = new FakeBridge();
   const attention = new AttentionManager();
   const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);

@@ -227,10 +227,9 @@ export class AppProjection extends EventEmitter {
         this.publishThread(request.threadId, state);
       }
     });
-    attention.on("removed", (attentionId: string) => {
+    attention.on("removed", (attentionId: string, request: AttentionRequest) => {
       this.publish({ type: "attention.removed", attentionId });
-      const state = this.store.view();
-      for (const threadId of this.threads.keys()) this.publishThread(threadId, state);
+      if (request.threadId) this.publishThread(request.threadId);
     });
   }
 

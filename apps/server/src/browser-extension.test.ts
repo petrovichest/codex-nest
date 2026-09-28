@@ -107,6 +107,72 @@ describe("browser extension transport", () => {
     await harness.close();
   });
 
+  it("coalesces catalog bursts into one snapshot shared by separately filtered connections", async () => {
+    const harness = await createHarness();
+    for (const id of ["shared", "owned"]) harness.projection.summaries.set(id, summary(id));
+    await harness.store.update((state) => {
+      for (const id of ["shared", "owned"]) {
+        state.threadMeta[id] = { pinned: false, lastReadUpdatedAt: 0, browserEnabled: true };
+      }
+      state.threadMeta.owned!.browserBinding = {
+        bindingId: "owned-binding",
+        instanceId: "extension-instance-1",
+        attachedAt: 1,
+      };
+    });
+    const first = await connect(harness.app, "extension-instance-1");
+    const second = await connect(harness.app, "extension-instance-2");
+    expect((await first.nextType("server.hello")).threads.map((thread) => thread.id)).toEqual([
+      "shared",
+      "owned",
+    ]);
+    expect((await second.nextType("server.hello")).threads.map((thread) => thread.id)).toEqual([
+      "shared",
+    ]);
+    const snapshot = vi.spyOn(harness.projection, "snapshot");
+    for (let index = 0; index < 1000; index += 1) {
+      const thread = { ...summary("shared"), title: `Title ${index}` };
+      harness.projection.summaries.set(thread.id, thread);
+      harness.projection.emit("event", index, { type: "thread.upserted", thread });
+    }
+    expect(snapshot).not.toHaveBeenCalled();
+    const firstCatalog = await first.nextType("catalog.updated");
+    const secondCatalog = await second.nextType("catalog.updated");
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(firstCatalog.threads).toEqual([
+      expect.objectContaining({ id: "shared", title: "Title 999" }),
+      expect.objectContaining({ id: "owned" }),
+    ]);
+    expect(secondCatalog.threads).toEqual([
+      expect.objectContaining({ id: "shared", title: "Title 999" }),
+    ]);
+    harness.projection.summaries.delete("shared");
+    harness.projection.emit("event", 1000, { type: "thread.removed", threadId: "shared" });
+    expect((await first.nextType("catalog.updated")).threads.map((thread) => thread.id)).toEqual([
+      "owned",
+    ]);
+    expect((await second.nextType("catalog.updated")).threads).toEqual([]);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    first.socket.close();
+    second.socket.close();
+    await harness.close();
+  });
+
+  it("does not build catalogs without connections or after shutdown", async () => {
+    const harness = await createHarness();
+    const snapshot = vi.spyOn(harness.projection, "snapshot");
+    harness.projection.emit("event", 1, { type: "resync.required" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(snapshot).not.toHaveBeenCalled();
+    const extension = await connect(harness.app, "extension-instance-1");
+    await extension.nextType("server.hello");
+    snapshot.mockClear();
+    harness.projection.emit("event", 2, { type: "resync.required" });
+    await harness.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
   it("catalogs enabled root project sessions regardless of activity", async () => {
     const harness = await createHarness();
     const summaries = [
