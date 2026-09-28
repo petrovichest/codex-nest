@@ -84,6 +84,7 @@ async function openQuestions(page: Page, theme: "light" | "dark", fallback = fal
   return {
     card,
     field,
+    surface: card.locator(".user-input-freeform"),
     request,
     completeRecording(text: string) {
       const job: VoiceTranscriptionJob = {
@@ -125,9 +126,19 @@ for (const theme of ["light", "dark"] as const) {
       page,
     }, testInfo) => {
       await page.setViewportSize({ width, height: 1000 });
-      const { card, field } = await openQuestions(page, theme);
+      const { card, field, surface } = await openQuestions(page, theme);
       await expect(field).toHaveAttribute("rows", "1");
       await expect(field).toHaveCSS("resize", "none");
+      const textLeftEdges = await card
+        .locator("legend, fieldset > p, .user-input-freeform-label")
+        .evaluateAll((elements) =>
+          elements.map((element) => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return Math.round(range.getBoundingClientRect().left);
+          }),
+        );
+      expect(new Set(textLeftEdges).size).toBe(1);
       const singleLine = await field.evaluate((element) => {
         const style = getComputedStyle(element);
         return Math.round(
@@ -149,16 +160,18 @@ for (const theme of ["light", "dark"] as const) {
         await card.screenshot({ path: testInfo.outputPath(`question-expanded-${theme}.png`) });
       const longAnswer = "Длинный ответ без ручного переноса строк. ".repeat(80);
       await field.fill(longAnswer);
-      await expect.poll(() => height(field)).toBe(190);
+      await expect.poll(() => height(surface)).toBe(190);
       expect(await field.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
         true,
       );
+      if (width === 390)
+        await card.screenshot({ path: testInfo.outputPath(`question-scrolled-${theme}.png`) });
       await card.getByRole("button", { name: "Далее", exact: true }).click();
       await expect(field).toHaveValue("");
       await expect.poll(() => height(field)).toBe(singleLine);
       await card.getByRole("button", { name: "Назад", exact: true }).click();
       await expect(field).toHaveValue(longAnswer);
-      await expect.poll(() => height(field)).toBe(190);
+      await expect.poll(() => height(surface)).toBe(190);
       await field.fill("");
       await expect.poll(() => height(field)).toBe(singleLine);
       await card.getByRole("button", { name: "Далее", exact: true }).click();
@@ -174,7 +187,11 @@ for (const theme of ["light", "dark"] as const) {
     page,
   }) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
-    const { card, field, request, completeRecording } = await openQuestions(page, theme, true);
+    const { card, field, surface, request, completeRecording } = await openQuestions(
+      page,
+      theme,
+      true,
+    );
     const compact = await height(field);
     const text = "Мой ответ. ".repeat(12);
     await field.fill(text);
@@ -188,11 +205,11 @@ for (const theme of ["light", "dark"] as const) {
     await expect.poll(() => request.draft?.answers.background?.[0]).toBe("Короткий ответ.");
     completeRecording("Распознанная часть ответа. ".repeat(80).trim());
     await expect(field).toHaveValue(/^Короткий ответ\. Распознанная часть ответа\./);
-    await expect.poll(() => height(field)).toBe(190);
+    await expect.poll(() => height(surface)).toBe(190);
     await card.getByRole("button", { name: "Далее", exact: true }).click();
     await expect.poll(() => height(field)).toBe(compact);
     await card.getByRole("button", { name: "Назад", exact: true }).click();
-    await expect.poll(() => height(field)).toBe(190);
+    await expect.poll(() => height(surface)).toBe(190);
     await field.fill("");
     await expect.poll(() => height(field)).toBe(compact);
   });

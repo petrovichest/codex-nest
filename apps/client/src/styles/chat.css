@@ -412,6 +412,10 @@
   background: transparent;
 }
 
+.thread-workspace .timeline .user-input-card legend {
+  padding: 0;
+}
+
 .thread-workspace .timeline :is(.attention-card, .async-question-card) :is(label, legend),
 .thread-workspace .timeline .user-input-progress,
 .chat-dialog label,
@@ -556,6 +560,10 @@
   border: 0;
   border-radius: var(--chat-radius-card);
   background: var(--chat-inset);
+}
+
+.thread-workspace .timeline .user-input-freeform:has(textarea) {
+  padding: 6px 6px 6px 16px;
 }
 
 .thread-workspace .timeline :is(.user-input-freeform, .async-question-card textarea) {
@@ -1494,15 +1502,17 @@
   border-radius: var(--chat-radius-card);
 }
 
-.user-input-freeform textarea {
+.thread-workspace .timeline .user-input-card .user-input-freeform textarea {
   resize: none;
   min-height: 0;
-  max-height: 190px;
+  max-height: calc(190px - 12px);
   height: auto;
   field-sizing: content;
   overflow-y: auto;
-  padding: 12px;
+  padding: 6px 0;
   border: 0;
+  /* Only the outer surface is rounded; its inset keeps the scrollport clear of the corners. */
+  border-radius: 0;
   line-height: 1.55;
 }
 .user-input-voice-queue {
