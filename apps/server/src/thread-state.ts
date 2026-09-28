@@ -38,7 +38,7 @@ export async function removeThreadState(
         draft?.images.length ||
         draft?.files?.length ||
         draft?.annotations.length ||
-        state.voiceTranscriptions?.[threadId])
+        Object.values(state.voiceTranscriptions ?? {}).some((job) => job.threadId === threadId))
     )
       return;
     removed = true;
@@ -62,8 +62,8 @@ export async function removeThreadState(
       if (receipt.threadId === threadId) delete state.messageReceipts![messageId];
     }
 
-    if (state.voiceTranscriptions) {
-      delete state.voiceTranscriptions[threadId];
+    for (const [key, job] of Object.entries(state.voiceTranscriptions ?? {})) {
+      if (job.threadId === threadId) delete state.voiceTranscriptions![key];
     }
 
     for (const [jobId, receipt] of Object.entries(state.voiceReceipts ?? {})) {

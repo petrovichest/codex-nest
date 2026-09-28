@@ -260,9 +260,16 @@ for (const theme of ["light", "dark"] as const) {
         await page.keyboard.press("Tab");
         await page.keyboard.press("Shift+Tab");
         await expect(steps.nth(1)).toHaveCSS("outline-style", "solid");
-        const input = panel.locator(".user-input-freeform input");
+        const input = panel.locator(".user-input-freeform textarea");
+        await steps.nth(1).focus();
+        const unfocusedShadow = await panel
+          .locator(".user-input-freeform")
+          .evaluate((element) => getComputedStyle(element).boxShadow);
         await input.fill("Сохранённый ответ");
-        await expect(panel.locator(".user-input-freeform")).toHaveCSS("outline-style", "solid");
+        await expect(panel.locator(".user-input-freeform")).not.toHaveCSS(
+          "box-shadow",
+          unfocusedShadow,
+        );
         await expect(input).toHaveAccessibleName(language === "ru" ? "Свой ответ" : "Your answer");
         const gap = async (before: string, after: string) => {
           const first = (await page.locator(before).boundingBox())!;

@@ -1,4 +1,4 @@
-import { pastedText } from "@codexnest/protocol";
+import { appendUserInputRecordings, pastedText } from "@codexnest/protocol";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import {
@@ -71,6 +71,22 @@ type VoiceRecordingUpload = Omit<
   "connectionKey" | "createdAt" | "attempts" | "lastError"
 >;
 
+type PendingQuestionRecording = Pick<
+  PendingVoiceRecording,
+  | "id"
+  | "threadId"
+  | "userInput"
+  | "durationMs"
+  | "createdAt"
+  | "lastError"
+  | "mode"
+  | "dismissUserInput"
+>;
+type ReliableMessageRequest = QueueMessageRequest & {
+  clientMessageId: string;
+  userInputSubmission?: OutboxMessage["userInputSubmission"];
+};
+
 type VoiceRecordingRecovery = Pick<
   PendingVoiceRecording,
   "threadId" | "mode" | "draft" | "draftUpdatedAt"
@@ -99,13 +115,16 @@ interface ConnectionContextValue {
   loadTurnItems(threadId: string, turnId: string): Promise<void>;
   sendReliable(
     threadId: string,
-    body: QueueMessageRequest & { clientMessageId: string },
+    body: ReliableMessageRequest,
     onCommitted?: () => void,
     source?: MessageDraftSource,
   ): Promise<"delivered" | "pending">;
   retryReliableMessage(threadId: string, messageId: string): Promise<void>;
   forgetReliableMessage(threadId: string, messageId: string): Promise<void>;
   queueVoiceRecording(recording: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void>;
+  pendingQuestionRecordings: readonly PendingQuestionRecording[];
+  pendingUserInputSubmissions: readonly OutboxMessage[];
+  retryQuestionUpload(id: string): Promise<void>;
   pendingVoiceRecordingThreadIds: readonly string[];
   pendingVoiceRecordingErrors: Readonly<Record<string, string>>;
   pendingVoiceInputDismissals: Readonly<
@@ -136,6 +155,18 @@ export function ConnectionProvider({
   const [generation, setGeneration] = useState(0);
   const [foregroundEpoch, setForegroundEpoch] = useState(0);
   const [streamRecoveryEpoch, setStreamRecoveryEpoch] = useState(0);
+  const [pendingQuestionRecordings, setPendingQuestionRecordings] = useState<
+    PendingQuestionRecording[]
+  >([]);
+  const [pendingUserInputSubmissions, setPendingUserInputSubmissions] = useState<OutboxMessage[]>(
+    [],
+  );
+  const questionUploadRef = useRef<(recording: PendingVoiceRecording) => Promise<void>>(
+    async () => undefined,
+  );
+  const voiceUploadLocks = useRef(new Map<string, Promise<void>>());
+  const unsavedVoiceRecordings = useRef(new Map<string, PendingVoiceRecording>());
+  const voiceStaging = useRef(new Map<string, Promise<boolean>>());
   const [pendingVoiceRecordingThreadIds, setPendingVoiceRecordingThreadIds] = useState<string[]>(
     [],
   );
@@ -173,12 +204,7 @@ export function ConnectionProvider({
   const outboxRetryTimers = useRef(new Map<string, number>());
   const lastMessageTime = useRef(0);
   const recoveredVoiceRecordingIds = useRef(new Set<string>());
-  const pendingVoiceRecordings = useRef(
-    new Map<
-      string,
-      Pick<PendingVoiceRecording, "threadId" | "lastError" | "dismissUserInput" | "mode">
-    >(),
-  );
+  const pendingVoiceRecordings = useRef(new Map<string, PendingQuestionRecording>());
   const voiceRecoveryDrain = useRef<Promise<void> | null>(null);
   const voiceRecoveryRetryTimer = useRef<number | undefined>(undefined);
   const userInputDraftPersistence = useRef(new Map<string, UserInputDraftPersistence>());
@@ -202,6 +228,9 @@ export function ConnectionProvider({
       if (entry && (entry.inFlight || entry.version > entry.savedVersion)) continue;
       userInputDraftPersistence.current.set(attentionId, {
         draft: {
+          ...(draft.appliedRecordingIds
+            ? { appliedRecordingIds: [...draft.appliedRecordingIds] }
+            : {}),
           answers: cloneUserInputAnswers(draft.answers),
           currentQuestionId: draft.currentQuestionId,
         },
@@ -245,6 +274,7 @@ export function ConnectionProvider({
           });
         }
         for (const message of outbox) {
+          if (message.userInputSubmission) continue;
           dispatch({
             type: "optimistic.add",
             message: {
@@ -630,6 +660,11 @@ export function ConnectionProvider({
         }
         lastMessageTime.current = Math.max(lastMessageTime.current, message.createdAt);
       }
+      setPendingUserInputSubmissions(
+        [...reliableMessages.current.values()]
+          .map((record) => record.message)
+          .filter((message) => message.userInputSubmission),
+      );
       const threadIds = new Set(
         [...reliableMessages.current.values()]
           .filter(
@@ -663,26 +698,55 @@ export function ConnectionProvider({
                   continue;
                 if (!(await record.staged)) continue;
                 try {
-                  await api.enqueue(threadId, {
-                    input: message.input,
-                    ...pastedText(message),
-                    ...(message.images.length ? { images: message.images } : {}),
-                    ...(message.files?.length ? { files: message.files } : {}),
-                    ...(message.goal ? { goal: true } : {}),
-                    ...(message.planImplementationMode
-                      ? { planImplementationMode: message.planImplementationMode }
-                      : {}),
-                    clientMessageId: message.id,
-                    ...(message.replyToAsyncQuestion
-                      ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
-                      : {}),
-                    ...(message.replyToUserInput
-                      ? { replyToUserInput: message.replyToUserInput }
-                      : {}),
-                    ...(message.dismissUserInput
-                      ? { dismissUserInput: message.dismissUserInput }
-                      : {}),
-                  });
+                  if (message.userInputSubmission) {
+                    if ((await Promise.all(voiceStaging.current.values())).some((saved) => !saved))
+                      throw new Error("Не удалось надежно сохранить запись на устройстве");
+                    if (
+                      [...unsavedVoiceRecordings.current.values()].some(
+                        (recording) =>
+                          recording.userInput?.draftKey === message.userInputSubmission!.draftKey &&
+                          recording.threadId === threadId,
+                      )
+                    ) {
+                      throw new Error(
+                        translate(
+                          languageRef.current,
+                          "Не удалось надежно сохранить запись на устройстве",
+                        ),
+                      );
+                    }
+                    const uploads = (await listPendingVoiceRecordings(settings)).filter(
+                      (recording) =>
+                        recording.threadId === threadId &&
+                        recording.userInput?.draftKey === message.userInputSubmission!.draftKey,
+                    );
+                    for (const recording of uploads) await questionUploadRef.current(recording);
+                    await api.submitUserInputVoices(
+                      threadId,
+                      message.userInputSubmission.draftKey,
+                      { ...message.userInputSubmission, clientMessageId: message.id },
+                    );
+                  } else
+                    await api.enqueue(threadId, {
+                      input: message.input,
+                      ...pastedText(message),
+                      ...(message.images.length ? { images: message.images } : {}),
+                      ...(message.files?.length ? { files: message.files } : {}),
+                      ...(message.goal ? { goal: true } : {}),
+                      ...(message.planImplementationMode
+                        ? { planImplementationMode: message.planImplementationMode }
+                        : {}),
+                      clientMessageId: message.id,
+                      ...(message.replyToAsyncQuestion
+                        ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
+                        : {}),
+                      ...(message.replyToUserInput
+                        ? { replyToUserInput: message.replyToUserInput }
+                        : {}),
+                      ...(message.dismissUserInput
+                        ? { dismissUserInput: message.dismissUserInput }
+                        : {}),
+                    });
                   record.message = {
                     ...message,
                     accepted: true,
@@ -691,25 +755,32 @@ export function ConnectionProvider({
                   };
                   record.failure = undefined;
                   record.commit?.();
-                  dispatch({
-                    type: "optimistic.add",
-                    message: {
-                      id: message.id,
-                      threadId,
-                      text: message.input,
-                      ...pastedText(message),
-                      images: message.images,
-                      files: message.files ?? [],
-                      createdAt: message.createdAt,
-                      destination: "queue",
-                      turnId: null,
-                      serverAccepted: true,
-                      ...(message.dismissUserInput
-                        ? { dismissUserInput: message.dismissUserInput }
-                        : {}),
-                    },
-                  });
+                  if (!message.userInputSubmission)
+                    dispatch({
+                      type: "optimistic.add",
+                      message: {
+                        id: message.id,
+                        threadId,
+                        text: message.input,
+                        ...pastedText(message),
+                        images: message.images,
+                        files: message.files ?? [],
+                        createdAt: message.createdAt,
+                        destination: "queue",
+                        turnId: null,
+                        serverAccepted: true,
+                        ...(message.dismissUserInput
+                          ? { dismissUserInput: message.dismissUserInput }
+                          : {}),
+                      },
+                    });
                   await acknowledgeOutboxMessage(record.message);
+                  if (message.userInputSubmission)
+                    setPendingUserInputSubmissions(
+                      [...reliableMessages.current.values()]
+                        .map((record) => record.message)
+                        .filter((message) => message.userInputSubmission),
+                    );
                 } catch (error) {
                   record.failure = error;
                   const retryable = isRetryableApiError(error);
@@ -731,12 +802,19 @@ export function ConnectionProvider({
                     record.staged = Promise.resolve(true);
                     record.commit?.();
                   }
-                  dispatch({
-                    type: "optimistic.error",
-                    threadId,
-                    messageId: message.id,
-                    error: { message: record.message.lastError!, retryable },
-                  });
+                  if (message.userInputSubmission)
+                    setPendingUserInputSubmissions(
+                      [...reliableMessages.current.values()]
+                        .map((record) => record.message)
+                        .filter((message) => message.userInputSubmission),
+                    );
+                  else
+                    dispatch({
+                      type: "optimistic.error",
+                      threadId,
+                      messageId: message.id,
+                      error: { message: record.message.lastError!, retryable },
+                    });
                   if (retryable) {
                     scheduleOutboxRetry(
                       threadId,
@@ -763,7 +841,7 @@ export function ConnectionProvider({
   const sendReliable = useCallback(
     async (
       threadId: string,
-      body: QueueMessageRequest & { clientMessageId: string },
+      body: ReliableMessageRequest,
       onCommitted?: () => void,
       source?: MessageDraftSource,
     ): Promise<"delivered" | "pending"> => {
@@ -782,6 +860,7 @@ export function ConnectionProvider({
         ...(body.replyToAsyncQuestion ? { replyToAsyncQuestion: body.replyToAsyncQuestion } : {}),
         ...(body.replyToUserInput ? { replyToUserInput: body.replyToUserInput } : {}),
         ...(body.dismissUserInput ? { dismissUserInput: body.dismissUserInput } : {}),
+        ...(body.userInputSubmission ? { userInputSubmission: body.userInputSubmission } : {}),
         createdAt: (lastMessageTime.current = Math.max(Date.now(), lastMessageTime.current + 1)),
         attempts: 0,
         lastError: null,
@@ -803,9 +882,20 @@ export function ConnectionProvider({
         failure: undefined as unknown,
       };
       reliableMessages.current.set(message.id, record);
+      if (message.userInputSubmission)
+        setPendingUserInputSubmissions(
+          [...reliableMessages.current.values()]
+            .map((record) => record.message)
+            .filter((message) => message.userInputSubmission),
+        );
       const persisted = await record.staged;
       if (!persisted) {
         if (!previous) reliableMessages.current.delete(message.id);
+        setPendingUserInputSubmissions(
+          [...reliableMessages.current.values()]
+            .map((record) => record.message)
+            .filter((message) => message.userInputSubmission),
+        );
         throw new Error("Не удалось сохранить сообщение на устройстве. Повторите отправку.");
       }
       commit();
@@ -834,17 +924,34 @@ export function ConnectionProvider({
     [drainReliableOutbox],
   );
 
-  const forgetReliableMessage = useCallback(async (threadId: string, messageId: string) => {
-    reliableMessages.current.delete(messageId);
-    await deleteOutboxMessage(messageId);
-    dispatch({ type: "optimistic.remove", threadId, messageId });
-  }, []);
+  const forgetReliableMessage = useCallback(
+    async (threadId: string, messageId: string) => {
+      const pending = reliableMessages.current.get(messageId)?.message.userInputSubmission;
+      if (pending) {
+        await outboxLocks.current.get(threadId);
+        await api.cancelUserInputSubmission(threadId, pending.draftKey);
+      }
+      reliableMessages.current.delete(messageId);
+      setPendingUserInputSubmissions(
+        [...reliableMessages.current.values()]
+          .map((record) => record.message)
+          .filter((message) => message.userInputSubmission),
+      );
+      await deleteOutboxMessage(messageId);
+      dispatch({ type: "optimistic.remove", threadId, messageId });
+    },
+    [api],
+  );
 
   const publishPendingVoiceRecordingThreads = useCallback(() => {
     const threadIds = new Set<string>();
     const errors: Record<string, string> = {};
     const dismissals: Record<string, NonNullable<QueueMessageRequest["dismissUserInput"]>> = {};
+    setPendingQuestionRecordings(
+      [...pendingVoiceRecordings.current.values()].filter((recording) => recording.userInput),
+    );
     for (const recording of pendingVoiceRecordings.current.values()) {
+      if (recording.userInput) continue;
       threadIds.add(recording.threadId);
       if (recording.lastError && errors[recording.threadId] === undefined) {
         errors[recording.threadId] = recording.lastError;
@@ -862,10 +969,21 @@ export function ConnectionProvider({
     (
       recording: Pick<
         PendingVoiceRecording,
-        "id" | "threadId" | "lastError" | "dismissUserInput" | "mode"
+        | "id"
+        | "threadId"
+        | "lastError"
+        | "dismissUserInput"
+        | "mode"
+        | "userInput"
+        | "createdAt"
+        | "durationMs"
       >,
     ) => {
       pendingVoiceRecordings.current.set(recording.id, {
+        id: recording.id,
+        userInput: recording.userInput,
+        durationMs: recording.durationMs,
+        createdAt: recording.createdAt,
         threadId: recording.threadId,
         lastError: recording.lastError,
         dismissUserInput: recording.dismissUserInput,
@@ -885,80 +1003,138 @@ export function ConnectionProvider({
   );
 
   const uploadVoiceRecording = useCallback(
-    async (recording: PendingVoiceRecording): Promise<void> => {
-      let prepared = recording;
-      trackPendingVoiceRecording({ ...recording, lastError: null });
-      try {
-        if (!Object.prototype.hasOwnProperty.call(prepared, "serverDraftUpdatedAt")) {
-          const savedDraft = await api.updateThreadDraft(prepared.threadId, prepared.draft, {
-            retry: false,
-            expectedUpdatedAt: prepared.draftUpdatedAt,
-          });
-          prepared = { ...prepared, serverDraftUpdatedAt: savedDraft?.updatedAt ?? null };
-          if (!(await putPendingVoiceRecording(prepared))) {
-            throw new Error(
-              translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+    (recording: PendingVoiceRecording): Promise<void> => {
+      const existing = voiceUploadLocks.current.get(recording.id);
+      if (existing) return existing;
+      const operation = (async () => {
+        let prepared = recording;
+        trackPendingVoiceRecording({ ...recording, lastError: null });
+        try {
+          if (
+            !prepared.userInput &&
+            !Object.prototype.hasOwnProperty.call(prepared, "serverDraftUpdatedAt")
+          ) {
+            const savedDraft = await api.updateThreadDraft(prepared.threadId, prepared.draft, {
+              retry: false,
+              expectedUpdatedAt: prepared.draftUpdatedAt,
+            });
+            prepared = { ...prepared, serverDraftUpdatedAt: savedDraft?.updatedAt ?? null };
+            if (!(await putPendingVoiceRecording(prepared))) {
+              throw new Error(
+                translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+              );
+            }
+            await confirmLocalDraft(
+              settings,
+              prepared.threadId,
+              savedDraft,
+              prepared.localDraftUpdatedAt,
             );
           }
-          await confirmLocalDraft(
-            settings,
-            prepared.threadId,
-            savedDraft,
-            prepared.localDraftUpdatedAt,
-          );
+          const accepted = await api.createVoiceTranscription(prepared.threadId, prepared.audio, {
+            recordingDurationMs: prepared.durationMs,
+            mode: prepared.mode,
+            selectionStart: prepared.selectionStart,
+            selectionEnd: prepared.selectionEnd,
+            draftUpdatedAt: prepared.serverDraftUpdatedAt ?? null,
+            clientUploadId: prepared.id,
+            ...(prepared.userInput ? { userInput: prepared.userInput } : {}),
+            ...(prepared.mode !== "draft" && prepared.dismissUserInput
+              ? { dismissUserInput: prepared.dismissUserInput }
+              : {}),
+          });
+          if (accepted) dispatch({ type: "voice.accepted", job: accepted });
+          await deletePendingVoiceRecording(prepared.id);
+          recoveredVoiceRecordingIds.current.delete(prepared.id);
+          untrackPendingVoiceRecording(prepared.id);
+        } catch (error) {
+          const current = (await loadPendingVoiceRecording(prepared.id)) ?? prepared;
+          const failed = {
+            ...current,
+            attempts: current.attempts + 1,
+            lastError: error instanceof Error ? error.message : "Delivery failed",
+          };
+          await putPendingVoiceRecording(failed);
+          trackPendingVoiceRecording(failed);
+          throw error;
         }
-        const accepted = await api.createVoiceTranscription(prepared.threadId, prepared.audio, {
-          recordingDurationMs: prepared.durationMs,
-          mode: prepared.mode,
-          selectionStart: prepared.selectionStart,
-          selectionEnd: prepared.selectionEnd,
-          draftUpdatedAt: prepared.serverDraftUpdatedAt ?? null,
-          clientUploadId: prepared.id,
-          ...(prepared.mode !== "draft" && prepared.dismissUserInput
-            ? { dismissUserInput: prepared.dismissUserInput }
-            : {}),
-        });
-        if (accepted) dispatch({ type: "voice.accepted", job: accepted });
-        await deletePendingVoiceRecording(prepared.id);
-        recoveredVoiceRecordingIds.current.delete(prepared.id);
-        untrackPendingVoiceRecording(prepared.id);
-      } catch (error) {
-        const current = (await loadPendingVoiceRecording(prepared.id)) ?? prepared;
-        const failed = {
-          ...current,
-          attempts: current.attempts + 1,
-          lastError: error instanceof Error ? error.message : "Delivery failed",
-        };
-        await putPendingVoiceRecording(failed);
-        trackPendingVoiceRecording(failed);
-        throw error;
-      }
+      })().finally(() => {
+        if (voiceUploadLocks.current.get(recording.id) === operation)
+          voiceUploadLocks.current.delete(recording.id);
+      });
+      voiceUploadLocks.current.set(recording.id, operation);
+      return operation;
     },
     [api, settings, trackPendingVoiceRecording, untrackPendingVoiceRecording],
   );
 
+  questionUploadRef.current = uploadVoiceRecording;
+  const retryQuestionUpload = useCallback(
+    async (id: string) => {
+      const recording =
+        unsavedVoiceRecordings.current.get(id) ?? (await loadPendingVoiceRecording(id));
+      if (recording?.userInput) {
+        if (!(await putPendingVoiceRecording(recording)))
+          throw new Error(
+            translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+          );
+        unsavedVoiceRecordings.current.delete(id);
+        await uploadVoiceRecording(recording);
+      }
+    },
+    [uploadVoiceRecording],
+  );
+
   const queueVoiceRecording = useCallback(
     async (input: Omit<VoiceRecordingUpload, "localDraftUpdatedAt">): Promise<void> => {
-      const existing = await loadPendingVoiceRecording(input.id);
-      const localDraftUpdatedAt = existing?.localDraftUpdatedAt ?? Date.now();
-      const recording: PendingVoiceRecording =
-        existing ??
-        ({
+      if (!input.userInput) {
+        const existing = await loadPendingVoiceRecording(input.id);
+        const localDraftUpdatedAt = existing?.localDraftUpdatedAt ?? Date.now();
+        const recording: PendingVoiceRecording = existing ?? {
           ...input,
           connectionKey: connectionCacheKey(settings),
           localDraftUpdatedAt,
           createdAt: Date.now(),
           attempts: 0,
           lastError: null,
-        } satisfies PendingVoiceRecording);
-      if (!existing && !(await putPendingVoiceRecording(recording))) {
-        throw new Error(
-          translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
-        );
+        };
+        if (!existing && !(await putPendingVoiceRecording(recording)))
+          throw new Error(
+            translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+          );
+        trackPendingVoiceRecording(recording);
+        await saveLocalDraft(settings, recording.threadId, recording.draft, localDraftUpdatedAt);
+        await uploadVoiceRecording(recording);
+        return;
       }
+      const recording: PendingVoiceRecording = {
+        ...input,
+        connectionKey: connectionCacheKey(settings),
+        localDraftUpdatedAt: Date.now(),
+        createdAt: Date.now(),
+        attempts: 0,
+        lastError: null,
+      };
       trackPendingVoiceRecording(recording);
-      await saveLocalDraft(settings, recording.threadId, recording.draft, localDraftUpdatedAt);
-      await uploadVoiceRecording(recording);
+      unsavedVoiceRecordings.current.set(recording.id, recording);
+      const staged = putPendingVoiceRecording(recording);
+      voiceStaging.current.set(recording.id, staged);
+      try {
+        if (!(await staged))
+          throw new Error(
+            translate(languageRef.current, "Не удалось надежно сохранить запись на устройстве"),
+          );
+        unsavedVoiceRecordings.current.delete(recording.id);
+        await uploadVoiceRecording(recording);
+      } catch (error) {
+        trackPendingVoiceRecording({
+          ...recording,
+          lastError: error instanceof Error ? error.message : "Voice upload failed",
+        });
+        throw error;
+      } finally {
+        voiceStaging.current.delete(recording.id);
+      }
     },
     [settings, trackPendingVoiceRecording, uploadVoiceRecording],
   );
@@ -967,7 +1143,7 @@ export function ConnectionProvider({
     async (input: VoiceRecordingRecovery): Promise<void> => {
       const recordings = await listPendingVoiceRecordings(settings);
       const recording = recordings
-        .filter((candidate) => candidate.threadId === input.threadId)
+        .filter((candidate) => candidate.threadId === input.threadId && !candidate.userInput)
         .sort((left, right) => left.createdAt - right.createdAt)[0];
       if (!recording) return;
       try {
@@ -1060,7 +1236,16 @@ export function ConnectionProvider({
       }
       if (entry.version <= entry.savedVersion) return;
       const version = entry.version;
-      const draft = normalizeUserInputDraft(entry.draft);
+      const request = stateRef.current.snapshot?.attention.find(
+        (candidate) => candidate.id === attentionId,
+      );
+      const draft = normalizeUserInputDraft(
+        appendUserInputRecordings(
+          entry.draft,
+          request?.kind === "userInput" ? (request.draft?.recordings ?? []) : [],
+        ),
+      );
+      entry.draft = draft;
       entry.inFlight = true;
       entry.pending = false;
       dispatch({ type: "userInputDraft.saving", attentionId, version });
@@ -1097,6 +1282,9 @@ export function ConnectionProvider({
       timing: "immediate" | "debounced",
     ): void => {
       const draft = {
+        ...(input.appliedRecordingIds
+          ? { appliedRecordingIds: [...input.appliedRecordingIds] }
+          : {}),
         answers: cloneUserInputAnswers(input.answers),
         currentQuestionId: input.currentQuestionId,
       };
@@ -1106,6 +1294,9 @@ export function ConnectionProvider({
         entry = {
           draft: current
             ? {
+                ...(current.appliedRecordingIds
+                  ? { appliedRecordingIds: [...current.appliedRecordingIds] }
+                  : {}),
                 answers: cloneUserInputAnswers(current.answers),
                 currentQuestionId: current.currentQuestionId,
               }
@@ -1195,6 +1386,10 @@ export function ConnectionProvider({
         for (const recording of recordings) {
           recoveredVoiceRecordingIds.current.add(recording.id);
           pendingVoiceRecordings.current.set(recording.id, {
+            id: recording.id,
+            userInput: recording.userInput,
+            durationMs: recording.durationMs,
+            createdAt: recording.createdAt,
             threadId: recording.threadId,
             lastError: recording.lastError,
             dismissUserInput: recording.dismissUserInput,
@@ -1404,6 +1599,9 @@ export function ConnectionProvider({
       retryReliableMessage,
       forgetReliableMessage,
       queueVoiceRecording,
+      pendingQuestionRecordings,
+      pendingUserInputSubmissions,
+      retryQuestionUpload,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,
       pendingVoiceInputDismissals,
@@ -1428,6 +1626,9 @@ export function ConnectionProvider({
       retryReliableMessage,
       forgetReliableMessage,
       queueVoiceRecording,
+      pendingQuestionRecordings,
+      pendingUserInputSubmissions,
+      retryQuestionUpload,
       pendingVoiceRecordingThreadIds,
       pendingVoiceRecordingErrors,
       pendingVoiceInputDismissals,
@@ -1529,6 +1730,7 @@ function serverEventThreadId(event: ServerEvent): string | null {
 
 function normalizeUserInputDraft(input: UpdateUserInputDraftRequest): UpdateUserInputDraftRequest {
   return {
+    ...(input.appliedRecordingIds ? { appliedRecordingIds: [...input.appliedRecordingIds] } : {}),
     answers: Object.fromEntries(
       Object.entries(input.answers)
         .filter(([, answers]) => Boolean(answers[0]?.trim()))
@@ -1546,7 +1748,11 @@ function sameUserInputDraft(
   left: UpdateUserInputDraftRequest,
   right: UpdateUserInputDraftRequest,
 ): boolean {
-  if (left.currentQuestionId !== right.currentQuestionId) return false;
+  if (
+    left.currentQuestionId !== right.currentQuestionId ||
+    JSON.stringify(left.appliedRecordingIds) !== JSON.stringify(right.appliedRecordingIds)
+  )
+    return false;
   const leftEntries = Object.entries(left.answers);
   const rightEntries = Object.entries(right.answers);
   return (

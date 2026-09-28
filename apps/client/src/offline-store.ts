@@ -12,6 +12,8 @@ import type {
   ThreadSummary,
   UpdateThreadDraftRequest,
   VoiceTranscriptionMode,
+  UserInputVoiceTarget,
+  UpdateUserInputDraftRequest,
 } from "@codexnest/protocol";
 
 import type { ConnectionSettings } from "./storage";
@@ -93,6 +95,11 @@ export type OutboxMessage = PastedText & {
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
   dismissUserInput?: AsyncQuestionReference;
+  userInputSubmission?: {
+    draftKey: string;
+    draft: UpdateUserInputDraftRequest;
+    recordingIds: string[];
+  };
 };
 
 export type MessageDraftSource = { draft: UpdateThreadDraftRequest; projectId?: string };
@@ -104,6 +111,7 @@ export type PendingVoiceRecording = {
   audio: Blob;
   durationMs: number;
   mode: VoiceTranscriptionMode;
+  userInput?: UserInputVoiceTarget;
   dismissUserInput?: AsyncQuestionReference;
   selectionStart: number;
   selectionEnd: number;
@@ -337,6 +345,7 @@ export function outboxMessageIntent(value: OutboxMessage): string {
     value.dismissUserInput,
     pastedText(value),
     value.planImplementationMode,
+    value.userInputSubmission,
   ]);
 }
 

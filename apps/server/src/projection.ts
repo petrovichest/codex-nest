@@ -1,4 +1,4 @@
-import { pastedText } from "@codexnest/protocol";
+import { appendUserInputRecordings, pastedText } from "@codexnest/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
@@ -203,6 +203,9 @@ export class AppProjection extends EventEmitter {
           this.attention.expire(request.id);
           return;
         }
+        void this.clearReplacedUserInputDrafts(request).catch((error: unknown) => {
+          this.emit("warning", error, "Could not retire replaced question drafts");
+        });
       }
       if (cached && request.turnId) {
         cached.currentTurnId = request.turnId;
@@ -1147,6 +1150,51 @@ export class AppProjection extends EventEmitter {
   publishVoiceTranscription(job: VoiceTranscriptionState): void {
     if (!this.isThreadVisible(job.threadId)) return;
     this.publish({ type: "voiceTranscription.upserted", job: publicVoiceTranscription(job) });
+    if (job.userInput) this.publishUserInputDraft(job.threadId, job.userInput.draftKey);
+  }
+
+  userInputVoiceRequest(
+    threadId: string,
+    draftKey: string,
+  ): Extract<AttentionRequest, { kind: "userInput" }> | undefined {
+    return this.attention
+      .list()
+      .find(
+        (request): request is Extract<AttentionRequest, { kind: "userInput" }> =>
+          request.kind === "userInput" &&
+          request.threadId === threadId &&
+          userInputDraftIdentity(request)?.key === draftKey,
+      );
+  }
+
+  publishUserInputDraft(threadId: string, draftKey: string): void {
+    const request = this.userInputVoiceRequest(threadId, draftKey);
+    if (request && this.isThreadVisible(threadId)) {
+      this.publish({ type: "attention.upserted", attention: this.enrichAttention(request) });
+    }
+  }
+
+  async ensureUserInputVoiceDraft(
+    request: Extract<AttentionRequest, { kind: "userInput" }>,
+  ): Promise<void> {
+    const identity = userInputDraftIdentity(request);
+    if (!identity) throw new Error("User input request has no stable identity");
+    await this.store.update((state) => {
+      const meta = (state.threadMeta[identity.threadId] ??= {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+      });
+      meta.userInputDrafts ??= {};
+      meta.userInputDrafts[identity.key] ??= {
+        turnId: identity.turnId,
+        itemId: identity.itemId,
+        fingerprint: identity.fingerprint,
+        answers: {},
+        currentQuestionId: request.questions[0]?.id ?? null,
+        revision: 1,
+        updatedAt: Date.now(),
+      };
+    });
   }
 
   removeVoiceTranscription(
@@ -1439,11 +1487,20 @@ export class AppProjection extends EventEmitter {
         lastReadUpdatedAt: 0,
       };
       const previous = meta.userInputDrafts?.[identity.key];
+      if (previous?.submission)
+        throw new ThreadDraftConflictError("Answers are already being submitted");
+      const merged = appendUserInputRecordings(
+        body,
+        Object.values(state.voiceTranscriptions ?? {}).filter(
+          (job) => job.threadId === identity.threadId && job.userInput?.draftKey === identity.key,
+        ),
+      );
       saved = {
-        answers: structuredClone(body.answers),
+        answers: structuredClone(merged.answers),
         currentQuestionId: body.currentQuestionId,
         revision: (previous?.revision ?? 0) + 1,
         updatedAt: Date.now(),
+        ...(merged.appliedRecordingIds ? { appliedRecordingIds: merged.appliedRecordingIds } : {}),
       };
       meta.userInputDrafts ??= {};
       meta.userInputDrafts[identity.key] = {
@@ -3310,9 +3367,49 @@ export class AppProjection extends EventEmitter {
             currentQuestionId: persisted.currentQuestionId,
             revision: persisted.revision,
             updatedAt: persisted.updatedAt,
+            ...(persisted.appliedRecordingIds
+              ? { appliedRecordingIds: [...persisted.appliedRecordingIds] }
+              : {}),
+            ...(persisted.submission
+              ? {
+                  submission: {
+                    ...persisted.submission,
+                    recordingIds: [...persisted.submission.recordingIds],
+                  },
+                }
+              : {}),
+            recordings: Object.values(state.voiceTranscriptions ?? {})
+              .filter(
+                (job) =>
+                  job.threadId === identity.threadId && job.userInput?.draftKey === identity.key,
+              )
+              .map(publicVoiceTranscription),
           }
         : null;
-    return { ...request, draft };
+    return { ...request, draft, ...(identity ? { draftKey: identity.key } : {}) };
+  }
+
+  private async clearReplacedUserInputDrafts(
+    request: Extract<AttentionRequest, { kind: "userInput" }>,
+  ): Promise<void> {
+    const identity = userInputDraftIdentity(request);
+    if (!identity) return;
+    const replaced = Object.entries(
+      this.store.view().threadMeta[identity.threadId]?.userInputDrafts ?? {},
+    ).filter(
+      ([key, draft]) =>
+        key !== identity.key &&
+        draft.turnId === identity.turnId &&
+        draft.itemId === identity.itemId,
+    );
+    if (!replaced.length) return;
+    await this.store.update((state) => {
+      const drafts = state.threadMeta[identity.threadId]?.userInputDrafts;
+      if (!drafts) return;
+      for (const [key] of replaced) delete drafts[key];
+      if (!Object.keys(drafts).length) delete state.threadMeta[identity.threadId]!.userInputDrafts;
+    });
+    this.emit("userInputVoiceChanged");
   }
 
   private async clearUserInputDraft(
@@ -3327,6 +3424,7 @@ export class AppProjection extends EventEmitter {
       delete drafts[identity.key];
       if (!Object.keys(drafts).length) delete state.threadMeta[identity.threadId]!.userInputDrafts;
     });
+    this.emit("userInputVoiceChanged");
   }
 
   private async clearCompletedUserInputs(
@@ -3358,6 +3456,7 @@ export class AppProjection extends EventEmitter {
       }
       if (!Object.keys(drafts).length) delete state.threadMeta[threadId]!.userInputDrafts;
     });
+    this.emit("userInputVoiceChanged");
   }
 
   private publishThread(
@@ -3449,7 +3548,7 @@ export class AppProjection extends EventEmitter {
   }
 }
 
-function userInputDraftIdentity(request: Extract<AttentionRequest, { kind: "userInput" }>): {
+export function userInputDraftIdentity(request: Extract<AttentionRequest, { kind: "userInput" }>): {
   threadId: string;
   turnId: string;
   itemId: string;
@@ -4596,6 +4695,9 @@ function publicVoiceTranscription(job: VoiceTranscriptionState): VoiceTranscript
     estimatedTotalSeconds: job.estimatedTotalSeconds,
     error: job.error,
     ...(job.dismissUserInput ? { dismissUserInput: job.dismissUserInput } : {}),
+    ...(job.userInput
+      ? { userInput: job.userInput, ...(job.transcript ? { transcript: job.transcript } : {}) }
+      : {}),
   };
 }
 

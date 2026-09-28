@@ -636,6 +636,90 @@ describe("ConnectionProvider", () => {
     },
   );
 
+  it("restores question recordings before submitting answers without touching the composer", async () => {
+    const { connectionCacheKey } = await import("./offline-store");
+    const settings = { baseUrl: "https://codexnest.example", token: "token" };
+    const draftKey = "a".repeat(64);
+    const recording: PendingVoiceRecording = {
+      id: "question-clip",
+      connectionKey: connectionCacheKey(settings),
+      threadId: "thread",
+      audio: new Blob(["audio"], { type: "audio/webm" }),
+      durationMs: 1000,
+      mode: "draft",
+      userInput: { draftKey, questionId: "first", order: 1 },
+      selectionStart: 0,
+      selectionEnd: 0,
+      draftUpdatedAt: null,
+      draft: { input: "", images: [], annotations: [], goalMode: false },
+      localDraftUpdatedAt: 1,
+      createdAt: 1,
+      attempts: 0,
+      lastError: null,
+    };
+    listPendingVoiceRecordings.mockResolvedValue([recording]);
+    deletePendingVoiceRecording.mockImplementation(async () => {
+      listPendingVoiceRecordings.mockResolvedValue([]);
+    });
+    const submission = {
+      draftKey,
+      draft: { answers: { first: ["Edited"] }, currentQuestionId: "first" },
+      recordingIds: [recording.id],
+    };
+    listOutboxMessages.mockResolvedValue([
+      {
+        id: "question-reply",
+        connectionKey: connectionCacheKey(settings),
+        threadId: "thread",
+        input: "",
+        images: [],
+        goal: false,
+        createdAt: 2,
+        attempts: 0,
+        lastError: null,
+        userInputSubmission: submission,
+      },
+    ]);
+    let finishUpload!: () => void;
+    const paths: string[] = [];
+    const fetchMock = vi.fn((url: URL) => {
+      paths.push(url.pathname);
+      if (url.pathname.endsWith("/voice-transcriptions")) {
+        expect(JSON.parse(url.searchParams.get("userInput")!)).toEqual(recording.userInput);
+        return new Promise<Response>((resolve) => {
+          finishUpload = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let context: ReturnType<typeof useConnection> | undefined;
+    function Probe() {
+      context = useConnection();
+      return null;
+    }
+    const view = render(
+      <ConnectionProvider settings={settings}>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(finishUpload).toBeTypeOf("function"));
+    expect(paths).toEqual(["/api/v1/threads/thread/voice-transcriptions"]);
+    expect(context!.pendingVoiceRecordingThreadIds).toEqual([]);
+    expect(context!.pendingQuestionRecordings).toHaveLength(1);
+    await act(async () => {
+      finishUpload();
+    });
+    await waitFor(() => expect(acknowledgeOutboxMessage).toHaveBeenCalled());
+    expect(paths).toEqual([
+      "/api/v1/threads/thread/voice-transcriptions",
+      `/api/v1/threads/thread/user-input/${draftKey}/submit`,
+    ]);
+    expect(context!.state.optimisticMessages.thread ?? []).toEqual([]);
+    view.unmount();
+  });
+
   it("keeps a recovered recording without endlessly retrying a stale draft conflict", async () => {
     listPendingVoiceRecordings.mockResolvedValue([
       {

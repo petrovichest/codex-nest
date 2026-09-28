@@ -1,4 +1,4 @@
-import type { PastedText } from "@codexnest/protocol";
+import { appendUserInputRecordings, type PastedText } from "@codexnest/protocol";
 import type {
   ActivityItem,
   AppSnapshot,
@@ -251,7 +251,12 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
       return { ...state, goals: { ...state.goals, [action.threadId]: action.goal } };
     case "voice.accepted": {
       if (!state.snapshot) return state;
-      if (state.voiceRemovals[action.job.threadId]?.jobId === action.job.id) return state;
+      if (
+        state.voiceRemovals[
+          action.job.userInput ? `question:${action.job.id}` : action.job.threadId
+        ]?.jobId === action.job.id
+      )
+        return state;
       const voiceTranscriptions = state.snapshot.voiceTranscriptions ?? [];
       const current = voiceTranscriptions.find((job) => job.id === action.job.id);
       return {
@@ -260,7 +265,9 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
           ...state.snapshot,
           voiceTranscriptions: upsert(voiceTranscriptions, current ?? action.job),
         },
-        voiceRemovals: withoutKey(state.voiceRemovals, action.job.threadId),
+        voiceRemovals: action.job.userInput
+          ? state.voiceRemovals
+          : withoutKey(state.voiceRemovals, action.job.threadId),
       };
     }
     case "optimistic.add":
@@ -320,6 +327,9 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
     case "userInputDraft.saved": {
       const current = state.userInputDrafts[action.attentionId];
       if (!current) return state;
+      const request = state.snapshot?.attention.find(
+        (candidate) => candidate.id === action.attentionId,
+      );
       return {
         ...state,
         userInputDrafts: {
@@ -327,7 +337,10 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
           [action.attentionId]: {
             ...(current.localVersion === action.version
               ? {
-                  answers: cloneAnswers(action.draft.answers),
+                  ...appendUserInputRecordings(
+                    action.draft,
+                    request?.kind === "userInput" ? (request.draft?.recordings ?? []) : [],
+                  ),
                   currentQuestionId: action.draft.currentQuestionId,
                 }
               : current),
@@ -374,7 +387,11 @@ function reconcileUserInputDrafts(
     const dirty = local && (local.saving || local.localVersion > local.savedVersion);
     if (dirty) {
       next[request.id] = request.draft
-        ? { ...local, serverRevision: Math.max(local.serverRevision, request.draft.revision) }
+        ? {
+            ...local,
+            ...appendUserInputRecordings(local, request.draft.recordings ?? []),
+            serverRevision: Math.max(local.serverRevision, request.draft.revision),
+          }
         : local;
       continue;
     }
@@ -391,6 +408,9 @@ function reconcileUserInputDrafts(
     }
     const version = local?.localVersion ?? 0;
     next[request.id] = {
+      ...(request.draft.appliedRecordingIds
+        ? { appliedRecordingIds: [...request.draft.appliedRecordingIds] }
+        : {}),
       answers: cloneAnswers(request.draft.answers),
       currentQuestionId: request.draft.currentQuestionId,
       serverRevision: request.draft.revision,
@@ -533,20 +553,29 @@ function applyVersionedEvent(
       return {
         ...state,
         snapshot,
-        voiceRemovals: withoutKey(state.voiceRemovals, event.job.threadId),
+        voiceRemovals: event.job.userInput
+          ? state.voiceRemovals
+          : withoutKey(state.voiceRemovals, event.job.threadId),
       };
-    case "voiceTranscription.removed":
+    case "voiceTranscription.removed": {
+      const wasQuestion = snapshot.voiceTranscriptions?.some(
+        (job) => job.id === event.jobId && job.userInput,
+      );
       snapshot.voiceTranscriptions = (snapshot.voiceTranscriptions ?? []).filter(
-        (job) => job.threadId !== event.threadId,
+        (job) => job.id !== event.jobId,
       );
       return {
         ...state,
         snapshot,
         voiceRemovals: {
           ...state.voiceRemovals,
-          [event.threadId]: { jobId: event.jobId, outcome: event.outcome },
+          [wasQuestion ? `question:${event.jobId}` : event.threadId]: {
+            jobId: event.jobId,
+            outcome: event.outcome,
+          },
         },
       };
+    }
     case "activity.upserted":
       return removeOptimisticMessage(
         applyActivity({ ...state, snapshot }, event.threadId, event.turnId, event.item),

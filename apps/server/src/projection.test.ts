@@ -4129,6 +4129,9 @@ describe("AppProjection", () => {
       respondError: vi.fn(),
     } as unknown as JsonlTransport);
     expect(mismatchProjection.snapshot().attention).toMatchObject([{ draft: null }]);
+    await vi.waitFor(() =>
+      expect(reloadedStore.snapshot().threadMeta.one?.userInputDrafts).toBeUndefined(),
+    );
 
     const response = { kind: "userInput" as const, answers: { choice: ["Final"] } };
     expect(replayAttention.resolve(replayed.id, response)).toBe(replayed);

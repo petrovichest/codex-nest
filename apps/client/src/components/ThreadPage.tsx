@@ -836,7 +836,9 @@ export function ThreadPage({
   }
   const goal = state.goals?.[threadId];
   const voiceJob =
-    state.snapshot?.voiceTranscriptions?.find((job) => job.threadId === threadId) ?? null;
+    state.snapshot?.voiceTranscriptions?.find(
+      (job) => job.threadId === threadId && !job.userInput,
+    ) ?? null;
   const voiceRemoval = state.voiceRemovals?.[threadId];
   const activeVoiceJob = voiceJob?.status === "failed" ? null : voiceJob;
   const localActiveVoiceJob =

@@ -83,6 +83,32 @@ describe("removeThreadState", () => {
     });
     await expect(removeThreadState(store, "thread", true)).resolves.toBe(false);
     expect(store.snapshot().threadMeta.thread?.draft?.input).toBe("Draft");
+    await store.update((state) => {
+      delete state.threadMeta.thread!.draft;
+      state.voiceTranscriptions = {
+        "question:clip": {
+          id: "clip",
+          threadId: "thread",
+          mode: "draft",
+          status: "queued",
+          userInput: { draftKey: "a".repeat(64), questionId: "question", order: 1 },
+          createdAt: 1,
+          startedAt: null,
+          audioDurationMs: 1000,
+          estimatedTotalSeconds: null,
+          error: null,
+          contentType: "audio/webm",
+          audioFile: "clip.webm",
+          audioBytes: 5,
+          selectionStart: 0,
+          selectionEnd: 0,
+        },
+      };
+    });
+    await expect(removeThreadState(store, "thread", true)).resolves.toBe(false);
+    expect(store.snapshot().voiceTranscriptions?.["question:clip"]).toBeDefined();
+    await expect(removeThreadState(store, "thread")).resolves.toBe(true);
+    expect(store.snapshot().voiceTranscriptions).toEqual({});
   });
 
   it("removes stale managed-team references along with a deleted session", async () => {

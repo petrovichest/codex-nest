@@ -21,6 +21,7 @@ import type {
   UiLanguage,
   VoiceTranscriptionMode,
   VoiceTranscriptionStatus,
+  UserInputVoiceTarget,
 } from "@codexnest/protocol";
 
 export type TimelineArtifact = Extract<
@@ -312,6 +313,7 @@ export interface VoiceTranscriptionState {
   threadId: string;
   mode: VoiceTranscriptionMode;
   dismissUserInput?: QueuedMessage["dismissUserInput"];
+  userInput?: UserInputVoiceTarget;
   status: VoiceTranscriptionStatus;
   createdAt: number;
   startedAt: number | null;
@@ -1296,12 +1298,25 @@ function isUserInputDrafts(value: unknown): value is Record<string, UserInputDra
         "currentQuestionId",
         "revision",
         "updatedAt",
+        "appliedRecordingIds",
+        "submission",
       ]) &&
       isBoundedString(draft.turnId, 500) &&
       isBoundedString(draft.itemId, 500) &&
       typeof draft.fingerprint === "string" &&
       /^[a-f\d]{64}$/iu.test(draft.fingerprint) &&
       isRecord(draft.answers) &&
+      (draft.appliedRecordingIds === undefined ||
+        (Array.isArray(draft.appliedRecordingIds) &&
+          draft.appliedRecordingIds.every((id) => typeof id === "string"))) &&
+      (draft.submission === undefined ||
+        draft.submission === null ||
+        (isRecord(draft.submission) &&
+          Array.isArray(draft.submission.recordingIds) &&
+          draft.submission.recordingIds.every((id) => typeof id === "string") &&
+          typeof draft.submission.clientMessageId === "string" &&
+          ["waiting", "sending", "failed"].includes(String(draft.submission.status)) &&
+          (draft.submission.error === undefined || typeof draft.submission.error === "string"))) &&
       Object.values(draft.answers).every(
         (answers) =>
           Array.isArray(answers) &&
@@ -2098,16 +2113,28 @@ function isUserInputReference(value: unknown): boolean {
   );
 }
 
-function isVoiceTranscription(value: unknown, threadId: string): value is VoiceTranscriptionState {
+function isVoiceTranscription(value: unknown, key: string): value is VoiceTranscriptionState {
   if (
     !isRecord(value) ||
     typeof value.id !== "string" ||
     !value.id ||
-    value.threadId !== threadId ||
+    typeof value.threadId !== "string" ||
+    (value.userInput === undefined
+      ? value.threadId !== key
+      : !isRecord(value.userInput) ||
+        key !== `question:${value.id}` ||
+        typeof value.userInput.draftKey !== "string" ||
+        !/^[a-f\d]{64}$/iu.test(value.userInput.draftKey) ||
+        typeof value.userInput.questionId !== "string" ||
+        !value.userInput.questionId ||
+        !Number.isSafeInteger(value.userInput.order) ||
+        Number(value.userInput.order) < 1 ||
+        value.mode !== "draft") ||
     !["draft", "send", "queue", "steer"].includes(String(value.mode)) ||
     (value.dismissUserInput !== undefined &&
       (value.mode === "draft" || !isUserInputReference(value.dismissUserInput))) ||
-    !["queued", "transcribing", "applying", "failed"].includes(String(value.status)) ||
+    !["queued", "transcribing", "applying", "failed", "completed"].includes(String(value.status)) ||
+    (value.status === "completed" && (!value.userInput || typeof value.transcript !== "string")) ||
     typeof value.createdAt !== "number" ||
     !Number.isFinite(value.createdAt) ||
     (value.startedAt !== null &&
@@ -2123,7 +2150,7 @@ function isVoiceTranscription(value: unknown, threadId: string): value is VoiceT
     !["audio/webm", "audio/mp4"].includes(String(value.contentType)) ||
     typeof value.audioBytes !== "number" ||
     !Number.isSafeInteger(value.audioBytes) ||
-    value.audioBytes <= 0 ||
+    value.audioBytes < (value.status === "completed" ? 0 : 1) ||
     typeof value.selectionStart !== "number" ||
     !Number.isSafeInteger(value.selectionStart) ||
     value.selectionStart < 0 ||

@@ -5,6 +5,7 @@ import type {
   AttentionResponse,
   UpdateUserInputDraftRequest,
   UserInputDraft,
+  UserInputVoiceTarget,
   CodexRateLimitsResponse,
   CodexManagementStatus,
   CreateDirectoryRequest,
@@ -163,6 +164,7 @@ export class ApiClient {
       draftUpdatedAt: number | null;
       clientUploadId: string;
       dismissUserInput?: QueuedMessage["dismissUserInput"];
+      userInput?: UserInputVoiceTarget;
     },
   ): Promise<VoiceTranscriptionJob | null> {
     const query = new URLSearchParams({
@@ -175,6 +177,7 @@ export class ApiClient {
     if (options.dismissUserInput) {
       query.set("dismissUserInput", JSON.stringify(options.dismissUserInput));
     }
+    if (options.userInput) query.set("userInput", JSON.stringify(options.userInput));
     return this.request(
       `/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions?${query}`,
       {
@@ -195,6 +198,31 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions`, {
       method: "DELETE",
     });
+  }
+
+  submitUserInputVoices(
+    threadId: string,
+    draftKey: string,
+    body: { draft: UpdateUserInputDraftRequest; recordingIds: string[]; clientMessageId: string },
+  ): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/user-input/${encodeURIComponent(draftKey)}/submit`,
+      { method: "POST", body },
+    );
+  }
+
+  cancelUserInputSubmission(threadId: string, draftKey: string): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/user-input/${encodeURIComponent(draftKey)}/submit`,
+      { method: "DELETE" },
+    );
+  }
+
+  retryUserInputRecording(threadId: string, jobId: string): Promise<void> {
+    return this.request(
+      `/api/v1/threads/${encodeURIComponent(threadId)}/voice-transcriptions/${encodeURIComponent(jobId)}/retry`,
+      { method: "POST" },
+    );
   }
 
   readCodexRateLimits(): Promise<CodexRateLimitsResponse> {

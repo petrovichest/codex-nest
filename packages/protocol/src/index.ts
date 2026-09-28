@@ -74,7 +74,14 @@ export type VoiceInputMode = "draft" | "send";
 
 export type VoiceTranscriptionMode = VoiceInputMode | "queue" | "steer";
 
-export type VoiceTranscriptionStatus = "queued" | "transcribing" | "applying" | "failed";
+export type VoiceTranscriptionStatus =
+  "queued" | "transcribing" | "applying" | "failed" | "completed";
+
+export type UserInputVoiceTarget = {
+  draftKey: string;
+  questionId: string;
+  order: number;
+};
 
 export type VoiceTranscriptionJob = {
   id: string;
@@ -87,6 +94,8 @@ export type VoiceTranscriptionJob = {
   estimatedTotalSeconds: number | null;
   error: string | null;
   dismissUserInput?: AsyncQuestionReference;
+  userInput?: UserInputVoiceTarget;
+  transcript?: string;
 };
 
 export type GitChangesSummary = {
@@ -788,6 +797,7 @@ export type AttentionRequest =
       autoResolutionMs: number | null;
       /** Present on server snapshots/events; optional for backward-compatible fixtures/clients. */
       draft?: UserInputDraft | null;
+      draftKey?: string;
     })
   | (AttentionBase & {
       kind: "elicitation";
@@ -827,9 +837,53 @@ export type UserInputDraft = {
   currentQuestionId: string | null;
   revision: number;
   updatedAt: number;
+  appliedRecordingIds?: string[];
+  recordings?: VoiceTranscriptionJob[];
+  submission?: UserInputSubmission | null;
 };
 
-export type UpdateUserInputDraftRequest = Pick<UserInputDraft, "answers" | "currentQuestionId">;
+export type UserInputSubmission = {
+  recordingIds: string[];
+  clientMessageId: string;
+  status: "waiting" | "sending" | "failed";
+  error?: string;
+};
+
+export type UpdateUserInputDraftRequest = Pick<
+  UserInputDraft,
+  "answers" | "currentQuestionId" | "appliedRecordingIds"
+>;
+
+/** Merge server-completed recordings into an editable draft without replaying text. */
+export function appendUserInputRecordings(
+  draft: UpdateUserInputDraftRequest,
+  recordings: readonly VoiceTranscriptionJob[],
+): UpdateUserInputDraftRequest {
+  const applied = new Set(draft.appliedRecordingIds ?? []);
+  const answers = { ...draft.answers };
+  for (const recording of [...recordings].sort(
+    (a, b) => (a.userInput?.order ?? 0) - (b.userInput?.order ?? 0),
+  )) {
+    if (
+      !recording.userInput ||
+      recording.status !== "completed" ||
+      !recording.transcript ||
+      applied.has(recording.id)
+    )
+      continue;
+    const id = recording.userInput.questionId;
+    const previous = answers[id]?.[0] ?? "";
+    answers[id] = [
+      previous + (previous && !/\s$/.test(previous) ? " " : "") + recording.transcript,
+    ];
+    applied.add(recording.id);
+  }
+  return {
+    ...draft,
+    answers,
+    ...(applied.size || draft.appliedRecordingIds ? { appliedRecordingIds: [...applied] } : {}),
+  };
+}
 
 export type ElicitationPrimitive =
   | {

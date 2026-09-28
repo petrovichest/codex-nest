@@ -79,6 +79,7 @@ import type {
   UpdateUiLanguageRequest,
   UpdateUserInputDraftRequest,
   UserInputQuestion,
+  UserInputVoiceTarget,
   VoiceTranscriptionMode,
   VoiceTranscriptionJob,
 } from "@codexnest/protocol";
@@ -2509,6 +2510,16 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       })
     : null;
   if (voiceTranscriptions) {
+    const wakeVoice = () => voiceTranscriptions?.wake();
+    const wakeVoiceForAttention = (_sequence: number, event: ServerEvent) => {
+      if (event.type === "attention.upserted") wakeVoice();
+    };
+    projection.on("event", wakeVoiceForAttention);
+    projection.on("userInputVoiceChanged", wakeVoice);
+    app.addHook("onClose", async () => {
+      projection.off("event", wakeVoiceForAttention);
+      projection.off("userInputVoiceChanged", wakeVoice);
+    });
     void voiceTranscriptions.start().catch((error: unknown) => {
       app.log.error({ err: safeError(error) }, "Failed to start voice transcription worker");
     });
@@ -2967,6 +2978,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       draftUpdatedAt?: string;
       clientUploadId?: string;
       dismissUserInput?: string;
+      userInput?: string;
     };
     Body: Buffer;
   }>(
@@ -2990,6 +3002,39 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       if (!["draft", "send", "queue", "steer"].includes(request.query.mode ?? "")) {
         return apiError(reply, 400, "validation_failed", "Voice input mode is invalid");
+      }
+      let userInput: UserInputVoiceTarget | undefined;
+      if (request.query.userInput !== undefined) {
+        try {
+          const target: unknown = JSON.parse(request.query.userInput);
+          if (
+            !isRecord(target) ||
+            typeof target.draftKey !== "string" ||
+            !/^[a-f\d]{64}$/iu.test(target.draftKey) ||
+            typeof target.questionId !== "string" ||
+            !target.questionId ||
+            !Number.isSafeInteger(target.order) ||
+            Number(target.order) < 1 ||
+            request.query.mode !== "draft" ||
+            request.query.dismissUserInput
+          ) {
+            throw new Error("Invalid voice target");
+          }
+          userInput = target as UserInputVoiceTarget;
+        } catch {
+          return apiError(reply, 400, "validation_failed", "Invalid question voice target");
+        }
+        const active = projection.userInputVoiceRequest(request.params.id, userInput.draftKey);
+        if (
+          !active ||
+          !active.questions.some(
+            (question) =>
+              question.id === userInput!.questionId && (question.isOther || !question.options),
+          )
+        ) {
+          return apiError(reply, 409, "conflict", "Question is no longer available");
+        }
+        await projection.ensureUserInputVoiceDraft(active);
       }
       let dismissUserInput: AsyncQuestionReference | undefined;
       if (request.query.dismissUserInput !== undefined) {
@@ -3027,14 +3072,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const currentDraft = store.view().threadMeta[request.params.id]?.draft;
       const currentDraftUpdatedAt = currentDraft?.updatedAt ?? null;
       if (
-        expectedDraftUpdatedAt === null
+        !userInput &&
+        (expectedDraftUpdatedAt === null
           ? request.query.draftUpdatedAt !== "none" || currentDraftUpdatedAt !== null
-          : currentDraftUpdatedAt !== expectedDraftUpdatedAt
+          : currentDraftUpdatedAt !== expectedDraftUpdatedAt)
       ) {
         return apiError(reply, 409, "draft_conflict", "The draft changed before voice upload");
       }
       const inputLength = currentDraft?.input.length ?? 0;
-      if (selectionStart > inputLength || selectionEnd > inputLength) {
+      if (!userInput && (selectionStart > inputLength || selectionEnd > inputLength)) {
         return apiError(reply, 400, "validation_failed", "Voice selection is outside the draft");
       }
       const audioDurationMs = parseAudioDurationHeader(
@@ -3052,6 +3098,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         threadId: request.params.id,
         mode: request.query.mode as VoiceTranscriptionMode,
         ...(dismissUserInput ? { dismissUserInput } : {}),
+        ...(userInput ? { userInput } : {}),
         audio: request.body,
         contentType: normalizedType,
         audioDurationMs,
@@ -3075,6 +3122,71 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       assertWritableThread(summary);
       await voiceTranscriptions?.cancelThread(request.params.id);
       return reply.code(204).send();
+    },
+  );
+
+  app.post<{
+    Params: { id: string; draftKey: string };
+    Body: { draft: UpdateUserInputDraftRequest; recordingIds: string[]; clientMessageId?: string };
+  }>("/api/v1/threads/:id/user-input/:draftKey/submit", async (request, reply) => {
+    const summary = projection.summary(request.params.id);
+    if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+    assertWritableThread(summary);
+    const body = requireRecord<{
+      draft: UpdateUserInputDraftRequest;
+      recordingIds: string[];
+      clientMessageId?: string;
+    }>(request.body);
+    const clientMessageId = optionalClientMessageId(body.clientMessageId);
+    if (clientMessageId) {
+      const receipt = store.view().messageReceipts?.[clientMessageId];
+      const queued = store
+        .view()
+        .messageQueues?.[request.params.id]?.some(
+          (message) => message.id === clientMessageId && message.replyToUserInput,
+        );
+      if (queued || (receipt?.threadId === request.params.id && receipt.status === "delivered"))
+        return reply.code(202).send({ accepted: true });
+    }
+    const active = projection.userInputVoiceRequest(request.params.id, request.params.draftKey);
+    if (!active) return apiError(reply, 409, "conflict", "Question is no longer available");
+    if (!voiceTranscriptions)
+      return apiError(reply, 503, "transcription_unavailable", "Transcription is not configured");
+    if (
+      !Array.isArray(body.recordingIds) ||
+      body.recordingIds.some((id) => typeof id !== "string" || !optionalVoiceUploadId(id))
+    ) {
+      return apiError(reply, 400, "validation_failed", "Invalid recording ids");
+    }
+    await voiceTranscriptions.submitUserInput(
+      request.params.id,
+      request.params.draftKey,
+      validateUserInputDraft(body.draft, active.questions),
+      body.recordingIds,
+    );
+    return reply.code(202).send({ accepted: true });
+  });
+  app.delete<{ Params: { id: string; draftKey: string } }>(
+    "/api/v1/threads/:id/user-input/:draftKey/submit",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      await voiceTranscriptions?.cancelUserInputSubmission(
+        request.params.id,
+        request.params.draftKey,
+      );
+      return reply.code(204).send();
+    },
+  );
+  app.post<{ Params: { id: string; jobId: string } }>(
+    "/api/v1/threads/:id/voice-transcriptions/:jobId/retry",
+    async (request, reply) => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      await voiceTranscriptions?.retryUserInputRecording(request.params.id, request.params.jobId);
+      return reply.code(202).send({ accepted: true });
     },
   );
 
@@ -4680,7 +4792,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 409, "conflict", error.message);
     if (error instanceof MessageQueuePausedError || error instanceof MessageQueueConflictError)
       return apiError(reply, 409, "conflict", error.message);
-    if (error instanceof VoiceTranscriptionDraftConflictError) {
+    if (
+      error instanceof VoiceTranscriptionDraftConflictError ||
+      error instanceof ThreadDraftConflictError
+    ) {
       return apiError(reply, 409, "draft_conflict", error.message);
     }
     if (
@@ -8358,7 +8473,9 @@ function validateUserInputDraft(
 ): UpdateUserInputDraftRequest {
   const body = requireRecord<UpdateUserInputDraftRequest>(value);
   if (
-    Object.keys(body).some((key) => !["answers", "currentQuestionId"].includes(key)) ||
+    Object.keys(body).some(
+      (key) => !["answers", "currentQuestionId", "appliedRecordingIds"].includes(key),
+    ) ||
     !isRecord(body.answers)
   ) {
     throw new ProjectValidationError("Invalid user-input draft");
@@ -8383,7 +8500,18 @@ function validateUserInputDraft(
   ) {
     throw new ProjectValidationError("Unknown current user-input question");
   }
-  return { answers: Object.fromEntries(entries), currentQuestionId: body.currentQuestionId };
+  if (
+    body.appliedRecordingIds !== undefined &&
+    (!Array.isArray(body.appliedRecordingIds) ||
+      body.appliedRecordingIds.some((id) => typeof id !== "string" || !optionalVoiceUploadId(id)))
+  ) {
+    throw new ProjectValidationError("Invalid applied recordings");
+  }
+  return {
+    answers: Object.fromEntries(entries),
+    currentQuestionId: body.currentQuestionId,
+    ...(body.appliedRecordingIds ? { appliedRecordingIds: body.appliedRecordingIds } : {}),
+  };
 }
 
 function isInlineImage(value: unknown): value is string {

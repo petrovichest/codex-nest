@@ -5514,7 +5514,7 @@ button.message-file:hover:not(:disabled) {
   font-size: var(--text-ui);
 }
 
-.user-input-freeform > input {
+.user-input-freeform > :is(input, textarea) {
   min-width: 0;
   flex: 1;
 }
@@ -6793,7 +6793,7 @@ button.message-file:hover:not(:disabled) {
     min-height: var(--control-touch-height);
   }
 
-  .user-input-freeform > input {
+  .user-input-freeform > :is(input, textarea) {
     font-size: var(--text-input);
   }
 

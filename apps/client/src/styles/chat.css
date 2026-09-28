@@ -562,11 +562,11 @@
   box-shadow: var(--field-shadow, var(--chat-shadow));
 }
 
-.thread-workspace .timeline .user-input-freeform:has(input:focus:enabled) {
+.thread-workspace .timeline .user-input-freeform:has(:is(input, textarea):focus:enabled) {
   box-shadow: var(--field-focus-shadow);
 }
 
-.thread-workspace .timeline .user-input-freeform input {
+.thread-workspace .timeline .user-input-freeform :is(input, textarea) {
   outline: none;
   background: transparent;
   box-shadow: none;
@@ -783,7 +783,7 @@
 }
 
 @media (forced-colors: active) {
-  .thread-workspace .timeline .user-input-freeform:has(input:focus:enabled),
+  .thread-workspace .timeline .user-input-freeform:has(:is(input, textarea):focus:enabled),
   .thread-workspace .timeline .annotation-editor:focus-within,
   .thread-workspace .queued-message-editing > .message-body:focus-within {
     outline: 2px solid Highlight;
@@ -1492,4 +1492,119 @@
 .thread-workspace .timeline :is(.attention-card, .async-question-card) textarea,
 .chat-dialog textarea {
   border-radius: var(--chat-radius-card);
+}
+
+.user-input-freeform textarea {
+  resize: vertical;
+  min-height: 78px;
+  padding: 12px;
+  border: 0;
+  line-height: 1.55;
+}
+.user-input-voice-queue {
+  min-width: 0;
+}
+.user-input-voice-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.user-input-voice-title h3 {
+  margin: 10px 0 16px;
+}
+.user-input-voice-title > span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+.user-input-voice-queue progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--line);
+  color: var(--muted-strong);
+  accent-color: var(--muted-strong);
+}
+.user-input-voice-queue progress::-webkit-progress-bar {
+  background: var(--line);
+}
+.user-input-voice-queue progress::-webkit-progress-value {
+  background: var(--muted-strong);
+}
+.user-input-voice-queue progress::-moz-progress-bar {
+  background: var(--muted-strong);
+}
+.user-input-voice-question {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.user-input-voice-question-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+.user-input-voice-question-label > span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.attention-card .user-input-voice-question-text {
+  margin: 9px 0 16px;
+  font-weight: 500;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.user-input-voice-recording {
+  margin-top: 14px;
+}
+.user-input-voice-recording-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: var(--text-small);
+}
+.user-input-voice-recording-title :is(svg, .spinner) {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+.user-input-voice-recording.completed svg {
+  color: var(--success);
+}
+.user-input-voice-recording.transcribing .user-input-voice-recording-title {
+  color: var(--text-strong);
+}
+.user-input-voice-recording time {
+  margin-left: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.attention-card .user-input-voice-transcript {
+  margin: 6px 0 0 22px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.attention-card .user-input-voice-recording > small {
+  display: block;
+  margin: 4px 0 0 22px;
+  color: var(--muted);
+}
+.attention-card .user-input-voice-note {
+  color: var(--muted);
+  font-size: var(--text-small);
+  margin-top: 18px;
+}
+.user-input-voice-queue.compact .user-input-voice-question {
+  padding: 0;
+  border: 0;
 }

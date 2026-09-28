@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { ActivityItem, AppSnapshot, ThreadDetail, ThreadSummary } from "@codexnest/protocol";
+import type {
+  VoiceTranscriptionJob,
+  ActivityItem,
+  AppSnapshot,
+  ThreadDetail,
+  ThreadSummary,
+} from "@codexnest/protocol";
 
 import { clientReducer, initialState, sortThreads } from "./state";
 import { forkOperationsFromSnapshot, type ForkOperationSummary } from "./forks";
@@ -38,6 +44,78 @@ const snapshot: AppSnapshot = {
 };
 
 describe("clientReducer", () => {
+  it("merges transcripts into dirty question answers once, including after a late save acknowledgement", () => {
+    const job: VoiceTranscriptionJob = {
+      id: "voice",
+      threadId: "one",
+      mode: "draft",
+      userInput: { draftKey: "a".repeat(64), questionId: "first", order: 1 },
+      status: "completed",
+      transcript: "голос",
+      createdAt: 1,
+      startedAt: 2,
+      audioDurationMs: 1000,
+      estimatedTotalSeconds: 1,
+      error: null,
+    };
+    const request = userInputAttention({
+      answers: { first: ["Старый"] },
+      currentQuestionId: "first",
+      revision: 1,
+      updatedAt: 1,
+    });
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, attention: [request] },
+    });
+    state = clientReducer(state, {
+      type: "userInputDraft.edit",
+      attentionId: request.id,
+      version: 1,
+      draft: {
+        answers: { first: ["Правка"], second: ["Другой ответ"] },
+        currentQuestionId: "second",
+      },
+    });
+    const updated = {
+      ...request,
+      draft: {
+        answers: { first: ["Старый голос"] },
+        currentQuestionId: "first",
+        revision: 2,
+        updatedAt: 2,
+        recordings: [job],
+        appliedRecordingIds: [job.id],
+      },
+    };
+    for (const sequence of [5, 6])
+      state = clientReducer(state, {
+        type: "event",
+        version: { instanceId: "legacy", sequence },
+        event: { type: "attention.upserted", attention: updated },
+      });
+    expect(state.userInputDrafts[request.id]?.answers).toEqual({
+      first: ["Правка голос"],
+      second: ["Другой ответ"],
+    });
+    state = clientReducer(state, {
+      type: "userInputDraft.saved",
+      attentionId: request.id,
+      version: 1,
+      draft: {
+        answers: { first: ["Правка"], second: ["Другой ответ"] },
+        currentQuestionId: "second",
+        revision: 1,
+        updatedAt: 1,
+      },
+    });
+    expect(state.userInputDrafts[request.id]?.answers).toEqual({
+      first: ["Правка голос"],
+      second: ["Другой ответ"],
+    });
+    expect(state.userInputDrafts[request.id]?.appliedRecordingIds).toEqual([job.id]);
+  });
+
   it("moves a reused plan ID after its clarification and starts a fresh streaming revision", () => {
     const plan: ActivityItem = {
       type: "plan",

@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { TranscriptionConfigResponse } from "@codexnest/protocol";
+import type {
+  AttentionRequest,
+  VoiceTranscriptionJob,
+  TranscriptionConfigResponse,
+} from "@codexnest/protocol";
 
 import { AttentionPanel } from "./AttentionPanel";
 
@@ -10,6 +14,119 @@ const connection = vi.hoisted(() => vi.fn());
 vi.mock("../connection", () => ({ useConnection: connection }));
 
 describe("AttentionPanel", () => {
+  it("records several questions in the background and locks only after submitting", async () => {
+    installMediaRecorder(async () => ({ getTracks: () => [] }) as unknown as MediaStream);
+    const request = {
+      ...freeformRequest(),
+      draftKey: "a".repeat(64),
+      questions: [
+        freeformRequest().questions[0]!,
+        {
+          ...freeformRequest().questions[0]!,
+          id: "second",
+          header: "Отправка",
+          question: "Когда отправлять?",
+        },
+      ],
+    };
+    const pending: Array<Record<string, unknown>> = [];
+    const sendReliable = vi.fn(() => new Promise(() => undefined));
+    const queueVoiceRecording = vi.fn((recording) => {
+      pending.push({ ...recording, createdAt: Date.now(), lastError: null });
+      return new Promise<void>(() => undefined);
+    });
+    connection.mockReturnValue({
+      api: { transcribe: vi.fn() },
+      queueVoiceRecording,
+      sendReliable,
+      pendingQuestionRecordings: pending,
+    });
+    render(
+      <AttentionPanel
+        requests={[request]}
+        transcriptionConfig={transcriptionConfig}
+        transcriptionProvider="local"
+      />,
+    );
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Написанный ответ" } });
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Остановить запись" })).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: "Далее" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Остановить запись" }));
+    await waitFor(() => expect(queueVoiceRecording).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Далее" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Начать запись" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Далее" }));
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Остановить запись" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Остановить запись" }));
+    await waitFor(() => expect(queueVoiceRecording).toHaveBeenCalledTimes(2));
+    expect(queueVoiceRecording.mock.calls.map(([recording]) => recording.userInput)).toEqual([
+      { draftKey: request.draftKey, questionId: "details", order: 1 },
+      { draftKey: request.draftKey, questionId: "second", order: 1 },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Назад" }));
+    expect(screen.getByRole("textbox")).toHaveValue("Написанный ответ");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Исправленный ответ" } });
+    fireEvent.click(screen.getByRole("button", { name: "Далее" }));
+    fireEvent.click(screen.getByRole("button", { name: "Отправить ответы" }));
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(sendReliable.mock.calls[0]).toEqual([
+      "thread",
+      expect.objectContaining({
+        userInputSubmission: {
+          draftKey: request.draftKey,
+          draft: expect.objectContaining({ answers: { details: ["Исправленный ответ"] } }),
+          recordingIds: pending.map((recording) => recording.id),
+        },
+      }),
+    ]);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByText("Что учесть?")).toBeInTheDocument();
+    expect(screen.getByText("Когда отправлять?")).toBeInTheDocument();
+    expect(screen.getAllByText("Запись 1")).toHaveLength(2);
+  });
+
+  it("shows each completed transcript under its recording and keeps questions visible", () => {
+    const job: VoiceTranscriptionJob = {
+      id: "clip",
+      threadId: "thread",
+      mode: "draft",
+      userInput: { draftKey: "a".repeat(64), questionId: "details", order: 1 },
+      status: "completed",
+      transcript: "Распознанный текст",
+      createdAt: 1,
+      startedAt: 2,
+      audioDurationMs: 1000,
+      estimatedTotalSeconds: 1,
+      error: null,
+    };
+    const request: Extract<AttentionRequest, { kind: "userInput" }> = {
+      ...freeformRequest(),
+      draftKey: job.userInput!.draftKey,
+      draft: {
+        answers: { details: ["Распознанный текст"] },
+        currentQuestionId: "details",
+        revision: 2,
+        updatedAt: 2,
+        appliedRecordingIds: [job.id],
+        recordings: [job],
+        submission: { recordingIds: [job.id], clientMessageId: "reply", status: "waiting" },
+      },
+    };
+    connection.mockReturnValue({ api: {} });
+    render(<AttentionPanel requests={[request]} />);
+    expect(screen.getByText("Что учесть?")).toBeInTheDocument();
+    expect(screen.getByText("Запись 1")).toBeInTheDocument();
+    expect(screen.getByText("Распознанный текст")).toBeInTheDocument();
+    expect(screen.queryByText("Ваш ответ")).not.toBeInTheDocument();
+    expect(screen.queryByText("Готово")).not.toBeInTheDocument();
+  });
+
   it.each([undefined, true, false])(
     "keeps countdowns only for blocking requests (%s)",
     (isBlocking) => {

@@ -22,6 +22,18 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  "Ответы подтверждены": "Answers confirmed",
+  "Распознавание ответов": "Answer transcription",
+  "Отправляем ответы": "Sending answers",
+  "Готовим ответы": "Preparing answers",
+  "{{done}} из {{total}} записей": "{{done}} of {{total}} recordings",
+  "Готовые записи": "Completed recordings",
+  "Добавляем текст": "Adding text",
+  "Загружаем запись": "Uploading recording",
+  "Запись {{number}}": "Recording {{number}}",
+  "Отправим ответы после распознавания всех записей.":
+    "Answers will be sent when all recordings are transcribed.",
+  "Вернуться к редактированию": "Return to editing",
   Шрифты: "Fonts",
   "Основной интерфейс": "Main interface",
   "Проекты · Настройки": "Projects \u00b7 Settings",

@@ -1,7 +1,10 @@
 import { Browser } from "@capacitor/browser";
 import { useEffect, useRef, useState } from "react";
 
+import { appendUserInputRecordings } from "@codexnest/protocol";
 import type {
+  UpdateUserInputDraftRequest,
+  UserInputVoiceTarget,
   AttentionRequest,
   AttentionResponse,
   ElicitationPrimitive,
@@ -13,6 +16,7 @@ import type {
 
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
+import { UserInputVoiceQueue, type QuestionVoiceRecording } from "./UserInputVoiceQueue";
 import { AlertIcon, MicrophoneIcon, XIcon } from "./Icons";
 import {
   estimatedTranscriptionSeconds,
@@ -143,9 +147,17 @@ function AttentionCard({
     >
       <div className="attention-heading">
         <AlertIcon />
-        {request.kind === "userInput" && request.isBlocking === false
-          ? t("Можно ответить, пока Codex работает")
-          : t("Требуется внимание")}
+        {request.kind === "userInput" &&
+        (request.draft?.submission ||
+          connection.pendingUserInputSubmissions?.some(
+            (message) =>
+              message.threadId === request.threadId &&
+              message.userInputSubmission?.draftKey === request.draftKey,
+          ))
+          ? t("Ответы подтверждены")
+          : request.kind === "userInput" && request.isBlocking === false
+            ? t("Можно ответить, пока Codex работает")
+            : t("Требуется внимание")}
       </div>
       {request.kind === "commandApproval" && (
         <>
@@ -360,7 +372,10 @@ function UserInputForm({
     null,
   );
   const [speechError, setSpeechError] = useState<string | null>(null);
-  const answerInputRef = useRef<HTMLInputElement>(null);
+  const answerInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const submissionPendingRef = useRef(false);
+  const recordingOrdersRef = useRef(new Map<string, number>());
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -380,6 +395,48 @@ function UserInputForm({
     selection: TextSelection;
     value: string;
   } | null>(null);
+  const serverRecordings = (
+    connection.state?.snapshot?.voiceTranscriptions ??
+    request.draft?.recordings ??
+    []
+  ).filter(
+    (recording) =>
+      recording.threadId === request.threadId && recording.userInput?.draftKey === request.draftKey,
+  );
+  const uploads = (connection.pendingQuestionRecordings ?? []).filter(
+    (recording) =>
+      recording.threadId === request.threadId && recording.userInput?.draftKey === request.draftKey,
+  );
+  const recordings: QuestionVoiceRecording[] = [
+    ...serverRecordings,
+    ...uploads
+      .filter((recording) => !serverRecordings.some((server) => server.id === recording.id))
+      .map((recording): QuestionVoiceRecording => ({
+        id: recording.id,
+        threadId: recording.threadId,
+        mode: "draft",
+        userInput: recording.userInput,
+        createdAt: recording.createdAt,
+        startedAt: null,
+        audioDurationMs: recording.durationMs,
+        estimatedTotalSeconds: null,
+        status: "uploading",
+        error: recording.lastError,
+      })),
+  ];
+  const localSubmission = (connection.pendingUserInputSubmissions ?? []).find(
+    (message) =>
+      message.threadId === request.threadId &&
+      message.userInputSubmission?.draftKey === request.draftKey,
+  );
+  const submission = request.draft?.submission;
+  const locked = busy || submitting || Boolean(submission || localSubmission);
+  const backgroundVoice = Boolean(
+    request.threadId && request.draftKey && connection.queueVoiceRecording,
+  );
+  const AnswerInput = questionInputTag(
+    request.questions.find((candidate) => candidate.id === viewDraft.currentQuestionId)?.isSecret,
+  );
   const requestedQuestionIndex = request.questions.findIndex(
     (candidate) => candidate.id === viewDraft.currentQuestionId,
   );
@@ -408,12 +465,13 @@ function UserInputForm({
         ? formatTranscriptionTimer(speechSeconds, speechEstimatedTotalSeconds)
         : null;
 
-  function updateDraft(
-    draft: { answers: Record<string, string[]>; currentQuestionId: string | null },
-    timing: "immediate" | "debounced",
-  ) {
-    setViewDraft(draft);
-    updateUserInputDraft?.(request.id, draft, timing);
+  function updateDraft(draft: UpdateUserInputDraftRequest, timing: "immediate" | "debounced") {
+    const merged = appendUserInputRecordings(
+      { ...draft, appliedRecordingIds: draft.appliedRecordingIds ?? viewDraft.appliedRecordingIds },
+      serverRecordings,
+    );
+    setViewDraft(merged);
+    updateUserInputDraft?.(request.id, merged, timing);
   }
 
   function updateAnswer(questionId: string, answer: string, timing: "immediate" | "debounced") {
@@ -428,14 +486,14 @@ function UserInputForm({
 
   function navigateTo(index: number) {
     const target = request.questions[index];
-    if (!target || busy || speechBusy) return;
+    if (!target || locked || speechBusy) return;
     setSpeechError(null);
     recordingTargetRef.current = null;
     updateDraft({ answers, currentQuestionId: target.id }, "immediate");
   }
 
   function clearAnswer() {
-    if (!question || busy || speechBusy) return;
+    if (!question || locked || speechBusy) return;
     const nextAnswers = { ...answers };
     delete nextAnswers[question.id];
     setSpeechError(null);
@@ -487,7 +545,7 @@ function UserInputForm({
   }
 
   async function startRecording() {
-    if (!question || speechState !== "idle" || busy || speechUnavailable) return;
+    if (!question || speechState !== "idle" || locked || speechUnavailable) return;
     const mimeType = recordingMimeType();
     if (!mimeType) {
       setSpeechError(t("Этот браузер не поддерживает запись WebM или MP4"));
@@ -506,6 +564,15 @@ function UserInputForm({
         return;
       }
       const recorder = new MediaRecorder(stream, { mimeType });
+      const previousOrder = Math.max(
+        recordingOrdersRef.current.get(question.id) ?? 0,
+        ...recordings
+          .filter((recording) => recording.userInput?.questionId === question.id)
+          .map((recording) => recording.userInput!.order),
+      );
+      const voiceTarget: UserInputVoiceTarget | undefined = backgroundVoice
+        ? { draftKey: request.draftKey!, questionId: question.id, order: previousOrder + 1 }
+        : undefined;
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
@@ -529,7 +596,7 @@ function UserInputForm({
           setSpeechError(t("Не удалось записать аудио"));
         }
       });
-      recorder.addEventListener("stop", () => void finishRecording(mimeType));
+      recorder.addEventListener("stop", () => void finishRecording(mimeType, voiceTarget));
       recorder.start(1_000);
       recordingStartedAtRef.current = Date.now();
       startSpeechTimer(recordingStartedAtRef.current);
@@ -573,7 +640,7 @@ function UserInputForm({
     stopMediaStream();
   }
 
-  async function finishRecording(mimeType: string) {
+  async function finishRecording(mimeType: string, voiceTarget?: UserInputVoiceTarget) {
     clearRecordingLimit();
     stopMediaStream();
     mediaRecorderRef.current = null;
@@ -603,6 +670,30 @@ function UserInputForm({
         setSpeechState("idle");
         setSpeechError(t("Запись слишком большая"));
       }
+      return;
+    }
+    if (voiceTarget && request.threadId) {
+      const id = crypto.randomUUID();
+      const durationMs =
+        recordingDurationMsRef.current || Math.max(1, Date.now() - recordingStartedAtRef.current);
+      recordingOrdersRef.current.set(voiceTarget.questionId, voiceTarget.order);
+      clearSpeechTimer();
+      if (aliveRef.current) setSpeechState("idle");
+      // The provider retains the immutable target and audio after this form unmounts.
+      void connection
+        .queueVoiceRecording({
+          id,
+          threadId: request.threadId,
+          audio: new Blob(chunks, { type: mimeType }),
+          durationMs,
+          mode: "draft",
+          userInput: voiceTarget,
+          selectionStart: 0,
+          selectionEnd: 0,
+          draftUpdatedAt: null,
+          draft: { input: "", images: [], goalMode: false, annotations: [] },
+        })
+        .catch(() => undefined);
       return;
     }
     const target = recordingTargetRef.current;
@@ -644,7 +735,7 @@ function UserInputForm({
   }, [transcriptionConfig?.timingEstimate]);
 
   useEffect(() => {
-    if (!providerDraft) return;
+    if (!providerDraft && !request.draft) return;
     setViewDraft(initialUserInputDraft(request, providerDraft));
   }, [providerDraft, request]);
 
@@ -653,25 +744,97 @@ function UserInputForm({
     return () => {
       flushUserInputDraft?.(request.id);
       aliveRef.current = false;
-      discardRecordingRef.current = true;
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state !== "inactive") discardRecordingRef.current = true;
       clearSpeechTimer();
       clearRecordingLimit();
-      const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== "inactive") recorder.stop();
       stopMediaStream();
     };
   }, [flushUserInputDraft, request.id]);
 
+  async function submitAnswers() {
+    if (submissionPendingRef.current || locked || speechBusy) return;
+    if (!backgroundVoice || !recordings.length) {
+      await respond({ kind: "userInput", answers: answeredUserInputValues(viewDraft.answers) });
+      return;
+    }
+    submissionPendingRef.current = true;
+    setSubmitting(true);
+    setSpeechError(null);
+    const draft = { ...viewDraft, answers: answeredUserInputValues(viewDraft.answers) };
+    try {
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(
+          JSON.stringify([request.threadId, request.turnId, request.itemId]),
+        ),
+      );
+      const clientMessageId = `user-input:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+      await connection.sendReliable(request.threadId!, {
+        input: "",
+        clientMessageId,
+        userInputSubmission: {
+          draftKey: request.draftKey!,
+          draft,
+          recordingIds: recordings.map((recording) => recording.id),
+        },
+      });
+    } catch (error) {
+      setSpeechError(error instanceof Error ? error.message : t("Не удалось отправить ответ"));
+    } finally {
+      setSubmitting(false);
+      submissionPendingRef.current = false;
+    }
+  }
+
+  async function editAnswers() {
+    if (!request.threadId || !request.draftKey) return;
+    setSpeechError(null);
+    try {
+      // The provider waits for an in-flight acceptance before canceling its durable intent.
+      if (localSubmission)
+        await connection.forgetReliableMessage(request.threadId, localSubmission.id);
+      else await api.cancelUserInputSubmission(request.threadId, request.draftKey);
+    } catch (error) {
+      setSpeechError(error instanceof Error ? error.message : t("Не удалось отправить ответ"));
+    }
+  }
+
+  async function retryRecording(recording: QuestionVoiceRecording) {
+    try {
+      if (recording.status === "uploading") await connection.retryQuestionUpload(recording.id);
+      else await api.retryUserInputRecording(recording.threadId, recording.id);
+      if (localSubmission && !localSubmission.accepted)
+        await connection.retryReliableMessage(recording.threadId, localSubmission.id);
+    } catch (error) {
+      setSpeechError(error instanceof Error ? error.message : t("Не удалось распознать запись"));
+    }
+  }
+
+  if (submitting || submission || localSubmission)
+    return (
+      <UserInputVoiceQueue
+        questions={request.questions}
+        recordings={recordings}
+        answers={viewDraft.answers}
+        sending={submission?.status === "sending"}
+        error={speechError ?? submission?.error ?? localSubmission?.lastError}
+        onRetry={(recording) => void retryRecording(recording)}
+        onEdit={() => void editAnswers()}
+      />
+    );
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (!question || busy || speechBusy) return;
+        if (!question || locked || speechBusy) return;
         if (!isLastQuestion) {
           navigateTo(questionIndex + 1);
           return;
         }
-        void respond({ kind: "userInput", answers: answeredUserInputValues(answers) });
+        void submitAnswers();
       }}
     >
       <h3>{t("Codex просит уточнение")}</h3>
@@ -701,7 +864,7 @@ function UserInputForm({
                       answered: answered ? t(", есть ответ") : t(", без ответа"),
                     })}
                     className={`${current ? "current" : ""}${answered ? " answered" : ""}`}
-                    disabled={busy || speechBusy}
+                    disabled={locked || speechBusy}
                     key={candidate.id}
                     type="button"
                     onClick={() => navigateTo(index)}
@@ -723,7 +886,7 @@ function UserInputForm({
                   value={option.label}
                   checked={answers[question.id]?.[0] === option.label}
                   onChange={() => updateAnswer(question.id, option.label, "immediate")}
-                  disabled={busy || speechBusy}
+                  disabled={locked || speechBusy}
                 />
                 <span>
                   {option.label}
@@ -740,14 +903,16 @@ function UserInputForm({
                   {t("Свой ответ")}
                 </label>
                 <div className="user-input-freeform">
-                  <input
-                    ref={answerInputRef}
+                  <AnswerInput
+                    ref={(node: HTMLInputElement | HTMLTextAreaElement | null) => {
+                      answerInputRef.current = node;
+                    }}
                     id={`${request.id}-${question.id}-answer`}
-                    type={question.isSecret ? "password" : "text"}
+                    {...(question.isSecret ? { type: "password" } : { rows: 3 })}
                     value={freeformAnswer}
                     onChange={(event) => updateAnswer(question.id, event.target.value, "debounced")}
                     onSelect={captureAnswerSelection}
-                    disabled={busy}
+                    disabled={locked}
                     readOnly={speechBusy}
                   />
                   {transcriptionConfig && (
@@ -801,6 +966,15 @@ function UserInputForm({
                     </div>
                   )}
                 </div>
+                {backgroundVoice && (
+                  <UserInputVoiceQueue
+                    compact
+                    questions={[question]}
+                    recordings={recordings}
+                    answers={answers}
+                    onRetry={(recording) => void retryRecording(recording)}
+                  />
+                )}
                 {speechError && (
                   <div className="user-input-speech-error" role="alert">
                     {speechError}
@@ -813,7 +987,7 @@ function UserInputForm({
             {currentAnswer && (
               <button
                 className="user-input-clear"
-                disabled={busy || speechBusy}
+                disabled={locked || speechBusy}
                 type="button"
                 onClick={clearAnswer}
               >
@@ -823,14 +997,14 @@ function UserInputForm({
             <span className="user-input-navigation">
               {questionIndex > 0 && (
                 <button
-                  disabled={busy || speechBusy}
+                  disabled={locked || speechBusy}
                   type="button"
                   onClick={() => navigateTo(questionIndex - 1)}
                 >
                   {t("Назад")}
                 </button>
               )}
-              <button className="primary" disabled={busy || speechBusy}>
+              <button className="primary" disabled={locked || speechBusy}>
                 {isLastQuestion ? t("Отправить ответы") : t("Далее")}
               </button>
             </span>
@@ -848,18 +1022,28 @@ function UserInputForm({
 
 function initialUserInputDraft(
   request: Extract<AttentionRequest, { kind: "userInput" }>,
-  draft: { answers: Record<string, string[]>; currentQuestionId: string | null } | null | undefined,
-): { answers: Record<string, string[]>; currentQuestionId: string | null } {
+  draft: UpdateUserInputDraftRequest | null | undefined,
+): UpdateUserInputDraftRequest {
   const source = draft ?? request.draft;
   const requestedId = source?.currentQuestionId;
-  return {
-    answers: Object.fromEntries(
-      Object.entries(source?.answers ?? {}).map(([id, values]) => [id, [...values]]),
-    ),
-    currentQuestionId: request.questions.some((question) => question.id === requestedId)
-      ? (requestedId ?? null)
-      : (request.questions[0]?.id ?? null),
-  };
+  return appendUserInputRecordings(
+    {
+      ...(source?.appliedRecordingIds
+        ? { appliedRecordingIds: [...source.appliedRecordingIds] }
+        : {}),
+      answers: Object.fromEntries(
+        Object.entries(source?.answers ?? {}).map(([id, values]) => [id, [...values]]),
+      ),
+      currentQuestionId: request.questions.some((question) => question.id === requestedId)
+        ? (requestedId ?? null)
+        : (request.questions[0]?.id ?? null),
+    },
+    request.draft?.recordings ?? [],
+  );
+}
+
+function questionInputTag(secret: boolean | undefined): "input" | "textarea" {
+  return secret ? "input" : "textarea";
 }
 
 function answeredUserInputValues(answers: Record<string, string[]>): Record<string, string[]> {

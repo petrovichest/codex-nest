@@ -1741,6 +1741,168 @@ describe("audio transcriptions", () => {
     await app.close();
   });
 
+  it("uploads question clips independently, preserves edits, and durably submits the whole set", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-question-voice-api-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.auth.tokenSha256 = hashToken("correct");
+    });
+    const bridge = new SettingsBridge();
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    await projection.setDraft("thread", {
+      input: "Composer stays",
+      images: [],
+      annotations: [],
+      goalMode: false,
+    });
+    const finish: Array<(text: string) => void> = [];
+    const transcription = {
+      configuration: vi.fn(() => ({
+        providers: ["local" as const],
+        provider: "local" as const,
+        localUrl: "http://127.0.0.1:8178/inference",
+        openAiApiKeyConfigured: false,
+        openAiModel: "gpt-4o-transcribe",
+        language: "ru",
+        refineLocal: false,
+        refinementModel: "gpt-5.6-luna",
+        maxRecordingSeconds: 300,
+        maxUploadBytes: 24 * 1024 * 1024,
+        timingEstimate: {
+          sampleCount: 0,
+          estimatedFixedProcessingMs: null,
+          estimatedProcessingMsPerAudioSecond: null,
+        },
+      })),
+      updateConfiguration: vi.fn(),
+      transcribe: vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            finish.push(resolve);
+          }),
+      ),
+    };
+    const app = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(directory, "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      { bridge: bridge as unknown as CodexBridge, store, projection, attention, transcription },
+    );
+    try {
+      const pending = attention.receive(dismissibleQuestion("questions"), {
+        respond: vi.fn(),
+        respondError: vi.fn(),
+      } as unknown as JsonlTransport);
+      const request = projection
+        .snapshot()
+        .attention.find((candidate) => candidate.id === pending.id);
+      if (request?.kind !== "userInput") throw new Error("Expected question");
+      const draftKey = request.draftKey!;
+      const headers = { authorization: "Bearer correct" };
+      const upload = (id: string, order: number, key = draftKey) =>
+        app.inject({
+          method: "POST",
+          url:
+            "/api/v1/threads/thread/voice-transcriptions?" +
+            new URLSearchParams({
+              mode: "draft",
+              selectionStart: "0",
+              selectionEnd: "0",
+              draftUpdatedAt: "none",
+              clientUploadId: id,
+              userInput: JSON.stringify({ draftKey: key, questionId: "choice", order }),
+            }),
+          headers: {
+            ...headers,
+            "content-type": "audio/webm",
+            "x-codexnest-audio-duration-ms": "1000",
+          },
+          payload: Buffer.from("audio"),
+        });
+      expect((await upload("wrong", 1, "b".repeat(64))).statusCode).toBe(409);
+      expect((await upload("clip-one", 1)).statusCode).toBe(202);
+      expect((await upload("clip-two", 2)).statusCode).toBe(202);
+      await vi.waitFor(() => expect(finish).toHaveLength(1));
+      finish[0]!("spoken");
+      await vi.waitFor(() => expect(finish).toHaveLength(2));
+      const updated = await app.inject({
+        method: "PUT",
+        url: `/api/v1/attention/${pending.id}/draft`,
+        headers,
+        payload: {
+          answers: { choice: ["Edited"] },
+          currentQuestionId: "choice",
+          appliedRecordingIds: [],
+        },
+      });
+      expect(updated.statusCode).toBe(200);
+      expect(updated.json()).toMatchObject({
+        answers: { choice: ["Edited spoken"] },
+        appliedRecordingIds: ["clip-one"],
+      });
+      const submitted = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/thread/user-input/${draftKey}/submit`,
+        headers,
+        payload: {
+          draft: {
+            answers: { choice: ["Corrected"] },
+            currentQuestionId: "choice",
+            appliedRecordingIds: ["clip-one"],
+          },
+          recordingIds: ["clip-one", "clip-two"],
+        },
+      });
+      expect(submitted.statusCode).toBe(202);
+      expect(store.view().threadMeta.thread!.userInputDrafts![draftKey]!.submission?.status).toBe(
+        "waiting",
+      );
+      const clientMessageId =
+        store.view().threadMeta.thread!.userInputDrafts![draftKey]!.submission!.clientMessageId;
+      const lateEdit = await app.inject({
+        method: "PUT",
+        url: `/api/v1/attention/${pending.id}/draft`,
+        headers,
+        payload: { answers: { choice: ["Late edit"] }, currentQuestionId: "choice" },
+      });
+      expect(lateEdit.statusCode).toBe(409);
+      finish[1]!("more");
+      await vi.waitFor(() =>
+        expect(
+          Object.values(store.view().messageQueues ?? {})
+            .flat()
+            .some(
+              (message) => message.replyToUserInput?.answers.choice?.[0] === "Corrected more",
+            ) ||
+            Object.values(store.view().messageReceipts ?? {}).some(
+              (receipt) => receipt.threadId === "thread",
+            ),
+        ).toBe(true),
+      );
+      expect(store.view().threadMeta.thread!.draft!.input).toBe("Composer stays");
+      attention.expire(pending.id);
+      const replay = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/thread/user-input/${draftKey}/submit`,
+        headers,
+        payload: {
+          clientMessageId,
+          draft: { answers: { choice: ["Must not resend"] }, currentQuestionId: "choice" },
+          recordingIds: ["clip-one", "clip-two"],
+        },
+      });
+      expect(replay.statusCode).toBe(202);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("durably accepts a thread voice job and locks its composer until completion", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-voice-api-test-"));
     directories.push(directory);
