@@ -113,6 +113,264 @@ afterEach(async () =>
   ),
 );
 
+describe("automatic session finishing", () => {
+  const now = Date.UTC(2026, 8, 29);
+  const threeDays = 72 * 60 * 60 * 1_000;
+
+  it("finishes only old sessions beyond the newest fifteen, including pinned sessions and forks across projects", async () => {
+    const { store, bridge, projection, threads } = await autoFinishHarness(now);
+    await store.update((state) => {
+      state.threadMeta[threads[0]!.id]!.pinned = true;
+      state.threadMeta[threads[15]!.id]!.pinned = true;
+    });
+    projection.upsertThread({ ...threads[15]!, forkedFromId: threads[0]!.id });
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(1);
+
+    expect(threads.slice(0, 15).every((item) => projection.summary(item.id)?.unread)).toBe(true);
+    expect(projection.summary(threads[15]!.id)).toMatchObject({
+      state: "completed",
+      unread: false,
+      pinned: true,
+      archived: false,
+      updatedAt: threads[15]!.updatedAt * 1_000,
+      relation: { kind: "session", forkedFromId: threads[0]!.id },
+    });
+    expect(projection.threadCount).toBe(16);
+    expect(events).toEqual([
+      { type: "thread.upserted", thread: projection.summary(threads[15]!.id) },
+    ]);
+    expect(bridge.request).not.toHaveBeenCalled();
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(0);
+
+    const restoredStore = new StateStore(store.path);
+    await restoredStore.load();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      restoredStore,
+      new AttentionManager(),
+    );
+    expect(restored.summary(threads[15]!.id)).toMatchObject({ unread: false, pinned: true });
+    expect(restored.summary(threads[8]!.id)?.unread).toBe(true);
+
+    projection.upsertThread({ ...threads[15]!, updatedAt: now / 1_000 });
+    expect(projection.summary(threads[15]!.id)).toMatchObject({ unread: true, pinned: true });
+    await store.flushed();
+  });
+
+  it.each([9, 15, 20])(
+    "keeps %i old or recent sessions when either condition is unmet",
+    async (count) => {
+      const updatedAt = now - (count === 20 ? 60_000 : threeDays + 60_000);
+      const { projection, bridge } = await autoFinishHarness(now, Array(count).fill(updatedAt));
+
+      await expect(projection.finishInactiveSessions(now)).resolves.toBe(0);
+      expect(projection.snapshot().threads.every((item) => item.unread)).toBe(true);
+      expect(bridge.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses a strict 72-hour boundary and stable ordering for equal activity times", async () => {
+    const { projection, threads } = await autoFinishHarness(now, Array(17).fill(now - threeDays));
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(0);
+    await expect(projection.finishInactiveSessions(now + 1)).resolves.toBe(2);
+    expect(threads.slice(0, 15).every((item) => projection.summary(item.id)?.unread)).toBe(true);
+    expect(threads.slice(15).every((item) => !projection.summary(item.id)?.unread)).toBe(true);
+  });
+
+  it("ignores viewing but respects new messages and agent activity", async () => {
+    const { projection, bridge, threads } = await autoFinishHarness(
+      now,
+      Array.from({ length: 18 }, (_, index) => now - threeDays - (index + 1) * 1_000),
+    );
+    await projection.markViewed(threads[15]!.id, threads[15]!.updatedAt * 1_000);
+    projection.publishQueue(threads[16]!.id, []);
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: threads[17]!.id,
+        turnId: "turn",
+        item: { type: "agentMessage", id: "answer", text: "Fresh answer", phase: null },
+        completedAtMs: now,
+      },
+    } satisfies ServerNotification);
+    await vi.waitFor(() => expect(projection.summary(threads[17]!.id)?.updatedAt).toBe(now));
+
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(3);
+    expect(projection.summary(threads[15]!.id)).toMatchObject({ unread: false, unseen: false });
+    expect(projection.summary(threads[16]!.id)?.unread).toBe(true);
+    expect(projection.summary(threads[17]!.id)?.unread).toBe(true);
+    expect(bridge.request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "read",
+    "archived",
+    "running",
+    "active status",
+    "queued",
+    "plan",
+    "failed",
+    "interrupted",
+    "idle",
+    "subagent",
+    "managed child",
+    "hidden",
+    "dismissed",
+    "ephemeral",
+  ])("leaves %s sessions alone", async (kind) => {
+    const { projection, store, threads } = await autoFinishHarness(now);
+    const candidate = threads[15]!;
+    await store.update((state) => {
+      const meta = state.threadMeta[candidate.id]!;
+      if (kind === "read") meta.lastReadUpdatedAt = candidate.updatedAt * 1_000;
+      if (kind === "plan") meta.awaitingPlanResponse = true;
+      if (kind === "failed" || kind === "interrupted") meta.lastOutcome = kind;
+      if (kind === "idle") delete meta.lastOutcome;
+      if (kind === "managed child")
+        meta.managedParent = { parentThreadId: "parent", taskId: "task" };
+      if (kind === "dismissed") state.dismissedProjectPaths = ["/dismissed"];
+      if (kind === "queued")
+        state.messageQueues = {
+          [candidate.id]: [
+            { id: "queued", threadId: candidate.id, text: "Next", createdAt: 1, status: "queued" },
+          ],
+        };
+    });
+    projection.upsertThread(
+      {
+        ...candidate,
+        ...(kind === "subagent" ? { parentThreadId: "parent" } : {}),
+        ...(kind === "hidden" ? { threadSource: "codexnest-fork-temp:operation" } : {}),
+        ...(kind === "dismissed" ? { cwd: "/dismissed" } : {}),
+        ...(kind === "ephemeral" ? { ephemeral: true } : {}),
+        ...(kind === "active status"
+          ? { status: { type: "active", activeFlags: [] } as const }
+          : {}),
+      },
+      kind === "archived",
+    );
+    if (kind === "running") await projection.setCurrentTurn(candidate.id, "live");
+    const before = store.view().threadMeta[candidate.id]!.lastReadUpdatedAt;
+
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(0);
+    expect(store.view().threadMeta[candidate.id]!.lastReadUpdatedAt).toBe(before);
+    expect(projection.threadCount).toBe(16);
+  });
+
+  it("does not let archived, read or child sessions consume the fifteen protected places", async () => {
+    const { projection, store, threads } = await autoFinishHarness(
+      now,
+      Array(18).fill(now - threeDays - 1_000),
+    );
+    await projection.markRead(threads[0]!.id, threads[0]!.updatedAt * 1_000);
+    await projection.setArchived(threads[1]!.id, true);
+    projection.upsertThread({ ...threads[2]!, parentThreadId: "parent" });
+    await store.flushed();
+    await expect(projection.finishInactiveSessions(now)).resolves.toBe(0);
+    expect(projection.summary(threads[17]!.id)?.unread).toBe(true);
+  });
+
+  it("rechecks activity and the count after queued writes", async () => {
+    const { projection, store, threads } = await autoFinishHarness(now);
+    const newest = threads[0]!;
+    const oldest = threads[15]!;
+    let release!: () => void;
+    const pending = store.update(async (state) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      state.threadMeta[newest.id]!.lastReadUpdatedAt = newest.updatedAt * 1_000;
+    });
+    await Promise.resolve();
+    const finishing = projection.finishInactiveSessions(now);
+    projection.upsertThread({ ...oldest, updatedAt: now / 1_000 });
+    release();
+    await pending;
+    await expect(finishing).resolves.toBe(0);
+    expect(projection.summary(oldest.id)?.unread).toBe(true);
+    expect(projection.summary(threads[14]!.id)?.unread).toBe(true);
+
+    await store.flushed();
+  });
+
+  it("checks after sync and every minute without clients or RPC, then pauses until reconnect sync", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { projection, store, bridge, threads, setConnection } = await autoFinishHarness(
+      now,
+      Array.from({ length: 16 }, (_, index) => now - threeDays + (16 - index) * 1_000),
+    );
+    try {
+      const finish = vi.spyOn(projection, "finishInactiveSessions");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(finish).not.toHaveBeenCalled();
+      vi.setSystemTime(now);
+      await projection.sync();
+      bridge.request.mockClear();
+      await vi.advanceTimersByTimeAsync(0);
+      await finish.mock.results.at(-1)!.value;
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(projection.summary(threads[15]!.id)?.unread).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await finish.mock.results.at(-1)!.value;
+      expect(finish).toHaveBeenCalledTimes(2);
+      expect(projection.summary(threads[15]!.id)?.unread).toBe(false);
+      expect(bridge.request).not.toHaveBeenCalled();
+
+      setConnection("unavailable");
+      await vi.advanceTimersByTimeAsync(120_000);
+      setConnection("ready");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(finish).toHaveBeenCalledTimes(2);
+      await projection.sync();
+      await vi.advanceTimersByTimeAsync(0);
+      await finish.mock.results.at(-1)!.value;
+      expect(finish).toHaveBeenCalledTimes(3);
+    } finally {
+      setConnection("unavailable");
+      await store.flushed();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries failed checks and does not overlap slow checks", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { projection, store, setConnection } = await autoFinishHarness(now);
+    try {
+      const error = new Error("Temporary storage failure");
+      const onError = vi.fn();
+      projection.on("projectionError", onError);
+      const finish = vi.spyOn(projection, "finishInactiveSessions").mockRejectedValueOnce(error);
+      await projection.sync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onError).toHaveBeenCalledWith(error);
+      let release!: (value: number) => void;
+      finish.mockImplementationOnce(
+        () =>
+          new Promise<number>((resolve) => {
+            release = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(finish).toHaveBeenCalledTimes(2);
+      release(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await finish.mock.results.at(-1)!.value;
+      expect(finish).toHaveBeenCalledTimes(3);
+    } finally {
+      setConnection("unavailable");
+      await store.flushed();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("AppProjection", () => {
   it("keeps a dismissed plan completed through restart, reconciliation and duplicate completion, but asks for a new plan", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-dismissed-plan-"));
@@ -6457,6 +6715,55 @@ async function createCompletionRecoveryHarness(
   const events: ServerEvent[] = [];
   projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
   return { store, bridge, projection, terminal, events };
+}
+
+async function autoFinishHarness(now: number, activityTimes?: number[]) {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-auto-finish-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  const threads = (
+    activityTimes ?? Array.from({ length: 16 }, (_, index) => now - 4 * 86_400_000 - index * 1_000)
+  ).map((time, index) =>
+    thread(`auto-${String(index).padStart(2, "0")}`, index % 2 ? "/other" : "/work", time / 1_000),
+  );
+  await store.update((state) => {
+    state.projects = ["/work", "/other"].map((path) => ({
+      id: path,
+      path,
+      displayName: path,
+      createdAt: "x",
+      updatedAt: "x",
+    }));
+    for (const item of threads)
+      state.threadMeta[item.id] = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: item.updatedAt * 1_000,
+        awaitingPlanResponse: false,
+      };
+  });
+  const bridge = new FakeBridge();
+  bridge.request.mockImplementation(async (method, params) => {
+    if (method === "thread/list")
+      return { data: params.archived ? [] : threads, nextCursor: null, backwardsCursor: null };
+    if (method === "thread/loaded/list" || method === "model/list")
+      return { data: [], nextCursor: null };
+    throw new Error(`Unexpected ${method}`);
+  });
+  const projection = new AppProjection(
+    bridge as unknown as CodexBridge,
+    store,
+    new AttentionManager(),
+  );
+  for (const item of threads) projection.upsertThread(item);
+  await store.flushed();
+  const setConnection = (state: CodexBridge["state"]) => {
+    Object.assign(bridge, { state });
+    bridge.emit("state", state);
+  };
+  return { store, bridge, projection, threads, setConnection };
 }
 
 async function searchHarness() {

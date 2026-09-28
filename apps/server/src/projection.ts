@@ -105,6 +105,9 @@ const THREAD_TURN_PAGE_SIZE = 20;
 const THREAD_SEARCH_PAGE_SIZE = 20;
 const LIVE_ACTIVITY_DELTA_FLUSH_MS = 50;
 const SESSION_RETENTION_BATCH_SIZE = 25;
+const AUTO_FINISH_SESSION_LIMIT = 15;
+const AUTO_FINISH_INACTIVITY_MS = 72 * 60 * 60 * 1_000;
+const AUTO_FINISH_INTERVAL_MS = 60_000;
 const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 const LOADED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 
@@ -143,6 +146,8 @@ export class AppProjection extends EventEmitter {
   private managedRecoveryTimer?: NodeJS.Timeout;
   private sessionRetentionTimer?: NodeJS.Timeout;
   private sessionRetentionRunning = false;
+  private autoFinishTimer?: NodeJS.Timeout;
+  private autoFinishRunning = false;
   private readonly historyCache: HistoryCache;
   private browserStatusProvider: (threadId: string) => BrowserThreadStatus = () => "disabled";
   private threadResumeConfigProvider: (threadId: string) => Record<string, unknown> = () => ({});
@@ -170,6 +175,8 @@ export class AppProjection extends EventEmitter {
         this.managedRecoveryAttempt = 0;
         if (this.sessionRetentionTimer) clearTimeout(this.sessionRetentionTimer);
         this.sessionRetentionTimer = undefined;
+        if (this.autoFinishTimer) clearTimeout(this.autoFinishTimer);
+        this.autoFinishTimer = undefined;
         this.subscribedThreads.clear();
         const persistedState = this.store.view();
         for (const threadId of this.hiddenThreads) {
@@ -1036,6 +1043,59 @@ export class AppProjection extends EventEmitter {
       state.threadMeta[threadId] = meta;
     });
     this.publishThread(threadId);
+  }
+
+  async finishInactiveSessions(now = Date.now()): Promise<number> {
+    if (
+      this.bridge.state !== "ready" ||
+      this.syncPromise ||
+      this.threads.size <= AUTO_FINISH_SESSION_LIMIT
+    )
+      return 0;
+
+    const finished: string[] = [];
+    await this.store.update((state) => {
+      // Recompute after waiting for earlier writes, so new activity and manual
+      // finishes cannot leave a stale selection outside the newest fifteen.
+      if (this.bridge.state !== "ready" || this.syncPromise) return;
+      const candidates = [...this.threads.values()]
+        .filter(
+          (cached) =>
+            !cached.thread.ephemeral &&
+            !this.removedThreads.has(cached.thread.id) &&
+            this.isThreadVisible(cached.thread.id, state),
+        )
+        .map((cached) => ({ cached, summary: this.toSummary(cached, state) }))
+        .filter(
+          ({ summary }) =>
+            summary.relation.kind === "session" &&
+            !summary.archived &&
+            summary.state === "completed" &&
+            summary.unread,
+        )
+        .sort(
+          (a, b) =>
+            b.summary.updatedAt - a.summary.updatedAt || a.summary.id.localeCompare(b.summary.id),
+        )
+        .slice(AUTO_FINISH_SESSION_LIMIT);
+
+      for (const { cached, summary } of candidates) {
+        if (
+          summary.currentTurnId !== null ||
+          cached.thread.status.type === "active" ||
+          summary.queuedMessageCount > 0 ||
+          now - summary.updatedAt <= AUTO_FINISH_INACTIVITY_MS
+        )
+          continue;
+        const meta = state.threadMeta[summary.id] ?? { pinned: false, lastReadUpdatedAt: 0 };
+        // Use the same acknowledgement as Finish, limited to the observed activity.
+        meta.lastReadUpdatedAt = Math.max(meta.lastReadUpdatedAt, summary.updatedAt);
+        state.threadMeta[summary.id] = meta;
+        finished.push(summary.id);
+      }
+    });
+    for (const threadId of finished) this.publishThread(threadId);
+    return finished.length;
   }
 
   async dismissPlan(threadId: string, request: DismissPlanRequest): Promise<ThreadSummary> {
@@ -2126,6 +2186,7 @@ export class AppProjection extends EventEmitter {
     this.backfillSubagentTitles();
     this.scheduleMissingManagedThreadRecovery();
     this.scheduleSessionRetention();
+    this.scheduleAutoFinish();
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 1_000) {
       process.stderr.write(
@@ -2175,6 +2236,30 @@ export class AppProjection extends EventEmitter {
       });
     }, delay);
     this.managedRecoveryTimer.unref();
+  }
+
+  private scheduleAutoFinish(delayMs = 0): void {
+    if (
+      this.syncedAt === null ||
+      this.recoverLoadedThreads ||
+      this.bridge.state !== "ready" ||
+      this.autoFinishTimer ||
+      this.autoFinishRunning
+    )
+      return;
+    this.autoFinishTimer = setTimeout(() => {
+      this.autoFinishTimer = undefined;
+      this.autoFinishRunning = true;
+      void this.finishInactiveSessions()
+        .catch((error: unknown) => {
+          this.emit("projectionError", error instanceof Error ? error : new Error(String(error)));
+        })
+        .finally(() => {
+          this.autoFinishRunning = false;
+          this.scheduleAutoFinish(AUTO_FINISH_INTERVAL_MS);
+        });
+    }, delayMs);
+    this.autoFinishTimer.unref();
   }
 
   private scheduleSessionRetention(delayMs = 0): void {
