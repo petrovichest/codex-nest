@@ -4134,7 +4134,7 @@ describe("thread settings", () => {
   });
 
   it("validates native search requests and returns compatibility failures explicitly", async () => {
-    const { app, bridge, headers } = await createForkHarness();
+    const { app, bridge, headers, projection } = await createForkHarness();
     await app.ready();
     bridge.request.mockClear();
     for (const url of [
@@ -4166,19 +4166,18 @@ describe("thread settings", () => {
       expect.objectContaining({ searchTerm: "text", archived: true }),
       30_000,
     );
-    bridge.request.mockResolvedValueOnce({
-      data: [
-        {
-          ...testThread("old-session"),
-          name: "Обновить хедеры MEXC и задеплоить",
-          preview: "надо обновить хедерсы",
-          historyMode: "legacy",
-        },
-      ],
-      nextCursor: "titles-next",
-    });
+    projection.upsertThread(
+      {
+        ...testThread("old-session"),
+        name: "Обновить хедеры MEXC и задеплоить",
+        preview: "надо обновить хедерсы",
+        historyMode: "legacy",
+      },
+      true,
+    );
+    bridge.request.mockClear();
     const titles = await app.inject({
-      url: `/api/v1/threads/search?q=${encodeURIComponent("хедеры")}&scope=titles&archived=true&cursor=titles-page`,
+      url: `/api/v1/threads/search?q=${encodeURIComponent("MEXC ХЕДЕРЫ")}&scope=titles&archived=true`,
       headers,
     });
     expect(titles.statusCode).toBe(200);
@@ -4189,13 +4188,14 @@ describe("thread settings", () => {
           snippet: "",
         },
       ],
-      nextCursor: "titles-next",
+      nextCursor: null,
     });
-    expect(bridge.request).toHaveBeenLastCalledWith(
-      "thread/list",
-      expect.objectContaining({ searchTerm: "хедеры", archived: true, cursor: "titles-page" }),
-      30_000,
-    );
+    const invalidCursor = await app.inject({
+      url: "/api/v1/threads/search?q=text&scope=titles&cursor=messages-page",
+      headers,
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(bridge.request).not.toHaveBeenCalled();
     bridge.request.mockRejectedValueOnce(new RpcError(-32601, "not found"));
     expect((await app.inject({ url: "/api/v1/threads/search?q=text", headers })).statusCode).toBe(
       503,

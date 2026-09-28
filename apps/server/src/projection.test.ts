@@ -743,108 +743,287 @@ describe("AppProjection", () => {
     await store.flushed();
   });
 
-  it.each(["titles", "messages"] as const)(
-    "searches unloaded roots by %s without expanding the snapshot and isolates targeted turn history",
-    async (scope) => {
-      const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
-      directories.push(directory);
-      const store = new StateStore(join(directory, "state.json"));
-      await store.load();
-      await store.update((state) => {
-        state.dismissedProjectPaths = ["/dismissed"];
+  it("searches unloaded roots by messages without expanding the snapshot and isolates targeted turn history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-search-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    await store.update((state) => {
+      state.dismissedProjectPaths = ["/dismissed"];
+    });
+    const bridge = new FakeBridge();
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 5));
+    const occurrence = {
+      turnId: "old",
+      itemId: "answer",
+      snippet: "😀needle",
+      snippetMatchRange: { start: 2, end: 8 },
+      turnCursor: "target-cursor",
+    };
+    const oldTurn = {
+      ...testTurn("old", "completed"),
+      itemsView: "full" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "answer",
+          text: "needle",
+          phase: "final_answer" as const,
+          memoryCitation: null,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/search")
+        return {
+          data: [
+            thread("outside", "/work", 6),
+            { ...thread("child", "/work", 5), parentThreadId: "one" },
+            { ...thread("internal", "/work", 5), threadSource: "codexnest-fork-temp:abc" },
+            { ...thread("ephemeral", "/work", 5), ephemeral: true },
+            thread("dismissed", "/dismissed", 5),
+          ].map((thread) => ({ thread, snippet: "needle" })),
+          nextCursor: "next",
+        };
+      if (method === "thread/read") return { thread: thread("outside", "/work", 6) };
+      if (method === "thread/searchOccurrences") return { data: [occurrence], nextCursor: null };
+      if (method === "thread/turns/list")
+        return { data: [oldTurn], nextCursor: "older", backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    expect(
+      (await projection.searchThreads("needle", true, "page", "messages")).data.map(
+        (entry) => entry.thread.id,
+      ),
+    ).toEqual(["outside"]);
+    expect(bridge.request).toHaveBeenCalledExactlyOnceWith(
+      "thread/search",
+      {
+        searchTerm: "needle",
+        archived: true,
+        cursor: "page",
+        limit: 20,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+      },
+      30_000,
+    );
+    expect(projection.summary("outside")).toBeUndefined();
+    expect(await projection.searchOccurrences("outside", "needle", null)).toMatchObject({
+      data: [occurrence],
+    });
+    const result = await projection.readSearchTurn("outside", "old", "target-cursor");
+    expect(result.turn.items).toEqual([expect.objectContaining({ id: "answer", text: "needle" })]);
+    expect(bridge.request).toHaveBeenLastCalledWith(
+      "thread/turns/list",
+      {
+        threadId: "outside",
+        cursor: "target-cursor",
+        limit: 1,
+        sortDirection: "asc",
+        itemsView: "full",
+      },
+      30_000,
+    );
+    expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["one"]);
+    await expect(projection.readSearchTurn("outside", "gone", "target-cursor")).rejects.toThrow(
+      "Search result changed",
+    );
+    bridge.request.mockRejectedValueOnce(new RpcError(-32601, "method not found"));
+    await expect(projection.searchThreads("needle", false, null, "messages")).rejects.toThrow(
+      "Поиск недоступен",
+    );
+  });
+  it("finds displayed titles by normalized fragments in any order without RPC", async () => {
+    const { projection, bridge, store } = await searchHarness();
+    const name = "Расширить OKX-парсер для Base";
+    projection.upsertThread({ ...thread("base", "/work", 8), name });
+    projection.upsertThread({
+      ...thread("preview", "/other", 7),
+      name: " ",
+      preview: "Учёт ЁЖИКОВ",
+    });
+    projection.upsertThread({
+      ...thread("other", "/work", 6),
+      name: "Другая задача",
+      preview: name,
+    });
+    for (const query of [
+      "base",
+      "Base",
+      "BASE",
+      "base okx",
+      "okx base",
+      "bas парс",
+      "  OKX---BASE  ",
+      "ＢＡＳＥ ＯＫＸ",
+    ]) {
+      const page = await projection.searchThreads(query, false, null, "titles");
+      expect(page).toMatchObject({
+        data: [{ thread: { id: "base", title: name }, snippet: "" }],
+        nextCursor: null,
       });
-      const bridge = new FakeBridge();
-      const projection = new AppProjection(
-        bridge as unknown as CodexBridge,
-        store,
-        new AttentionManager(),
-      );
-      projection.upsertThread(thread("one", "/work", 5));
-      const occurrence = {
-        turnId: "old",
-        itemId: "answer",
-        snippet: "😀needle",
-        snippetMatchRange: { start: 2, end: 8 },
-        turnCursor: "target-cursor",
-      };
-      const oldTurn = {
-        ...testTurn("old", "completed"),
-        itemsView: "full" as const,
-        items: [
-          {
-            type: "agentMessage" as const,
-            id: "answer",
-            text: "needle",
-            phase: "final_answer" as const,
-            memoryCitation: null,
-          },
-        ],
-      };
-      bridge.request.mockImplementation(async (method) => {
-        if (method === (scope === "titles" ? "thread/list" : "thread/search"))
-          return {
-            data: [
-              thread("outside", "/work", 6),
-              { ...thread("child", "/work", 5), parentThreadId: "one" },
-              { ...thread("internal", "/work", 5), threadSource: "codexnest-fork-temp:abc" },
-              { ...thread("ephemeral", "/work", 5), ephemeral: true },
-              thread("dismissed", "/dismissed", 5),
-            ].map((thread) => (scope === "titles" ? thread : { thread, snippet: "needle" })),
-            nextCursor: "next",
-          };
-        if (method === "thread/read") return { thread: thread("outside", "/work", 6) };
-        if (method === "thread/searchOccurrences") return { data: [occurrence], nextCursor: null };
-        if (method === "thread/turns/list")
-          return { data: [oldTurn], nextCursor: "older", backwardsCursor: null };
-        throw new Error(`Unexpected ${method}`);
-      });
+      expect(page.data).toHaveLength(1);
+    }
+    for (const query of ["ЕЖ учет", "ЁЖ УЧЁТ", "е\u0308ж уче\u0308т"]) {
       expect(
-        (await projection.searchThreads("needle", true, "page", scope)).data.map(
-          (entry) => entry.thread.id,
+        (await projection.searchThreads(query, false, null, "titles")).data.map(
+          ({ thread }) => thread.id,
         ),
-      ).toEqual(["outside"]);
-      expect(bridge.request).toHaveBeenCalledExactlyOnceWith(
-        scope === "titles" ? "thread/list" : "thread/search",
-        {
-          searchTerm: "needle",
-          archived: true,
-          cursor: "page",
-          limit: 20,
-          sortKey: "updated_at",
-          sortDirection: "desc",
-          sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
-        },
-        30_000,
-      );
-      expect(projection.summary("outside")).toBeUndefined();
-      expect(await projection.searchOccurrences("outside", "needle", null)).toMatchObject({
-        data: [occurrence],
+      ).toEqual(["preview"]);
+    }
+    for (const query of ["base missing", "base bsae", "ифыу", "---", "  "]) {
+      expect(await projection.searchThreads(query, false, null, "titles")).toEqual({
+        data: [],
+        nextCursor: null,
       });
-      const result = await projection.readSearchTurn("outside", "old", "target-cursor");
-      expect(result.turn.items).toEqual([
-        expect.objectContaining({ id: "answer", text: "needle" }),
-      ]);
-      expect(bridge.request).toHaveBeenLastCalledWith(
-        "thread/turns/list",
-        {
-          threadId: "outside",
-          cursor: "target-cursor",
-          limit: 1,
-          sortDirection: "asc",
-          itemsView: "full",
-        },
-        30_000,
+    }
+    bridge.emit("notification", {
+      method: "thread/name/updated",
+      params: { threadId: "base", threadName: "Парсер Ethereum" },
+    } satisfies ServerNotification);
+    expect((await projection.searchThreads("base", false, null, "titles")).data).toEqual([]);
+    expect(
+      (await projection.searchThreads("ETH парс", false, null, "titles")).data[0]?.thread.title,
+    ).toBe("Парсер Ethereum");
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
+  it("filters title results by archive and visibility", async () => {
+    const { projection, bridge, store } = await searchHarness();
+    await store.update((state) => {
+      state.dismissedProjectPaths = ["/dismissed"];
+      state.threadMeta.managed = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        managedParent: { parentThreadId: "parent", taskId: "task" },
+      };
+    });
+    for (const candidate of [
+      thread("base-visible", "/other", 10),
+      thread("base-dismissed", "/dismissed", 10),
+      { ...thread("base-child", "/work", 10), parentThreadId: "parent" },
+      { ...thread("base-native", "/work", 10), source: { subAgent: "review" } as const },
+      { ...thread("base-internal", "/work", 10), threadSource: "codexnest-fork-temp:abc" },
+      { ...thread("base-ephemeral", "/work", 10), ephemeral: true },
+      { ...thread("managed", "/work", 10), name: "base managed" },
+      thread("base-deleted", "/work", 10),
+    ])
+      projection.upsertThread(candidate);
+    projection.upsertThread(thread("base-archived", "/other", 1, { type: "notLoaded" }), true);
+    await projection.removeOrphanedThread("base-deleted");
+    expect(
+      (await projection.searchThreads("BASE", false, null, "titles")).data.map(
+        ({ thread }) => thread.id,
+      ),
+    ).toEqual(["base-visible"]);
+    expect(
+      (await projection.searchThreads("BASE", true, null, "titles")).data.map(
+        ({ thread }) => thread.id,
+      ),
+    ).toEqual(["base-archived"]);
+    await projection.setArchived("base-visible", true);
+    expect((await projection.searchThreads("BASE", false, null, "titles")).data).toEqual([]);
+    expect(
+      (await projection.searchThreads("BASE", true, null, "titles")).data.map(
+        ({ thread }) => thread.id,
+      ),
+    ).toEqual(["base-visible", "base-archived"]);
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
+  it("paginates title matches by time and ID and validates title cursors", async () => {
+    const { projection, bridge, store } = await searchHarness();
+    const ids = Array.from({ length: 45 }, (_, i) => `base-${String(i).padStart(2, "0")}`);
+    for (const id of [...ids].reverse()) projection.upsertThread(thread(id, "/work", 10));
+    projection.upsertThread(thread("base-newest", "/work", 11));
+    const first = await projection.searchThreads("BASE", false, null, "titles");
+    expect(first.data.map(({ thread }) => thread.id)).toEqual(["base-newest", ...ids.slice(0, 19)]);
+    expect(first.nextCursor).not.toBeNull();
+    projection.upsertThread(thread("base-arrived", "/work", 12));
+    await projection.removeOrphanedThread("base-18");
+    const second = await projection.searchThreads("base", false, first.nextCursor, "titles");
+    const third = await projection.searchThreads("base", false, second.nextCursor, "titles");
+    expect(second.data.map(({ thread }) => thread.id)).toEqual(ids.slice(19, 39));
+    expect(third.data.map(({ thread }) => thread.id)).toEqual(ids.slice(39));
+    expect(third.nextCursor).toBeNull();
+    for (const cursor of ["messages-next", Buffer.from("null").toString("base64url")]) {
+      await expect(projection.searchThreads("base", false, cursor, "titles")).rejects.toThrow(
+        "Invalid search cursor",
       );
-      expect(projection.snapshot().threads.map((thread) => thread.id)).toEqual(["one"]);
-      await expect(projection.readSearchTurn("outside", "gone", "target-cursor")).rejects.toThrow(
-        "Search result changed",
-      );
-      bridge.request.mockRejectedValueOnce(new RpcError(-32601, "method not found"));
-      await expect(projection.searchThreads("needle", false, null, scope)).rejects.toThrow(
-        "Поиск недоступен",
-      );
-    },
-  );
+    }
+    await expect(
+      projection.searchThreads("different", false, first.nextCursor, "titles"),
+    ).rejects.toThrow("Invalid search cursor");
+    await expect(
+      projection.searchThreads("base", true, first.nextCursor, "titles"),
+    ).rejects.toThrow("Invalid search cursor");
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
+  it("waits for the existing full catalog sync and searches unloaded titles without more RPC", async () => {
+    const { projection, bridge, store } = await searchHarness();
+    let resolvePage!: (page: unknown) => void;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/list") {
+        if (params.archived)
+          return {
+            data: [thread("base-archive", "/work", 1, { type: "notLoaded" })],
+            nextCursor: null,
+          };
+        if (!params.cursor)
+          return new Promise((resolve) => {
+            resolvePage = resolve;
+          });
+        return {
+          data: [{ ...thread("base-old", "/other", 2, { type: "notLoaded" }), source: "unknown" }],
+          nextCursor: null,
+        };
+      }
+      if (method === "model/list" || method === "thread/loaded/list")
+        return { data: [], nextCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const sync = projection.sync();
+    let completed = false;
+    const search = projection.searchThreads("BASE", false, null, "titles").then((page) => {
+      completed = true;
+      return page;
+    });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    resolvePage({
+      data: [{ ...thread("base-exec", "/work", 3, { type: "notLoaded" }), source: "exec" }],
+      nextCursor: "older",
+    });
+    await sync;
+    expect((await search).data.map(({ thread }) => thread.id)).toEqual(["base-exec", "base-old"]);
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/list")).toHaveLength(
+      3,
+    );
+    for (const [, params] of bridge.request.mock.calls.filter(
+      ([method]) => method === "thread/list",
+    )) {
+      expect(params.sourceKinds).toEqual(expect.arrayContaining(["exec", "unknown"]));
+      expect(params).not.toHaveProperty("searchTerm");
+    }
+    bridge.request.mockClear();
+    expect((await projection.searchThreads("BASE", true, null, "titles")).data[0]?.thread.id).toBe(
+      "base-archive",
+    );
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
   it("preserves async questions through streaming, item renumbering, and history reload", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-async-question-test-"));
     directories.push(directory);
@@ -3645,7 +3824,7 @@ describe("AppProjection", () => {
     expect(
       bridge.request.mock.calls.find(([method]) => method === "thread/list")?.[1],
     ).toMatchObject({
-      sourceKinds: ["cli", "vscode", "appServer", "subAgentThreadSpawn"],
+      sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown", "subAgentThreadSpawn"],
     });
     expect(projection.summary("two")?.projectId).toBe("nested");
     expect(projection.summary("two")?.settings).toEqual({ collaborationMode: "default" });
@@ -6278,6 +6457,20 @@ async function createCompletionRecoveryHarness(
   const events: ServerEvent[] = [];
   projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
   return { store, bridge, projection, terminal, events };
+}
+
+async function searchHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-title-search-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  const bridge = new FakeBridge();
+  const projection = new AppProjection(
+    bridge as unknown as CodexBridge,
+    store,
+    new AttentionManager(),
+  );
+  return { store, bridge, projection };
 }
 
 function thread(

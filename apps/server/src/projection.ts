@@ -58,7 +58,7 @@ import {
 } from "./codex/guards";
 import { RpcError } from "./codex/transport";
 import { HistoryCache, type CachedTurnsPage } from "./history-cache";
-import { pathContains, projectForCwd } from "./projects";
+import { pathContains, projectForCwd, ProjectValidationError } from "./projects";
 import { isMissingThreadError, isThreadNotLoadedError, removeThreadState } from "./thread-state";
 import { recoverTimelineOrder } from "./timeline-rollout";
 import type {
@@ -102,6 +102,7 @@ export class ThreadSearchUnavailableError extends Error {}
 export class ThreadSearchNotFoundError extends Error {}
 
 const THREAD_TURN_PAGE_SIZE = 20;
+const THREAD_SEARCH_PAGE_SIZE = 20;
 const LIVE_ACTIVITY_DELTA_FLUSH_MS = 50;
 const SESSION_RETENTION_BATCH_SIZE = 25;
 const MANAGED_RECOVERY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
@@ -367,30 +368,67 @@ export class AppProjection extends EventEmitter {
     cursor: string | null,
     scope: ThreadSearchScope = "messages",
   ): Promise<ThreadSearchPage> {
+    if (scope === "titles") return this.searchThreadTitles(searchTerm, archived, cursor);
     const params = {
       searchTerm,
       archived,
       cursor,
-      limit: 20,
+      limit: THREAD_SEARCH_PAGE_SIZE,
       sortKey: "updated_at",
       sortDirection: "desc",
       sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
     };
-    const page =
-      scope === "titles"
-        ? parseThreadList(await this.searchRequest("thread/list", params))
-        : parseThreadSearch(await this.searchRequest("thread/search", params));
-    const entries = page.data.map((entry) =>
-      "thread" in entry ? entry : { thread: entry, snippet: "" },
-    );
+    const page = parseThreadSearch(await this.searchRequest("thread/search", params));
     return {
-      data: entries
+      data: page.data
         .filter(({ thread }) => this.isSearchVisible(thread))
         .map(({ thread, snippet }) => ({
           thread: this.toSummary({ thread, archived, currentTurnId: activeTurnId(thread) }),
           snippet,
         })),
       nextCursor: page.nextCursor,
+    };
+  }
+
+  private async searchThreadTitles(
+    searchTerm: string,
+    archived: boolean,
+    cursor: string | null,
+  ): Promise<ThreadSearchPage> {
+    const query = normalizeTitleSearch(searchTerm);
+    const boundary = cursor ? parseTitleSearchCursor(cursor, query, archived) : null;
+    if (!query) return { data: [], nextCursor: null };
+    if (this.syncPromise) await this.syncPromise;
+    const words = query.split(" ");
+    const matches = [...this.threads.values()]
+      .filter(({ thread, archived: threadArchived }) => {
+        if (
+          threadArchived !== archived ||
+          (typeof thread.source === "object" && "subAgent" in thread.source) ||
+          !this.isSearchVisible(thread) ||
+          (boundary &&
+            (thread.updatedAt > boundary.updatedAt ||
+              (thread.updatedAt === boundary.updatedAt && thread.id <= boundary.id)))
+        )
+          return false;
+        const title = normalizeTitleSearch(displayThreadTitle(thread));
+        return words.every((word) => title.includes(word));
+      })
+      .sort(
+        (a, b) =>
+          b.thread.updatedAt - a.thread.updatedAt ||
+          (a.thread.id < b.thread.id ? -1 : a.thread.id > b.thread.id ? 1 : 0),
+      );
+    const page = matches.slice(0, THREAD_SEARCH_PAGE_SIZE);
+    const last = page.at(-1)?.thread;
+    return {
+      data: page.map((cached) => ({ thread: this.toSummary(cached), snippet: "" })),
+      nextCursor:
+        matches.length > THREAD_SEARCH_PAGE_SIZE && last
+          ? Buffer.from(
+              JSON.stringify(["titles-v1", query, archived, last.updatedAt, last.id]),
+            ).toString("base64url")
+          : null,
     };
   }
 
@@ -2439,7 +2477,7 @@ export class AppProjection extends EventEmitter {
             sortKey: "updated_at",
             sortDirection: "desc",
             archived,
-            sourceKinds: ["cli", "vscode", "appServer", "subAgentThreadSpawn"],
+            sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown", "subAgentThreadSpawn"],
           },
           30_000,
         ),
@@ -3273,7 +3311,7 @@ export class AppProjection extends EventEmitter {
     return {
       id: cached.thread.id,
       projectId: projectForCwd(state.projects, cached.thread.cwd)?.id ?? null,
-      title: cached.thread.name?.trim() || cached.thread.preview.trim() || "Без названия",
+      title: displayThreadTitle(cached.thread),
       preview: cached.thread.preview,
       cwd: cached.thread.cwd,
       state: threadState,
@@ -3601,6 +3639,45 @@ function notificationThreadId(notification: ServerNotification): string | undefi
   if (!params || typeof params !== "object" || !("threadId" in params)) return undefined;
   const threadId = (params as { threadId?: unknown }).threadId;
   return typeof threadId === "string" ? threadId : undefined;
+}
+
+function displayThreadTitle(thread: Thread): string {
+  return thread.name?.trim() || thread.preview.trim() || "Без названия";
+}
+
+function normalizeTitleSearch(text: string): string {
+  return (
+    text
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .match(/[\p{L}\p{N}]+/gu) ?? []
+  ).join(" ");
+}
+
+function parseTitleSearchCursor(
+  cursor: string,
+  query: string,
+  archived: boolean,
+): { updatedAt: number; id: string } {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (
+      Array.isArray(value) &&
+      value.length === 5 &&
+      value[0] === "titles-v1" &&
+      value[1] === query &&
+      value[2] === archived &&
+      typeof value[3] === "number" &&
+      Number.isFinite(value[3]) &&
+      typeof value[4] === "string" &&
+      value[4].length > 0
+    )
+      return { updatedAt: value[3], id: value[4] };
+  } catch {
+    // Native message-search cursors and malformed title cursors are not interchangeable.
+  }
+  throw new ProjectValidationError("Invalid search cursor");
 }
 
 function isSpawnedSubagent(thread: Thread): boolean {
