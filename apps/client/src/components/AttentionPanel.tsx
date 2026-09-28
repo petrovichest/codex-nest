@@ -1,5 +1,5 @@
 import { Browser } from "@capacitor/browser";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { appendUserInputRecordings } from "@codexnest/protocol";
 import type {
@@ -16,6 +16,7 @@ import type {
 
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
+import { useTypography } from "../typography";
 import { UserInputVoiceQueue, type QuestionVoiceRecording } from "./UserInputVoiceQueue";
 import { AlertIcon, MicrophoneIcon, XIcon } from "./Icons";
 import {
@@ -362,6 +363,7 @@ function UserInputForm({
   const updateUserInputDraft = connection.updateUserInputDraft;
   const flushUserInputDraft = connection.flushUserInputDraft;
   const { language, t } = useI18n();
+  const { message: messageFontSize, ui: uiFontSize } = useTypography();
   const providerDraft = connection.state?.userInputDrafts?.[request.id];
   const [viewDraft, setViewDraft] = useState(() => initialUserInputDraft(request, providerDraft));
   const [speechState, setSpeechState] = useState<
@@ -373,6 +375,10 @@ function UserInputForm({
   );
   const [speechError, setSpeechError] = useState<string | null>(null);
   const answerInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const nativeFieldSizing = useMemo(
+    () => typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content"),
+    [],
+  );
   const [submitting, setSubmitting] = useState(false);
   const submissionPendingRef = useRef(false);
   const recordingOrdersRef = useRef(new Map<string, number>());
@@ -430,6 +436,7 @@ function UserInputForm({
       message.userInputSubmission?.draftKey === request.draftKey,
   );
   const submission = request.draft?.submission;
+  const showVoiceQueue = Boolean(submitting || submission || localSubmission);
   const locked = busy || submitting || Boolean(submission || localSubmission);
   const backgroundVoice = Boolean(
     request.threadId && request.draftKey && connection.queueVoiceRecording,
@@ -451,6 +458,40 @@ function UserInputForm({
     (option) => option.label === answers[question.id]?.[0],
   );
   const freeformAnswer = selectedOption ? "" : question ? (answers[question.id]?.[0] ?? "") : "";
+  const resizeAnswer = useCallback(() => {
+    const field = answerInputRef.current;
+    if (nativeFieldSizing || field?.tagName !== "TEXTAREA" || !field.clientWidth) return;
+    const scrollTop = field.scrollTop;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+    field.scrollTop = scrollTop;
+  }, [nativeFieldSizing]);
+
+  useLayoutEffect(() => {
+    resizeAnswer();
+  }, [freeformAnswer, question?.id, showVoiceQueue, resizeAnswer, messageFontSize, uiFontSize]);
+
+  useEffect(() => {
+    const field = answerInputRef.current;
+    if (nativeFieldSizing || field?.tagName !== "TEXTAREA") return;
+    let width = field.getBoundingClientRect().width;
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            const nextWidth = field.getBoundingClientRect().width;
+            if (nextWidth === width) return;
+            width = nextWidth;
+            resizeAnswer();
+          });
+    observer?.observe(field);
+    window.addEventListener("resize", resizeAnswer);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resizeAnswer);
+    };
+  }, [question?.id, showVoiceQueue, nativeFieldSizing, resizeAnswer]);
+
   const speechBusy = speechState !== "idle";
   const speechUnavailable = microphoneUnavailableReason(
     transcriptionConfig,
@@ -812,7 +853,7 @@ function UserInputForm({
     }
   }
 
-  if (submitting || submission || localSubmission)
+  if (showVoiceQueue)
     return (
       <UserInputVoiceQueue
         questions={request.questions}
@@ -908,7 +949,7 @@ function UserInputForm({
                       answerInputRef.current = node;
                     }}
                     id={`${request.id}-${question.id}-answer`}
-                    {...(question.isSecret ? { type: "password" } : { rows: 3 })}
+                    {...(question.isSecret ? { type: "password" } : { rows: 1 })}
                     value={freeformAnswer}
                     onChange={(event) => updateAnswer(question.id, event.target.value, "debounced")}
                     onSelect={captureAnswerSelection}

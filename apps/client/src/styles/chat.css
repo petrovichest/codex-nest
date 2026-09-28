@@ -1495,8 +1495,12 @@
 }
 
 .user-input-freeform textarea {
-  resize: vertical;
-  min-height: 78px;
+  resize: none;
+  min-height: 0;
+  max-height: 190px;
+  height: auto;
+  field-sizing: content;
+  overflow-y: auto;
   padding: 12px;
   border: 0;
   line-height: 1.55;
