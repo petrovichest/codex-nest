@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectMessageImages } from "./message-images";
+import { collectMessageImages, messageImage } from "./message-images";
 
 describe("message image collection", () => {
   it("routes external image links through downloads while preserving raw tool paths", () => {
@@ -49,6 +49,37 @@ describe("message image collection", () => {
         [],
       ).map(({ src }) => src),
     ).toEqual(["https://example.test/a.PNG?size=2", "https://example.test/render?id=1"]);
+  });
+  it("loads GitHub file images from their raw URLs and deduplicates all link forms", () => {
+    const page = "https://github.com/pump-fun/pump-public-docs/blob/main/docs/fees.png";
+    const raw = "https://raw.githubusercontent.com/pump-fun/pump-public-docs/main/docs/fees.png";
+    expect(
+      collectMessageImages(
+        `[Таблица комиссий Pump](${page})\n\n![Таблица][fees]\n\n[Прямая ссылка](${raw})\n\n[fees]: ${page}`,
+        [page, raw],
+      ),
+    ).toEqual([{ key: raw, src: raw, localPath: null, label: "Таблица комиссий Pump" }]);
+    expect(messageImage(page)?.key).toBe(messageImage(raw)?.key);
+  });
+  it("preserves revisions, encoded paths, queries and fragments in GitHub image URLs", () => {
+    const page =
+      "https://github.com/owner/repo/blob/feature/gallery/docs/a%20b.PNG?download=1#image";
+    const raw =
+      "https://raw.githubusercontent.com/owner/repo/feature/gallery/docs/a%20b.PNG?download=1#image";
+    expect(messageImage(page)).toEqual({ key: raw, src: raw, localPath: null, label: "a b.PNG" });
+  });
+  it("only rewrites GitHub HTTPS file pages for recognized image formats", () => {
+    const unchanged = [
+      "https://github.com.example.test/owner/repo/blob/main/a.png",
+      "https://github.com/owner/repo/tree/main/a.png",
+      "https://github.com/owner/repo/blob/a.png",
+      "http://github.com/owner/repo/blob/main/a.png",
+      "https://github.com/owner/repo/blob/main/report.pdf",
+    ];
+    for (const src of unchanged) expect(messageImage(src, undefined, true)?.src).toBe(src);
+    expect(
+      collectMessageImages("[Документ](https://github.com/owner/repo/blob/main/report.pdf)", []),
+    ).toEqual([]);
   });
   it("keeps URL security rules and accepts data attachments without displaying their address", () => {
     const src = "data:image/png;base64,abc";

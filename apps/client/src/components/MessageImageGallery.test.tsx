@@ -29,14 +29,20 @@ beforeEach(() => {
   });
 });
 
-it("opens remote image downloads in the system browser on native platforms", async () => {
+it.each([
+  ["https://example.test/photo.png", "https://example.test/photo.png"],
+  [
+    "https://github.com/owner/repo/blob/main/photo.png",
+    "https://raw.githubusercontent.com/owner/repo/main/photo.png",
+  ],
+])("opens remote image %s in the system browser on native platforms", async (src, downloadUrl) => {
   native.isNativePlatform.mockReturnValue(true);
   render(
     <Activity
       item={{
         type: "agentMessage",
         id: "remote-message",
-        text: "[Фото](https://example.test/photo.png)",
+        text: `[Фото](${src})`,
         images: [],
         timestamp: null,
         phase: null,
@@ -48,9 +54,7 @@ it("opens remote image downloads in the system browser on native platforms", asy
   fireEvent.load(within(gallery).getByAltText("Фото"));
   fireEvent.click(within(gallery).getByRole("button", { name: "Открыть изображение Фото" }));
   fireEvent.click(screen.getByRole("button", { name: "Скачать Фото" }));
-  await waitFor(() =>
-    expect(native.open).toHaveBeenCalledWith({ url: "https://example.test/photo.png" }),
-  );
+  await waitFor(() => expect(native.open).toHaveBeenCalledWith({ url: downloadUrl }));
 });
 
 it("loads tool images only after disclosure and downloads their exact external paths", async () => {

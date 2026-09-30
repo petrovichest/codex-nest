@@ -23,9 +23,11 @@ export function messageImage(
     if (path && artifactDescriptor(path)?.kind === "image") localPath = path;
   }
   let fileName = localPath ?? src;
+  let url: URL | undefined;
   if (/^https?:\/\//i.test(src)) {
     try {
-      fileName = decodeURI(new URL(src).pathname);
+      url = new URL(src);
+      fileName = decodeURI(url.pathname);
     } catch {
       return null;
     }
@@ -33,6 +35,11 @@ export function messageImage(
   const descriptor = artifactDescriptor(fileName);
   if (!explicit && (descriptor?.kind !== "image" || (!localPath && !/^https?:\/\//i.test(src))))
     return null;
+  if (url?.protocol === "https:" && url.hostname === "github.com" && descriptor?.kind === "image") {
+    const path = url.pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/(.+\/[^/]+)$/);
+    if (path)
+      src = `https://raw.githubusercontent.com/${path[1]}/${path[2]}/${path[3]}${url.search}${url.hash}`;
+  }
   return {
     key: localPath ?? src,
     src,

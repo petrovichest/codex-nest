@@ -83,7 +83,7 @@ export async function buildApp(config: AppConfig, services: ApiServices): Promis
     reply.header("Referrer-Policy", "no-referrer");
     reply.header(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' http: https: ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https:; connect-src 'self' http: https: ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     );
     return payload;
   });
