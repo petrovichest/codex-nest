@@ -2215,6 +2215,237 @@ describe("AppProjection", () => {
     ]);
   });
 
+  it.each(["v1", "v2"])(
+    "projects native %s launches live and from history without extra RPCs",
+    async (version) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-native-launch-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      const bridge = new FakeBridge();
+      const launch: ThreadItem =
+        version === "v2"
+          ? {
+              type: "subAgentActivity",
+              id: "native-launch",
+              kind: "started",
+              agentThreadId: "child",
+              agentPath: "/root/mobile_review",
+            }
+          : {
+              type: "collabAgentToolCall",
+              id: "native-launch",
+              tool: "spawnAgent",
+              status: "completed",
+              senderThreadId: "one",
+              receiverThreadIds: ["child"],
+              prompt: "Task: Проверить интерфейс\nReview the mobile layout.",
+              model: null,
+              reasoningEffort: null,
+              agentsStates: {},
+            };
+      const canonical = {
+        ...testTurn("parent-turn", "completed"),
+        itemsView: "full" as const,
+        items: [
+          { ...launch, id: "history-launch" },
+          {
+            type: "subAgentActivity" as const,
+            id: "interaction",
+            kind: "interacted" as const,
+            agentThreadId: "child",
+            agentPath: "/root/mobile_review",
+          },
+        ],
+      };
+      bridge.request.mockImplementation(async (method: string) => {
+        if (method === "thread/turns/list")
+          return { data: [canonical], nextCursor: null, backwardsCursor: null };
+        throw new Error(`Unexpected ${method}`);
+      });
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+      );
+      projection.upsertThread(thread("one", "/work", 5, { type: "notLoaded" }));
+      const activities: ActivityItem[] = [];
+      projection.on("event", (_sequence, event: ServerEvent) => {
+        if (event.type === "activity.upserted") activities.push(event.item);
+      });
+      bridge.emit("notification", {
+        method: "item/started",
+        params: {
+          threadId: "one",
+          turnId: "parent-turn",
+          startedAtMs: 1_000,
+          item:
+            launch.type === "collabAgentToolCall" ? { ...launch, status: "inProgress" } : launch,
+        },
+      } satisfies ServerNotification);
+      const completed: ServerNotification = {
+        method: "item/completed",
+        params: { threadId: "one", turnId: "parent-turn", item: launch, completedAtMs: 2_000 },
+      };
+      bridge.emit("notification", completed);
+      bridge.emit("notification", completed);
+      expect(activities).toHaveLength(3);
+      expect(activities[0]).toMatchObject({
+        type: "subagentLaunch",
+        source: "codex",
+        status: "inProgress",
+      });
+      expect(activities[2]).toMatchObject({
+        type: "subagentLaunch",
+        source: "codex",
+        status: "completed",
+        timestamp: 1_000,
+      });
+      expect(bridge.request).not.toHaveBeenCalled();
+      const detail = await projection.readThread("one");
+      expect(detail.turns[0]?.items).toEqual([
+        expect.objectContaining({
+          type: "subagentLaunch",
+          source: "codex",
+          id: "history-launch",
+          threadId: "child",
+          title: version === "v2" ? "mobile_review" : "Проверить интерфейс",
+          ...(version === "v2" ? { agentPath: "/root/mobile_review" } : {}),
+        }),
+      ]);
+      const reloaded = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+      );
+      reloaded.upsertThread(thread("one", "/work", 5, { type: "notLoaded" }));
+      expect((await reloaded.readThread("one")).turns[0]?.items).toHaveLength(1);
+      expect(bridge.request.mock.calls.every(([method]) => method === "thread/turns/list")).toBe(
+        true,
+      );
+      if (launch.type === "collabAgentToolCall") {
+        bridge.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId: "one",
+            turnId: "parent-turn",
+            completedAtMs: 3_000,
+            item: { ...launch, id: "failed-launch", status: "failed", receiverThreadIds: [] },
+          },
+        } satisfies ServerNotification);
+        expect(activities.at(-1)).toMatchObject({
+          type: "subagentLaunch",
+          source: "codex",
+          status: "failed",
+          threadId: null,
+        });
+      }
+    },
+  );
+
+  it("retains a native launch when the terminal turn only contains the final answer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-native-terminal-test-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge();
+    const canonical = {
+      ...testTurn("live", "completed"),
+      itemsView: "summary" as const,
+      items: [
+        {
+          type: "agentMessage" as const,
+          id: "final",
+          text: "Готово",
+          phase: "final_answer" as const,
+        },
+      ],
+    };
+    bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/turns/list")
+        return { data: [canonical], nextCursor: null, backwardsCursor: null };
+      throw new Error(`Unexpected ${method}`);
+    });
+    const projection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      store,
+      new AttentionManager(),
+    );
+    projection.upsertThread(thread("one", "/work", 5));
+    const replacements: TurnView[] = [];
+    projection.on("event", (_sequence, event: ServerEvent) => {
+      if (event.type === "turn.replaced") replacements.push(event.turn);
+    });
+    bridge.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "one",
+        turnId: "live",
+        completedAtMs: 1_000,
+        item: {
+          type: "subAgentActivity",
+          id: "launch",
+          kind: "started",
+          agentThreadId: "child",
+          agentPath: "/root/review",
+        },
+      },
+    } satisfies ServerNotification);
+    bridge.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: "one", turn: canonical },
+    } as ServerNotification);
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    expect(replacements[0]?.items.map((item) => item.id)).toEqual(["launch", "final"]);
+    expect((await projection.readThread("one")).turns[0]?.items.map((item) => item.id)).toEqual([
+      "launch",
+      "final",
+    ]);
+  });
+
+  it.each([false, null])(
+    "shows native input-free subagent history with input capability %s",
+    async (canAcceptDirectInput) => {
+      const directory = await mkdtemp(join(tmpdir(), "codexnest-native-history-test-"));
+      directories.push(directory);
+      const store = new StateStore(join(directory, "state.json"));
+      await store.load();
+      const bridge = new FakeBridge();
+      const ownTurn = {
+        ...testTurn("child-turn", "completed"),
+        itemsView: "full" as const,
+        items: [
+          {
+            type: "agentMessage" as const,
+            id: "own-answer",
+            text: "Результат субагента",
+            phase: "final_answer" as const,
+          },
+        ],
+      };
+      bridge.request.mockImplementation(async (method: string) => {
+        if (method === "thread/turns/list")
+          return { data: [ownTurn], nextCursor: null, backwardsCursor: null };
+        throw new Error(`Unexpected ${method}`);
+      });
+      const projection = new AppProjection(
+        bridge as unknown as CodexBridge,
+        store,
+        new AttentionManager(),
+      );
+      projection.upsertThread({
+        ...thread("child", "/work", 5, { type: "notLoaded" }),
+        parentThreadId: "parent",
+        ephemeral: true,
+        canAcceptDirectInput,
+      });
+      const detail = await projection.readThread("child");
+      expect(detail.turns[0]?.items).toEqual([
+        expect.objectContaining({ id: "own-answer", text: "Результат субагента" }),
+      ]);
+    },
+  );
+
   it("keeps ephemeral helper threads out of the client projection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-test-"));
     directories.push(directory);

@@ -624,6 +624,186 @@ describe("Activity", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
+  it("groups native launches and updates child status from the snapshot without fetching children", () => {
+    const api = threadApi();
+    const launches: ActivityItem[] = ["first", "second"].map((id) => ({
+      type: "subagentLaunch",
+      id,
+      source: "codex",
+      status: "completed",
+      title: id,
+      threadId: `child-${id}`,
+      agentPath: `/root/${id}`,
+      timestamp: 1_000,
+    }));
+    const context = mockThreadConnection(api, summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: launches,
+        },
+      ],
+    });
+    const child: ThreadSummary = {
+      ...summary,
+      id: "child-first",
+      title: "Проверить интерфейс",
+      state: "running",
+      relation: {
+        kind: "subagent",
+        sessionId: "child-first",
+        parentThreadId: "thread",
+        nickname: "Hubble",
+        role: "worker",
+      },
+      codexSettings: { model: "native-model", reasoningEffort: "ultra" },
+      settings: { collaborationMode: "default", model: "incorrect-default" },
+    };
+    context.state.snapshot.threads.push(child);
+    const view = renderThread();
+    const card = view.container.querySelector(".native-subagent-launches")!;
+    expect(view.container.querySelectorAll(".native-subagent-launches")).toHaveLength(1);
+    expect(within(card as HTMLElement).getByText("Запущены 2 субагента")).toBeVisible();
+    expect(screen.getByText("Hubble · native-model · Ultra")).toBeVisible();
+    expect(screen.queryByText(/incorrect-default/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Статус субагента: Работает")).toBeVisible();
+    expect(screen.getByLabelText("Статус субагента: Запущен")).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Открыть диалог субагента: Проверить интерфейс" }),
+    ).toHaveAttribute("href", "/threads/child-first");
+    expect(screen.queryByText(/Нажмите на задачу/)).not.toBeInTheDocument();
+    context.state.snapshot.threads = context.state.snapshot.threads.map((thread) =>
+      thread.id === child.id ? { ...thread, state: "completed" } : thread,
+    );
+    view.rerender(threadRoute());
+    expect(screen.getByLabelText("Статус субагента: Готово")).toBeVisible();
+    expect(screen.queryByLabelText("Статус субагента: Работает")).not.toBeInTheDocument();
+    expect(context.refreshDetail).not.toHaveBeenCalledWith("child-first");
+    expect(context.loadTurnItems).not.toHaveBeenCalled();
+  });
+
+  it("keeps native launch groups on their side of intervening messages", () => {
+    const launch = (id: string): ActivityItem => ({
+      type: "subagentLaunch",
+      source: "codex",
+      id,
+      title: id,
+      threadId: id,
+      status: "completed",
+    });
+    const context = mockThreadConnection(threadApi(), summary, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            launch("first"),
+            {
+              type: "agentMessage",
+              id: "between",
+              status: "completed",
+              text: "Продолжим исследование",
+              timestamp: 1,
+              phase: "commentary",
+              images: [],
+            },
+            launch("second"),
+          ],
+        },
+      ],
+    });
+    const view = renderThread();
+    expect(view.container.querySelectorAll(".native-subagent-launches")).toHaveLength(2);
+    expect(context.loadTurnItems).not.toHaveBeenCalled();
+  });
+
+  it("shows nested native launches in the read-only child transcript", () => {
+    const child: ThreadSummary = {
+      ...summary,
+      relation: {
+        kind: "subagent",
+        sessionId: "thread",
+        parentThreadId: "parent",
+        nickname: "Hubble",
+        role: "worker",
+      },
+    };
+    mockThreadConnection(threadApi(), child, {
+      turns: [
+        {
+          id: "turn",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "subagentLaunch",
+              source: "codex",
+              id: "launch",
+              status: "completed",
+              title: "Вложенная задача",
+              threadId: "nested",
+            },
+          ],
+        },
+      ],
+    });
+    renderThread();
+    expect(
+      screen.getByRole("link", { name: "Открыть диалог субагента: Вложенная задача" }),
+    ).toHaveAttribute("href", "/threads/nested");
+    expect(screen.queryByRole("textbox", { name: "Сообщение Codex" })).not.toBeInTheDocument();
+  });
+
+  it("renders native launch failures without links and uses the agent path when metadata is absent", () => {
+    const view = render(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "subagentLaunch",
+            source: "codex",
+            id: "launch",
+            status: "inProgress",
+            title: "",
+            threadId: null,
+            agentPath: "/root/mobile_review",
+          }}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("mobile_review")).toBeVisible();
+    expect(screen.getByLabelText("Статус субагента: Запуск")).toBeVisible();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    view.rerender(
+      <MemoryRouter>
+        <Activity
+          item={{
+            type: "subagentLaunch",
+            source: "codex",
+            id: "launch",
+            status: "failed",
+            title: "Проверить интерфейс",
+            threadId: "unavailable-child",
+          }}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Не удалось запустить субагента")).toBeVisible();
+    expect(screen.getByLabelText("Статус субагента: Ошибка")).toBeVisible();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("omits empty text activities and hides copy for image-only messages", () => {
     const view = render(
       <Activity

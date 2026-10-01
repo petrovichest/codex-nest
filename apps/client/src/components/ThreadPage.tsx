@@ -1,5 +1,6 @@
 import { useTypography } from "../typography";
 import { PasteBlocks } from "./PasteBlocks";
+import { isNativeSubagentLaunch, NativeSubagentLaunchCard } from "./NativeSubagentLaunchCard";
 import { PasteMessageEditor } from "./PasteEditor";
 import { PastedMarkdown } from "./PastedMarkdown";
 import {
@@ -4052,13 +4053,21 @@ export function ThreadPage({
                                     style={{ gridRow: index + leadingPendingRows + 1 }}
                                     key={entry.map((item) => item.id).join(":")}
                                   >
-                                    <MemoizedActivityGroup
-                                      items={entry}
-                                      cwd={workspaceSummary.cwd}
-                                      onDownload={downloadFile}
-                                      onLoadImage={loadLocalImage}
-                                      onOpenArtifact={openLinkedArtifact}
-                                    />
+                                    {entry[0] && isNativeSubagentLaunch(entry[0]) ? (
+                                      <NativeSubagentLaunchCard
+                                        items={entry.filter(isNativeSubagentLaunch)}
+                                        threads={state.snapshot?.threads}
+                                        models={state.snapshot?.models}
+                                      />
+                                    ) : (
+                                      <MemoizedActivityGroup
+                                        items={entry}
+                                        cwd={workspaceSummary.cwd}
+                                        onDownload={downloadFile}
+                                        onLoadImage={loadLocalImage}
+                                        onOpenArtifact={openLinkedArtifact}
+                                      />
+                                    )}
                                   </div>
                                 ) : (
                                   <div
@@ -5489,6 +5498,7 @@ export function Activity({
     );
   }
   if (item.type === "subagentLaunch") {
+    if (isNativeSubagentLaunch(item)) return <NativeSubagentLaunchCard items={[item]} />;
     const label =
       item.status === "failed"
         ? t("Не удалось запустить субагента")
@@ -6944,7 +6954,12 @@ function groupActivities(items: ActivityItem[]): Array<ActivityItem | ActivityIt
   };
   for (const item of activitiesForDisplay(items)) {
     if (!hasVisibleActivity(item)) continue;
-    if (["command", "fileChange", "tool"].includes(item.type) && isTechnicalActivity(item)) {
+    const nativeLaunch = isNativeSubagentLaunch(item);
+    if (
+      nativeLaunch ||
+      (["command", "fileChange", "tool"].includes(item.type) && isTechnicalActivity(item))
+    ) {
+      if (group.length && isNativeSubagentLaunch(group[0]!) !== nativeLaunch) flush();
       group.push(item);
     } else {
       flush();
@@ -6971,7 +6986,10 @@ function isTechnicalActivity(item: ActivityItem): boolean {
 
 function activitiesForThreadDisplay(items: ActivityItem[], isSubagent: boolean): ActivityItem[] {
   if (!isSubagent) return items;
-  return items.filter((item) => item.type === "userMessage" || item.type === "agentMessage");
+  return items.filter(
+    (item) =>
+      item.type === "userMessage" || item.type === "agentMessage" || isNativeSubagentLaunch(item),
+  );
 }
 
 function activitiesForDisplay(items: ActivityItem[]): ActivityItem[] {

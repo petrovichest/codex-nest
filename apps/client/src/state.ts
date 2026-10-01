@@ -1090,11 +1090,11 @@ function upsertActivity(
 }
 
 function chronologicalActivityPosition(items: ActivityItem[], item: ActivityItem): number {
-  if (!("timestamp" in item) || item.timestamp === null) return items.length;
+  if (!("timestamp" in item) || item.timestamp == null) return items.length;
   const timestamp = item.timestamp;
   const later = items.findIndex(
     (candidate) =>
-      "timestamp" in candidate && candidate.timestamp !== null && candidate.timestamp > timestamp,
+      "timestamp" in candidate && candidate.timestamp != null && candidate.timestamp > timestamp,
   );
   return later < 0 ? items.length : later;
 }
@@ -1237,8 +1237,8 @@ function withPreservedTimestamp(current: ActivityItem, incoming: ActivityItem): 
   if (
     "timestamp" in current &&
     "timestamp" in incoming &&
-    current.timestamp !== null &&
-    incoming.timestamp === null
+    current.timestamp != null &&
+    incoming.timestamp == null
   ) {
     return { ...incoming, timestamp: current.timestamp } as ActivityItem;
   }

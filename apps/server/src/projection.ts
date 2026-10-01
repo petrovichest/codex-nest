@@ -3314,6 +3314,14 @@ export class AppProjection extends EventEmitter {
         ) {
           this.activity.delete(key);
         }
+        if (
+          item.type === "subagentLaunch" &&
+          item.source === "codex" &&
+          previous?.type === "subagentLaunch" &&
+          previous.timestamp != null
+        ) {
+          item.timestamp = previous.timestamp;
+        }
         this.activity.set(key, item);
         this.publishActivityUpsert(notification.params.threadId, notification.params.turnId, item);
         this.touchThreadActivity(notification.params.threadId, eventTimestamp);
@@ -3509,7 +3517,7 @@ export class AppProjection extends EventEmitter {
       text: previous && "text" in previous ? previous.text + delta : delta,
       images: previous && "images" in previous ? (previous.images ?? []) : [],
       timestamp:
-        previous && "timestamp" in previous
+        previous && "timestamp" in previous && previous.timestamp !== undefined
           ? previous.timestamp
           : (this.progress.get(turnKey(threadId, turnId))?.startedAt ?? Date.now()),
       phase: previous && "phase" in previous ? previous.phase : null,
@@ -4125,6 +4133,17 @@ function subagentTranscriptTurnViews(
     }));
   }
 
+  // Native v2 children have their own transcript, without an initial userMessage.
+  // Unloaded threads may omit the input capability, so also recognize input-free history.
+  if (
+    isSpawnedSubagent(thread) &&
+    !meta?.managedParent &&
+    (thread.canAcceptDirectInput === false ||
+      !turns.some((turn) => turn.items.some((item) => item.type === "userMessage")))
+  ) {
+    return turns;
+  }
+
   const expectedTitle = thread.name?.trim() || null;
   let boundary: { turnIndex: number; itemIndex: number } | null = null;
 
@@ -4348,6 +4367,7 @@ function isConversationMessage(item: ActivityItem): boolean {
     item.type === "userMessage" ||
     item.type === "agentMessage" ||
     item.type === "plan" ||
+    (item.type === "subagentLaunch" && item.source === "codex") ||
     (item.type === "tool" && Boolean(item.images?.length))
   );
 }
@@ -4477,6 +4497,7 @@ function mergeLiveActivities(
     const finalResponse =
       turnStatus !== "inProgress" &&
       (item.type === "userMessage" ||
+        (item.type === "subagentLaunch" && item.source === "codex") ||
         (item.type === "tool" && Boolean(item.images?.length)) ||
         (isAssistantTextActivity(item) && item.phase !== "final_answer"))
         ? result.findIndex(
@@ -4757,6 +4778,39 @@ function normalizeActivity(
         detail: "Инструмент",
         ...toolImageContent(item.output),
       };
+    case "subAgentActivity":
+    case "collabAgentToolCall": {
+      if (item.type === "subAgentActivity" && item.kind === "started") {
+        return {
+          type: "subagentLaunch",
+          id: item.id,
+          source: "codex",
+          status: lifecycleStarted ? "inProgress" : "completed",
+          title: item.agentPath.split("/").filter(Boolean).at(-1) ?? "Субагент",
+          threadId: item.agentThreadId || null,
+          agentPath: item.agentPath,
+          timestamp,
+        };
+      }
+      if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent") {
+        return {
+          type: "subagentLaunch",
+          id: item.id,
+          source: "codex",
+          status: normalizeItemStatus(item.status),
+          title: (item.prompt && subagentTaskTitle(item.prompt)) || "Субагент",
+          threadId: item.receiverThreadIds[0] ?? null,
+          timestamp,
+        };
+      }
+      return {
+        type: "tool",
+        id: item.id,
+        status: "completed",
+        title: item.type,
+        detail: "Активность Codex",
+      };
+    }
     case "imageView":
       return {
         type: "tool",
@@ -4870,6 +4924,14 @@ function sameRenderedActivity(
   second: ActivityItem,
   allowPrefix: boolean,
 ): boolean {
+  if (
+    first.type === "subagentLaunch" &&
+    second.type === "subagentLaunch" &&
+    first.source === "codex" &&
+    second.source === "codex"
+  ) {
+    return Boolean(first.threadId && first.threadId === second.threadId);
+  }
   if (
     first.type !== second.type ||
     !["agentMessage", "reasoning", "plan"].includes(first.type) ||
