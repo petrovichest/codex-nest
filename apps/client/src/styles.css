@@ -703,6 +703,20 @@
   height: 14px;
 }
 
+.thread-subagent-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.thread-subagent-count svg {
+  width: 14px;
+  height: 14px;
+}
+
 .thread-branch-children {
   margin-left: 14px;
   padding-left: 5px;

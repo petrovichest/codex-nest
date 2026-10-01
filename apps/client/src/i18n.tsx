@@ -651,6 +651,12 @@ const ENGLISH: Record<string, string> = {
   "Включить командный режим": "Enable Team mode",
   "Свернуть субагентов": "Collapse subagents",
   "Показать субагентов": "Show subagents",
+  "Субагенты · {{count}}": "Subagents · {{count}}",
+  "{{count}} агент работает": "{{count}} agent running",
+  "{{count}} агента работают": "{{count}} agents running",
+  "{{count}} агентов работают": "{{count}} agents running",
+  "В очереди: {{count}}": "Queued: {{count}}",
+  "Требуется внимание: {{count}}": "Needs attention: {{count}}",
   "Субагент управляется родительской сессией. Здесь доступен только просмотр.":
     "This subagent is managed by its parent session. This view is read-only.",
   "Открыть родительскую сессию": "Open parent session",

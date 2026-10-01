@@ -1,6 +1,7 @@
 import { useTypography } from "../typography";
 import { PasteBlocks } from "./PasteBlocks";
 import { isNativeSubagentLaunch, NativeSubagentLaunchCard } from "./NativeSubagentLaunchCard";
+import { SubagentActivityBar } from "./SubagentActivityBar";
 import { PasteMessageEditor } from "./PasteEditor";
 import { PastedMarkdown } from "./PastedMarkdown";
 import {
@@ -650,6 +651,14 @@ export function ThreadPage({
   const parentThreadId =
     summary?.relation.kind === "subagent" ? summary.relation.parentThreadId : null;
   const isSubagent = parentThreadId !== null;
+  const childSubagents = useMemo(
+    () =>
+      (state.snapshot?.threads ?? []).filter(
+        (thread) =>
+          thread.relation.kind === "subagent" && thread.relation.parentThreadId === threadId,
+      ),
+    [state.snapshot?.threads, threadId],
+  );
   const inputUnavailable = summary?.canAcceptDirectInput === false;
   const parentSummary = parentThreadId
     ? state.snapshot?.threads.find((thread) => thread.id === parentThreadId)
@@ -4480,6 +4489,12 @@ export function ThreadPage({
                 <ArrowDownIcon />
               </button>
             )}
+            <SubagentActivityBar
+              key={threadId}
+              threads={childSubagents}
+              models={state.snapshot?.models ?? []}
+              turns={detail?.turns}
+            />
           </Composer>
         )}
       </div>

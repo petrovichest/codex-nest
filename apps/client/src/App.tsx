@@ -6,6 +6,7 @@ import {
   type TouchEvent as ReactTouchEvent,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -52,6 +53,7 @@ import {
   PlusIcon,
   SearchIcon,
   SlidersIcon,
+  TeamIcon,
   TrashIcon,
 } from "./components/Icons";
 import { NewSession } from "./components/NewSession";
@@ -1085,7 +1087,9 @@ function Sidebar({
   }
 
   function toggleBranchHistory(threadId: string, total: number) {
-    setBranchHistoryExpansions((current) => toggleListExpansion(current, threadId, total, 0));
+    setBranchHistoryExpansions((current) =>
+      toggleListExpansion(current, threadId, total, THREAD_PREVIEW_LIMIT),
+    );
   }
 
   function renderActiveThread(thread: ThreadSummary) {
@@ -1970,6 +1974,8 @@ function ThreadBranch({
 }) {
   const { t } = useI18n();
   const { state } = useConnection();
+  const [expanded, setExpanded] = useState(false);
+  const childrenId = useId();
   const forkOperations = forkOperationsFromSnapshot(state.snapshot).filter(
     (operation) => operation.sourceThreadId === thread.id && operation.status !== "ready",
   );
@@ -1981,15 +1987,24 @@ function ThreadBranch({
   const historyChildren = children.filter((child) => child.state !== "running");
   const historyExpansion = branchHistoryExpansions.get(thread.id);
   const historyLimit =
-    historyExpansion === "all" ? historyChildren.length : (historyExpansion ?? 0);
+    historyExpansion === "all"
+      ? historyChildren.length
+      : (historyExpansion ?? THREAD_PREVIEW_LIMIT);
   const showsAllHistory = historyChildren.length > 0 && historyLimit >= historyChildren.length;
   const visibleChildren = [...activeChildren, ...historyChildren.slice(0, historyLimit)];
 
   return (
     <div className="thread-branch">
-      <ThreadLink thread={thread} onNavigate={onNavigate} />
-      {(children.length > 0 || forkOperations.length > 0) && (
-        <div className="thread-branch-children">
+      <ThreadLink
+        thread={thread}
+        onNavigate={onNavigate}
+        subagentCount={children.length}
+        subagentsExpanded={expanded}
+        subagentsId={childrenId}
+        onToggleSubagents={() => setExpanded((value) => !value)}
+      />
+      {((expanded && children.length > 0) || forkOperations.length > 0) && (
+        <div className="thread-branch-children" id={childrenId}>
           {forkOperations.map((operation) => (
             <ForkOperationRow
               operation={operation}
@@ -1998,17 +2013,18 @@ function ThreadBranch({
               onNavigate={onNavigate}
             />
           ))}
-          {visibleChildren.map((child) => (
-            <ThreadBranch
-              branchHistoryExpansions={branchHistoryExpansions}
-              thread={child}
-              childrenByParent={childrenByParent}
-              key={child.id}
-              onNavigate={onNavigate}
-              onToggleHistory={onToggleHistory}
-            />
-          ))}
-          {historyChildren.length > 0 && (
+          {expanded &&
+            visibleChildren.map((child) => (
+              <ThreadBranch
+                branchHistoryExpansions={branchHistoryExpansions}
+                thread={child}
+                childrenByParent={childrenByParent}
+                key={child.id}
+                onNavigate={onNavigate}
+                onToggleHistory={onToggleHistory}
+              />
+            ))}
+          {expanded && historyChildren.length > THREAD_PREVIEW_LIMIT && (
             <button
               className="show-more"
               type="button"
@@ -2043,6 +2059,8 @@ function ActiveThreadBranch({
   runningOrderByParent: Map<string | null, string[]>;
 }) {
   const { state } = useConnection();
+  const [expanded, setExpanded] = useState(false);
+  const childrenId = useId();
   const forkOperations = forkOperationsFromSnapshot(state.snapshot).filter(
     (operation) =>
       operation.sourceThreadId === thread.id &&
@@ -2062,9 +2080,13 @@ function ActiveThreadBranch({
         onNavigate={onNavigate}
         secondaryLabel={projectLabel}
         onNewSession={onNewSession}
+        subagentCount={children.length}
+        subagentsExpanded={expanded}
+        subagentsId={childrenId}
+        onToggleSubagents={() => setExpanded((value) => !value)}
       />
-      {(children.length > 0 || forkOperations.length > 0) && (
-        <div className="thread-branch-children">
+      {((expanded && children.length > 0) || forkOperations.length > 0) && (
+        <div className="thread-branch-children" id={childrenId}>
           {forkOperations.map((operation) => (
             <ForkOperationRow
               operation={operation}
@@ -2073,16 +2095,17 @@ function ActiveThreadBranch({
               onNavigate={onNavigate}
             />
           ))}
-          {children.map((child) => (
-            <ActiveThreadBranch
-              onNewSession={onNewSession}
-              thread={child}
-              childrenByParent={childrenByParent}
-              key={child.id}
-              onNavigate={onNavigate}
-              runningOrderByParent={runningOrderByParent}
-            />
-          ))}
+          {expanded &&
+            children.map((child) => (
+              <ActiveThreadBranch
+                onNewSession={onNewSession}
+                thread={child}
+                childrenByParent={childrenByParent}
+                key={child.id}
+                onNavigate={onNavigate}
+                runningOrderByParent={runningOrderByParent}
+              />
+            ))}
         </div>
       )}
     </div>
@@ -2178,11 +2201,19 @@ function ThreadLink({
   onNavigate,
   secondaryLabel,
   onNewSession,
+  subagentCount = 0,
+  subagentsExpanded = false,
+  subagentsId,
+  onToggleSubagents,
 }: {
   thread: ThreadSummary;
   onNavigate(): void;
   secondaryLabel?: string;
   onNewSession?(projectId: string): void;
+  subagentCount?: number;
+  subagentsExpanded?: boolean;
+  subagentsId?: string;
+  onToggleSubagents?(): void;
 }) {
   const { api, dispatch, state } = useConnection();
   const { language, t } = useI18n();
@@ -2360,7 +2391,20 @@ function ThreadLink({
           }
         }}
       >
-        <span className="thread-branch-spacer" />
+        {subagentCount > 0 ? (
+          <button
+            type="button"
+            className="thread-branch-toggle"
+            aria-label={t(subagentsExpanded ? "Свернуть субагентов" : "Показать субагентов")}
+            aria-expanded={subagentsExpanded}
+            aria-controls={subagentsExpanded ? subagentsId : undefined}
+            onClick={onToggleSubagents}
+          >
+            {subagentsExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
+          </button>
+        ) : (
+          <span className="thread-branch-spacer" />
+        )}
         <NavLink
           className={({ isActive }) =>
             `thread-link${hasActions ? " has-actions" : ""}${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
@@ -2392,6 +2436,11 @@ function ThreadLink({
           ) : (
             <span className="thread-link-title" ref={titleRef}>
               <span className="thread-link-title-text">{displayTitle}</span>
+            </span>
+          )}
+          {subagentCount > 0 && (
+            <span className="thread-subagent-count" aria-hidden="true">
+              <TeamIcon /> {subagentCount}
             </span>
           )}
           <span className="thread-marker-slot">

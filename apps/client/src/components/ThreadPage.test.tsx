@@ -669,6 +669,11 @@ describe("Activity", () => {
     const card = view.container.querySelector(".native-subagent-launches")!;
     expect(view.container.querySelectorAll(".native-subagent-launches")).toHaveLength(1);
     expect(within(card as HTMLElement).getByText("Запущены 2 субагента")).toBeVisible();
+    const toggle = within(card as HTMLElement).getByRole("button", { name: "Показать субагентов" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(card as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(card as HTMLElement).getByText("1 работает")).toBeVisible();
+    fireEvent.click(toggle);
     expect(screen.getByText("Hubble · native-model · Ultra")).toBeVisible();
     expect(screen.queryByText(/incorrect-default/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Статус субагента: Работает")).toBeVisible();
@@ -686,6 +691,124 @@ describe("Activity", () => {
     expect(context.refreshDetail).not.toHaveBeenCalledWith("child-first");
     expect(context.loadTurnItems).not.toHaveBeenCalled();
   });
+
+  it.each(["default", "team"] as const)(
+    "keeps %s agents visible without loaded launch history and dismisses their list without stopping the task",
+    (collaborationMode) => {
+      const api = threadApi();
+      const context = mockThreadConnection(
+        api,
+        {
+          ...summary,
+          state: "running",
+          currentTurnId: "active-turn",
+          settings: { collaborationMode },
+        },
+        { olderTurnsCursor: "unloaded-launches" },
+      );
+      const child = (
+        id: string,
+        state: ThreadSummary["state"],
+        parentThreadId = "thread",
+      ): ThreadSummary => ({
+        ...summary,
+        id,
+        title: `Задача ${id}`,
+        state,
+        relation: { kind: "subagent", sessionId: id, parentThreadId, nickname: id, role: "worker" },
+        codexSettings: { model: "gpt", reasoningEffort: "ultra" },
+        settings: { collaborationMode: "default", model: "incorrect-default" },
+      });
+      const children = [
+        child("Hubble", "running"),
+        child("Mencius", "queued"),
+        child("Carson", "needsAttention"),
+        child("ready", "completed"),
+      ];
+      context.state.snapshot.threads.push(
+        ...children,
+        child("unrelated", "running", "other"),
+        child("nested", "running", "Hubble"),
+        { ...child("archived", "running"), archived: true },
+      );
+      const view = renderThread();
+      const bar = view.container.querySelector(".subagent-activity") as HTMLElement;
+      expect(bar.closest(".conversation-scroll")).toBeNull();
+      expect(within(bar).getByRole("status")).toHaveTextContent(
+        "1 агент работает · В очереди: 1 · Требуется внимание: 1",
+      );
+      const toggle = within(bar).getByRole("button", { name: "Показать субагентов" });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(within(bar).queryByRole("link")).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(within(bar).getAllByRole("link")).toHaveLength(4);
+      expect(within(bar).getByText("Hubble · GPT · Ultra")).toBeVisible();
+      expect(within(bar).getByLabelText("Статус субагента: Готово")).toBeVisible();
+      expect(within(bar).queryByText(/incorrect-default|unrelated|nested|archived/)).toBeNull();
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(toggle).toHaveFocus();
+      expect(api.interrupt).not.toHaveBeenCalled();
+      expect(api.startTurn).not.toHaveBeenCalled();
+      context.state.snapshot.threads = context.state.snapshot.threads.map((thread) =>
+        thread.id === "Hubble" ? { ...thread, title: "Без названия" } : thread,
+      );
+      view.rerender(threadRoute());
+      fireEvent.click(toggle);
+      expect(
+        within(bar).getByRole("link", { name: "Открыть диалог субагента: Hubble" }),
+      ).toBeVisible();
+      fireEvent.keyDown(window, { key: "Escape" });
+      context.state.details.thread.turns = [
+        {
+          id: "unloaded-launches",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+          progress: progress(),
+          items: [
+            {
+              type: "subagentLaunch",
+              source: "codex",
+              id: "launch-Hubble",
+              status: "completed",
+              title: "Проверить интерфейс",
+              threadId: "Hubble",
+            },
+          ],
+        },
+      ];
+      view.rerender(threadRoute());
+      fireEvent.click(toggle);
+      expect(
+        within(bar).getByRole("link", { name: "Открыть диалог субагента: Проверить интерфейс" }),
+      ).toBeVisible();
+      fireEvent.keyDown(window, { key: "Escape" });
+      fireEvent.click(toggle);
+      fireEvent.pointerDown(screen.getByRole("textbox", { name: "Направить текущую задачу" }));
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(toggle);
+      context.state.snapshot.threads = context.state.snapshot.threads.map((thread) =>
+        children.some((entry) => entry.id === thread.id)
+          ? { ...thread, state: "completed" }
+          : thread,
+      );
+      view.rerender(threadRoute());
+      expect(view.container.querySelector(".subagent-activity")).toBeNull();
+      context.state.snapshot.threads = context.state.snapshot.threads.map((thread) =>
+        thread.id === "Hubble" ? { ...thread, state: "running" } : thread,
+      );
+      view.rerender(threadRoute());
+      expect(view.container.querySelector(".subagent-activity-toggle")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+      for (const entry of children)
+        expect(context.refreshDetail).not.toHaveBeenCalledWith(entry.id);
+      expect(context.loadTurnItems).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps native launch groups on their side of intervening messages", () => {
     const launch = (id: string): ActivityItem => ({
@@ -760,6 +883,7 @@ describe("Activity", () => {
       ],
     });
     renderThread();
+    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
     expect(
       screen.getByRole("link", { name: "Открыть диалог субагента: Вложенная задача" }),
     ).toHaveAttribute("href", "/threads/nested");
@@ -782,6 +906,7 @@ describe("Activity", () => {
         />
       </MemoryRouter>,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Показать субагентов" }));
     expect(screen.getByText("mobile_review")).toBeVisible();
     expect(screen.getByLabelText("Статус субагента: Запуск")).toBeVisible();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();

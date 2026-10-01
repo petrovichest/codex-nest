@@ -499,6 +499,8 @@ describe("App routing and navigation", () => {
     const toggle = screen.getByRole("button", { name: "Свернуть закрепленные (2)" });
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getAllByRole("link", { name: /Закрепленная\s*Проект/ })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /Дочерняя в работе/ })).not.toBeInTheDocument();
+    expandSidebarSubagents(/Закрепленная в работе/);
     expect(screen.getByRole("link", { name: /Дочерняя в работе/ })).toBeVisible();
 
     fireEvent.click(toggle);
@@ -520,6 +522,7 @@ describe("App routing and navigation", () => {
       "false",
     );
     fireEvent.click(screen.getByRole("button", { name: "Показать закрепленные (2)" }));
+    expandSidebarSubagents(/Закрепленная в работе/);
     expect(screen.getByRole("link", { name: /Дочерняя в работе/ })).toBeVisible();
   });
 
@@ -746,6 +749,7 @@ describe("App routing and navigation", () => {
       );
       api.createProjectThread.mockReturnValue(new Promise(() => undefined));
       renderApp("/threads/newer");
+      if (isChild) expandSidebarSubagents(new RegExp(baseThread.title));
       const row = screen
         .getByRole("link", { name: /Источник/ })
         .closest(".thread-branch-row") as HTMLElement;
@@ -1129,6 +1133,8 @@ describe("App routing and navigation", () => {
       ).map((element) => element.textContent);
     const context = connection.mock.results.at(-1)!.value;
 
+    expect(childTitles()).toEqual([]);
+    expandSidebarSubagents(new RegExp(root.title));
     expect(childTitles()).toEqual(["Первый агент", "Второй агент", "Агент в очереди"]);
 
     context.state.snapshot = snapshot([
@@ -1305,6 +1311,7 @@ describe("App routing and navigation", () => {
     const rootBranch = screen
       .getByRole("link", { name: /Новая задача в истории/ })
       .closest(".thread-branch") as HTMLElement;
+    expandSidebarSubagents(new RegExp(root.title));
     const nested = rootBranch.querySelector(":scope > .thread-branch-children") as HTMLElement;
     const nestedTitles = Array.from(
       nested.querySelectorAll(":scope > .thread-branch > .thread-branch-row .thread-link-title"),
@@ -1902,7 +1909,7 @@ describe("App routing and navigation", () => {
 
     const parentBranch = screen.getByRole("link", { name: /Родитель/ }).closest(".thread-branch")!;
     fireEvent.click(
-      within(parentBranch as HTMLElement).getByRole("button", { name: "Показать ещё 1" }),
+      within(parentBranch as HTMLElement).getByRole("button", { name: "Показать субагентов" }),
     );
 
     expect(screen.getByRole("link", { name: /Дочерний результат/ })).toBeInTheDocument();
@@ -2518,7 +2525,7 @@ describe("App routing and navigation", () => {
     expect(within(sessions).getByRole("button", { name: "Показать ещё 3" })).toBeInTheDocument();
   });
 
-  it("always shows running children and keeps history behind the button", () => {
+  it("collapses running and completed subagents by default and reveals them without navigating", () => {
     const running: ThreadSummary = {
       ...baseThread,
       id: "running-child",
@@ -2547,22 +2554,31 @@ describe("App routing and navigation", () => {
         role: "worker",
       },
     };
-    mockConnection(snapshot([running, completed, baseThread]));
+    const api = mockConnection(snapshot([running, completed, baseThread]));
 
     const view = renderApp("/threads/newer");
 
+    const root = screen
+      .getByRole("link", { name: baseThread.title })
+      .closest(".thread-branch") as HTMLElement;
+    const toggle = within(root).getByRole("button", { name: "Показать субагентов" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(root).queryByRole("link", { name: /tester/ })).not.toBeInTheDocument();
+    expect(root.querySelector(".thread-subagent-count")).toHaveTextContent("2");
+    fireEvent.click(toggle);
     const childLink = screen.getByRole("link", { name: /tester · Проверить тесты/ });
     expect(childLink.closest(".thread-branch-children")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /historian · Старый отчёт/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /субагентов/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Показать ещё 1" }));
     expect(screen.getByRole("link", { name: /historian · Старый отчёт/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Показать меньше" }));
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("link", { name: /tester · Проверить тесты/ })).toBeNull();
     expect(screen.queryByRole("link", { name: /historian · Старый отчёт/ })).toBeNull();
     expect(view.container.querySelectorAll(".project-sessions > .thread-branch")).toHaveLength(1);
+    expect(api.updateThread).not.toHaveBeenCalled();
+    expect(manualNavigationIntent).not.toHaveBeenCalled();
   });
 
-  it("reveals each always-open subagent branch independently", () => {
+  it("expands nested subagent branches independently and pages completed history", () => {
     const activeChildren = Array.from({ length: 6 }, (_, index): ThreadSummary => ({
       ...baseThread,
       id: `active-child-${index + 1}`,
@@ -2608,6 +2624,8 @@ describe("App routing and navigation", () => {
 
     const view = renderApp("/threads/newer");
 
+    expect(view.container.querySelector(".thread-branch-children")).toBeNull();
+    expandSidebarSubagents(new RegExp(baseThread.title));
     const rootChildren = view.container.querySelector(
       ".project-sessions > .thread-branch > .thread-branch-children",
     ) as HTMLElement;
@@ -2615,14 +2633,16 @@ describe("App routing and navigation", () => {
       Array.from(rootChildren.children).filter((element) =>
         element.classList.contains("thread-branch"),
       );
-    expect(directBranches()).toHaveLength(6);
-    expect(rootChildren.querySelector(":scope > .show-more")).toHaveTextContent("Показать ещё 5");
+    expect(directBranches()).toHaveLength(11);
+    expect(rootChildren.querySelector(":scope > .show-more")).toHaveTextContent("Показать ещё 1");
 
     const firstChildLink = within(rootChildren).getByRole("link", {
       name: /agent-1 · Активный 1/,
     });
     const firstChildBranch = firstChildLink.closest(".thread-branch") as HTMLElement;
 
+    expect(firstChildBranch.querySelector(":scope > .thread-branch-children")).toBeNull();
+    fireEvent.click(within(firstChildBranch).getByRole("button", { name: "Показать субагентов" }));
     const nestedChildren = firstChildBranch.querySelector(
       ":scope > .thread-branch-children",
     ) as HTMLElement;
@@ -2630,23 +2650,19 @@ describe("App routing and navigation", () => {
       Array.from(nestedChildren.children).filter((element) =>
         element.classList.contains("thread-branch"),
       );
-    expect(nestedBranches()).toHaveLength(0);
-
-    fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
-    expect(directBranches()).toHaveLength(11);
-    expect(nestedBranches()).toHaveLength(0);
+    expect(nestedBranches()).toHaveLength(5);
 
     fireEvent.click(nestedChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
-    expect(nestedBranches()).toHaveLength(5);
+    expect(nestedBranches()).toHaveLength(6);
 
     fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
     expect(directBranches()).toHaveLength(12);
     expect(rootChildren.lastElementChild).toHaveTextContent("Показать меньше");
-    expect(nestedBranches()).toHaveLength(5);
+    expect(nestedBranches()).toHaveLength(6);
 
     fireEvent.click(rootChildren.querySelector(":scope > .show-more") as HTMLButtonElement);
-    expect(directBranches()).toHaveLength(6);
-    expect(nestedBranches()).toHaveLength(5);
+    expect(directBranches()).toHaveLength(11);
+    expect(nestedBranches()).toHaveLength(6);
   });
 
   it("restores collapsed projects and resets expanded project and branch lists", () => {
@@ -2680,11 +2696,12 @@ describe("App routing and navigation", () => {
     const firstRootBranch = screen
       .getByRole("link", { name: "Новая задача в истории" })
       .closest(".thread-branch") as HTMLElement;
+    expandSidebarSubagents(new RegExp(baseThread.title));
     const firstChildren = firstRootBranch.querySelector(
       ":scope > .thread-branch-children",
     ) as HTMLElement;
-    fireEvent.click(within(firstChildren).getByRole("button", { name: "Показать ещё 5" }));
-    expect(firstChildren.querySelectorAll(":scope > .thread-branch")).toHaveLength(5);
+    fireEvent.click(within(firstChildren).getByRole("button", { name: "Показать ещё 1" }));
+    expect(firstChildren.querySelectorAll(":scope > .thread-branch")).toHaveLength(6);
     fireEvent.click(screen.getByRole("button", { name: "Проект" }));
     firstView.unmount();
 
@@ -2707,8 +2724,8 @@ describe("App routing and navigation", () => {
       restoredRootBranch.querySelectorAll(":scope > .thread-branch-children > .thread-branch"),
     ).toHaveLength(0);
     expect(
-      within(restoredRootBranch).getByRole("button", { name: "Показать ещё 5" }),
-    ).toBeInTheDocument();
+      within(restoredRootBranch).getByRole("button", { name: "Показать субагентов" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 
   it("keeps sidebar tree state isolated by server", () => {
@@ -2841,7 +2858,7 @@ describe("App routing and navigation", () => {
     expect(directBranches()).toHaveLength(5);
   });
 
-  it("keeps a selected non-running child behind the history button", () => {
+  it("keeps a selected non-running child inside a collapsed branch", () => {
     const child: ThreadSummary = {
       ...baseThread,
       id: "child",
@@ -2861,7 +2878,11 @@ describe("App routing and navigation", () => {
     renderApp("/threads/child");
 
     expect(screen.queryByRole("link", { name: /reviewer · Нужно решение/ })).toBeNull();
-    expect(screen.getByRole("button", { name: "Показать ещё 1" })).toBeInTheDocument();
+    const sidebar = document.querySelector(".sidebar") as HTMLElement;
+    expect(within(sidebar).getByRole("button", { name: "Показать субагентов" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("collapses project sessions without toggling from project actions", () => {
@@ -4823,6 +4844,14 @@ describe("App routing and navigation", () => {
 
 function ThemedApp(props: Omit<React.ComponentProps<typeof App>, "theme" | "onThemeChange">) {
   return <App {...props} {...useTheme()} />;
+}
+
+function expandSidebarSubagents(title: RegExp) {
+  const sidebar = document.querySelector(".sidebar") as HTMLElement;
+  const branch = within(sidebar)
+    .getByRole("link", { name: title })
+    .closest(".thread-branch-row") as HTMLElement;
+  fireEvent.click(within(branch).getByRole("button", { name: "Показать субагентов" }));
 }
 
 function renderApp(path: string, onDisconnected = () => undefined, baseUrl = "https://pi.local") {

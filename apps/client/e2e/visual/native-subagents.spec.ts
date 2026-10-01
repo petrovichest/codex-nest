@@ -6,6 +6,8 @@ import { installVisualFixture, mainThread, snapshot, waitForVisualReady } from "
 const parent: ThreadSummary = {
   ...mainThread,
   title: "Исследование сигналов входа",
+  state: "running",
+  currentTurnId: "native-turn",
   settings: { collaborationMode: "default", model: "gpt-5.6-codex", reasoningEffort: "ultra" },
 };
 const children: ThreadSummary[] = [
@@ -36,10 +38,10 @@ const detail: ThreadDetail = {
   turns: [
     {
       id: "native-turn",
-      status: "completed",
+      status: "inProgress",
       startedAt: Date.UTC(2026, 7, 3, 11, 41),
-      completedAt: Date.UTC(2026, 7, 3, 11, 44),
-      durationMs: 180_000,
+      completedAt: null,
+      durationMs: null,
       progress: {
         startedAt: null,
         explanation: null,
@@ -84,8 +86,17 @@ const detail: ThreadDetail = {
           text: "Пока агенты исследуют свои части, сверяю общие условия и исходные данные.",
           images: [],
           timestamp: Date.UTC(2026, 7, 3, 11, 44),
-          phase: "final_answer",
+          phase: "commentary",
         },
+        ...Array.from({ length: 12 }, (_, index) => ({
+          type: "agentMessage" as const,
+          id: `update-${index}`,
+          status: "completed" as const,
+          text: "Параллельно идёт сбор данных для независимой проверки. Агенты исследуют разные части задачи, после чего сопоставлю их выводы.",
+          images: [],
+          timestamp: Date.UTC(2026, 7, 3, 11, 44 + index),
+          phase: "commentary" as const,
+        })),
       ],
     },
   ],
@@ -130,8 +141,30 @@ for (const theme of ["light", "dark"] as const) {
         await page.route("http://127.0.0.1:4310/**", (route) => route.abort());
         await page.goto("/threads/session-main");
         await waitForVisualReady(page);
+        const sidebarRow = page.locator(".sidebar .thread-branch-row").filter({
+          has: page.locator('a[href="/threads/session-main"]'),
+        });
+        await expect(
+          sidebarRow.getByRole("button", { name: "Показать субагентов" }),
+        ).toHaveAttribute("aria-expanded", "false");
+        await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(0);
+        if (width > 820) {
+          await sidebarRow.getByRole("button", { name: "Показать субагентов" }).click();
+          await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(3);
+          await sidebarRow.getByRole("button", { name: "Свернуть субагентов" }).click();
+          await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(0);
+          await expect(page).toHaveURL(/\/threads\/session-main$/);
+        }
+        const scroll = page.locator(".conversation-scroll");
+        await scroll.evaluate((element) => {
+          element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+          element.scrollTop = 0;
+        });
         const card = page.locator(".native-subagent-launches");
         await expect(card).toHaveCount(1);
+        await expect(card.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+        await expect(card.getByRole("link")).toHaveCount(0);
+        await card.getByRole("button").click();
         await expect(card.getByRole("link")).toHaveCount(3);
         await expect(card.getByText("2 работают", { exact: true })).toBeVisible();
         await expect(card.getByText("1 готов", { exact: true })).toBeVisible();
@@ -168,9 +201,59 @@ for (const theme of ["light", "dark"] as const) {
         });
         expect(surface).toEqual({ matches: true, overflows: false });
         const link = card.getByRole("link").first();
-        await link.focus();
+        await card.getByRole("button").focus();
+        await page.keyboard.press("Tab");
         await expect(link).toBeFocused();
         await expect(link).toHaveCSS("outline-style", "solid");
+        expect(requests.some((url) => /\/threads\/native-\d/.test(url))).toBe(false);
+
+        await scroll.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+        });
+        const bar = page.locator(".subagent-activity");
+        const barToggle = bar.locator(".subagent-activity-toggle");
+        await expect(barToggle).toHaveAttribute("aria-expanded", "false");
+        await expect(barToggle).toBeInViewport();
+        await expect(card).not.toBeInViewport();
+        await expect(bar.getByRole("status")).toHaveText("2 агента работают");
+        await expect(barToggle).toHaveCSS(
+          "font-size",
+          enlarged ? (width <= 820 ? "20px" : "24px") : width <= 820 ? "12px" : "14px",
+        );
+        const topAtTail = await scroll.evaluate((element) => element.scrollTop);
+        await barToggle.click();
+        await expect(bar.getByRole("region")).toBeInViewport();
+        await expect(bar.getByRole("link")).toHaveCount(3);
+        expect(await scroll.evaluate((element) => element.scrollTop)).toBe(topAtTail);
+        await page.keyboard.press("Escape");
+        await expect(barToggle).toHaveAttribute("aria-expanded", "false");
+        await expect(barToggle).toBeFocused();
+        expect(requests.some((url) => url.endsWith("/interrupt"))).toBe(false);
+        await scroll.evaluate((element) => {
+          element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+          element.scrollTop = 0;
+        });
+        await expect(barToggle).toBeInViewport();
+        await barToggle.click();
+        expect(await scroll.evaluate((element) => element.scrollTop)).toBe(0);
+        await page.keyboard.press("Escape");
+        expect(await scroll.evaluate((element) => element.scrollTop)).toBe(0);
+        const geometry = await bar.evaluate((element) => {
+          const composer = element.closest(".composer")!;
+          const panel = element.querySelector(".subagent-activity-panel");
+          return {
+            contained: composer.contains(element),
+            overflows: element.scrollWidth > element.clientWidth,
+            pageOverflows: document.documentElement.scrollWidth > innerWidth,
+            panelClosed: panel === null,
+          };
+        });
+        expect(geometry).toEqual({
+          contained: true,
+          overflows: false,
+          pageOverflows: false,
+          panelClosed: true,
+        });
         expect(requests.some((url) => /\/threads\/native-\d/.test(url))).toBe(false);
 
         if (
@@ -181,12 +264,14 @@ for (const theme of ["light", "dark"] as const) {
           await link.evaluate((element) => {
             element.blur();
           });
-          await page.locator(".timeline").evaluate((element) => {
-            element.scrollTop = 0;
+          await scroll.evaluate((element) => {
+            element.scrollTop = element.scrollHeight;
           });
-          await page
-            .locator(".thread-workspace")
-            .screenshot({ path: testInfo.outputPath("native-subagents.png") });
+          if (width === 390) await barToggle.click();
+          await barToggle.evaluate((element) => {
+            element.blur();
+          });
+          await page.screenshot({ path: testInfo.outputPath("native-subagents.png") });
         }
         if (width === 390 && theme === "light" && !enlarged) {
           await page.route("https://codexnest.visual/api/v1/threads/native-0", (route) =>
@@ -214,7 +299,8 @@ for (const theme of ["light", "dark"] as const) {
               headers: { "access-control-allow-origin": "*" },
             }),
           );
-          await link.focus();
+          if ((await barToggle.getAttribute("aria-expanded")) !== "true") await barToggle.click();
+          await bar.getByRole("link").first().focus();
           await page.keyboard.press("Enter");
           await expect(page).toHaveURL(/\/threads\/native-0$/);
           await expect(page.getByText("Собственный ответ субагента")).toBeVisible();
