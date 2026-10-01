@@ -614,7 +614,17 @@ export class AppProjection extends EventEmitter {
     if (needsCanonicalPage) {
       try {
         page = await this.readTurnsPage(id, null, "desc", !subagent && !options.refresh);
-        await this.restoreActiveTurnFromPage(cached, page.turns);
+        if (page.historyRevision === this.historyRevision(id)) {
+          await this.restoreActiveTurnFromPage(cached, page.turns);
+          if (cached.currentTurnId && !this.subscribedThreads.has(id)) {
+            const resumed = await this.rejoinActiveThread(cached.thread, true);
+            await this.reconcileCompletedTurn(id, resumed.thread.turns);
+            // Rejoining may replay live events and invalidate the page just read.
+            if (page.historyRevision !== this.historyRevision(id)) {
+              page = await this.readTurnsPage(id, null, "desc", false);
+            }
+          }
+        }
       } catch (error) {
         const pending = this.store.view();
         if (pending.messageQueues?.[id]?.length || pending.threadMeta[id]?.draft) {
@@ -628,6 +638,9 @@ export class AppProjection extends EventEmitter {
           throw new ThreadViewUnavailableError("Thread view is temporarily unavailable");
         }
       }
+    } else if (cached.currentTurnId && !this.subscribedThreads.has(id)) {
+      const resumed = await this.rejoinActiveThread(cached.thread, true);
+      await this.reconcileCompletedTurn(id, resumed.thread.turns);
     }
     const state = this.store.view();
     if (page && page.historyRevision !== this.historyRevision(id)) {
@@ -819,9 +832,15 @@ export class AppProjection extends EventEmitter {
   }
 
   private async restoreActiveTurnFromPage(cached: CachedThread, turns: TurnView[]): Promise<void> {
-    if (cached.currentTurnId) return;
     const activeTurn = [...turns].reverse().find((turn) => turn.status === "inProgress");
-    if (!activeTurn) return;
+    if (!activeTurn || activeTurn.id === cached.currentTurnId) return;
+    if (cached.currentTurnId) {
+      const currentIndex = turns.findIndex((turn) => turn.id === cached.currentTurnId);
+      const activeIndex = turns.findIndex((turn) => turn.id === activeTurn.id);
+      // A history page can advance a stale turn, but cannot displace a live turn
+      // it does not contain or replace it with an older one.
+      if (currentIndex < 0 || activeIndex < currentIndex) return;
+    }
     const knownTurn = cached.thread.turns.find((turn) => turn.id === activeTurn.id);
     if (knownTurn && knownTurn.status !== "inProgress") return;
     const outcomeUpdatedAt = this.store.view().threadMeta[cached.thread.id]?.outcomeUpdatedAt;
@@ -1454,16 +1473,32 @@ export class AppProjection extends EventEmitter {
     if (this.isUnmaterialized(threadId)) await this.markMaterialized(threadId);
     const index = cached.thread.turns.findIndex((candidate) => candidate.id === turn.id);
     const existing = cached.thread.turns[index];
+    const knownState = this.turnStates.get(turnKey(threadId, turn.id));
+    if (knownState && knownState.status !== "inProgress" && turn.status === "inProgress") {
+      return;
+    }
     // A completion notification may have arrived while history was being read.
     const source = existing && existing.status !== "inProgress" ? existing : turn;
     if (index < 0) cached.thread.turns.push(source);
     else cached.thread.turns[index] = source;
-    if (source.status === "inProgress" && !cached.currentTurnId) {
+    if (source.status !== "inProgress") {
+      if (source === turn) await this.completeTurn(threadId, source);
+      return;
+    }
+    if (!cached.currentTurnId) {
       await this.setCurrentTurn(threadId, source.id);
     }
     this.replaceTurnState(threadId, source.id, { source, publish: true });
     await this.clearCompletedUserInputs(threadId, [source]);
     await this.saveSessionSnapshot(threadId, true);
+    if (cached.currentTurnId === source.id) {
+      // An acknowledged turn absent from live state means its start event was
+      // missed. A subscription remembered from an earlier turn is not proof
+      // that this connection still receives the thread's events.
+      if (!existing) this.subscribedThreads.delete(threadId);
+      const resumed = await this.rejoinActiveThread(cached.thread);
+      await this.reconcileCompletedTurn(threadId, resumed.thread.turns);
+    }
   }
 
   async setCurrentTurn(threadId: string, turnId: string): Promise<void> {
@@ -2992,18 +3027,21 @@ export class AppProjection extends EventEmitter {
         this.subscribedThreads.add(notification.params.threadId);
         this.unmaterializedThreads.delete(notification.params.threadId);
         const cached = this.threads.get(notification.params.threadId);
+        const key = turnKey(notification.params.threadId, notification.params.turn.id);
+        const knownState = this.turnStates.get(key);
+        if (knownState && knownState.status !== "inProgress") break;
         if (cached) {
           const turnIndex = cached.thread.turns.findIndex(
             (turn) => turn.id === notification.params.turn.id,
           );
+          // A delayed start must not revive a turn already stopped or completed.
+          if (turnIndex >= 0 && cached.thread.turns[turnIndex]!.status !== "inProgress") break;
           if (turnIndex >= 0) cached.thread.turns[turnIndex] = notification.params.turn;
           else cached.thread.turns.push(notification.params.turn);
         }
-        const progress = emptyProgress(notification.params.turn.startedAt);
-        this.progress.set(
-          turnKey(notification.params.threadId, notification.params.turn.id),
-          progress,
-        );
+        if (!this.progress.has(key)) {
+          this.progress.set(key, emptyProgress(notification.params.turn.startedAt));
+        }
         if (this.threads.has(notification.params.threadId)) {
           await this.setCurrentTurn(notification.params.threadId, notification.params.turn.id);
         }

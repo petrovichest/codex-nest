@@ -8083,6 +8083,7 @@ class SettingsBridge extends EventEmitter {
     updatedAt: number;
   } | null = null;
   failNextTurnStart = false;
+  notifyTurnStarted = true;
   failBrowserResumeOnce = false;
   failNextGoalActivation = false;
   failInterrupts = 0;
@@ -8411,7 +8412,9 @@ class SettingsBridge extends EventEmitter {
           : [],
       };
       this.threadTurns.set(threadId, [...(this.threadTurns.get(threadId) ?? []), turn]);
-      this.emit("notification", { method: "turn/started", params: { threadId, turn } });
+      if (this.notifyTurnStarted) {
+        this.emit("notification", { method: "turn/started", params: { threadId, turn } });
+      }
       return {
         turn,
       };
@@ -8661,6 +8664,119 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
 }
 
 describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
+  it.each([false, true])(
+    "restores an acknowledged start and its question without a start notification (interrupted=%s)",
+    async (interrupted) => {
+      const { app, bridge, headers, projection } = await createForkHarness(deliveryVersion);
+      try {
+        if (interrupted) {
+          projection.upsertThread({
+            ...testThread(),
+            status: { type: "active", activeFlags: [] },
+            turns: [testTurn("old-turn", "inProgress")],
+          });
+          expect(
+            (
+              await app.inject({
+                method: "POST",
+                url: "/api/v1/threads/thread/interrupt",
+                headers,
+                payload: { turnId: "old-turn" },
+              })
+            ).statusCode,
+          ).toBe(204);
+        }
+        bridge.notifyTurnStarted = false;
+        const request = bridge.request.getMockImplementation()!;
+        bridge.request.mockImplementation(async (method, params) => {
+          const result = await request(method, params);
+          if (method === "thread/resume") {
+            bridge.emit("request", dismissibleQuestion("new-question"), {
+              respond: vi.fn(),
+              respondError: vi.fn(),
+            });
+          }
+          return result;
+        });
+        bridge.request.mockClear();
+        const message = {
+          method: "POST" as const,
+          url: "/api/v1/threads/thread/turns",
+          headers,
+          payload: { input: "Continue with my instructions", clientMessageId: "missing-start" },
+        };
+        const delivered = await app.inject(message);
+        expect(delivered.statusCode).toBe(201);
+        expect(delivered.json()).toMatchObject({ turnId: "turn" });
+        expect(
+          bridge.request.mock.calls
+            .map(([method]) => method)
+            .filter((method) => method.startsWith("turn/") || method === "thread/resume"),
+        ).toEqual(["turn/start", "thread/resume"]);
+        expect(projection.summary("thread")).toMatchObject({
+          currentTurnId: "turn",
+          state: "needsAttention",
+        });
+        expect(projection.snapshot().attention).toEqual([
+          expect.objectContaining({ turnId: "turn", itemId: "new-question" }),
+        ]);
+        expect((await app.inject(message)).statusCode).toBe(201);
+        await projection.readThread("thread");
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/resume"),
+        ).toHaveLength(1);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+        ).toHaveLength(1);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it("keeps an early completion terminal when the start acknowledgement and notification arrive later", async () => {
+    const { app, bridge, headers, projection } = await createForkHarness(deliveryVersion);
+    try {
+      bridge.notifyTurnStarted = false;
+      const request = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params) => {
+        const result = await request(method, params);
+        if (method === "turn/start") {
+          bridge.emit("notification", {
+            method: "turn/completed",
+            params: { threadId: "thread", turn: testTurn("turn", "completed") },
+          } satisfies ServerNotification);
+          await vi.waitFor(() => expect(projection.summary("thread")?.state).toBe("completed"));
+        }
+        return result;
+      });
+      bridge.request.mockClear();
+      const message = {
+        method: "POST" as const,
+        url: "/api/v1/threads/thread/turns",
+        headers,
+        payload: { input: "Finish quickly", clientMessageId: "early-completion" },
+      };
+      expect((await app.inject(message)).statusCode).toBe(201);
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "thread", turn: testTurn("turn", "inProgress") },
+      } satisfies ServerNotification);
+      expect((await app.inject(message)).statusCode).toBe(201);
+      expect(projection.summary("thread")).toMatchObject({
+        state: "completed",
+        currentTurnId: null,
+      });
+      expect(
+        bridge.request.mock.calls
+          .map(([method]) => method)
+          .filter((method) => method.startsWith("turn/") || method === "thread/resume"),
+      ).toEqual(["turn/start"]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("starts a follow-up after interrupting a question without restoring its form", async () => {
     const { app, bridge, headers, store, projection, attention } =
       await createForkHarness(deliveryVersion);

@@ -19,6 +19,16 @@ const params = {
   model: "original",
 };
 const deliveryReceipt = { version: 1, clientId: "message", threadId: "thread", turnId: "turn" };
+const turn = {
+  id: "turn",
+  items: [],
+  itemsView: "full",
+  status: "inProgress",
+  error: null,
+  startedAt: 3,
+  completedAt: null,
+  durationMs: null,
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -31,7 +41,7 @@ async function setup() {
   directories.push(directory);
   const store = new StateStore(join(directory, "state.json"));
   await store.load();
-  const request = vi.fn(async () => ({ turn: { id: "turn" }, deliveryReceipt }));
+  const request = vi.fn(async () => ({ turn, deliveryReceipt }));
   const bridge = { deliveryVersion: 1, request } as unknown as DeliveryBridge;
   return { store, request, bridge, sender: new DurableDelivery(store, bridge) };
 }
@@ -88,7 +98,7 @@ describe("DurableDelivery", () => {
     });
     bridge.ready = true;
     bridge.deliveryVersion = 1;
-    await expect(recovered.replay("message")).resolves.toEqual(deliveryReceipt);
+    await expect(recovered.replay("message")).resolves.toEqual({ ...deliveryReceipt, turn });
     expect(request).toHaveBeenCalledTimes(2);
   });
   it("keeps a definitive rejection after restart without retrying the native command", async () => {
@@ -126,7 +136,7 @@ describe("DurableDelivery", () => {
         model: "changed",
         expectedTurnId: "another-turn",
       }),
-    ).resolves.toEqual(deliveryReceipt);
+    ).resolves.toEqual({ ...deliveryReceipt, turn });
     expect(request.mock.calls).toEqual([
       ["turn/start", params],
       ["turn/start", params],
@@ -158,6 +168,7 @@ describe("DurableDelivery", () => {
     { deliveryReceipt: { ...deliveryReceipt, clientId: "another-message" } },
     { deliveryReceipt: { ...deliveryReceipt, threadId: "another-thread" } },
     { deliveryReceipt, turn: { id: "another-turn" } },
+    { deliveryReceipt, turn: { id: "turn" } },
   ])("retains the command when the response does not prove its delivery: %j", async (response) => {
     const { store, request, sender } = await setup();
     request.mockResolvedValueOnce(response as never);
@@ -186,12 +197,11 @@ describe("DurableDelivery", () => {
 
   it("sends through an ordinary receiver and replays its local acknowledgement without another RPC", async () => {
     const { store, request } = await setup();
-    request.mockResolvedValue({
-      turn: { id: "turn", items: [], status: "inProgress", error: null },
-    } as never);
+    request.mockResolvedValue({ turn } as never);
     const legacy = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
     await expect(legacy.send("thread", "message", hash, "turn/start", params)).resolves.toEqual({
       turnId: "turn",
+      turn,
     });
     const reopened = new StateStore(store.path);
     await reopened.load();
@@ -229,9 +239,7 @@ describe("DurableDelivery", () => {
   it("does not dispatch concurrent ordinary retries twice", async () => {
     const { store } = await setup();
     const request = vi.fn(async (method: string) =>
-      method === "turn/start"
-        ? { turn: { id: "turn", items: [], status: "inProgress", error: null } }
-        : { data: [], nextCursor: null },
+      method === "turn/start" ? { turn } : { data: [], nextCursor: null },
     );
     const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
     const results = await Promise.allSettled([
@@ -241,6 +249,31 @@ describe("DurableDelivery", () => {
     expect(results.some((result) => result.status === "fulfilled")).toBe(true);
     expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
     expect(store.view().messageReceipts?.message?.status).toBe("delivered");
+  });
+
+  it("retains the terminal turn when an ambiguous ordinary delivery is found in history", async () => {
+    const { store, request } = await setup();
+    const bridge = { request } as unknown as DeliveryBridge;
+    const sender = new DurableDelivery(store, bridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow(
+      "reply lost",
+    );
+    const completed = {
+      ...turn,
+      status: "completed",
+      completedAt: 4,
+      durationMs: 1_000,
+      items: [{ type: "userMessage", id: "user", clientId: "message", content: [] }],
+    };
+    request.mockResolvedValueOnce({ data: [completed], nextCursor: null } as never);
+
+    await expect(sender.replay("message")).resolves.toEqual({ turnId: "turn", turn: completed });
+    await expect(sender.replay("message")).resolves.toEqual({ turnId: "turn" });
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      "turn/start",
+      "thread/turns/list",
+    ]);
   });
 
   it("never downgrades a prepared native command to the ordinary protocol", async () => {

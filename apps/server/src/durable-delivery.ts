@@ -1,6 +1,7 @@
 import type { AppServerState, DeliveryReceipt, MessagePresentation } from "@codexnest/protocol";
 
 import type { StateStore } from "./state/store";
+import type { Turn } from "./codex/generated/v2/Turn";
 import { RpcError } from "./codex/transport";
 import { BridgeUnavailableError } from "./codex/bridge";
 import { parseTurnStart, parseTurnSteer, parseTurnsList } from "./codex/guards";
@@ -39,7 +40,7 @@ export class DurableDelivery {
     params: Record<string, unknown>,
     dispatch?: () => Promise<unknown>,
     presentation?: MessagePresentation,
-  ): Promise<{ turnId: string | null }> {
+  ): Promise<{ turnId: string | null; turn?: Turn }> {
     const existing = this.store.view().messageReceipts?.[clientId];
     // Never downgrade an in-flight native command: only that receiver can safely replay it.
     if (existing ? existing.deliveryVersion !== 1 : this.bridge.deliveryVersion !== 1) {
@@ -89,7 +90,7 @@ export class DurableDelivery {
     params: Record<string, unknown>,
     dispatch?: () => Promise<unknown>,
     presentation?: MessagePresentation,
-  ): Promise<{ turnId: string | null }> {
+  ): Promise<{ turnId: string | null; turn?: Turn }> {
     if (this.bridge.ready === false)
       throw new BridgeUnavailableError(this.bridge.state ?? "unavailable");
     const existing = this.store.view().messageReceipts?.[clientId];
@@ -135,10 +136,10 @@ export class DurableDelivery {
       }
       throw error;
     }
-    const turnId =
-      method === "turn/start" ? parseTurnStart(result).turn.id : parseTurnSteer(result).turnId;
+    const turn = method === "turn/start" ? parseTurnStart(result).turn : undefined;
+    const turnId = turn?.id ?? parseTurnSteer(result).turnId;
     await this.acceptCompatible(clientId, turnId);
-    return { turnId };
+    return { turnId, ...(turn ? { turn } : {}) };
   }
 
   private async acceptCompatible(clientId: string, turnId: string): Promise<void> {
@@ -152,7 +153,9 @@ export class DurableDelivery {
     });
   }
 
-  async replay(clientId: string): Promise<DeliveryReceipt | { turnId: string | null }> {
+  async replay(
+    clientId: string,
+  ): Promise<(DeliveryReceipt | { turnId: string | null }) & { turn?: Turn }> {
     const saved = this.store.view().messageReceipts?.[clientId];
     if (!saved || saved.status === "canceled") {
       throw new DeliveryContractError("Нет подтверждения доставки сообщения.");
@@ -176,7 +179,7 @@ export class DurableDelivery {
         );
         if (delivered) {
           await this.acceptCompatible(clientId, delivered.id);
-          return { turnId: delivered.id };
+          return { turnId: delivered.id, turn: delivered };
         }
         cursor = page.nextCursor;
         if (cursor && seen.has(cursor)) break;
@@ -221,6 +224,7 @@ export class DurableDelivery {
     if (!receipt.turnId || receipt.turnId !== (response.turn?.id ?? response.turnId)) {
       throw new DeliveryContractError("Codex не подтвердил ход сообщения.");
     }
+    const turn = saved.request.method === "turn/start" ? parseTurnStart(result).turn : undefined;
     await this.store.update((state) => {
       const current = state.messageReceipts?.[clientId];
       if (!current || current.status === "canceled") {
@@ -230,7 +234,7 @@ export class DurableDelivery {
       current.turnId = receipt.turnId;
       delete current.request;
     });
-    return receipt;
+    return { ...receipt, ...(turn ? { turn } : {}) };
   }
 }
 

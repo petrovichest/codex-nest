@@ -737,6 +737,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       );
     }
     let turnId: string;
+    let acceptedTurn: Turn | undefined;
     try {
       const resume = async () => {
         const currentSummary = summary!;
@@ -780,8 +781,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       };
       const send = async () => {
         const clientId = startParams.clientUserMessageId;
-        if (!clientId) return bridge.request<unknown>("turn/start", startParams);
-        const receipt = await durableDelivery.send(
+        if (!clientId) {
+          const { turn } = parseTurnStart(await bridge.request<unknown>("turn/start", startParams));
+          return { turnId: turn.id, turn };
+        }
+        return durableDelivery.send(
           threadId,
           clientId,
           messageContentHash(
@@ -799,12 +803,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           undefined,
           Object.keys(pastedText(pastes)).length ? trimPastedMessage(input, pastes) : undefined,
         );
-        return {
-          turn: { id: receipt.turnId, items: [], status: "inProgress", error: null },
-          deliveryReceipt: receipt,
-        };
       };
-      let started: unknown;
+      let started: Awaited<ReturnType<typeof send>>;
       try {
         started = await send();
       } catch (error) {
@@ -814,8 +814,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         await resume();
         started = await send();
       }
-      const turn = parseTurnStart(started);
-      turnId = turn.turn.id;
+      if (!started.turnId) throw new DeliveryContractError("Codex не подтвердил ход сообщения.");
+      turnId = started.turnId;
+      acceptedTurn = started.turn;
     } catch (error) {
       if (teamClaim && teamMarkerId) {
         let recoveredTurnId: string | null;
@@ -843,6 +844,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
     }
     await projection.markMaterialized(threadId);
+    if (acceptedTurn) await projection.restoreDeliveredTurn(threadId, acceptedTurn);
     if (clientMessageId) {
       projection.recordUserMessage(
         threadId,

@@ -1551,6 +1551,11 @@ describe("AppProjection", () => {
     });
     const bridge = new FakeBridge();
     bridge.request.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread/resume") {
+        return {
+          thread: thread("one", "/work", 10, { type: "active", activeFlags: [] }, [canonical]),
+        };
+      }
       if (method !== "thread/turns/list") throw new Error(`Unexpected ${method}`);
       expect(params.itemsView).toBe("full");
       return { data: [canonical], nextCursor: null };
@@ -1570,7 +1575,7 @@ describe("AppProjection", () => {
     expect(detail.turns[0]?.items.map((item) => item.id)).toEqual(expected);
     expect(detail.turns[0]?.itemsLoaded).toBe(false);
     expect(JSON.stringify(detail)).not.toContain("large output");
-    expect(bridge.request).toHaveBeenCalledTimes(1);
+    expect(bridge.request).toHaveBeenCalledTimes(2);
     const full = await projection.readTurnItems("one", "live");
     expect(full.items.map((item) => item.id)).toEqual([...expected, "command"]);
     expect(full.items.at(-1)).toMatchObject({
@@ -4429,6 +4434,10 @@ describe("AppProjection", () => {
       } satisfies ServerNotification);
       const newer = receive("new-turn");
       const late = receive();
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "one", turn: testTurn("question-turn", "inProgress") },
+      } satisfies ServerNotification);
       expect(attention.list()).toEqual([newer]);
       expect(projection.summary("one")).toMatchObject({
         currentTurnId: "new-turn",
@@ -4491,6 +4500,13 @@ describe("AppProjection", () => {
     const unloaded = receive("unloaded-turn");
     const newer = receive("new-turn");
     bridge.request.mockImplementation(async (method) => {
+      if (method === "thread/resume") {
+        return {
+          thread: thread("one", "/work", 5, { type: "active", activeFlags: [] }, [
+            testTurn("new-turn", "inProgress"),
+          ]),
+        };
+      }
       if (method === "thread/turns/list") {
         return {
           data: [testTurn("new-turn", "inProgress"), testTurn("question-turn", "completed")],
@@ -4509,7 +4525,7 @@ describe("AppProjection", () => {
     expect(attention.get(replayed.id)).toBeUndefined();
     await projection.readThread("one");
     expect(attention.list()).toEqual([unloaded, newer]);
-    expect(bridge.request).toHaveBeenCalledTimes(1);
+    expect(bridge.request).toHaveBeenCalledTimes(2);
     await store.flushed();
   });
 
@@ -5153,6 +5169,7 @@ describe("AppProjection", () => {
     });
     const bridge = new FakeBridge();
     bridge.request.mockImplementation(async (method: string) => {
+      if (method === "thread/resume") return { thread: liveThread() };
       if (method === "thread/turns/list") {
         return {
           data: [{ ...testTurn("live", "inProgress"), startedAt: 3 }],
@@ -5180,6 +5197,85 @@ describe("AppProjection", () => {
       state: "running",
       currentTurnId: "live",
     });
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      1,
+    );
+  });
+
+  it.each([false, true])(
+    "advances a stale active turn from history without interrupting it (refresh=%s)",
+    async (refresh) => {
+      const { bridge, projection } = await searchHarness();
+      const old = testTurn("old-turn", "inProgress");
+      projection.upsertThread(
+        thread("one", "/work", 3, { type: "active", activeFlags: [] }, [old]),
+      );
+      bridge.request.mockImplementation(async (method) => {
+        if (method === "thread/read") return { thread: thread("one", "/work", 3) };
+        if (method === "thread/resume") return { thread: liveThread() };
+        if (method === "thread/turns/list") {
+          return {
+            data: [...liveThread().turns, testTurn("old-turn", "completed")],
+            nextCursor: null,
+            backwardsCursor: null,
+          };
+        }
+        throw new Error(`Unexpected ${method}`);
+      });
+
+      if (refresh) await projection.refreshThread("one", { requireFresh: true });
+      const detail = await projection.readThread("one", { refresh });
+
+      expect(detail.summary).toMatchObject({ state: "running", currentTurnId: "live" });
+      expect(detail.turns.at(-1)?.items).toContainEqual(
+        expect.objectContaining({ type: "agentMessage", text: "В процессе" }),
+      );
+      await projection.readThread("one");
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/resume"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("rejoins an open chat after a disconnect and restores its pending question and live text", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codexnest-projection-rejoin-"));
+    directories.push(directory);
+    const store = new StateStore(join(directory, "state.json"));
+    await store.load();
+    const bridge = new FakeBridge(true);
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    bridge.emit("state", "unavailable");
+    bridge.emit("state", "ready");
+    const request = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/resume") {
+        bridge.emit("notification", {
+          method: "turn/started",
+          params: { threadId: "one", turn: liveThread().turns[0]! },
+        } satisfies ServerNotification);
+        attention.receive(userInputServerRequest(501, "Continue?", "live"), {
+          respond: vi.fn(),
+          respondError: vi.fn(),
+        } as unknown as JsonlTransport);
+      }
+      return request(method, params);
+    });
+
+    const detail = await projection.readThread("one", { refresh: true });
+
+    expect(detail.summary).toMatchObject({ currentTurnId: "live", state: "needsAttention" });
+    expect(detail.turns[0]?.items).toContainEqual(
+      expect.objectContaining({ type: "agentMessage", text: "В процессе" }),
+    );
+    expect(projection.snapshot().attention).toEqual([
+      expect.objectContaining({ turnId: "live", itemId: "question-item" }),
+    ]);
+    await projection.readThread("one");
+    expect(bridge.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(
+      2,
+    );
   });
 
   it.each(["completed", "failed", "interrupted"] as const)(
