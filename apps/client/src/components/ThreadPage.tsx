@@ -955,7 +955,9 @@ export function ThreadPage({
         (detail?.turns ?? []).map((turn) => {
           const entries = groupActivities(
             activitiesForThreadDisplay(turn.items, isSubagent).filter(
-              (item) => !isTechnicalActivity(item),
+              (item) =>
+                !isTechnicalActivity(item) &&
+                !(turn.id === summary?.capacityRetry?.failedTurnId && item.type === "error"),
             ),
           );
           const completionResponseId =
@@ -973,7 +975,7 @@ export function ThreadPage({
           return [turn.id, { entries, completionResponseId }] as const;
         }),
       ),
-    [detail?.turns, isSubagent],
+    [detail?.turns, isSubagent, summary?.capacityRetry?.failedTurnId],
   );
   const loadTurnJournal = useCallback(
     (turnId: string) => loadTurnItems(threadId, turnId),
@@ -983,10 +985,20 @@ export function ThreadPage({
     () =>
       new Map(
         (detail?.turns ?? []).map(
-          (turn) => [turn.id, isSubagent ? [] : turn.items.filter(isTechnicalActivity)] as const,
+          (turn) =>
+            [
+              turn.id,
+              isSubagent
+                ? []
+                : turn.items.filter(
+                    (item) =>
+                      isTechnicalActivity(item) ||
+                      (turn.id === summary?.capacityRetry?.failedTurnId && item.type === "error"),
+                  ),
+            ] as const,
         ),
       ),
-    [detail?.turns, isSubagent],
+    [detail?.turns, isSubagent, summary?.capacityRetry?.failedTurnId],
   );
   const forkFromTurnEvent = useCallback(
     (lastTurnId: string, agentMessageId: string, opener?: HTMLElement) => {
@@ -4010,6 +4022,12 @@ export function ThreadPage({
                           turn={turn}
                           active={active}
                           waitingForUserInput={active && waitingForUserInput}
+                          capacityRetryAt={
+                            !workspaceSummary.currentTurnId &&
+                            workspaceSummary.capacityRetry?.failedTurnId === turn.id
+                              ? workspaceSummary.capacityRetry.nextAttemptAt
+                              : undefined
+                          }
                           items={technicalItems}
                           loaded={turn.itemsLoaded !== false}
                           interactive={!isSubagent}
@@ -4260,6 +4278,16 @@ export function ThreadPage({
             <div className="subagent-readonly-copy">
               {t("Субагент управляется родительской сессией. Здесь доступен только просмотр.")}
             </div>
+            {workspaceSummary.capacityRetry && (
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy}
+                onClick={() => void stopTask()}
+              >
+                {t("Стоп")}
+              </button>
+            )}
             {parentThreadId && (
               <Link to={`/threads/${encodeURIComponent(parentThreadId)}`}>
                 <span>{t("Открыть родительскую сессию")}</span>
@@ -4308,6 +4336,7 @@ export function ThreadPage({
             busy={busy || (preparationRef.current.active && pendingOptimisticMessage !== null)}
             running={
               Boolean(workspaceSummary.currentTurnId) ||
+              Boolean(workspaceSummary.capacityRetry) ||
               (workspaceSummary.settings.collaborationMode === "team" &&
                 workspaceSummary.state === "running")
             }
@@ -4330,6 +4359,7 @@ export function ThreadPage({
             onStop={
               !busy &&
               (workspaceSummary.currentTurnId ||
+                workspaceSummary.capacityRetry ||
                 (workspaceSummary.settings.collaborationMode === "team" &&
                   workspaceSummary.state === "running"))
                 ? () => void stopTask()
@@ -6144,6 +6174,7 @@ function TurnActivityDisclosure({
   turn,
   active,
   waitingForUserInput,
+  capacityRetryAt,
   items,
   loaded,
   interactive,
@@ -6158,6 +6189,7 @@ function TurnActivityDisclosure({
   turn: TurnView;
   active: boolean;
   waitingForUserInput: boolean;
+  capacityRetryAt?: number;
   items: ActivityItem[];
   loaded: boolean;
   interactive: boolean;
@@ -6195,6 +6227,7 @@ function TurnActivityDisclosure({
         turn={turn}
         active={active}
         waitingForUserInput={waitingForUserInput}
+        capacityRetryAt={capacityRetryAt}
         loading={loading}
         disclosure={
           canOpen
@@ -6210,7 +6243,7 @@ function TurnActivityDisclosure({
         }
       />
     ),
-    [turn, active, waitingForUserInput, loading, canOpen, open, journalId, load],
+    [turn, active, waitingForUserInput, capacityRetryAt, loading, canOpen, open, journalId, load],
   );
   if (!active && turn.status === "inProgress") return children(null, null);
   const journal = canOpen ? (
@@ -6707,6 +6740,7 @@ function TurnActivityStatus({
   progress = turn?.progress,
   active = turn?.status === "inProgress",
   waitingForUserInput = false,
+  capacityRetryAt,
   loading = false,
   disclosure,
 }: {
@@ -6714,12 +6748,14 @@ function TurnActivityStatus({
   progress?: TurnProgress;
   active?: boolean;
   waitingForUserInput?: boolean;
+  capacityRetryAt?: number;
   loading?: boolean;
   disclosure?: { open: boolean; journalId: string; onToggle(): void };
 }) {
   const { language, t } = useI18n();
   const isActive = active;
-  const isWaiting = isActive && waitingForUserInput;
+  const isWaiting = (isActive && waitingForUserInput) || capacityRetryAt !== undefined;
+  const retryRemaining = useCountdown(capacityRetryAt);
   const showSpinner = !isWaiting && (isActive || loading);
   const startedAt = turn?.startedAt ?? progress?.startedAt ?? null;
   const elapsed = useElapsed(
@@ -6733,13 +6769,20 @@ function TurnActivityStatus({
         ? null
         : Math.max(0, turn.completedAt - startedAt)))
     : null;
-  const label = isWaiting
-    ? t("Ждёт вашего ответа")
-    : isActive
-      ? progress?.explanation?.trim() || t("Codex работает")
-      : turn
-        ? turnOutcomeLabel(turn.status, duration, language, t)
-        : t("Codex работает");
+  const label =
+    capacityRetryAt !== undefined
+      ? retryRemaining > 0
+        ? t("Модель перегружена — следующая попытка через {{duration}}", {
+            duration: formatDuration(retryRemaining, language),
+          })
+        : t("Модель перегружена — повторяем попытку…")
+      : isWaiting
+        ? t("Ждёт вашего ответа")
+        : isActive
+          ? progress?.explanation?.trim() || t("Codex работает")
+          : turn
+            ? turnOutcomeLabel(turn.status, duration, language, t)
+            : t("Codex работает");
   const content = (
     <>
       {(isWaiting || showSpinner || turn?.status !== "completed") && (
@@ -6758,7 +6801,7 @@ function TurnActivityStatus({
           )}
         </span>
       )}
-      <span className="turn-activity-phase" role={isActive ? "status" : undefined}>
+      <span className="turn-activity-phase" role={isActive || isWaiting ? "status" : undefined}>
         {label}
       </span>
     </>
@@ -6820,6 +6863,17 @@ export function formatMessageTime(timestamp: number, language: UiLanguage = "ru"
   }).format(value);
   if (value.toDateString() === today.toDateString()) return time;
   return `${new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: "numeric" }).format(value)}, ${time}`;
+}
+
+function useCountdown(deadline?: number): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (deadline === undefined) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [deadline]);
+  return deadline === undefined ? 0 : Math.max(0, deadline - now);
 }
 
 function useElapsed(startedAt: number, active = true, language: UiLanguage = "ru"): string {

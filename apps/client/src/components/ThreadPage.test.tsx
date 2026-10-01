@@ -84,6 +84,56 @@ afterEach(() => {
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
 
+describe("model capacity waiting", () => {
+  it("counts down on the server's retry and offers Stop without an active turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = threadApi();
+      const waiting: ThreadSummary = {
+        ...summary,
+        state: "running",
+        currentTurnId: null,
+        capacityRetry: { failedTurnId: "failed", nextAttemptAt: Date.now() + 300_000 },
+      };
+      mockThreadConnection(api, waiting, {
+        turns: [
+          {
+            id: "failed",
+            status: "failed",
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            progress: progress(),
+            items: [
+              {
+                type: "error",
+                id: "error",
+                status: "failed",
+                message: "Selected model is at capacity. Please try a different model.",
+              },
+            ],
+          },
+        ],
+      });
+      const view = renderThread();
+      expect(screen.getByText("Модель перегружена — следующая попытка через 5м 0с")).toBeVisible();
+      expect(
+        screen.queryByText("Selected model is at capacity. Please try a different model."),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/^Ошибка через/)).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByText("Модель перегружена — следующая попытка через 4м 59с")).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
+      await act(async () => {});
+      expect(api.interrupt).toHaveBeenCalledWith("thread", undefined);
+      expect(api.startTurn).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("initialSessionSettings", () => {
   const taskDefaults = { serviceTier: "fast", personality: "friendly" };
 

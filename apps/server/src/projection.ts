@@ -43,6 +43,11 @@ import type {
 
 import type { AttentionManager } from "./attention";
 import { stripAttachmentContext } from "./attachments";
+import {
+  CAPACITY_RETRY_INTERVAL_MS,
+  CAPACITY_RETRY_MESSAGE_PREFIX,
+  isCapacityFailure,
+} from "./capacity-retry";
 import type { CodexBridge } from "./codex/bridge";
 import type { ServerNotification } from "./codex/generated/index";
 import type { Model, Thread, Turn } from "./codex/generated/v2/index";
@@ -81,6 +86,7 @@ interface CachedThread {
   currentTurnId: string | null;
   liveOutcome?: ThreadOutcome;
   goalStatus?: ThreadGoal["status"] | null;
+  stoppedGoalForTurn?: { turnId: string; goal: ThreadGoal };
 }
 
 interface PendingActivityDelta {
@@ -1346,6 +1352,7 @@ export class AppProjection extends EventEmitter {
       currentTurnId: activeTurnId(latestThread),
       liveOutcome: current?.liveOutcome,
       goalStatus: current?.goalStatus,
+      stoppedGoalForTurn: current?.stoppedGoalForTurn,
     };
     this.threads.set(thread.id, cached);
     if (reveal) this.hiddenThreads.delete(thread.id);
@@ -1520,6 +1527,48 @@ export class AppProjection extends EventEmitter {
     this.publishThread(threadId);
   }
 
+  async cancelCapacityRetry(
+    threadId: string,
+    failedTurnId?: string,
+    publish = true,
+  ): Promise<void> {
+    if (!this.store.view().threadMeta[threadId]?.capacityRetry) return;
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId];
+      if (
+        !meta?.capacityRetry ||
+        (failedTurnId && meta.capacityRetry.failedTurnId !== failedTurnId)
+      )
+        return;
+      meta.capacityRetryHandledTurnId = meta.capacityRetry.failedTurnId;
+      delete meta.capacityRetry;
+    });
+    if (publish) this.publishThread(threadId);
+  }
+
+  async prepareCapacityRetry(threadId: string, turn: Turn, goal?: ThreadGoal): Promise<void> {
+    const cached = this.threads.get(threadId);
+    if (
+      !cached ||
+      !isCapacityFailure(turn) ||
+      (cached.currentTurnId && cached.currentTurnId !== turn.id)
+    )
+      return;
+    if (goal) cached.stoppedGoalForTurn = { turnId: turn.id, goal };
+    await this.store.update((state) => {
+      const meta = state.threadMeta[threadId];
+      if (meta?.capacityRetry?.failedTurnId === turn.id && goal?.status === "blocked") {
+        meta.capacityRetry.goal = {
+          createdAt: goal.createdAt,
+          updatedAt: goal.updatedAt,
+          objective: goal.objective,
+        };
+      }
+      if (meta) this.updateCapacityRetry(meta, cached, turn, false);
+    });
+    this.publishThread(threadId);
+  }
+
   async markInterrupted(threadId: string, expectedTurnIds: readonly string[]): Promise<void> {
     const cached = this.threads.get(threadId);
     if (!cached) throw new Error("Thread not found");
@@ -1549,6 +1598,9 @@ export class AppProjection extends EventEmitter {
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.lastOutcome = "interrupted";
+      if (expectedTurnIds.length) {
+        meta.capacityRetryHandledTurnId = expectedTurnIds.at(-1);
+      }
       meta.outcomeUpdatedAt = updatedAt;
       for (const [turnId, items] of interruptedTextActivities) {
         retainedTextChanged =
@@ -2153,6 +2205,7 @@ export class AppProjection extends EventEmitter {
           resumedTurnId ??
           (latestThread.status.type === "active" ? (liveCached?.currentTurnId ?? null) : null),
         goalStatus: liveGoalStatus === undefined ? restoredGoalStatus : liveGoalStatus,
+        stoppedGoalForTurn: liveCached?.stoppedGoalForTurn,
       });
       this.hydrateLiveTurn(latestThread);
       await this.clearCompletedUserInputs(thread.id, latestThread.turns);
@@ -2171,6 +2224,7 @@ export class AppProjection extends EventEmitter {
         archived: true,
         currentTurnId: activeTurnId(latestThread),
         goalStatus: liveCached?.goalStatus,
+        stoppedGoalForTurn: liveCached?.stoppedGoalForTurn,
       });
     }
     const state = this.store.view();
@@ -2779,6 +2833,52 @@ export class AppProjection extends EventEmitter {
     }
   }
 
+  private updateCapacityRetry(
+    meta: ThreadMetaState,
+    cached: CachedThread,
+    turn: Turn,
+    recovered: boolean,
+  ): void {
+    if (!isCapacityFailure(turn)) {
+      if (meta.capacityRetry && turn.id !== meta.capacityRetry.failedTurnId) {
+        delete meta.capacityRetry;
+      }
+      return;
+    }
+    if (
+      cached.archived ||
+      this.hiddenThreads.has(cached.thread.id) ||
+      (isSpawnedSubagent(cached.thread) && !meta.managedParent) ||
+      cached.thread.turns.at(-1)?.id !== turn.id ||
+      meta.capacityRetryHandledTurnId === turn.id ||
+      (recovered && !meta.capacityRetry)
+    )
+      return;
+    const goal =
+      cached.stoppedGoalForTurn?.turnId === turn.id ? cached.stoppedGoalForTurn.goal : undefined;
+    if (goal && goal.status !== "blocked") {
+      delete meta.capacityRetry;
+      meta.capacityRetryHandledTurnId = turn.id;
+      return;
+    }
+    meta.capacityRetry = {
+      failedTurnId: turn.id,
+      nextAttemptAt:
+        (turn.completedAt === null ? Date.now() : turn.completedAt * 1_000) +
+        CAPACITY_RETRY_INTERVAL_MS,
+      ...(goal
+        ? {
+            goal: {
+              createdAt: goal.createdAt,
+              updatedAt: goal.updatedAt,
+              objective: goal.objective,
+            },
+          }
+        : {}),
+    };
+    meta.capacityRetryHandledTurnId = turn.id;
+  }
+
   private async completeTurn(
     threadId: string,
     turn: Turn,
@@ -2788,6 +2888,7 @@ export class AppProjection extends EventEmitter {
     this.flushActivityDeltas(threadId, turn.id);
     const cached = this.threads.get(threadId);
     const outcome = normalizeOutcome(turn.status);
+    const wasCurrentTurn = cached?.currentTurnId === turn.id;
     const interruptedTextActivities =
       outcome === "interrupted"
         ? this.collectInterruptedTextActivities(threadId, turn.id, turn)
@@ -2799,6 +2900,13 @@ export class AppProjection extends EventEmitter {
       } else {
         cached.thread.turns.push(turn);
       }
+    }
+    // Park automatic input before clearing the current turn or publishing idle state.
+    if (
+      isCapacityFailure(turn) &&
+      (!recovered || wasCurrentTurn || this.store.view().threadMeta[threadId]?.capacityRetry)
+    ) {
+      await this.prepareCapacityRetry(threadId, turn);
     }
     await this.clearUserInputsForTurn(threadId, turn.id);
     const rolloutPath = this.rolloutPath(threadId);
@@ -2839,6 +2947,7 @@ export class AppProjection extends EventEmitter {
         };
         meta.lastOutcome = outcome;
         meta.outcomeUpdatedAt = updatedAt;
+        this.updateCapacityRetry(meta, cached, turn, recovered);
         retainedTextChanged = updateInterruptedTextActivities(
           meta,
           turn.id,
@@ -2967,7 +3076,31 @@ export class AppProjection extends EventEmitter {
       case "thread/goal/updated": {
         const cached = this.threads.get(notification.params.threadId);
         const statusChanged = cached?.goalStatus !== notification.params.goal.status;
-        if (cached) cached.goalStatus = notification.params.goal.status;
+        if (cached) {
+          if (
+            cached.goalStatus === "active" &&
+            notification.params.goal.status !== "active" &&
+            cached.currentTurnId
+          ) {
+            cached.stoppedGoalForTurn = {
+              turnId: cached.currentTurnId,
+              goal: notification.params.goal,
+            };
+          } else if (notification.params.goal.status === "active") {
+            delete cached.stoppedGoalForTurn;
+          }
+          cached.goalStatus = notification.params.goal.status;
+        }
+        const retry = this.store.view().threadMeta[notification.params.threadId]?.capacityRetry;
+        if (
+          retry?.goal &&
+          (!["active", "blocked"].includes(notification.params.goal.status) ||
+            notification.params.goal.createdAt !== retry.goal.createdAt ||
+            notification.params.goal.objective !== retry.goal.objective ||
+            (!retry.dispatching && notification.params.goal.updatedAt !== retry.goal.updatedAt))
+        ) {
+          await this.cancelCapacityRetry(notification.params.threadId);
+        }
         this.publish({
           type: "goal.changed",
           threadId: notification.params.threadId,
@@ -2979,7 +3112,13 @@ export class AppProjection extends EventEmitter {
       case "thread/goal/cleared": {
         const cached = this.threads.get(notification.params.threadId);
         const statusChanged = cached?.goalStatus !== null;
-        if (cached) cached.goalStatus = null;
+        if (cached) {
+          cached.goalStatus = null;
+          delete cached.stoppedGoalForTurn;
+        }
+        if (this.store.view().threadMeta[notification.params.threadId]?.capacityRetry?.goal) {
+          await this.cancelCapacityRetry(notification.params.threadId);
+        }
         this.publish({
           type: "goal.changed",
           threadId: notification.params.threadId,
@@ -2992,6 +3131,7 @@ export class AppProjection extends EventEmitter {
         const cached = this.threads.get(notification.params.threadId);
         if (cached) {
           cached.archived = true;
+          await this.cancelCapacityRetry(notification.params.threadId);
           await this.saveSessionSnapshot(notification.params.threadId, true);
         }
         this.publishThread(notification.params.threadId);
@@ -3445,6 +3585,14 @@ export class AppProjection extends EventEmitter {
       createdAt: cached.thread.createdAt * 1_000,
       updatedAt,
       currentTurnId: cached.currentTurnId,
+      ...(meta.capacityRetry
+        ? {
+            capacityRetry: {
+              failedTurnId: meta.capacityRetry.failedTurnId,
+              nextAttemptAt: meta.capacityRetry.nextAttemptAt,
+            },
+          }
+        : {}),
       awaitingPlanResponse: meta.awaitingPlanResponse ?? false,
       ...(meta.dismissedPlanTurnId ? { dismissedPlanTurnId: meta.dismissedPlanTurnId } : {}),
       queuedMessageCount: state.messageQueues?.[cached.thread.id]?.length ?? 0,
@@ -3477,6 +3625,7 @@ export class AppProjection extends EventEmitter {
       return "needsAttention";
     }
     const meta = state.threadMeta[cached.thread.id];
+    if (meta?.capacityRetry) return "running";
     if (meta?.managedParent) {
       const managedTask =
         state.threadMeta[meta.managedParent.parentThreadId]?.teamOrchestration?.tasks[
@@ -4475,7 +4624,8 @@ function isInternalTeamContinuationItem(item: Turn["items"][number]): boolean {
     item.type === "userMessage" &&
     typeof item.clientId === "string" &&
     (item.clientId.startsWith("codexnest-team-claim:") ||
-      item.clientId.startsWith("codexnest-team-continuation:"))
+      item.clientId.startsWith("codexnest-team-continuation:") ||
+      item.clientId.startsWith(CAPACITY_RETRY_MESSAGE_PREFIX))
   );
 }
 

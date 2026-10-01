@@ -38,7 +38,8 @@ import { AttentionManager } from "./attention";
 import { hashToken } from "./auth";
 import { CodexBridge } from "./codex/bridge";
 import type { ServerNotification, ServerRequest } from "./codex/generated/index";
-import type { Thread, ThreadItem, Turn } from "./codex/generated/v2/index";
+import type { Thread, ThreadGoal, ThreadItem, Turn } from "./codex/generated/v2/index";
+import { CAPACITY_RETRY_INTERVAL_MS, CAPACITY_RETRY_MESSAGE_PREFIX } from "./capacity-retry";
 import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
@@ -59,6 +60,693 @@ afterEach(async () =>
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   ),
 );
+
+describe("model capacity recovery", () => {
+  afterEach(() => vi.useRealTimers());
+
+  async function harness(mode: "default" | "plan" | "team" = "default") {
+    const context = await createTeamHarness();
+    await context.projection.setSettings("thread", {
+      collaborationMode: mode,
+      model: "gpt-a",
+      reasoningEffort: "high",
+    });
+    await context.app.ready();
+    await nextImmediate();
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date"] });
+    return context;
+  }
+
+  async function fail(
+    context: Awaited<ReturnType<typeof harness>>,
+    id = "capacity-0",
+    threadId = "thread",
+  ) {
+    const previous = context.bridge.threadTurns.get(threadId) ?? [];
+    const turn: Turn = {
+      ...testTurn(id, "failed"),
+      itemsView: "full",
+      error: {
+        message: "Selected model is at capacity. Please try a different model.",
+        codexErrorInfo: "serverOverloaded",
+        additionalDetails: null,
+        misalignment: null,
+      },
+    };
+    context.bridge.threadTurns.set(threadId, [
+      ...previous.filter((entry) => entry.id !== id),
+      turn,
+    ]);
+    context.bridge.emit("notification", {
+      method: "turn/started",
+      params: { threadId, turn: { ...turn, status: "inProgress", error: null } },
+    });
+    context.bridge.emit("notification", { method: "turn/completed", params: { threadId, turn } });
+    await vi.waitFor(() =>
+      expect(context.projection.summary(threadId)?.capacityRetry?.failedTurnId).toBe(id),
+    );
+    await vi.waitFor(() => expect(context.projection.summary(threadId)?.currentTurnId).toBeNull());
+    return turn;
+  }
+
+  async function retry(context: Awaited<ReturnType<typeof harness>>, threadId = "thread") {
+    const deadline = context.store.view().threadMeta[threadId]!.capacityRetry!.nextAttemptAt;
+    await vi.advanceTimersByTimeAsync(Math.max(0, deadline - Date.now()));
+    await vi.waitFor(() =>
+      expect(context.projection.summary(threadId)?.currentTurnId).not.toBeNull(),
+    );
+    await vi.waitFor(() =>
+      expect(context.store.view().threadMeta[threadId]?.capacityRetry).toBeUndefined(),
+    );
+    return context.projection.summary(threadId)!.currentTurnId!;
+  }
+
+  it.each(["default", "plan"] as const)(
+    "retries %s every five minutes without changing settings or duplicating input",
+    async (mode) => {
+      const context = await harness(mode);
+      try {
+        await fail(context);
+        expect(context.projection.summary("thread")).toMatchObject({
+          state: "running",
+          currentTurnId: null,
+        });
+        const firstDeadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+        context.bridge.request.mockClear();
+        await vi.advanceTimersByTimeAsync(firstDeadline - Date.now() - 1);
+        expect(context.bridge.request).not.toHaveBeenCalled();
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const turnId = await retry(context);
+          const starts = context.bridge.request.mock.calls.filter(
+            ([method]) => method === "turn/start",
+          );
+          expect(starts).toHaveLength(attempt + 1);
+          expect(starts.at(-1)?.[1]).toMatchObject({
+            model: "gpt-a",
+            effort: "high",
+            collaborationMode: { mode },
+            clientUserMessageId: expect.stringContaining(CAPACITY_RETRY_MESSAGE_PREFIX),
+          });
+          const view = await context.projection.readThread("thread");
+          expect(
+            view.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage"),
+          ).toEqual([]);
+          if (attempt < 2) await fail(context, turnId);
+        }
+        const successful = testTurn(
+          context.projection.summary("thread")!.currentTurnId!,
+          "completed",
+        );
+        context.bridge.emit("notification", {
+          method: "turn/completed",
+          params: { threadId: "thread", turn: successful },
+        });
+        await vi.waitFor(() =>
+          expect(context.projection.summary("thread")?.state).toBe("completed"),
+        );
+        context.bridge.request.mockClear();
+        await vi.advanceTimersByTimeAsync(10 * CAPACITY_RETRY_INTERVAL_MS);
+        expect(context.bridge.request).not.toHaveBeenCalled();
+      } finally {
+        await context.app.close();
+      }
+    },
+  );
+
+  it("stops waiting without an RPC and ignores duplicate failure events", async () => {
+    const context = await harness();
+    try {
+      const turn = await fail(context);
+      context.bridge.request.mockClear();
+      const stopped = await context.app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/interrupt",
+        headers: context.headers,
+        payload: {},
+      });
+      expect(stopped.statusCode).toBe(204);
+      context.bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "thread", turn },
+      });
+      await nextImmediate();
+      await vi.advanceTimersByTimeAsync(20 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined();
+      expect(context.bridge.request).not.toHaveBeenCalled();
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("keeps queued messages parked and lets Send now cancel waiting", async () => {
+    const context = await harness();
+    try {
+      await fail(context);
+      context.bridge.request.mockClear();
+      const queued = await context.app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue",
+        headers: context.headers,
+        payload: { input: "New direction", clientMessageId: "queued" },
+      });
+      expect(queued.statusCode).toBe(202);
+      await nextImmediate();
+      expect(context.bridge.request).not.toHaveBeenCalled();
+      expect(context.store.view().messageQueues?.thread).toHaveLength(1);
+      const sent = await context.app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/queue/queued/send",
+        headers: context.headers,
+      });
+      expect(sent.statusCode).toBe(200);
+      expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined();
+      expect(
+        context.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+      ).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(
+        context.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+      ).toHaveLength(1);
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("stops a retry whose start RPC is in flight and suppresses its late failure", async () => {
+    const context = await harness();
+    try {
+      await fail(context);
+      let releaseStart!: () => void;
+      context.bridge.parentTurnStartGate = new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+      let entered = false;
+      context.bridge.parentTurnStartEntered = () => {
+        entered = true;
+      };
+      const deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await vi.waitFor(() => expect(entered).toBe(true));
+      const stopped = context.app.inject({
+        method: "POST",
+        url: "/api/v1/threads/thread/interrupt",
+        headers: context.headers,
+        payload: {},
+      });
+      await vi.waitFor(() =>
+        expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined(),
+      );
+      releaseStart();
+      expect((await stopped).statusCode).toBe(204);
+      const turnId = context.bridge.threadTurns.get("thread")!.at(-1)!.id;
+      context.bridge.emit("notification", {
+        method: "turn/completed",
+        params: {
+          threadId: "thread",
+          turn: {
+            ...testTurn(turnId, "failed"),
+            error: {
+              message: "Model overload",
+              codexErrorInfo: "serverOverloaded",
+              additionalDetails: null,
+              misalignment: null,
+            },
+          },
+        },
+      });
+      await nextImmediate();
+      await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(context.bridge.managedTurnSequences.get("thread")).toBe(1);
+      expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined();
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it.each(["budgetLimited", "usageLimited", "paused", "complete"] as const)(
+    "does not continue an overloaded goal that became %s",
+    async (status) => {
+      const context = await harness();
+      try {
+        const goal: ThreadGoal = {
+          threadId: "thread",
+          objective: "Finish work",
+          status: "active",
+          tokenBudget: 10,
+          tokensUsed: 10,
+          timeUsedSeconds: 20,
+          createdAt: 1,
+          updatedAt: 2,
+        };
+        context.bridge.emit("notification", {
+          method: "thread/goal/updated",
+          params: { threadId: "thread", goal },
+        });
+        context.bridge.emit("notification", {
+          method: "turn/started",
+          params: { threadId: "thread", turn: testTurn("failed", "inProgress") },
+        });
+        context.bridge.emit("notification", {
+          method: "thread/goal/updated",
+          params: { threadId: "thread", goal: { ...goal, status } },
+        });
+        context.bridge.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread",
+            turn: {
+              ...testTurn("failed", "failed"),
+              error: {
+                message: "Model overload",
+                codexErrorInfo: "serverOverloaded",
+                additionalDetails: null,
+                misalignment: null,
+              },
+            },
+          },
+        });
+        await vi.waitFor(() => expect(context.projection.summary("thread")?.state).toBe("failed"));
+        context.bridge.request.mockClear();
+        await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+        expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined();
+        expect(context.bridge.request).not.toHaveBeenCalled();
+      } finally {
+        await context.app.close();
+      }
+    },
+  );
+
+  it.each([1, undefined])(
+    "reconciles a lost start reply with receiver version %s without a second model turn",
+    async (version) => {
+      const context = await harness();
+      try {
+        context.bridge.deliveryVersion = version;
+        await fail(context);
+        const original = context.bridge.request.getMockImplementation()!;
+        let loseReply = true;
+        context.bridge.request.mockImplementation(async (method, params) => {
+          const response = await original(method, params);
+          if (method === "turn/start" && loseReply) {
+            loseReply = false;
+            throw new RpcTimeoutError("turn/start", 30_000);
+          }
+          return response;
+        });
+        const deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+        await vi.advanceTimersByTimeAsync(deadline - Date.now());
+        await vi.waitFor(() => expect(loseReply).toBe(false));
+        await vi.waitFor(() =>
+          expect(
+            context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt,
+          ).toBeGreaterThan(Date.now()),
+        );
+        const turnId = await retry(context);
+        expect(turnId).toContain("capacity-turn");
+        expect(context.bridge.managedTurnSequences.get("thread")).toBe(1);
+        expect(
+          context.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+        ).toHaveLength(1);
+      } finally {
+        await context.app.close();
+      }
+    },
+  );
+
+  it("restores an overdue persisted retry once after a server restart", async () => {
+    const context = await harness();
+    await fail(context);
+    const deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+    await context.app.close();
+    const store = new StateStore(context.store.path);
+    await store.load();
+    expect(store.view().threadMeta.thread?.capacityRetry?.nextAttemptAt).toBe(deadline);
+    vi.setSystemTime(deadline + 20 * CAPACITY_RETRY_INTERVAL_MS);
+    const bridge = new SettingsBridge();
+    bridge.threadTurns = context.bridge.threadTurns;
+    const attention = new AttentionManager();
+    const projection = new AppProjection(bridge as unknown as CodexBridge, store, attention);
+    await projection.sync();
+    const app = await buildApp(
+      loadConfig({ statePath: store.path, clientDist: join(dirname(store.path), "missing") }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store,
+        projection,
+        attention,
+      },
+    );
+    try {
+      await app.ready();
+      await nextImmediate();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(store.view().threadMeta.thread?.capacityRetry).toBeUndefined());
+      expect(bridge.managedTurnSequences.get("thread")).toBe(1);
+      expect(projection.summary("thread")?.currentTurnId).toContain("capacity-turn");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("recovers the next blocked goal revision after losing its continuation events", async () => {
+    const context = await harness();
+    try {
+      const goal: ThreadGoal = {
+        threadId: "thread",
+        objective: "Finish work",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 10,
+        timeUsedSeconds: 20,
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      context.bridge.emit("notification", {
+        method: "thread/goal/updated",
+        params: { threadId: "thread", goal },
+      });
+      context.bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "thread", turn: testTurn("capacity-0", "inProgress") },
+      });
+      const blocked = { ...goal, status: "blocked" as const, updatedAt: 3 };
+      context.bridge.emit("notification", {
+        method: "thread/goal/updated",
+        params: { threadId: "thread", goal: blocked },
+      });
+      const failed = await fail(context);
+      await context.store.update((state) => {
+        state.threadMeta.thread!.capacityRetry!.dispatching = true;
+      });
+      // The native continuation ran while Nest was disconnected and failed again.
+      context.bridge.goal = { ...blocked, updatedAt: 4 };
+      context.bridge.threadTurns.set("thread", [failed, { ...failed, id: "native-goal-retry" }]);
+      const deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await vi.waitFor(() =>
+        expect(context.store.view().threadMeta.thread?.capacityRetry).toMatchObject({
+          failedTurnId: "native-goal-retry",
+          goal: { createdAt: 1, updatedAt: 4 },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(CAPACITY_RETRY_INTERVAL_MS);
+      await vi.waitFor(() => expect(context.bridge.goal?.status).toBe("active"));
+      expect(
+        context.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+      ).toHaveLength(0);
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it.each([false, true])(
+    "resumes only the goal blocked by overload; manually paused = %s",
+    async (pause) => {
+      const context = await harness();
+      try {
+        const goal: ThreadGoal = {
+          threadId: "thread",
+          objective: "Finish work",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 10,
+          timeUsedSeconds: 20,
+          createdAt: 1,
+          updatedAt: 2,
+        };
+        context.bridge.goal = goal;
+        context.bridge.emit("notification", {
+          method: "thread/goal/updated",
+          params: { threadId: "thread", goal },
+        });
+        context.bridge.emit("notification", {
+          method: "turn/started",
+          params: { threadId: "thread", turn: testTurn("capacity-0", "inProgress") },
+        });
+        goal.status = "blocked";
+        goal.updatedAt = 3;
+        context.bridge.emit("notification", {
+          method: "thread/goal/updated",
+          params: { threadId: "thread", goal },
+        });
+        await fail(context);
+        expect(context.store.view().threadMeta.thread!.capacityRetry!.goal).toMatchObject({
+          createdAt: 1,
+          updatedAt: 3,
+        });
+        context.bridge.request.mockClear();
+        if (pause) {
+          const response = await context.app.inject({
+            method: "PATCH",
+            url: "/api/v1/threads/thread/goal",
+            headers: context.headers,
+            payload: { status: "paused" },
+          });
+          expect(response.statusCode).toBe(200);
+        }
+        await vi.advanceTimersByTimeAsync(CAPACITY_RETRY_INTERVAL_MS);
+        await vi.waitFor(() =>
+          expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined(),
+        );
+        expect(context.bridge.goal?.status).toBe(pause ? "paused" : "active");
+        expect(
+          context.bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+        ).toHaveLength(0);
+        expect(
+          context.bridge.request.mock.calls.filter(
+            ([method, params]) => method === "thread/goal/set" && params?.status === "active",
+          ),
+        ).toHaveLength(pause ? 0 : 1);
+      } finally {
+        await context.app.close();
+      }
+    },
+  );
+
+  it("keeps managed tasks running across overload, skips watchdogs, and delivers their eventual result", async () => {
+    const context = await harness("team");
+    try {
+      const spawned = dynamicToolJson(
+        await callTeamTool(context.bridge, "thread", "spawn_task", {
+          title: "Capacity child",
+          prompt: "Finish the assigned work.",
+        }),
+      );
+      const threadId = String(spawned.threadId);
+      const taskId = String(spawned.taskId);
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status,
+        ).toBe("running"),
+      );
+      const task = context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]!;
+      const dependent = dynamicToolJson(
+        await callTeamTool(context.bridge, "thread", "spawn_task", {
+          title: "Dependent child",
+          prompt: "Use the completed result.",
+          dependsOn: [taskId],
+        }),
+      );
+      await fail(context, task.childTurnId!, threadId);
+      expect(context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status).toBe(
+        "running",
+      );
+      expect(
+        context.store.view().threadMeta.thread!.teamOrchestration!.tasks[String(dependent.taskId)]
+          ?.status,
+      ).toBe("queued");
+      expect(
+        await triggerTeamWatchdogs(context.store, new Map(), Date.now() + 60 * 60_000),
+      ).toEqual(new Set());
+      context.bridge.request.mockClear();
+      const turnId = await retry(context, threadId);
+      expect(
+        context.bridge.request.mock.calls.find(([method]) => method === "turn/start")?.[1],
+      ).toMatchObject({ model: "gpt-5.6-sol", effort: "high", cwd: "/work" });
+      expect(
+        context.bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+      ).toHaveLength(0);
+      expect(
+        context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.childTurnId,
+      ).toBe(turnId);
+      context.bridge.emit("notification", {
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: {
+            ...testTurn(turnId, "completed"),
+            itemsView: "full",
+            items: [agentMessage("result", "Finished work")],
+          },
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status,
+        ).toBe("completed"),
+      );
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.delivery
+            ?.status,
+        ).toBe("delivered"),
+      );
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[String(dependent.taskId)]
+            ?.status,
+        ).toBe("running"),
+      );
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("cancels a waiting managed task through Stop without interrupting its old failed turn", async () => {
+    const context = await harness("team");
+    try {
+      const spawned = dynamicToolJson(
+        await callTeamTool(context.bridge, "thread", "spawn_task", {
+          title: "Cancel child",
+          prompt: "Finish the assigned work.",
+        }),
+      );
+      const threadId = String(spawned.threadId),
+        taskId = String(spawned.taskId);
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status,
+        ).toBe("running"),
+      );
+      await fail(
+        context,
+        context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]!.childTurnId!,
+        threadId,
+      );
+      context.bridge.request.mockClear();
+      const response = await context.app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${threadId}/interrupt`,
+        headers: context.headers,
+        payload: {},
+      });
+      expect(response.statusCode).toBe(204);
+      expect(context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status).toBe(
+        "interrupted",
+      );
+      expect(
+        context.bridge.request.mock.calls.filter(([method]) => method === "turn/interrupt"),
+      ).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(
+        context.bridge.request.mock.calls.filter(
+          ([method, params]) => method === "turn/start" && params?.threadId === threadId,
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("delivers a managed result completed before a lost retry acknowledgement", async () => {
+    const context = await harness("team");
+    try {
+      const spawned = dynamicToolJson(
+        await callTeamTool(context.bridge, "thread", "spawn_task", {
+          title: "Fast result",
+          prompt: "Finish the assigned work.",
+        }),
+      );
+      const threadId = String(spawned.threadId),
+        taskId = String(spawned.taskId);
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status,
+        ).toBe("running"),
+      );
+      await fail(
+        context,
+        context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]!.childTurnId!,
+        threadId,
+      );
+      const original = context.bridge.request.getMockImplementation()!;
+      context.bridge.request.mockImplementation(async (method, params) => {
+        const response = await original(method, params);
+        if (method === "turn/start" && params?.threadId === threadId) {
+          const started = (response as { turn: Turn }).turn;
+          const finished: Turn = {
+            ...started,
+            status: "completed",
+            itemsView: "full",
+            items: [agentMessage("fast-result", "Finished work")],
+          };
+          context.bridge.threadTurns.set(threadId, [
+            ...context.bridge.threadTurns.get(threadId)!.slice(0, -1),
+            finished,
+          ]);
+          context.bridge.emit("notification", {
+            method: "turn/completed",
+            params: { threadId, turn: finished },
+          });
+          throw new RpcTimeoutError("turn/start", 30_000);
+        }
+        return response;
+      });
+      const deadline = context.store.view().threadMeta[threadId]!.capacityRetry!.nextAttemptAt;
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.status,
+        ).toBe("completed"),
+      );
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.teamOrchestration!.tasks[taskId]?.delivery
+            ?.status,
+        ).toBe("delivered"),
+      );
+      await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(context.bridge.managedTurnSequences.get(threadId)).toBe(2);
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it.each([
+    "usageLimitExceeded",
+    "contextWindowExceeded",
+    "unauthorized",
+    "internalServerError",
+  ] as const)("does not retry %s", async (code) => {
+    const context = await harness();
+    try {
+      const turn: Turn = {
+        ...testTurn("failed", "failed"),
+        error: {
+          message: "Other error",
+          codexErrorInfo: code,
+          additionalDetails: null,
+          misalignment: null,
+        },
+      };
+      context.bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "thread", turn: testTurn("failed", "inProgress") },
+      });
+      context.bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "thread", turn },
+      });
+      await vi.waitFor(() => expect(context.projection.summary("thread")?.state).toBe("failed"));
+      context.bridge.request.mockClear();
+      await vi.advanceTimersByTimeAsync(2 * CAPACITY_RETRY_INTERVAL_MS);
+      expect(context.bridge.request).not.toHaveBeenCalled();
+      expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined();
+    } finally {
+      await context.app.close();
+    }
+  });
+});
 
 describe("plan dismissal", () => {
   async function harness() {
@@ -8072,16 +8760,7 @@ class SettingsBridge extends EventEmitter {
   writeStatus: "ok" | "okOverridden" = "ok";
   writeMessage: string | null = null;
   conflictingVersion: string | null = null;
-  goal: {
-    threadId: string;
-    objective: string;
-    status: "active" | "paused";
-    tokenBudget: null;
-    tokensUsed: number;
-    timeUsedSeconds: number;
-    createdAt: number;
-    updatedAt: number;
-  } | null = null;
+  goal: ThreadGoal | null = null;
   failNextTurnStart = false;
   notifyTurnStarted = true;
   failBrowserResumeOnce = false;
@@ -8389,7 +9068,9 @@ class SettingsBridge extends EventEmitter {
       this.managedTurnSequences.set(threadId, managedTurnSequence);
       const turnId =
         threadId === "thread"
-          ? "turn"
+          ? String(params.clientUserMessageId).startsWith(CAPACITY_RETRY_MESSAGE_PREFIX)
+            ? `capacity-turn-${managedTurnSequence}`
+            : "turn"
           : managedTurnSequence === 1
             ? `turn-${threadId}`
             : `turn-${threadId}-${managedTurnSequence}`;

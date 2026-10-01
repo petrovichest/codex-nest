@@ -231,12 +231,22 @@ export interface UserInputDraftState extends UserInputDraft {
   fingerprint: string;
 }
 
+export interface CapacityRetryState {
+  failedTurnId: string;
+  nextAttemptAt: number;
+  dispatching?: true;
+  goal?: { createdAt: number; updatedAt: number; objective: string };
+}
+
 export interface ThreadMetaState {
   pinned: boolean;
   lastReadUpdatedAt: number;
   lastViewedUpdatedAt?: number;
   lastOutcome?: ThreadOutcome;
   outcomeUpdatedAt?: number;
+  capacityRetry?: CapacityRetryState;
+  /** Do not revive a retry canceled by the user when terminal events are replayed. */
+  capacityRetryHandledTurnId?: string;
   settings?: SessionSettings;
   inheritCodexSettings?: boolean;
   awaitingPlanResponse?: boolean;
@@ -1176,6 +1186,9 @@ function validateState(value: unknown): CodexNestState {
       (meta.lastOutcome !== undefined &&
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
       (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||
+      (meta.capacityRetry !== undefined && !isCapacityRetry(meta.capacityRetry)) ||
+      (meta.capacityRetryHandledTurnId !== undefined &&
+        typeof meta.capacityRetryHandledTurnId !== "string") ||
       (meta.settings !== undefined && !isSessionSettings(meta.settings)) ||
       (meta.inheritCodexSettings !== undefined && typeof meta.inheritCodexSettings !== "boolean") ||
       (meta.awaitingPlanResponse !== undefined && typeof meta.awaitingPlanResponse !== "boolean") ||
@@ -1282,6 +1295,20 @@ function validateState(value: unknown): CodexNestState {
     ...(transcriptionTimings === undefined ? {} : { transcriptionTimings }),
     ...(value.uiLanguage === undefined ? { uiLanguage: "ru" as const } : {}),
   };
+}
+
+function isCapacityRetry(value: unknown): value is CapacityRetryState {
+  return (
+    isRecord(value) &&
+    isBoundedString(value.failedTurnId, 500) &&
+    isNonNegativeFiniteNumber(value.nextAttemptAt) &&
+    (value.dispatching === undefined || value.dispatching === true) &&
+    (value.goal === undefined ||
+      (isRecord(value.goal) &&
+        isNonNegativeFiniteNumber(value.goal.createdAt) &&
+        isNonNegativeFiniteNumber(value.goal.updatedAt) &&
+        typeof value.goal.objective === "string"))
+  );
 }
 
 function isUserInputDrafts(value: unknown): value is Record<string, UserInputDraftState> {

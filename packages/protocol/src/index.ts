@@ -290,6 +290,8 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   currentTurnId: string | null;
+  /** The server will continue this thread after temporary model overload. */
+  capacityRetry?: { failedTurnId: string; nextAttemptAt: number };
   /** A completed plan still needs a user response, even if its mode was changed. */
   awaitingPlanResponse?: boolean;
   /** The completed plan whose response requirement the user dismissed. */

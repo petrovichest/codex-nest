@@ -22,6 +22,9 @@ const LEGACY_INSTALLATION_KEYS = [
 ];
 
 const ENGLISH: Record<string, string> = {
+  "Модель перегружена — следующая попытка через {{duration}}":
+    "Model is at capacity — next attempt in {{duration}}",
+  "Модель перегружена — повторяем попытку…": "Model is at capacity — retrying…",
   "Ответы подтверждены": "Answers confirmed",
   "Распознавание ответов": "Answer transcription",
   "Отправляем ответы": "Sending answers",

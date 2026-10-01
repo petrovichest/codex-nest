@@ -125,6 +125,12 @@ import {
 import { RpcError, RpcTimeoutError, type JsonlTransport } from "./codex/transport";
 import { CodexManagementError, type CodexManager } from "./codex-management";
 import { SERVER_VERSION } from "./config";
+import {
+  CAPACITY_RETRY_INTERVAL_MS,
+  CAPACITY_RETRY_MESSAGE,
+  capacityRetryMessageId,
+  isCapacityFailure,
+} from "./capacity-retry";
 import { readGitChanges } from "./git-changes";
 import { safeError } from "./logging";
 import {
@@ -579,7 +585,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         "Нельзя выключить Team, пока субагенты работают или их результаты ещё не обработаны. Попросите главного агента завершить или отменить их.",
       );
     }
-    if (summary.currentTurnId) {
+    if (summary.currentTurnId || summary.capacityRetry) {
       throw new ProjectConflictError("Settings cannot be changed while a turn is running");
     }
     const settings = mergeSettings(summary.settings, patch, projection.availableModels);
@@ -675,6 +681,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     assertWritableThread(summary);
     const validatedFiles = await attachments.validate(threadId, files);
     assertDirectInput(summary);
+    if (store.view().threadMeta[threadId]?.capacityRetry) {
+      throw new MessageQueueConflictError("Model capacity retry is pending");
+    }
     if (planImplementationMode) {
       try {
         summary = await updateThreadSettings(threadId, {
@@ -1401,7 +1410,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return bridge.deliveryVersion === 1;
     },
     paused: () => codexManager?.maintenanceActive ?? false,
-    acceptsInput: (threadId) => projection.summary(threadId)?.canAcceptDirectInput !== false,
+    acceptsInput: (threadId) =>
+      projection.summary(threadId)?.canAcceptDirectInput !== false &&
+      !store.view().threadMeta[threadId]?.capacityRetry,
     currentTurnId: (threadId) => projection.summary(threadId)?.currentTurnId ?? null,
     shouldSteerQueuedMessage: (threadId, turnId) => Boolean(pendingUserInput(threadId, turnId)),
     start: (threadId, message) =>
@@ -2240,6 +2251,287 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     void promise.then(cleanup, cleanup);
     return lifecycle?.track(promise, "Team background run") ?? promise;
   };
+  const capacityRetryTimers = new Map<string, NodeJS.Timeout>();
+  const cancelCapacityRetry = async (threadId: string): Promise<void> => {
+    const timer = capacityRetryTimers.get(threadId);
+    if (timer) clearTimeout(timer);
+    capacityRetryTimers.delete(threadId);
+    await projection.cancelCapacityRetry(threadId, undefined, false);
+  };
+  const runCapacityRetry = async (threadId: string): Promise<void> => {
+    const retry = store.view().threadMeta[threadId]?.capacityRetry;
+    const summary = projection.summary(threadId);
+    if (!retry || !summary || summary.archived || retry.nextAttemptAt > Date.now()) return;
+    if (
+      teamContinuationsClosed ||
+      teamContinuationsPaused ||
+      bridge.state !== "ready" ||
+      codexManager?.maintenanceActive
+    )
+      return;
+    const managed = managedTaskForChild(store.view(), threadId);
+    if (managed && isTerminalTask(managed.task)) {
+      await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+      return;
+    }
+    const release = codexManager?.beginTurn();
+    try {
+      // Only the retry path reads history. It also recovers a start whose reply was lost.
+      const page = parseTurnsList(
+        await bridge.request<unknown>(
+          "thread/turns/list",
+          {
+            threadId,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+          30_000,
+        ),
+      );
+      const latest = page.data[0];
+      if (
+        store.view().threadMeta[threadId]?.capacityRetry?.failedTurnId !== retry.failedTurnId ||
+        teamContinuationsPaused ||
+        teamContinuationsClosed ||
+        summary.archived
+      )
+        return;
+      if (latest && latest.id !== retry.failedTurnId) {
+        if (managed) {
+          await store.update((state) => {
+            const task =
+              state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+            if (task && !isTerminalTask(task)) task.childTurnId = latest.id;
+          });
+        }
+        await projection.restoreDeliveredTurn(threadId, latest);
+        if (isCapacityFailure(latest) && retry.dispatching) {
+          const goal = retry.goal ? await readThreadGoal(bridge, threadId) : null;
+          const sameGoal =
+            goal &&
+            retry.goal &&
+            goal.createdAt === retry.goal.createdAt &&
+            goal.objective === retry.goal.objective;
+          if (retry.goal && (!sameGoal || goal?.status !== "blocked")) {
+            await projection.cancelCapacityRetry(threadId, latest.id);
+            await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+            return;
+          }
+          await projection.prepareCapacityRetry(threadId, latest, sameGoal ? goal : undefined);
+        } else {
+          await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+          if (managed && latest.status !== "inProgress") {
+            const affected = await handleManagedTeamNotification(
+              {
+                method: "turn/completed",
+                params: { threadId, turn: latest },
+              },
+              bridge,
+              store,
+              projection,
+              managedActivity,
+              managedTokenUsage,
+            );
+            for (const parentThreadId of affected) {
+              projection.publishThreadState(parentThreadId);
+              scheduleTeamTasks(parentThreadId);
+              scheduleTeamContinuation(parentThreadId);
+            }
+          }
+        }
+        return;
+      }
+      if (!latest || !isCapacityFailure(latest)) {
+        await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+        return;
+      }
+      if (summary.currentTurnId && summary.currentTurnId !== retry.failedTurnId) return;
+      const parent = managed ? projection.summary(managed.parentThreadId) : summary;
+      if (!parent) return;
+      await store.update((state) => {
+        const current = state.threadMeta[threadId]?.capacityRetry;
+        if (current?.failedTurnId === retry.failedTurnId) current.dispatching = true;
+      });
+      if (retry.goal) {
+        const goal = await readThreadGoal(bridge, threadId);
+        if (
+          !goal ||
+          goal.createdAt !== retry.goal.createdAt ||
+          goal.objective !== retry.goal.objective ||
+          (goal.status !== "active" &&
+            (goal.status !== "blocked" || goal.updatedAt !== retry.goal.updatedAt))
+        ) {
+          await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+          return;
+        }
+        await bridge.request(
+          "thread/resume",
+          {
+            threadId,
+            cwd: summary.cwd,
+            excludeTurns: true,
+            ...threadSettings(summary.settings),
+            ...runtimeConfigOverride(browserExtension, threadId, {}),
+          },
+          30_000,
+        );
+        if (store.view().threadMeta[threadId]?.capacityRetry?.failedTurnId !== retry.failedTurnId)
+          return;
+        // Reactivation starts the native goal continuation; do not also send turn/start.
+        await setThreadGoal(bridge, threadId, { status: "active" });
+        await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+        return;
+      }
+      const runtime = managed
+        ? await managedChildRuntime(
+            managed.task,
+            parent.cwd,
+            managed.task.workspace
+              ? cloneView<NonNullable<ManagedTeamTaskState["workspace"]>>(managed.task.workspace)
+              : null,
+          )
+        : undefined;
+      const settings = managed
+        ? managedChildTurnSettings(
+            parent.settings,
+            projection.availableModels,
+            managed.task,
+            runtime,
+          )
+        : turnSettings(summary.settings, projection.availableModels);
+      const markerId = capacityRetryMessageId(retry.failedTurnId);
+      const params = {
+        threadId,
+        clientUserMessageId: markerId,
+        input: messageInput(CAPACITY_RETRY_MESSAGE, []),
+        ...settings,
+      };
+      const send = () =>
+        durableDelivery.send(
+          threadId,
+          markerId,
+          messageContentHash(CAPACITY_RETRY_MESSAGE, [], [], false),
+          "turn/start",
+          params,
+        );
+      if (store.view().threadMeta[threadId]?.capacityRetry?.failedTurnId !== retry.failedTurnId)
+        return;
+      let delivered: Awaited<ReturnType<typeof send>>;
+      try {
+        delivered = await send();
+      } catch (error) {
+        if (!isThreadResumeRequiredError(error, threadId)) throw error;
+        await bridge.request(
+          "thread/resume",
+          {
+            threadId,
+            cwd: runtime?.cwd ?? summary.cwd,
+            excludeTurns: true,
+            ...(managed
+              ? {
+                  ...managedChildResumeSettings(parent.settings, projection.availableModels),
+                  ...(runtime?.runtimeWorkspaceRoots
+                    ? { runtimeWorkspaceRoots: runtime.runtimeWorkspaceRoots }
+                    : {}),
+                  developerInstructions: TEAM_CHILD_INSTRUCTIONS,
+                  config: teamRuntimeConfig(),
+                }
+              : {
+                  ...threadSettings(summary.settings),
+                  ...runtimeConfigOverride(
+                    browserExtension,
+                    threadId,
+                    summary.settings.collaborationMode === "team" ? teamRuntimeConfig() : {},
+                  ),
+                }),
+          },
+          30_000,
+        );
+        if (store.view().threadMeta[threadId]?.capacityRetry?.failedTurnId !== retry.failedTurnId)
+          return;
+        delivered = await send();
+      }
+      if (managed && delivered.turnId) {
+        await store.update((state) => {
+          const task =
+            state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+          if (task && !isTerminalTask(task)) {
+            task.childTurnId = delivered.turnId!;
+            task.lastActivityAt = Date.now();
+            delete task.watchdog;
+          }
+        });
+      }
+      if (delivered.turn) await projection.restoreDeliveredTurn(threadId, delivered.turn);
+      await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+    } catch (error) {
+      app.log.warn({ err: safeError(error), threadId }, "Failed to continue after model overload");
+      if (error instanceof RpcError) {
+        await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
+      } else {
+        await store.update((state) => {
+          const current = state.threadMeta[threadId]?.capacityRetry;
+          if (current?.failedTurnId === retry.failedTurnId) {
+            current.nextAttemptAt = Date.now() + CAPACITY_RETRY_INTERVAL_MS;
+          }
+        });
+        projection.publishThreadState(threadId);
+      }
+    } finally {
+      release?.();
+    }
+  };
+  const scheduleCapacityRetry = (threadId: string): void => {
+    const retry = store.view().threadMeta[threadId]?.capacityRetry;
+    const timer = capacityRetryTimers.get(threadId);
+    if (!retry || teamContinuationsClosed) {
+      if (timer) clearTimeout(timer);
+      capacityRetryTimers.delete(threadId);
+      return;
+    }
+    if (timer || teamContinuationsPaused || bridge.state !== "ready") return;
+    const next = setTimeout(
+      () => {
+        capacityRetryTimers.delete(threadId);
+        const managed = managedTaskForChild(store.view(), threadId);
+        const run = () => runCapacityRetry(threadId);
+        void trackTeamBackground(
+          withKeyLock(turnStartLocks, threadId, () =>
+            withKeyLock(teamParentLocks, managed?.parentThreadId ?? threadId, run),
+          ),
+        )
+          .finally(async () => {
+            // A busy or unloaded thread must not create a zero-delay retry loop.
+            const pending = store.view().threadMeta[threadId]?.capacityRetry;
+            if (
+              pending &&
+              pending.nextAttemptAt <= Date.now() &&
+              !teamContinuationsClosed &&
+              !teamContinuationsPaused
+            ) {
+              await store.update((state) => {
+                const current = state.threadMeta[threadId]?.capacityRetry;
+                if (current && current.nextAttemptAt <= Date.now()) {
+                  current.nextAttemptAt = Date.now() + CAPACITY_RETRY_INTERVAL_MS;
+                }
+              });
+              projection.publishThreadState(threadId);
+            }
+            scheduleCapacityRetry(threadId);
+          })
+          .catch(() => undefined);
+      },
+      Math.max(0, Math.min(retry.nextAttemptAt - Date.now(), 2_147_000_000)),
+    );
+    next.unref();
+    capacityRetryTimers.set(threadId, next);
+  };
+  const resumeCapacityRetries = (): void => {
+    for (const [threadId, meta] of Object.entries(store.view().threadMeta)) {
+      if (meta.capacityRetry) scheduleCapacityRetry(threadId);
+    }
+  };
   const scheduleTeamContinuation = (threadId: string): void => {
     if (
       teamContinuationsClosed ||
@@ -2273,6 +2565,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
               !summary ||
               summary.relation.kind !== "session" ||
               summary.currentTurnId ||
+              summary.capacityRetry ||
               !hasPendingTeamContinuation(store, threadId)
             ) {
               return;
@@ -2328,6 +2621,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     teamTaskStartImmediates.set(parentThreadId, immediate);
   };
   const resumeTeamContinuations = (): void => {
+    resumeCapacityRetries();
     for (const threadId of pendingTeamParents(store)) {
       scheduleTeamTasks(threadId);
       scheduleTeamContinuation(threadId);
@@ -2354,6 +2648,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     const managed = childThreadId
       ? managedTaskForNotification(store.view(), notification)
       : undefined;
+    const capacityStartedTaskId =
+      notification.method === "turn/started" &&
+      childThreadId &&
+      store.view().threadMeta[childThreadId]?.capacityRetry?.dispatching
+        ? managed?.task.id
+        : undefined;
     if (childThreadId && managed) {
       managedActivity.set(childThreadId, Date.now());
     }
@@ -2369,6 +2669,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             projection,
             managedActivity,
             managedTokenUsage,
+            capacityStartedTaskId,
           );
         const affected = managed
           ? await withKeyLock(teamParentLocks, managed.parentThreadId, run)
@@ -2471,6 +2772,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const bridgeTeamStateHandler = (state: string) => {
     if (state === "ready" || teamContinuationsClosed) return;
     teamContinuationsPaused = true;
+    for (const timer of capacityRetryTimers.values()) clearTimeout(timer);
+    capacityRetryTimers.clear();
     void queue.pause().catch(() => undefined);
   };
   bridge.on("state", bridgeTeamStateHandler);
@@ -2478,6 +2781,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     teamContinuationsClosed = true;
     teamContinuationsPaused = true;
     clearInterval(teamWatchdogTimer);
+    for (const timer of capacityRetryTimers.values()) clearTimeout(timer);
+    capacityRetryTimers.clear();
+    clearImmediate(initialCapacityRecovery);
     for (const immediate of teamContinuationImmediates.values()) clearImmediate(immediate);
     for (const immediate of teamTaskStartImmediates.values()) clearImmediate(immediate);
     teamContinuationImmediates.clear();
@@ -2608,6 +2914,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const unregisterLifecycleParticipant = lifecycle?.register({
     pause: async () => {
       teamContinuationsPaused = true;
+      for (const timer of capacityRetryTimers.values()) clearTimeout(timer);
+      capacityRetryTimers.clear();
       await queue.pause();
       await teamNotificationQueue.catch(() => undefined);
       await Promise.all(
@@ -2636,6 +2944,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     if (event.type === "resync.required") {
       void runRecovery().catch(() => undefined);
     } else if (event.type === "thread.upserted") {
+      scheduleCapacityRetry(event.thread.id);
       void queue.drain(event.thread.id).catch(() => undefined);
       if (!event.thread.currentTurnId && event.thread.relation.kind === "session") {
         if (hasClaimedTeamContinuation(store, event.thread.id)) {
@@ -2647,10 +2956,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         }
       }
     } else if (event.type === "thread.removed") {
+      const timer = capacityRetryTimers.get(event.threadId);
+      if (timer) clearTimeout(timer);
+      capacityRetryTimers.delete(event.threadId);
       void queue.removeThread(event.threadId).catch(() => undefined);
       void removeReadyForkOperationsForThread(event.threadId).catch(() => undefined);
     }
   });
+
+  const initialCapacityRecovery = setImmediate(resumeCapacityRetries);
 
   app.addHook("onClose", async () => {
     unregisterLifecycleParticipant?.();
@@ -3870,7 +4184,9 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       if (summary.settings.collaborationMode === "team") {
         throw new ProjectConflictError("Team mode cannot be combined with a goal");
       }
-      return setThreadGoal(bridge, request.params.id, validateGoalPatch(request.body));
+      const patch = validateGoalPatch(request.body);
+      await cancelCapacityRetry(request.params.id);
+      return setThreadGoal(bridge, request.params.id, patch);
     },
   );
 
@@ -3880,6 +4196,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       return apiError(reply, 404, "not_found", "Thread not found");
     }
     assertWritableThread(summary);
+    await cancelCapacityRetry(request.params.id);
     await clearThreadGoal(bridge, request.params.id);
     return reply.code(204).send();
   });
@@ -4465,6 +4782,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      await cancelCapacityRetry(request.params.id);
       const result = await startTurn(
         request.params.id,
         body.input,
@@ -4525,6 +4843,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      await cancelCapacityRetry(request.params.id);
       return { turnId: await queue.sendNow(request.params.id, request.params.messageId) };
     },
   );
@@ -4576,15 +4895,44 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     async (request, reply) => {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      assertWritableThread(summary);
+      const managedRetry = summary.capacityRetry
+        ? managedTaskForChild(store.view(), request.params.id)
+        : null;
+      if (!managedRetry) assertWritableThread(summary);
       const body = requireRecord<InterruptTurnRequest>(request.body);
       if (body.turnId !== undefined && typeof body.turnId !== "string") {
         return apiError(reply, 400, "validation_failed", "turnId must be a string");
       }
       const requestedTurnId = summary.currentTurnId ?? body.turnId;
       const orchestration = store.view().threadMeta[request.params.id]?.teamOrchestration;
-      if (!requestedTurnId && !orchestration) {
+      if (!requestedTurnId && !orchestration && !summary.capacityRetry) {
         return apiError(reply, 400, "validation_failed", "There is no running task to stop");
+      }
+      await cancelCapacityRetry(request.params.id);
+      if (managedRetry) {
+        await withKeyLock(turnStartLocks, request.params.id, () =>
+          withKeyLock(teamParentLocks, managedRetry.parentThreadId, async () => {
+            const currentTurnId = projection.summary(request.params.id)?.currentTurnId;
+            if (currentTurnId)
+              await interruptTurnIfRunning(bridge, request.params.id, currentTurnId);
+            await finalizeManagedTask(
+              store,
+              projection,
+              request.params.id,
+              `cancelled:${Date.now()}`,
+              "interrupted",
+              {
+                summary: "Task cancelled by the user during model capacity recovery.",
+                source: "status",
+              },
+              managedRetry.task.id,
+            );
+          }),
+        );
+        projection.publishThreadState(managedRetry.parentThreadId);
+        scheduleTeamTasks(managedRetry.parentThreadId);
+        scheduleTeamContinuation(managedRetry.parentThreadId);
+        return reply.code(204).send();
       }
       if (orchestration) {
         stoppedTeamParents.add(request.params.id);
@@ -4594,27 +4942,40 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         scheduledTeamContinuations.delete(request.params.id);
       }
       const interruptedTurnIds: string[] = [];
-      await withKeyLock(teamParentLocks, request.params.id, async () => {
-        if (requestedTurnId) {
-          const interrupted = await interruptTurnIfRunning(
-            bridge,
-            request.params.id,
-            requestedTurnId,
+      await withKeyLock(turnStartLocks, request.params.id, () =>
+        withKeyLock(teamParentLocks, request.params.id, async () => {
+          const currentTurnId = projection.summary(request.params.id)?.currentTurnId;
+          if (currentTurnId && currentTurnId !== requestedTurnId) {
+            const interrupted = await interruptTurnIfRunning(
+              bridge,
+              request.params.id,
+              currentTurnId,
+            );
+            interruptedTurnIds.push(currentTurnId);
+            if (interrupted && interrupted !== currentTurnId) interruptedTurnIds.push(interrupted);
+          }
+          if (requestedTurnId) {
+            const interrupted = await interruptTurnIfRunning(
+              bridge,
+              request.params.id,
+              requestedTurnId,
+            );
+            interruptedTurnIds.push(requestedTurnId);
+            if (interrupted && interrupted !== requestedTurnId)
+              interruptedTurnIds.push(interrupted);
+          }
+          const tasks = Object.values(
+            store.view().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
           );
-          interruptedTurnIds.push(requestedTurnId);
-          if (interrupted && interrupted !== requestedTurnId) interruptedTurnIds.push(interrupted);
-        }
-        const tasks = Object.values(
-          store.view().threadMeta[request.params.id]?.teamOrchestration?.tasks ?? {},
-        );
-        const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
-        if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
-          await store.update((state) => {
-            const meta = state.threadMeta[request.params.id];
-            if (meta) delete meta.teamOrchestration;
-          });
-        }
-      });
+          const hasPendingWorkspace = tasks.some(managedTaskHasPendingWorkspace);
+          if (tasks.length && tasks.every(isTerminalTask) && !hasPendingWorkspace) {
+            await store.update((state) => {
+              const meta = state.threadMeta[request.params.id];
+              if (meta) delete meta.teamOrchestration;
+            });
+          }
+        }),
+      );
       await projection.markInterrupted(request.params.id, interruptedTurnIds);
       projection.publishThreadState(request.params.id);
       return reply.code(204).send();
@@ -4629,6 +4990,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       const summary = projection.summary(request.params.id);
       if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
       assertWritableThread(summary);
+      if (route === "archive") await cancelCapacityRetry(request.params.id);
       await bridge.request(method, { threadId: request.params.id });
       await projection.setArchived(request.params.id, route === "archive");
       return reply.code(204).send();
@@ -5403,10 +5765,15 @@ async function handleManagedTeamToolCall(
     if (isTerminalTask(task)) {
       return finish(dynamicToolSuccess({ accepted: true, status: task.status }));
     }
-    if (task.childTurnId) {
+    const capacityRetry = store.view().threadMeta[task.childThreadId]?.capacityRetry;
+    await projection.cancelCapacityRetry(task.childThreadId, undefined, false);
+    const turnId =
+      projection.summary(task.childThreadId)?.currentTurnId ??
+      (capacityRetry ? null : task.childTurnId);
+    if (turnId) {
       await bridge.request("turn/interrupt", {
         threadId: task.childThreadId,
-        turnId: task.childTurnId,
+        turnId,
       });
     }
     const reason = optionalToolString(args, "reason");
@@ -5862,12 +6229,24 @@ async function handleManagedTeamNotification(
   projection: AppProjection,
   activity: Map<string, number>,
   tokenUsage: Map<string, { tokens: number; persistedAt: number }>,
+  capacityStartedTaskId?: string,
 ): Promise<Set<string>> {
   const affected = new Set<string>();
   const childThreadId = notificationThreadId(notification);
   if (!childThreadId) return affected;
-  const managed = managedTaskForNotification(store.view(), notification);
+  const managed =
+    managedTaskForNotification(store.view(), notification) ??
+    (capacityStartedTaskId
+      ? managedTaskForChild(store.view(), childThreadId, capacityStartedTaskId)
+      : null);
   if (!managed || isTerminalTask(managed.task)) return affected;
+  if (notification.method === "turn/started" && capacityStartedTaskId) {
+    await store.update((state) => {
+      const task =
+        state.threadMeta[managed.parentThreadId]?.teamOrchestration?.tasks[managed.task.id];
+      if (task && !isTerminalTask(task)) task.childTurnId = notification.params.turn.id;
+    });
+  }
   const now = activity.get(childThreadId) ?? Date.now();
   const expectedWakeAt = managedSleepExpectedWakeAt(notification);
   const sleepCompleted =
@@ -5915,6 +6294,10 @@ async function handleManagedTeamNotification(
   }
 
   if (notification.method === "turn/completed") {
+    if (isCapacityFailure(notification.params.turn)) {
+      await projection.prepareCapacityRetry(childThreadId, notification.params.turn);
+      return affected;
+    }
     const finalUsage = tokenUsage.get(childThreadId);
     if (finalUsage) {
       await store.update((state) => {
@@ -6080,6 +6463,10 @@ async function finalizeManagedTask(
     delete task.expectedWakeAt;
     const childMeta = state.threadMeta[childThreadId];
     if (childMeta) {
+      if (childMeta.capacityRetry) {
+        childMeta.capacityRetryHandledTurnId = childMeta.capacityRetry.failedTurnId;
+        delete childMeta.capacityRetry;
+      }
       childMeta.lastOutcome = outcome;
       childMeta.outcomeUpdatedAt = Date.now();
     }
@@ -6587,6 +6974,10 @@ async function reconcileTeamOrchestration(
           ? page.data.find((turn) => turn.id === expectedTurnId)
           : page.data[0];
         if (recoveredTurn && recoveredTurn.status !== "inProgress") {
+          if (isCapacityFailure(recoveredTurn)) {
+            await projection.prepareCapacityRetry(task.childThreadId, recoveredTurn);
+            continue;
+          }
           const result = task.resultCandidate
             ? submittedManagedResult(task)
             : managedResultFromTurn(recoveredTurn, turnOutcome(recoveredTurn));
@@ -6787,6 +7178,7 @@ export async function triggerTeamWatchdogs(
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     for (const task of Object.values(meta.teamOrchestration?.tasks ?? {})) {
       if (task.status !== "running" || task.watchdog) continue;
+      if (state.threadMeta[task.childThreadId]?.capacityRetry) continue;
       if (teamWatchdogIsPaused(task, now)) continue;
       const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
       if (
@@ -6802,6 +7194,7 @@ export async function triggerTeamWatchdogs(
     for (const item of due) {
       const task = draft.threadMeta[item.parentThreadId]?.teamOrchestration?.tasks[item.taskId];
       if (!task || task.status !== "running" || task.watchdog) continue;
+      if (draft.threadMeta[task.childThreadId]?.capacityRetry) continue;
       if (teamWatchdogIsPaused(task, now)) continue;
       const lastActivityAt = Math.max(task.lastActivityAt, activity.get(task.childThreadId) ?? 0);
       if (now - lastActivityAt < TEAM_WATCHDOG_MS) continue;
@@ -6864,6 +7257,10 @@ function managedTaskForNotification(
   if (!childThreadId) return null;
   const turnId = notificationTurnId(notification);
   if (!turnId) return managedTaskForChild(state, childThreadId);
+  const retry = state.threadMeta[childThreadId]?.capacityRetry;
+  if (retry?.dispatching && turnId !== retry.failedTurnId) {
+    return managedTaskForChild(state, childThreadId);
+  }
   for (const [parentThreadId, meta] of Object.entries(state.threadMeta)) {
     const task = Object.values(meta.teamOrchestration?.tasks ?? {}).find(
       (candidate) => candidate.childThreadId === childThreadId && candidate.childTurnId === turnId,
