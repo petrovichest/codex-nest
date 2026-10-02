@@ -2563,8 +2563,9 @@ describe("App routing and navigation", () => {
       .closest(".thread-branch") as HTMLElement;
     const toggle = within(root).getByRole("button", { name: "Показать субагентов" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("2");
+    expect(toggle.closest("a")).toBeNull();
     expect(within(root).queryByRole("link", { name: /tester/ })).not.toBeInTheDocument();
-    expect(root.querySelector(".thread-subagent-count")).toHaveTextContent("2");
     fireEvent.click(toggle);
     const childLink = screen.getByRole("link", { name: /tester · Проверить тесты/ });
     expect(childLink.closest(".thread-branch-children")).toBeInTheDocument();

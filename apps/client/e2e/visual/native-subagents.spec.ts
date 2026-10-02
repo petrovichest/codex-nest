@@ -117,6 +117,13 @@ for (const theme of ["light", "dark"] as const) {
             attention: [],
             threads: [
               parent,
+              {
+                ...parent,
+                id: "session-ordinary",
+                title: "Обычная сессия без агентов",
+                pinned: false,
+                relation: { kind: "session", sessionId: "session-ordinary" },
+              },
               ...children.map((child) =>
                 enlarged && child.id === "native-2"
                   ? {
@@ -144,17 +151,52 @@ for (const theme of ["light", "dark"] as const) {
         const sidebarRow = page.locator(".sidebar .thread-branch-row").filter({
           has: page.locator('a[href="/threads/session-main"]'),
         });
-        await expect(
-          sidebarRow.getByRole("button", { name: "Показать субагентов" }),
-        ).toHaveAttribute("aria-expanded", "false");
-        await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(0);
-        if (width > 820) {
-          await sidebarRow.getByRole("button", { name: "Показать субагентов" }).click();
-          await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(3);
-          await sidebarRow.getByRole("button", { name: "Свернуть субагентов" }).click();
+        if (width <= 820) await page.getByRole("button", { name: "Открыть список задач" }).click();
+        for (const mode of ["Проекты", "Активные"]) {
+          await page.getByRole("button", { name: mode, exact: true }).click();
+          const toggle = sidebarRow.locator(".thread-subagent-count");
+          await expect(toggle).toHaveAccessibleName("Показать субагентов");
+          await expect(toggle).toHaveAttribute("aria-expanded", "false");
+          await expect(toggle).toHaveText(mode === "Проекты" ? "3" : "2");
+          await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(0);
+          const title = (await sidebarRow.locator(".thread-link-title").boundingBox())!;
+          const ordinary = (await page
+            .locator('.sidebar a[href="/threads/session-ordinary"] .thread-link-title')
+            .boundingBox())!;
+          const counter = (await toggle.boundingBox())!;
+          expect(title.x).toBe(ordinary.x);
+          expect(title.x + title.width).toBeLessThanOrEqual(counter.x);
+          expect(counter.width).toBeGreaterThanOrEqual(44);
+          expect(counter.height).toBeGreaterThanOrEqual(32);
+          const pin = (await sidebarRow.locator(".thread-pinned-marker").boundingBox())!;
+          expect(counter.x + counter.width).toBeLessThanOrEqual(pin.x);
+          expect(
+            await toggle.evaluate((element) => {
+              const box = element.getBoundingClientRect();
+              return {
+                nestedInLink: Boolean(element.closest("a")),
+                hit: element.contains(
+                  document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+                ),
+              };
+            }),
+          ).toEqual({ nestedInLink: false, hit: true });
+          await toggle.locator("svg").click();
+          await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(
+            mode === "Проекты" ? 3 : 2,
+          );
+          await expect(toggle).toHaveAttribute("aria-expanded", "true");
+          await toggle.focus();
+          await page.keyboard.press("Space");
+          await expect(toggle).toHaveAttribute("aria-expanded", "false");
           await expect(page.locator('.sidebar a[href^="/threads/native-"]')).toHaveCount(0);
           await expect(page).toHaveURL(/\/threads\/session-main$/);
         }
+        await page.getByRole("button", { name: "Проекты", exact: true }).click();
+        if (width <= 820)
+          await page
+            .getByRole("button", { name: "Закрыть меню" })
+            .click({ position: { x: width - 2, y: 10 } });
         const scroll = page.locator(".conversation-scroll");
         await scroll.evaluate((element) => {
           element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));

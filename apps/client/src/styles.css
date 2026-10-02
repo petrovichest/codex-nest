@@ -443,6 +443,13 @@
   color: var(--text);
 }
 
+.thread-markers {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
 .thread-marker-slot {
   width: 20px;
   height: 20px;
@@ -506,6 +513,27 @@
   position: relative;
   display: flex;
   align-items: center;
+}
+
+.thread-branch-row:has(> .thread-subagent-count) {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) max-content max-content;
+}
+
+.active-session-list .thread-branch-row:has(> .thread-subagent-count) {
+  grid-template-columns: 0 minmax(0, 1fr) max-content max-content;
+}
+
+.thread-branch-row:has(> .thread-subagent-count) > .thread-link {
+  /* The link keeps the full row surface; the count is a separate control above it. */
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 2 / -1;
+  grid-row: 1;
+}
+
+.thread-branch-row:has(> .thread-subagent-count) .thread-markers {
+  grid-column: 3;
 }
 
 .thread-branch-row > .thread-link {
@@ -585,7 +613,9 @@
 }
 
 .thread-branch-row:has(> .thread-row-menu[open] .thread-pin-action)
-  .thread-marker-slot:has(.thread-pinned-marker) {
+  .thread-marker-slot:has(.thread-pinned-marker),
+.thread-branch-row:has(> .thread-row-menu[open] .thread-pin-action)
+  .thread-markers:not(:has(.thread-browser-status)) {
   display: none;
 }
 
@@ -677,44 +707,34 @@
   --sidebar-button-hover-ink: var(--danger);
 }
 
-.thread-branch-toggle,
 .thread-branch-spacer {
   width: 28px;
   height: var(--control-touch-height);
   flex: 0 0 28px;
 }
 
-.thread-branch-toggle {
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-}
-
-.thread-branch-toggle:hover {
-  color: var(--text);
-  background: transparent;
-}
-
-.thread-branch-toggle svg {
-  width: 14px;
-  height: 14px;
-}
-
 .thread-subagent-count {
+  grid-column: 3;
+  grid-row: 1;
+  z-index: 1;
+  min-width: 44px;
+  min-height: max(var(--control-touch-height), var(--thread-menu-width));
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-1);
-  flex: 0 0 auto;
-  color: var(--muted);
+  padding: 0 var(--space-1-5);
   font-size: var(--text-caption);
+}
+
+.thread-subagent-count[aria-expanded="true"] {
+  --sidebar-button-ink: var(--text-strong);
 }
 
 .thread-subagent-count svg {
   width: 14px;
   height: 14px;
+  flex: 0 0 auto;
 }
 
 .thread-branch-children {
@@ -1077,6 +1097,7 @@
     .project-action-popover button,
     .thread-row-action,
     .thread-more-action,
+    .thread-subagent-count,
     .session-list-mode button,
     .archive-group > summary
   ) {
@@ -7030,8 +7051,7 @@ button.message-file:hover:not(:disabled) {
     height: var(--control-touch-height);
   }
 
-  .project-icon-action,
-  .thread-branch-toggle {
+  .project-icon-action {
     width: var(--control-touch-height);
     min-width: var(--control-touch-height);
     height: var(--control-touch-height);

@@ -2310,6 +2310,8 @@ function ThreadLink({
 
   const actionCount = Number(Boolean(project)) + Number(canPin) + Number(canFinish);
   const hasActions = actionCount > 0;
+  const hasBrowserStatus =
+    thread.browserStatus === "connected" || thread.browserStatus === "disconnected";
   const actions = (
     <>
       {project && (
@@ -2391,20 +2393,7 @@ function ThreadLink({
           }
         }}
       >
-        {subagentCount > 0 ? (
-          <button
-            type="button"
-            className="thread-branch-toggle"
-            aria-label={t(subagentsExpanded ? "Свернуть субагентов" : "Показать субагентов")}
-            aria-expanded={subagentsExpanded}
-            aria-controls={subagentsExpanded ? subagentsId : undefined}
-            onClick={onToggleSubagents}
-          >
-            {subagentsExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-          </button>
-        ) : (
-          <span className="thread-branch-spacer" />
-        )}
+        <span className="thread-branch-spacer" />
         <NavLink
           className={({ isActive }) =>
             `thread-link${hasActions ? " has-actions" : ""}${canFinish ? " finishable" : ""}${isActive ? " active" : ""}`
@@ -2438,39 +2427,50 @@ function ThreadLink({
               <span className="thread-link-title-text">{displayTitle}</span>
             </span>
           )}
-          {subagentCount > 0 && (
-            <span className="thread-subagent-count" aria-hidden="true">
-              <TeamIcon /> {subagentCount}
+          {(thread.pinned || hasBrowserStatus) && (
+            <span className="thread-markers">
+              <span className="thread-marker-slot">
+                {thread.pinned && (
+                  <span
+                    className="thread-pinned-marker"
+                    title={t("Сессия закреплена")}
+                    aria-hidden="true"
+                  >
+                    <PinIcon />
+                  </span>
+                )}
+              </span>
+              <span className="thread-marker-slot">
+                {hasBrowserStatus && (
+                  <span
+                    aria-hidden="true"
+                    className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
+                    title={
+                      thread.browserStatus === "connected"
+                        ? t("Браузер подключён")
+                        : t("Браузер включён")
+                    }
+                  >
+                    <BrowserIcon />
+                  </span>
+                )}
+              </span>
             </span>
           )}
-          <span className="thread-marker-slot">
-            {thread.pinned && (
-              <span
-                className="thread-pinned-marker"
-                title={t("Сессия закреплена")}
-                aria-hidden="true"
-              >
-                <PinIcon />
-              </span>
-            )}
-          </span>
-          <span className="thread-marker-slot">
-            {(thread.browserStatus === "connected" || thread.browserStatus === "disconnected") && (
-              <span
-                aria-hidden="true"
-                className={`thread-browser-status thread-browser-status-${thread.browserStatus}`}
-                title={
-                  thread.browserStatus === "connected"
-                    ? t("Браузер подключён")
-                    : t("Браузер включён")
-                }
-              >
-                <BrowserIcon />
-              </span>
-            )}
-          </span>
           <span className={threadStatusClasses(thread)} title={thread.state} />
         </NavLink>
+        {subagentCount > 0 && (
+          <button
+            type="button"
+            className="thread-subagent-count"
+            aria-label={t(subagentsExpanded ? "Свернуть субагентов" : "Показать субагентов")}
+            aria-expanded={subagentsExpanded}
+            aria-controls={subagentsExpanded ? subagentsId : undefined}
+            onClick={onToggleSubagents}
+          >
+            <TeamIcon /> {subagentCount}
+          </button>
+        )}
         {hasActions && (
           <details
             className="thread-row-menu"
