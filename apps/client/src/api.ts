@@ -331,11 +331,14 @@ export class ApiClient {
     id: string,
     base: UpdateThreadDraftRequest,
     value: UpdateThreadDraftRequest,
+    options?: { keepalive?: boolean },
   ): Promise<ThreadDraft> {
     return this.request(`/api/v1/projects/${encodeURIComponent(id)}/draft`, {
       method: "PUT",
       body: { base, value },
-      keepalive: JSON.stringify({ base, value }).length < 60_000,
+      keepalive:
+        Boolean(options?.keepalive) &&
+        new TextEncoder().encode(JSON.stringify({ base, value })).byteLength < 60_000,
       timeoutMs: 15_000,
     });
   }

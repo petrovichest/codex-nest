@@ -57,6 +57,41 @@ describe("ApiClient", () => {
     );
   });
 
+  it("uses keepalive only for small project draft writes during page exit", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+    const empty = { input: "", images: [], annotations: [], goalMode: false };
+    await api.updateProjectDraft("project", empty, { ...empty, input: "Текст" });
+    expect(fetchMock.mock.calls.at(-1)?.[1].keepalive).toBe(false);
+    await api.updateProjectDraft(
+      "project",
+      empty,
+      { ...empty, input: "Текст" },
+      { keepalive: true },
+    );
+    expect(fetchMock.mock.calls.at(-1)?.[1].keepalive).toBe(true);
+    await api.updateProjectDraft(
+      "project",
+      empty,
+      { ...empty, input: "я".repeat(40_000) },
+      { keepalive: true },
+    );
+    expect(fetchMock.mock.calls.at(-1)?.[1].keepalive).toBe(false);
+    await api.updateProjectDraft(
+      "project",
+      empty,
+      {
+        ...empty,
+        images: [
+          { id: "image", name: "image.png", url: `data:image/png;base64,${"a".repeat(100_000)}` },
+        ],
+      },
+      { keepalive: true },
+    );
+    expect(fetchMock.mock.calls.at(-1)?.[1].keepalive).toBe(false);
+  });
+
   it("does not send the server-only draft timestamp back to the draft endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

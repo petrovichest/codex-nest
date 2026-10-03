@@ -1213,7 +1213,10 @@ export function ThreadPage({
     attachmentWaitersRef.current.clear();
   }
 
-  function enqueuePreparationSave(snapshot: NewSessionPreparation): Promise<boolean> {
+  function enqueuePreparationSave(
+    snapshot: NewSessionPreparation,
+    keepalive = false,
+  ): Promise<boolean> {
     const key = newSessionDraftSaveKey(api.settings, snapshot.projectId);
     const request = (pendingNewSessionDraftSaves.get(key) ?? preparationDraftSaveChainRef.current)
       .catch(() => undefined)
@@ -1239,7 +1242,9 @@ export function ThreadPage({
           const value = snapshot.submission?.draft ?? snapshot.value;
           const base = normalizeNewSessionDraft(snapshot.sharedBase ?? emptyComposerDraft());
           if (JSON.stringify(normalizeNewSessionDraft(value)) !== JSON.stringify(base)) {
-            const draft = await api.updateProjectDraft(snapshot.projectId, base, value);
+            const draft = await api.updateProjectDraft(snapshot.projectId, base, value, {
+              keepalive,
+            });
             snapshot.sharedDraftUpdatedAt = draft.updatedAt;
             snapshot.sharedBase = draft;
             dispatch({ type: "projectDraft", projectId: snapshot.projectId, draft });
@@ -1290,7 +1295,7 @@ export function ThreadPage({
     return request;
   }
 
-  function flushPreparation(): Promise<void> {
+  function flushPreparation(keepalive = false): Promise<void> {
     if (preparationDraftTimerRef.current !== null) {
       window.clearTimeout(preparationDraftTimerRef.current);
       preparationDraftTimerRef.current = null;
@@ -1298,7 +1303,7 @@ export function ThreadPage({
     if (!preparationRef.current.active || !newSessionAdmitted || preparationDiscardRef.current) {
       return preparationDraftSaveChainRef.current;
     }
-    return enqueuePreparationSave(snapshotPreparation()).then(() => undefined);
+    return enqueuePreparationSave(snapshotPreparation(), keepalive).then(() => undefined);
   }
 
   function schedulePreparationDraftSave(): void {
@@ -1769,7 +1774,7 @@ export function ThreadPage({
     keepalive = false,
   ): Promise<void> {
     return preparationRef.current.active
-      ? flushPreparation()
+      ? flushPreparation(keepalive)
       : flushDraft(targetThreadId, keepalive);
   }
   flushComposerDraftRef.current = flushComposerDraft;
