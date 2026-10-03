@@ -1779,12 +1779,7 @@ describe("AppProjection", () => {
     expect(stateViews).toHaveBeenCalledTimes(1);
 
     stateViews.mockClear();
-    expect(projection.emptyThreadCandidates("root")).toEqual([
-      {
-        thread: expect.objectContaining({ id: "empty", projectId: "root" }),
-        knownUnmaterialized: true,
-      },
-    ]);
+    expect(projection.canRecoverMissingFirstSession("empty")).toBe(false);
     expect(stateViews).toHaveBeenCalledTimes(1);
   });
 

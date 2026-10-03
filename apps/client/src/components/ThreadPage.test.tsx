@@ -3710,6 +3710,35 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Скопировать сообщение" })).toBeEnabled();
   });
 
+  it("opens the replacement session when retrying a preserved first message", async () => {
+    const api = threadApi();
+    api.sendQueuedNow.mockResolvedValue({
+      turnId: "recovered-turn",
+      thread: { ...summary, id: "recovered" },
+    });
+    const context = mockThreadConnection(api, summary, {
+      queuedMessages: [
+        {
+          id: "saved",
+          threadId: "thread",
+          text: "Первое сообщение",
+          createdAt: 1,
+          status: "queued",
+          deliveryError: { message: "Сессия недоступна. Сообщение сохранено.", retryable: false },
+        },
+      ],
+    });
+    render(forkThreadRoute());
+    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("fork-location")).toHaveTextContent("/threads/recovered:true"),
+    );
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "thread",
+      thread: expect.objectContaining({ id: "recovered" }),
+    });
+  });
+
   it("shows a local draft even when the missing session has no summary", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     context.state.snapshot.threads = [];

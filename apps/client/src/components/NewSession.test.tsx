@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
-import type { LocalDraft, LocalNewSessionDraft } from "../offline-store";
+import type { LocalNewSessionDraft } from "../offline-store";
 import { NewSession } from "./NewSession";
 
 const connection = vi.hoisted(() => vi.fn());
@@ -311,286 +311,191 @@ describe("NewSession", () => {
     expect(sendReliable.mock.calls[0]?.[1].clientMessageId).toBe(id);
   });
 
-  it("opens immediately for the selected project and transfers the draft to the created thread", async () => {
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const dispatch = vi.fn();
-    const createProjectThread = vi.fn().mockReturnValue(creation.promise);
-    const updateThreadDraft = vi
-      .fn()
-      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
-        ...value,
-        updatedAt: 20,
-      }));
+  it("keeps a project draft without creating a Codex session until Enter", async () => {
+    let stored: LocalNewSessionDraft | null = null;
+    drafts.load.mockImplementation(async () => stored);
+    drafts.save.mockImplementation(async (_settings, projectId, value, preparation) => {
+      stored = structuredClone({
+        key: "new",
+        connectionKey: "test",
+        projectId,
+        value,
+        ...preparation,
+        updatedAt: 1,
+      });
+      return true;
+    });
+    drafts.delete.mockImplementation(async () => {
+      stored = null;
+    });
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    const updateThreadDraft = vi.fn();
     connection.mockReturnValue(
-      mockConnection({ createProjectThread, updateThreadDraft, dispatch }),
+      mockConnection({ createProjectThread, sendReliable, updateThreadDraft }),
     );
-
-    renderNewSession();
-
+    let view = renderNewSession();
     const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
-    expect(textbox).toHaveFocus();
-    expect(screen.queryByRole("combobox", { name: "Проект" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
-    await waitFor(() =>
-      expect(createProjectThread).toHaveBeenCalledWith(project.id, expect.any(String), {
-        resumeEmpty: true,
-      }),
-    );
-
-    fireEvent.change(textbox, { target: { value: "Не потерять этот текст" } });
-    creation.resolve({ thread });
-
-    await waitFor(() =>
-      expect(updateThreadDraft).toHaveBeenCalledWith(
-        thread.id,
-        {
-          input: "Не потерять этот текст",
-          images: [],
-          goalMode: false,
-          annotations: [],
-        },
-        { retry: true },
-      ),
-    );
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(dispatch).toHaveBeenCalledWith({ type: "thread", thread });
-    expect(drafts.delete).toHaveBeenCalledWith(connectionSettings, project.id);
-  });
-
-  it("opens an untouched thread without an extra draft request", async () => {
-    const updateThreadDraft = vi.fn();
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockResolvedValue({ thread }),
-        updateThreadDraft,
-      }),
-    );
-
-    renderNewSession();
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
+    fireEvent.change(textbox, { target: { value: "Не потерять черновик" } });
+    view.unmount();
+    await waitFor(() => expect(stored?.value.input).toBe("Не потерять черновик"));
+    expect((stored as LocalNewSessionDraft | null)?.threadId).toBeNull();
+    expect(createProjectThread).not.toHaveBeenCalled();
     expect(updateThreadDraft).not.toHaveBeenCalled();
+    view = renderNewSession();
+    expect(await screen.findByDisplayValue("Не потерять черновик")).toBeInTheDocument();
+    expect(createProjectThread).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(createProjectThread).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(String));
+    await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
+    view.unmount();
+    renderNewSession();
+    await waitFor(() => expect(drafts.load).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+    expect(createProjectThread).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    { localInput: null, updatedAt: 0, expected: "Серверный черновик", writes: 0 },
-    { localInput: "Устаревшая копия", updatedAt: 10, expected: "Серверный черновик", writes: 0 },
-    {
-      localInput: "Последние изменения",
-      updatedAt: 30,
-      expected: "Последние изменения",
-      writes: 1,
-    },
-    { localInput: "", updatedAt: 30, expected: "", writes: 1 },
-  ])(
-    "restores the latest reused-thread draft: $expected ($updatedAt)",
-    async ({ localInput, updatedAt, expected, writes }) => {
-      const serverDraft: ThreadDraft = {
-        input: "Серверный черновик",
-        images: [],
-        goalMode: false,
-        annotations: [],
-        updatedAt: 20,
+  it("retains file bytes across reopening and uploads only on the first send", async () => {
+    let stored: LocalNewSessionDraft | null = null;
+    drafts.load.mockImplementation(async () => stored);
+    drafts.save.mockImplementation(async (_settings, projectId, value, preparation) => {
+      stored = {
+        key: "new",
+        connectionKey: "test",
+        projectId,
+        value,
+        ...preparation,
+        updatedAt: 1,
       };
-      if (localInput !== null) {
-        drafts.loadLocal.mockResolvedValue({
-          value: { input: localInput, images: [], goalMode: false, annotations: [] },
-          updatedAt,
-        });
-      }
-      const updateThreadDraft = vi
-        .fn()
-        .mockImplementation(async (_id, value) =>
-          value.input ? { ...value, updatedAt: 40 } : null,
-        );
-      const readThread = vi.fn();
-      connection.mockReturnValue(
-        mockConnection({
-          createProjectThread: vi.fn().mockResolvedValue({ thread, draft: serverDraft }),
-          updateThreadDraft,
-          readThread,
-        }),
-      );
-
-      renderNewSession();
-
-      expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-      expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(expected);
-      expect(drafts.loadLocal).toHaveBeenCalledWith(connectionSettings, thread.id);
-      expect(updateThreadDraft).toHaveBeenCalledTimes(writes);
-      if (writes) {
-        expect(updateThreadDraft).toHaveBeenCalledWith(
-          thread.id,
-          {
-            input: expected,
-            images: [],
-            goalMode: false,
-            annotations: [],
-          },
-          { retry: true },
-        );
-      }
-      expect(readThread).not.toHaveBeenCalled();
-    },
-  );
-
-  it("restores attachments and goal mode without resaving the server draft", async () => {
-    const draft: ThreadDraft = {
-      input: "  Текст с пробелами\nи новой строкой  ",
-      images: [{ id: "image", name: "image.png", url: "data:image/png;base64,AA==" }],
-      files: [
-        {
-          id: "file",
-          name: "notes.txt",
-          path: "/work/notes.txt",
-          size: 5,
-          mediaType: "text/plain",
-        },
-      ],
-      goalMode: true,
-      annotations: [],
-      updatedAt: 20,
-    };
-    const updateThreadDraft = vi.fn();
+      return true;
+    });
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      id: "uploaded",
+      name: "notes.txt",
+      path: "/attachments/notes.txt",
+      size: 5,
+      mediaType: "text/plain",
+    });
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockResolvedValue({ thread, draft }),
-        updateThreadDraft,
-      }),
+      mockConnection({ createProjectThread, sendReliable, uploadAttachment }),
     );
-
-    renderNewSession();
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(draft.input);
+    const view = renderNewSession();
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
     expect(
-      screen.getByRole("button", { name: "Удалить изображение image.png" }),
+      await screen.findByRole("button", { name: "Удалить файл notes.txt" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Удалить файл notes.txt" })).toBeInTheDocument();
-    expect(drafts.save).toHaveBeenLastCalledWith(
-      connectionSettings,
-      project.id,
-      {
-        input: draft.input,
-        images: draft.images,
-        files: draft.files,
-        goalMode: true,
-        annotations: [],
-      },
-      expect.anything(),
+    view.unmount();
+    await waitFor(() => expect(stored?.attachments?.[0]?.file.size).toBe(5));
+    expect(createProjectThread).not.toHaveBeenCalled();
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    renderNewSession();
+    expect(
+      await screen.findByRole("button", { name: "Удалить файл notes.txt" }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(uploadAttachment).toHaveBeenCalledWith(
+      thread.id,
+      expect.objectContaining({ name: "notes.txt", size: 5 }),
     );
-    expect(updateThreadDraft).not.toHaveBeenCalled();
+    const fileContents = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(uploadAttachment.mock.calls[0]?.[1]);
+    });
+    expect(fileContents).toBe("hello");
+    expect(sendReliable.mock.calls[0]?.[1].files).toEqual([
+      {
+        id: "uploaded",
+        name: "notes.txt",
+        path: "/attachments/notes.txt",
+        size: 5,
+        mediaType: "text/plain",
+      },
+    ]);
   });
 
-  it.each(["Новый текст", ""])(
-    "preserves edits made while a reused draft is loading: %s",
-    async (input) => {
-      const loading = deferred<LocalDraft | null>();
-      drafts.loadLocal.mockReturnValueOnce(loading.promise);
-      const updateThreadDraft = vi.fn().mockResolvedValue(null);
-      connection.mockReturnValue(
-        mockConnection({
-          createProjectThread: vi.fn().mockResolvedValue({
-            thread,
-            draft: {
-              input: "Старый текст",
-              images: [],
-              goalMode: false,
-              annotations: [],
-              updatedAt: 20,
-            },
-          }),
-          updateThreadDraft,
-        }),
-      );
-
-      renderNewSession();
-      await waitFor(() => expect(drafts.loadLocal).toHaveBeenCalledOnce());
-      const textarea = screen.getByRole("textbox", { name: "Сообщение для Codex" });
-      fireEvent.change(textarea, { target: { value: "Начал писать" } });
-      fireEvent.change(textarea, { target: { value: input } });
-      loading.resolve(null);
-
-      expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-      expect(textarea).toHaveValue(input);
-      expect(updateThreadDraft).toHaveBeenCalledWith(
-        thread.id,
-        {
-          input,
-          images: [],
-          goalMode: false,
-          annotations: [],
-        },
-        { retry: true },
-      );
-    },
-  );
-
-  it("keeps a saved preparation ahead of a reused thread's older draft", async () => {
+  it("ignores a legacy created-thread binding when only an unsent draft is restored", async () => {
     drafts.load.mockResolvedValue({
-      value: { input: "Черновик подготовки", images: [], goalMode: false, annotations: [] },
-      phase: "creating",
-      threadId: null,
-      thread: null,
+      projectId: project.id,
+      clientCreationId: "obsolete-id",
+      threadId: "missing",
+      thread: { ...thread, id: "missing" },
+      value: { input: "Старый черновик", images: [], annotations: [], goalMode: false },
       revision: 1,
     });
-    const updateThreadDraft = vi.fn().mockResolvedValue(null);
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockResolvedValue({
-          thread,
-          draft: {
-            input: "Старый текст",
-            images: [],
-            goalMode: false,
-            annotations: [],
-            updatedAt: 20,
-          },
-        }),
-        updateThreadDraft,
-      }),
-    );
-
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    const readThread = vi.fn();
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(mockConnection({ createProjectThread, readThread, sendReliable }));
     renderNewSession();
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
-      "Черновик подготовки",
-    );
-    expect(updateThreadDraft).toHaveBeenCalledWith(
-      thread.id,
-      expect.objectContaining({ input: "Черновик подготовки" }),
-      { retry: true },
-    );
+    expect(await screen.findByDisplayValue("Старый черновик")).toBeInTheDocument();
+    expect(createProjectThread).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(createProjectThread.mock.calls[0]?.[1]).not.toBe("obsolete-id");
+    expect(readThread).not.toHaveBeenCalled();
   });
 
-  it("clears a reused thread when its saved preparation was deliberately emptied", async () => {
-    drafts.load.mockResolvedValue({
-      value: { input: "", images: [], goalMode: false, annotations: [] },
-      phase: "transferring",
-      threadId: thread.id,
-      thread,
-      revision: 2,
+  it("keeps user edits made while the project draft is being restored", async () => {
+    const loading = deferred<LocalNewSessionDraft | null>();
+    drafts.load.mockReturnValue(loading.promise);
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    const uploadAttachment = vi
+      .fn()
+      .mockResolvedValue({
+        id: "uploaded",
+        name: "fresh.txt",
+        path: "/attachments/fresh.txt",
+        size: 5,
+        mediaType: "text/plain",
+      });
+    const sendReliable = vi.fn().mockResolvedValue("delivered");
+    connection.mockReturnValue(
+      mockConnection({ createProjectThread, uploadAttachment, sendReliable }),
+    );
+    const view = renderNewSession();
+    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      target: { value: "Свежий текст" },
     });
-    const updateThreadDraft = vi.fn().mockResolvedValue(null);
-    const createProjectThread = vi.fn();
-    connection.mockReturnValue(mockConnection({ createProjectThread, updateThreadDraft }));
-
-    renderNewSession();
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
-    expect(updateThreadDraft).toHaveBeenCalledWith(
-      thread.id,
-      {
-        input: "",
-        images: [],
-        goalMode: false,
-        annotations: [],
-      },
-      { retry: true },
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["fresh"], "fresh.txt", { type: "text/plain" })] },
+    });
+    expect(
+      await screen.findByRole("button", { name: "Удалить файл fresh.txt" }),
+    ).toBeInTheDocument();
+    await act(async () =>
+      loading.resolve({
+        key: "new",
+        connectionKey: "test",
+        projectId: project.id,
+        updatedAt: 1,
+        attachments: [],
+        value: { input: "Старый текст", images: [], annotations: [], goalMode: false },
+      } as LocalNewSessionDraft),
+    );
+    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
+      "Свежий текст",
     );
     expect(createProjectThread).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    expect(sendReliable.mock.calls[0]?.[1].files?.[0]?.path).toBe("/attachments/fresh.txt");
   });
 
   it("does not create a session when /new is opened directly", async () => {
@@ -611,152 +516,6 @@ describe("NewSession", () => {
 
     expect(await screen.findByText("Главная")).toBeInTheDocument();
     expect(createProjectThread).not.toHaveBeenCalled();
-  });
-
-  it("resumes draft transfer without creating a second thread", async () => {
-    const transfer = deferred<ThreadDraft>();
-    drafts.load.mockResolvedValue({
-      key: "draft",
-      connectionKey: "connection",
-      projectId: project.id,
-      value: {
-        input: "Восстановленный черновик",
-        images: [],
-        goalMode: false,
-        annotations: [],
-      },
-      phase: "transferring",
-      threadId: thread.id,
-      thread,
-      revision: 4,
-      updatedAt: 10,
-    });
-    const createProjectThread = vi.fn();
-    const updateThreadDraft = vi.fn().mockReturnValue(transfer.promise);
-    connection.mockReturnValue(mockConnection({ createProjectThread, updateThreadDraft }));
-
-    render(
-      <MemoryRouter initialEntries={["/new?projectId=project"]}>
-        <Routes>
-          <Route
-            path="/new"
-            element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
-          />
-          <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByDisplayValue("Восстановленный черновик")).toBeInTheDocument();
-    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalled());
-    expect(createProjectThread).not.toHaveBeenCalled();
-    transfer.resolve({
-      input: "Восстановленный черновик",
-      images: [],
-      goalMode: false,
-      annotations: [],
-      updatedAt: 20,
-    });
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-  });
-
-  it("retries a failed resumed thread read with a fresh promise", async () => {
-    drafts.load.mockResolvedValue({
-      key: "draft",
-      connectionKey: "connection",
-      projectId: project.id,
-      value: {
-        input: "Восстановленный черновик",
-        images: [],
-        goalMode: false,
-        annotations: [],
-      },
-      phase: "transferring",
-      threadId: thread.id,
-      thread: null,
-      revision: 4,
-      updatedAt: 10,
-    });
-    const readThread = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("Чтение недоступно"))
-      .mockResolvedValueOnce({ summary: thread });
-    const createProjectThread = vi.fn();
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread,
-        readThread,
-        updateThreadDraft: vi.fn().mockResolvedValue(null),
-      }),
-    );
-
-    render(
-      <MemoryRouter initialEntries={["/new?projectId=project"]}>
-        <Routes>
-          <Route
-            path="/new"
-            element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
-          />
-          <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText("Чтение недоступно")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(readThread).toHaveBeenCalledTimes(2);
-    expect(createProjectThread).not.toHaveBeenCalled();
-  });
-
-  it("recovers a missing resumed thread by creating a replacement on retry", async () => {
-    drafts.load.mockResolvedValue({
-      key: "draft",
-      connectionKey: "connection",
-      projectId: project.id,
-      value: {
-        input: "Восстановленный черновик",
-        images: [],
-        goalMode: false,
-        annotations: [],
-      },
-      phase: "transferring",
-      threadId: "missing",
-      thread: null,
-      revision: 4,
-      updatedAt: 10,
-    });
-    const readThread = vi
-      .fn()
-      .mockRejectedValue(new ApiClientError("not_found", "Сессия не найдена", 404));
-    const createProjectThread = vi.fn().mockResolvedValue({ thread });
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread,
-        readThread,
-        updateThreadDraft: vi.fn().mockResolvedValue(null),
-      }),
-    );
-
-    render(
-      <MemoryRouter initialEntries={["/new?projectId=project"]}>
-        <Routes>
-          <Route
-            path="/new"
-            element={<NewSession projects={[project]} onOpenNavigation={() => undefined} />}
-          />
-          <Route path="/threads/:threadId" element={<div>Созданная сессия</div>} />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText("Сессия не найдена")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(readThread).toHaveBeenCalledOnce();
-    expect(createProjectThread).toHaveBeenCalledOnce();
   });
 
   it("restores an abandoned early submission without carrying a legacy service tier", async () => {
@@ -867,297 +626,8 @@ describe("NewSession", () => {
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
     expect(view.container.querySelector('img[src^="data:image/png"]')).not.toBeNull();
     expect(screen.getByRole("button", { name: "Включить режим планирования" })).toBeInTheDocument();
-    expect(createProjectThread).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
     expect(sendReliable).not.toHaveBeenCalled();
-  });
-
-  it("clears a claimed automatic transfer after it settles behind accepted sending", async () => {
-    const transfer = deferred<ThreadDraft | null>();
-    const order: string[] = [];
-    const updateThreadDraft = vi
-      .fn()
-      .mockImplementationOnce(async () => {
-        order.push("transfer-started");
-        const saved = await transfer.promise;
-        order.push("transfer-settled");
-        return saved;
-      })
-      .mockImplementationOnce(async (_threadId, value) => {
-        order.push("server-cleared");
-        expect(value).toEqual({
-          input: "",
-          images: [],
-          goalMode: false,
-          annotations: [],
-        });
-        return null;
-      });
-    const sendReliable = vi.fn().mockImplementation(async () => {
-      order.push("send-accepted");
-      return "delivered";
-    });
-    drafts.deleteLocal.mockImplementation(async () => {
-      order.push("local-cleared");
-    });
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockResolvedValue({ thread }),
-        sendReliable,
-        updateThreadDraft,
-      }),
-    );
-
-    renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
-    fireEvent.change(textbox, { target: { value: "Отправь только один раз" } });
-    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalledOnce());
-
-    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
-    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(updateThreadDraft).toHaveBeenCalledOnce();
-
-    transfer.resolve({
-      input: "Отправь только один раз",
-      images: [],
-      goalMode: false,
-      annotations: [],
-      updatedAt: 20,
-    });
-
-    await waitFor(() =>
-      expect(drafts.deleteLocal).toHaveBeenCalledWith(connectionSettings, thread.id),
-    );
-    expect(updateThreadDraft).toHaveBeenCalledTimes(2);
-    expect(updateThreadDraft).toHaveBeenLastCalledWith(
-      thread.id,
-      { input: "", images: [], goalMode: false, annotations: [] },
-      { retry: true },
-    );
-    expect(sendReliable).toHaveBeenCalledOnce();
-    expect(order).toEqual([
-      "transfer-started",
-      "send-accepted",
-      "transfer-settled",
-      "server-cleared",
-      "local-cleared",
-    ]);
-  });
-
-  it("repeats transfer when the user types while the previous draft is being saved", async () => {
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const firstTransfer = deferred<ThreadDraft | null>();
-    const updateThreadDraft = vi
-      .fn()
-      .mockReturnValueOnce(firstTransfer.promise)
-      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
-        ...value,
-        updatedAt: 30,
-      }));
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockReturnValue(creation.promise),
-        updateThreadDraft,
-      }),
-    );
-
-    renderNewSession();
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Первая версия" },
-    });
-    creation.resolve({ thread });
-    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Самая новая версия" },
-    });
-    firstTransfer.resolve(null);
-
-    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalledTimes(2));
-    expect(updateThreadDraft.mock.calls[1]?.[1]).toEqual({
-      input: "Самая новая версия",
-      images: [],
-      goalMode: false,
-      annotations: [],
-    });
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-  });
-
-  it("does not lose input typed while the transferred preparation is being removed", async () => {
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const deletion = deferred<void>();
-    drafts.delete.mockReturnValueOnce(deletion.promise).mockResolvedValueOnce(undefined);
-    const updateThreadDraft = vi
-      .fn()
-      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
-        ...value,
-        updatedAt: Date.now(),
-      }));
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockReturnValue(creation.promise),
-        updateThreadDraft,
-      }),
-    );
-
-    renderNewSession();
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Первая версия" },
-    });
-    creation.resolve({ thread });
-    await waitFor(() => expect(drafts.delete).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Версия во время удаления" },
-    });
-    deletion.resolve();
-
-    await waitFor(() => expect(updateThreadDraft).toHaveBeenCalledTimes(2));
-    expect(updateThreadDraft.mock.calls[1]?.[1]).toEqual({
-      input: "Версия во время удаления",
-      images: [],
-      goalMode: false,
-      annotations: [],
-    });
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-  });
-
-  it("waits for a selected image before opening the created thread", async () => {
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const imageRead = deferred<string>();
-    class PendingFileReader {
-      result: string | ArrayBuffer | null = null;
-      error: DOMException | null = null;
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-
-      readAsDataURL(): void {
-        void imageRead.promise.then(
-          (result) => {
-            this.result = result;
-            this.onload?.();
-          },
-          () => this.onerror?.(),
-        );
-      }
-    }
-    vi.stubGlobal("FileReader", PendingFileReader);
-    const updateThreadDraft = vi
-      .fn()
-      .mockImplementation(async (_threadId: string, value: ThreadDraft): Promise<ThreadDraft> => ({
-        ...value,
-        updatedAt: Date.now(),
-      }));
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread: vi.fn().mockReturnValue(creation.promise),
-        updateThreadDraft,
-      }),
-    );
-
-    const view = renderNewSession();
-    const fileInput = view.container.querySelector('input[type="file"]') as HTMLInputElement;
-    fireEvent.change(fileInput, {
-      target: { files: [new File(["image"], "screenshot.png", { type: "image/png" })] },
-    });
-    creation.resolve({ thread });
-
-    await waitFor(() =>
-      expect(drafts.save).toHaveBeenCalledWith(
-        connectionSettings,
-        project.id,
-        expect.anything(),
-        expect.objectContaining({ phase: "transferring", threadId: thread.id }),
-      ),
-    );
-    expect(screen.queryByText("Созданная сессия")).not.toBeInTheDocument();
-    expect(updateThreadDraft).not.toHaveBeenCalled();
-
-    imageRead.resolve("data:image/png;base64,aW1hZ2U=");
-
-    await waitFor(() =>
-      expect(updateThreadDraft).toHaveBeenCalledWith(
-        thread.id,
-        {
-          input: "",
-          images: [
-            expect.objectContaining({
-              name: "screenshot.png",
-              url: "data:image/png;base64,aW1hZ2U=",
-            }),
-          ],
-          goalMode: false,
-          annotations: [],
-        },
-        { retry: true },
-      ),
-    );
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-  });
-
-  it("keeps the draft and retries the same preparation after a creation error", async () => {
-    const createProjectThread = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("Codex недоступен"))
-      .mockResolvedValueOnce({ thread });
-    connection.mockReturnValue(
-      mockConnection({
-        createProjectThread,
-        updateThreadDraft: vi.fn().mockResolvedValue(null),
-      }),
-    );
-
-    renderNewSession();
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Черновик для повторной попытки" },
-    });
-    expect(await screen.findByText("Codex недоступен")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(drafts.save).toHaveBeenCalledWith(
-        connectionSettings,
-        project.id,
-        expect.objectContaining({ input: "Черновик для повторной попытки" }),
-        expect.objectContaining({ phase: "creating", threadId: null }),
-      ),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(createProjectThread).toHaveBeenCalledTimes(2);
-  });
-
-  it("retries only draft transfer after the thread has already been created", async () => {
-    const creation = deferred<{ thread: ThreadSummary }>();
-    const createProjectThread = vi.fn().mockReturnValue(creation.promise);
-    const updateThreadDraft = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("Черновик не сохранён"))
-      .mockResolvedValueOnce({
-        input: "Сохранить в существующую сессию",
-        images: [],
-        goalMode: false,
-        annotations: [],
-        updatedAt: 40,
-      });
-    connection.mockReturnValue(mockConnection({ createProjectThread, updateThreadDraft }));
-
-    renderNewSession();
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Сохранить в существующую сессию" },
-    });
-    creation.resolve({ thread });
-
-    expect(await screen.findByText("Черновик не сохранён")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(drafts.save).toHaveBeenCalledWith(
-        connectionSettings,
-        project.id,
-        expect.objectContaining({ input: "Сохранить в существующую сессию" }),
-        expect.objectContaining({ phase: "transferring", threadId: thread.id }),
-      ),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
-
-    expect(await screen.findByText("Созданная сессия")).toBeInTheDocument();
-    expect(createProjectThread).toHaveBeenCalledOnce();
-    expect(updateThreadDraft).toHaveBeenCalledTimes(2);
   });
 
   it("warns when the preparation cannot be stored locally", async () => {
@@ -1172,7 +642,7 @@ describe("NewSession", () => {
 
     expect(
       await screen.findByText(
-        "Локальное сохранение недоступно. Не закрывайте страницу, пока сессия не откроется.",
+        "Локальное сохранение недоступно. Не закрывайте страницу до отправки сообщения.",
       ),
     ).toBeInTheDocument();
   });
@@ -1221,6 +691,7 @@ function PersistentNewSessionRoute() {
 
 function mockConnection({
   createProjectThread = vi.fn(),
+  uploadAttachment = vi.fn(),
   models = [],
   readThread = vi.fn(),
   sendQueuedNow = vi.fn(),
@@ -1230,6 +701,7 @@ function mockConnection({
   dispatch = vi.fn(),
 }: {
   createProjectThread?: ReturnType<typeof vi.fn>;
+  uploadAttachment?: ReturnType<typeof vi.fn>;
   models?: ModelOption[];
   readThread?: ReturnType<typeof vi.fn>;
   sendQueuedNow?: ReturnType<typeof vi.fn>;
@@ -1246,6 +718,7 @@ function mockConnection({
   return {
     api: {
       createProjectThread,
+      uploadAttachment,
       readThread,
       sendQueuedNow,
       settings: connectionSettings,

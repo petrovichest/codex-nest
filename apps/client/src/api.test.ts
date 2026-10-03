@@ -10,33 +10,6 @@ describe("ApiClient", () => {
     vi.unstubAllGlobals();
   });
 
-  it("opts into first-message recovery without changing explicit session creation", async () => {
-    const fetchMock = vi.fn().mockImplementation(
-      async () =>
-        new Response(JSON.stringify({ thread: { id: "created" }, draft: null }), {
-          headers: { "Content-Type": "application/json" },
-          status: 201,
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
-
-    await api.createProjectThread("project/id", "first", { resumeEmpty: true });
-    await api.createProjectThread("project/id", "team-upgrade:old");
-
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
-      new URL("https://codexnest.example/api/v1/projects/project%2Fid/threads"),
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ clientCreationId: "first", resumeEmpty: true }),
-      }),
-    );
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1].body))).toEqual({
-      clientCreationId: "team-upgrade:old",
-    });
-  });
-
   it("lists and updates skills for an encoded workspace", async () => {
     const catalog = { cwd: "/work/one two", skills: [], errors: [] };
     const fetchMock = vi

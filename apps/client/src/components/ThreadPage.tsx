@@ -70,7 +70,7 @@ import {
 } from "../annotations";
 import { copyMarkdown, copyText } from "../clipboard";
 import { useConnection } from "../connection";
-import { ApiClientError, isRetryableApiError } from "../api";
+import { type ApiClient, ApiClientError, isRetryableApiError } from "../api";
 import { openDownloadUrl } from "../downloads";
 import { forkOperationsFromSnapshot } from "../forks";
 import { localizeKnownServerText, type Translate, useI18n } from "../i18n";
@@ -83,6 +83,7 @@ import {
   saveLocalDraft,
   saveNewSessionDraft,
   type NewSessionSubmission,
+  type NewSessionAttachment,
 } from "../offline-store";
 import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
@@ -156,6 +157,11 @@ type LocalImageLoader = (path: string) => Promise<Blob>;
 type LocalArtifactOpener = (artifact: ArtifactDescriptor, opener: HTMLButtonElement | null) => void;
 
 const ORCHESTRATION_CHANGED_PATH_LIMIT = 20;
+// A reopened project must await the previous workspace's final draft write.
+const pendingNewSessionDraftSaves = new Map<string, Promise<void>>();
+function newSessionDraftSaveKey(settings: ApiClient["settings"], projectId: string): string {
+  return `${settings.baseUrl}\0${settings.token}\0${projectId}`;
+}
 const QUESTION_REPLY_MESSAGE_ID_PREFIXES = ["user-input:", "async-answer:"] as const;
 
 type NewSessionPreparation = {
@@ -169,6 +175,7 @@ type NewSessionPreparation = {
   thread: ThreadSummary | null;
   revision: number;
   submission?: NewSessionSubmission;
+  attachments?: NewSessionAttachment[];
 };
 
 type EarlySubmission = {
@@ -180,13 +187,6 @@ type EarlySubmission = {
   draft: UpdateThreadDraftRequest;
   editRevision: number;
   staged?: boolean;
-};
-
-type PreparationDraftTransfer = {
-  generation: number;
-  promise: Promise<ThreadDraft | null>;
-  revision: number;
-  serverWriteStarted: boolean;
 };
 
 type AcceptedDraftClearGuard = {
@@ -573,7 +573,6 @@ export function ThreadPage({
   const [newSessionHydrated, setNewSessionHydrated] = useState(
     !initialNewSessionRef.current.active,
   );
-  const [preparationWorking, setPreparationWorking] = useState(false);
   const [preparationRetry, setPreparationRetry] = useState(0);
   const [storageWarning, setStorageWarning] = useState(false);
   const [pendingSettings, setPendingSettings] = useState<ClientSessionSettings>(() =>
@@ -605,11 +604,6 @@ export function ThreadPage({
   const preparationAliveRef = useRef(true);
   const preparationDiscardRef = useRef(false);
   const preparationDraftTouchedRef = useRef(false);
-  const preparationServerDraftRef = useRef<{
-    threadId: string;
-    draft: ThreadDraft | null;
-    revision: number | null;
-  } | null>(null);
   const preparationDraftTimerRef = useRef<number | null>(null);
   const preparationDraftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const preparationHydrationRef = useRef<Promise<void> | null>(null);
@@ -621,9 +615,6 @@ export function ThreadPage({
   const attachmentWaitersRef = useRef(new Set<{ scope: number | null; resolve: () => void }>());
   const earlySubmitRef = useRef(false);
   const preparationClaimedForSubmitRef = useRef(false);
-  const preparationDraftTransferGenerationRef = useRef(0);
-  const activePreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
-  const claimedPreparationDraftTransferRef = useRef<PreparationDraftTransfer | null>(null);
   const earlySubmissionRef = useRef<EarlySubmission | null>(null);
   const messageClaimsRef = useRef(new Set<string>());
   const activeMessageFingerprintsRef = useRef(new Set<string>());
@@ -1223,7 +1214,8 @@ export function ThreadPage({
   }
 
   function enqueuePreparationSave(snapshot: NewSessionPreparation): Promise<boolean> {
-    const request = preparationDraftSaveChainRef.current
+    const key = newSessionDraftSaveKey(api.settings, snapshot.projectId);
+    const request = (pendingNewSessionDraftSaves.get(key) ?? preparationDraftSaveChainRef.current)
       .catch(() => undefined)
       .then(async () => {
         const saved = await saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
@@ -1234,11 +1226,19 @@ export function ThreadPage({
           revision: snapshot.revision,
           settings: snapshot.settings,
           ...(snapshot.submission ? { submission: snapshot.submission } : {}),
+          attachments: snapshot.attachments,
         });
         if (!saved && preparationAliveRef.current) setStorageWarning(true);
         return saved;
       });
-    preparationDraftSaveChainRef.current = request.then(() => undefined);
+    const completion = request
+      .then(() => undefined)
+      .finally(() => {
+        if (pendingNewSessionDraftSaves.get(key) === completion)
+          pendingNewSessionDraftSaves.delete(key);
+      });
+    preparationDraftSaveChainRef.current = completion;
+    pendingNewSessionDraftSaves.set(key, completion);
     return request;
   }
 
@@ -1315,65 +1315,6 @@ export function ThreadPage({
     else composerDraftRef.current = next;
   }
 
-  function preparationDraftTransferActive(transfer: PreparationDraftTransfer): boolean {
-    return (
-      preparationDraftTransferGenerationRef.current === transfer.generation &&
-      !preparationClaimedForSubmitRef.current &&
-      preparationRef.current.active &&
-      !preparationDiscardRef.current &&
-      preparationRef.current.revision === transfer.revision &&
-      pendingAttachmentScopesRef.current.size === 0
-    );
-  }
-
-  function transferPreparationDraft(
-    targetThreadId: string,
-    value: UpdateThreadDraftRequest,
-  ): Promise<ThreadDraft | null> {
-    const transfer: PreparationDraftTransfer = {
-      generation: preparationDraftTransferGenerationRef.current,
-      promise: Promise.resolve(null),
-      revision: preparationRef.current.revision,
-      serverWriteStarted: false,
-    };
-    const request = (async () => {
-      if (!preparationDraftTransferActive(transfer)) return null;
-      await saveLocalDraft(api.settings, targetThreadId, value, Date.now());
-      if (!preparationDraftTransferActive(transfer)) return null;
-      transfer.serverWriteStarted = true;
-      try {
-        const saved = await api.updateThreadDraft(targetThreadId, value, { retry: true });
-        if (!preparationDraftTransferActive(transfer)) return saved;
-        if (saved) {
-          await saveLocalDraft(api.settings, targetThreadId, value, saved.updatedAt);
-        } else {
-          await deleteLocalDraft(api.settings, targetThreadId);
-        }
-        return saved;
-      } catch (caught) {
-        if (!preparationDraftTransferActive(transfer)) return null;
-        throw caught;
-      }
-    })().finally(() => {
-      if (activePreparationDraftTransferRef.current === transfer) {
-        activePreparationDraftTransferRef.current = null;
-      }
-    });
-    transfer.promise = request;
-    activePreparationDraftTransferRef.current = transfer;
-    return request;
-  }
-
-  async function settleClaimedPreparationDraftTransfer(): Promise<boolean> {
-    const transfer = claimedPreparationDraftTransferRef.current;
-    if (!transfer) return false;
-    await transfer.promise.catch(() => undefined);
-    if (claimedPreparationDraftTransferRef.current === transfer) {
-      claimedPreparationDraftTransferRef.current = null;
-    }
-    return transfer.serverWriteStarted;
-  }
-
   async function ensureCreatedThread(
     activeProject: Project,
     generation: number,
@@ -1401,29 +1342,9 @@ export function ThreadPage({
             const created = await api.createProjectThread(
               activeProject.id,
               preparationRef.current.clientCreationId,
-              { resumeEmpty: true },
             );
             assertPreparationGeneration(generation);
             thread = created.thread;
-            // The endpoint can reuse a session whose first message is still a draft.
-            const serverDraft = created.draft ?? null;
-            preparationServerDraftRef.current = {
-              threadId: thread.id,
-              draft: serverDraft,
-              revision: null,
-            };
-            const localDraft = await loadLocalDraft(api.settings, thread.id);
-            assertPreparationGeneration(generation);
-            if (!preparationDraftTouchedRef.current && !preparationClaimedForSubmitRef.current) {
-              const source =
-                localDraft && localDraft.updatedAt > (serverDraft?.updatedAt ?? 0)
-                  ? localDraft.value
-                  : serverDraft;
-              if (source) replacePreparationDraft(normalizeNewSessionDraft(source));
-              if (source === serverDraft) {
-                preparationServerDraftRef.current.revision = preparationRef.current.revision;
-              }
-            }
           }
           assertPreparationGeneration(generation);
         }
@@ -1542,75 +1463,6 @@ export function ThreadPage({
       },
     });
     return true;
-  }
-
-  async function finishNewSessionPreparation(
-    activeProject: Project,
-    generation: number,
-  ): Promise<void> {
-    let thread = await ensureCreatedThread(activeProject, generation);
-    assertPreparationGeneration(generation);
-    thread = await applyPendingSettings(thread, generation);
-    assertPreparationGeneration(generation);
-    preparationRef.current = { ...preparationRef.current, thread };
-    if (preparationClaimedForSubmitRef.current) return;
-
-    while (true) {
-      await waitForPendingAttachments();
-      assertPreparationGeneration(generation);
-      if (preparationClaimedForSubmitRef.current) return;
-      const transferring = snapshotPreparation();
-      const hasDraft =
-        Boolean(transferring.value.input) ||
-        transferring.value.images.length > 0 ||
-        (transferring.value.files?.length ?? 0) > 0 ||
-        transferring.value.goalMode ||
-        transferring.value.annotations.length > 0;
-      const serverDraft =
-        preparationServerDraftRef.current?.threadId === thread.id
-          ? preparationServerDraftRef.current
-          : null;
-      const saved =
-        serverDraft?.revision === transferring.revision
-          ? serverDraft.draft
-          : hasDraft || serverDraft?.draft || preparationDraftTouchedRef.current
-            ? await transferPreparationDraft(thread.id, transferring.value)
-            : null;
-      assertPreparationGeneration(generation);
-      if (
-        preparationClaimedForSubmitRef.current ||
-        pendingAttachmentScopesRef.current.size > 0 ||
-        preparationRef.current.revision !== transferring.revision
-      ) {
-        continue;
-      }
-
-      await flushPreparation();
-      assertPreparationGeneration(generation);
-      if (
-        preparationClaimedForSubmitRef.current ||
-        pendingAttachmentScopesRef.current.size > 0 ||
-        preparationRef.current.revision !== transferring.revision
-      ) {
-        continue;
-      }
-      await deleteNewSessionDraft(api.settings, activeProject.id);
-      assertPreparationGeneration(generation);
-      if (
-        preparationClaimedForSubmitRef.current ||
-        pendingAttachmentScopesRef.current.size > 0 ||
-        preparationRef.current.revision !== transferring.revision
-      ) {
-        continue;
-      }
-
-      thread = await applyPendingSettings(thread, generation);
-      assertPreparationGeneration(generation);
-      preparationRef.current = { ...preparationRef.current, thread };
-      if (preparationClaimedForSubmitRef.current) return;
-      activateCreatedThread(thread, saved, generation);
-      return;
-    }
   }
 
   function currentComposerDraft(
@@ -1761,11 +1613,23 @@ export function ThreadPage({
   }
 
   async function uploadFiles(selected: readonly File[]): Promise<ThreadFileAttachment[]> {
-    let targetThreadId = activeThreadIdRef.current;
-    if (preparationRef.current.active) {
-      if (!newSessionProject) throw new Error(t("Не удалось создать сессию"));
-      const thread = await ensureCreatedThread(newSessionProject, preparationGenerationRef.current);
-      targetThreadId = thread.id;
+    const targetThreadId = preparationRef.current.threadId || activeThreadIdRef.current;
+    if (preparationRef.current.active && !preparationRef.current.threadId) {
+      const attachments = selected.map((file) => ({
+        file,
+        attachment: {
+          id: crypto.randomUUID(),
+          name: file.name,
+          path: "",
+          size: file.size,
+          mediaType: file.type || "application/octet-stream",
+        },
+      }));
+      preparationRef.current.attachments = [
+        ...(preparationRef.current.attachments ?? []),
+        ...attachments,
+      ];
+      return attachments.map(({ attachment }) => attachment);
     }
     if (!targetThreadId) throw new Error(t("Не удалось создать сессию"));
     const uploaded: ThreadFileAttachment[] = [];
@@ -1783,8 +1647,57 @@ export function ThreadPage({
   }
 
   async function deleteFile(file: ThreadFileAttachment): Promise<void> {
+    if (preparationRef.current.attachments?.some(({ attachment }) => attachment.id === file.id)) {
+      preparationRef.current.attachments = preparationRef.current.attachments.filter(
+        ({ attachment }) => attachment.id !== file.id,
+      );
+      return;
+    }
     const targetThreadId = preparationRef.current.threadId || activeThreadIdRef.current;
     if (targetThreadId) await api.deleteAttachment(targetThreadId, file.id);
+  }
+
+  async function uploadPreparationFiles(targetThreadId: string, generation: number): Promise<void> {
+    for (const pending of [...(preparationRef.current.attachments ?? [])]) {
+      const used = [
+        ...(preparationRef.current.value.files ?? []),
+        ...(earlySubmissionRef.current?.draft.files ?? []),
+      ].some((file) => file.id === pending.attachment.id);
+      if (!used) continue;
+      const uploaded = await api.uploadAttachment(
+        targetThreadId,
+        new File([pending.file], pending.attachment.name, { type: pending.attachment.mediaType }),
+      );
+      assertPreparationGeneration(generation);
+      const replace = (draft: UpdateThreadDraftRequest): UpdateThreadDraftRequest => ({
+        ...draft,
+        ...(draft.files
+          ? {
+              files: draft.files.map((file) =>
+                file.id === pending.attachment.id ? uploaded : file,
+              ),
+            }
+          : {}),
+      });
+      preparationRef.current.value = replace(preparationRef.current.value);
+      if (earlySubmissionRef.current) {
+        earlySubmissionRef.current.draft = replace(earlySubmissionRef.current.draft);
+      }
+      if (preparationRef.current.submission) {
+        preparationRef.current.submission.draft = replace(preparationRef.current.submission.draft);
+      }
+      commitComposerDraft({
+        ...composerDraftRef.current,
+        value: replace(composerDraftRef.current.value),
+      });
+      preparationRef.current.attachments = preparationRef.current.attachments?.filter(
+        ({ attachment }) => attachment.id !== pending.attachment.id,
+      );
+      if (!(await enqueuePreparationSave(snapshotPreparation()))) {
+        throw new Error(t("Не удалось сохранить черновик на устройстве"));
+      }
+      assertPreparationGeneration(generation);
+    }
   }
 
   function setGoalMode(value: boolean): void {
@@ -1867,20 +1780,6 @@ export function ThreadPage({
     }
   }
 
-  async function beginPreparedTranscription(recording: ComposerRecording): Promise<void> {
-    const generation = preparationGenerationRef.current;
-    await preparationOperationRef.current;
-    if (
-      !preparationAliveRef.current ||
-      preparationGenerationRef.current !== generation ||
-      preparationRef.current.active ||
-      !activeThreadIdRef.current
-    ) {
-      throw new Error(t("Не удалось создать сессию"));
-    }
-    await beginTranscription(activeThreadIdRef.current, recording);
-  }
-
   async function cancelVoiceTranscription(): Promise<void> {
     if (!activeVoiceJob || voiceCancellationPending) return;
     setVoiceCancellationPending(true);
@@ -1923,6 +1822,9 @@ export function ThreadPage({
     let active = true;
     const generation = preparationGenerationRef.current;
     const hydration = (async () => {
+      await pendingNewSessionDraftSaves.get(
+        newSessionDraftSaveKey(api.settings, newSessionProject.id),
+      );
       const stored = await loadNewSessionDraft(api.settings, newSessionProject.id);
       if (!active || !preparationGenerationActive(generation)) return;
       if (!stored && !initialNewSessionRef.current.admitted) {
@@ -1955,11 +1857,14 @@ export function ThreadPage({
         pendingSettingsRevisionRef.current += 1;
         setPendingSettings(settings);
       }
-      const storedThreadId = stored?.threadId ?? null;
+      const storedThreadId = stored?.submission ? (stored.threadId ?? null) : null;
       preparationRef.current = {
         ...current,
         projectId: newSessionProject.id,
-        clientCreationId: stored?.clientCreationId ?? current.clientCreationId,
+        clientCreationId:
+          stored?.threadId && !stored.submission
+            ? current.clientCreationId
+            : (stored?.clientCreationId ?? current.clientCreationId),
         value,
         settings,
         phase: storedThreadId ? "transferring" : "creating",
@@ -1967,6 +1872,7 @@ export function ThreadPage({
         thread: stored?.thread?.id === storedThreadId ? stored.thread : null,
         revision: Math.max(current.revision, stored?.revision ?? 0),
         submission: current.submission ?? stored?.submission,
+        attachments: [...(stored?.attachments ?? []), ...(current.attachments ?? [])],
       };
       if (stored && !preparationDraftTouchedRef.current) {
         const next = { threadId, value };
@@ -2011,19 +1917,17 @@ export function ThreadPage({
       !newSessionProject ||
       preparationClaimedForSubmitRef.current ||
       preparationSendRetryRef.current !== null ||
-      preparationOperationRef.current
+      preparationOperationRef.current ||
+      !preparationRef.current.submission
     ) {
       return;
     }
     if (preparationRef.current.submission?.deliveryError?.retryable === false) return;
-    setPreparationWorking(true);
     setError(null);
     const generation = preparationGenerationRef.current;
-    const pendingSubmission = preparationRef.current.submission;
-    const operation = (
-      pendingSubmission && !preparationClaimedForSubmitRef.current
-        ? submitPreparingSession(newSessionProject, pendingSubmission.intent)
-        : finishNewSessionPreparation(newSessionProject, generation)
+    const operation = submitPreparingSession(
+      newSessionProject,
+      preparationRef.current.submission.intent,
     )
       .catch(async (caught: unknown) => {
         if (caught === PREPARATION_SUPERSEDED) return;
@@ -2054,9 +1958,6 @@ export function ThreadPage({
       .finally(() => {
         if (preparationOperationRef.current === operation) {
           preparationOperationRef.current = null;
-        }
-        if (preparationAliveRef.current && preparationGenerationRef.current === generation) {
-          setPreparationWorking(false);
         }
       });
     preparationOperationRef.current = operation;
@@ -2844,8 +2745,6 @@ export function ThreadPage({
     }
     earlySubmitRef.current = true;
     preparationClaimedForSubmitRef.current = true;
-    preparationDraftTransferGenerationRef.current += 1;
-    claimedPreparationDraftTransferRef.current = activePreparationDraftTransferRef.current;
     setBusy(true);
     setError(null);
     const submittedAttachmentScope = attachmentScopeRef.current;
@@ -2883,7 +2782,7 @@ export function ThreadPage({
       await waitForPendingAttachments(submittedAttachmentScope);
       assertPreparationGeneration(generation);
       const submission = earlySubmissionRef.current;
-      const completeDraft = structuredClone(submission?.draft ?? submittedDraft);
+      let completeDraft = structuredClone(submission?.draft ?? submittedDraft);
       const completeInput = submittedInput;
       preparationRef.current.submission = {
         id: clientMessageId,
@@ -2914,6 +2813,13 @@ export function ThreadPage({
           commitComposerDraft({ threadId, value });
         }
       } else if (submission) submission.staged = stagedInPreparation;
+      let thread = await ensureCreatedThread(activeProject, generation);
+      assertPreparationGeneration(generation);
+      thread = await applyPendingSettings(thread, generation);
+      assertPreparationGeneration(generation);
+      preparationRef.current = { ...preparationRef.current, thread };
+      await uploadPreparationFiles(thread.id, generation);
+      completeDraft = structuredClone(earlySubmissionRef.current?.draft ?? completeDraft);
       const completeIdentity: SubmittedMessageIdentity = {
         text: completeInput,
         ...pastedText(trimPastedMessage(completeDraft.input, completeDraft)),
@@ -2922,11 +2828,6 @@ export function ThreadPage({
         goal: completeDraft.goalMode,
       };
       messageClaimKey = moveSubmittedMessageClaim(messageClaimKey, completeIdentity);
-      let thread = await ensureCreatedThread(activeProject, generation);
-      assertPreparationGeneration(generation);
-      thread = await applyPendingSettings(thread, generation);
-      assertPreparationGeneration(generation);
-      preparationRef.current = { ...preparationRef.current, thread };
       const optimisticMessage: GoalAwareOptimisticMessage = {
         id: clientMessageId,
         threadId: thread.id,
@@ -2992,8 +2893,6 @@ export function ThreadPage({
         }
       }
       await waitForPendingAttachments();
-      const staleServerWrite = await settleClaimedPreparationDraftTransfer();
-      await waitForPendingAttachments();
       const settledSubmission = earlySubmissionRef.current;
       const submittedEditRevision =
         settledSubmission?.editRevision ?? composerEditRevisionRef.current;
@@ -3013,24 +2912,7 @@ export function ThreadPage({
           remainingEditRevision,
         );
       } else {
-        if (staleServerWrite) {
-          const clearGuard: AcceptedDraftClearGuard = {
-            editRevision: composerEditRevisionRef.current,
-            generation,
-            pendingRevision: draftRevisionRef.current,
-          };
-          let clearFailed = false;
-          try {
-            await api.updateThreadDraft(thread.id, emptyComposerDraft(), { retry: true });
-          } catch {
-            clearFailed = true;
-          }
-          if (reconcileAcceptedDraftAfterClear(thread.id, clearGuard, clearFailed)) {
-            await cleanupAcceptedDraft(thread.id, clearGuard.editRevision);
-          }
-        } else {
-          await cleanupAcceptedDraft(thread.id, submittedEditRevision);
-        }
+        await cleanupAcceptedDraft(thread.id, submittedEditRevision);
       }
       if (!hasNewerDraft || newerDraftStored) {
         await deletePreparationPersistence(activeProject.id);
@@ -3228,7 +3110,23 @@ export function ThreadPage({
     setQueueAction({ messageId, kind: "send" });
     setError(null);
     try {
-      await api.sendQueuedNow(threadId, messageId);
+      await flushComposerDraftEvent(threadId);
+      const editRevision = composerEditRevisionRef.current;
+      const result = await api.sendQueuedNow(threadId, messageId);
+      if (result?.thread && result.thread.id !== threadId) {
+        dispatch({ type: "thread", thread: result.thread });
+        if (preparationAliveRef.current && activeThreadIdRef.current === threadId) {
+          if (composerEditRevisionRef.current !== editRevision) {
+            persistDraftAfterAcceptedSend(
+              result.thread.id,
+              structuredClone(currentComposerDraft()),
+            );
+          }
+          navigate(`/threads/${encodeURIComponent(result.thread.id)}`, {
+            state: { focusComposer: true },
+          });
+        }
+      }
       return true;
     } catch (caught) {
       setError(
@@ -4398,12 +4296,21 @@ export function ThreadPage({
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
             voiceCancellationPending={voiceCancellationPending}
-            onRecordingReady={
+            onTranscribe={
               preparationRef.current.active
-                ? beginPreparedTranscription
-                : backgroundVoiceContext
-                  ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
-                  : undefined
+                ? async (audio, durationMs) => {
+                    const result = await api.transcribe(audio, durationMs);
+                    if (result.timingEstimate) {
+                      onTranscriptionTimingEstimateChange?.(result.timingEstimate);
+                    }
+                    return result.text;
+                  }
+                : undefined
+            }
+            onRecordingReady={
+              !preparationRef.current.active && backgroundVoiceContext
+                ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
+                : undefined
             }
             preserveRecordingOnSessionChange={backgroundVoiceContext !== null}
             transcriptionStatus={draftVoiceProgress}
@@ -4448,7 +4355,7 @@ export function ThreadPage({
             {storageWarning && preparationRef.current.active && (
               <p className="new-session-storage-warning" role="status">
                 {t(
-                  "Локальное сохранение недоступно. Не закрывайте страницу, пока сессия не откроется.",
+                  "Локальное сохранение недоступно. Не закрывайте страницу до отправки сообщения.",
                 )}
               </p>
             )}
@@ -4456,7 +4363,7 @@ export function ThreadPage({
               <button
                 className="new-session-retry"
                 type="button"
-                disabled={preparationWorking || busy}
+                disabled={busy}
                 onClick={() => {
                   if (!preparationRef.current.threadId) creationPromiseRef.current = null;
                   setPreparationRetry((value) => value + 1);

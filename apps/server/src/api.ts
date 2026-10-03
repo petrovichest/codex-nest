@@ -32,7 +32,6 @@ import type {
   CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
-  CreateProjectThreadRequest,
   CreateProjectThreadResponse,
   GlobalPermissionSettings,
   InterruptTurnRequest,
@@ -55,6 +54,7 @@ import type {
   StartTurnRequest,
   TaskDefaults,
   ThreadGoal,
+  ThreadDraft,
   ThreadFileAttachment,
   ThreadChanges,
   ThreadArtifactsResponse,
@@ -535,8 +535,8 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const attachments = new AttachmentStore(store.path);
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
-  const projectThreadCreationLocks = new Map<string, Promise<unknown>>();
   const turnStartLocks = new Map<string, Promise<unknown>>();
+  const firstSessionRecoveryLocks = new Map<string, Promise<unknown>>();
   const teamParentLocks = new Map<string, Promise<unknown>>();
   const teamToolOperationLocks = new Map<string, Promise<unknown>>();
   const stoppedTeamParents = new Set<string>();
@@ -933,12 +933,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   function getOrCreateProjectThread(
     projectId: string,
     clientCreationId: string,
-    resumeEmpty = false,
   ): Promise<ThreadSummary> {
     const key = `${projectId}:${clientCreationId}`;
     const current = projectThreadCreations.get(key);
     if (current) return current;
-    const request = withKeyLock(projectThreadCreationLocks, projectId, async () => {
+    const request = (async () => {
       const previous = store.view().threadCreations?.[clientCreationId];
       if (previous && previous.projectId !== projectId)
         throw new ProjectConflictError("Creation id has already been used");
@@ -958,20 +957,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       codexManager?.assertTurnsAllowed();
       const project = store.view().projects.find((candidate) => candidate.id === projectId);
       if (!project) throw new ProjectNotFoundError("Project not found");
-      const existing =
-        !previous && resumeEmpty
-          ? projection.emptyThreadCandidates(projectId).find(({ thread, knownUnmaterialized }) => {
-              const meta = store.view().threadMeta[thread.id];
-              return (
-                !knownUnmaterialized &&
-                meta?.managedTeamToolsAvailable === true &&
-                meta.sessionArtifactsVersion === 1 &&
-                !meta.logicalFork &&
-                !teamOrchestrationHasWork(store, thread.id)
-              );
-            })?.thread
-          : undefined;
-      const settings = existing?.settings ?? projection.newSessionSettings;
+      const settings = projection.newSessionSettings;
       if (!previous) {
         const params = {
           clientCreationId,
@@ -987,11 +973,10 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             projectId,
             params,
             settings,
-            threadId: existing?.id ?? null,
+            threadId: null,
           };
         });
       }
-      if (existing) return existing;
       const prepared = store.view().threadCreations![clientCreationId]!;
       const response = await bridge.request<unknown>("thread/start", prepared.params);
       const started = parseThreadStart(response);
@@ -1012,11 +997,81 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       // Both receivers now have a persisted empty thread before the first message.
       return projection.setSettings(started.thread.id, prepared.settings ?? settings);
-    }).finally(() => {
+    })().finally(() => {
       if (projectThreadCreations.get(key) === request) projectThreadCreations.delete(key);
     });
     projectThreadCreations.set(key, request);
     return request;
+  }
+
+  async function sendRecoveredFirstMessage(thread: ThreadSummary, messageId: string) {
+    const draft = cloneView<ThreadDraft | null>(store.view().threadMeta[thread.id]?.draft ?? null);
+    try {
+      return {
+        turnId: await queue.sendNow(thread.id, messageId),
+        thread: projection.summary(thread.id)!,
+      };
+    } finally {
+      // Accepting the first turn clears its composer draft. Restore the next,
+      // unsent draft copied from the missing session without replacing newer edits.
+      if (draft && !store.view().threadMeta[thread.id]?.draft) {
+        await projection.setDraft(thread.id, draft, { expectedUpdatedAt: null });
+      }
+    }
+  }
+
+  async function recoverMissingFirstSession(source: ThreadSummary): Promise<ThreadSummary> {
+    if (!source.projectId || !projection.canRecoverMissingFirstSession(source.id)) {
+      throw new ProjectConflictError("The missing session cannot be recovered automatically");
+    }
+    const pending = cloneView<QueuedMessage[]>(store.view().messageQueues![source.id]!);
+    const draft = cloneView<ThreadDraft | null>(store.view().threadMeta[source.id]?.draft ?? null);
+    const thread = await getOrCreateProjectThread(source.projectId, `recover-first:${source.id}`);
+    const target = await updateThreadSettings(thread.id, source.settings);
+    const copiedFiles = new Map<string, ThreadFileAttachment>();
+    for (const file of [
+      ...pending.flatMap((message) => message.files ?? []),
+      ...(draft?.files ?? []),
+    ]) {
+      if (copiedFiles.has(file.id)) continue;
+      await attachments.validate(source.id, [file]);
+      copiedFiles.set(
+        file.id,
+        await attachments.save(
+          target.id,
+          file.name,
+          file.mediaType,
+          createReadStream(file.path),
+          file.size,
+        ),
+      );
+    }
+    const copyFiles = (files: ThreadFileAttachment[] | undefined) =>
+      files?.map((file) => copiedFiles.get(file.id)!);
+    await store.update((state) => {
+      if (
+        !projection.canRecoverMissingFirstSession(source.id) ||
+        JSON.stringify(state.messageQueues?.[source.id]) !== JSON.stringify(pending) ||
+        JSON.stringify(state.threadMeta[source.id]?.draft ?? null) !== JSON.stringify(draft)
+      ) {
+        throw new ProjectConflictError("The saved message changed during recovery");
+      }
+      state.messageQueues![target.id] = pending.map((message) => ({
+        ...message,
+        threadId: target.id,
+        files: copyFiles(message.files),
+        deliveryError: undefined,
+      }));
+      state.messageQueues![source.id] = [];
+      if (draft) state.threadMeta[target.id]!.draft = { ...draft, files: copyFiles(draft.files) };
+      delete state.threadMeta[source.id]!.draft;
+      for (const [id, receipt] of Object.entries(state.messageReceipts ?? {})) {
+        if (receipt.threadId === source.id) delete state.messageReceipts![id];
+      }
+    });
+    projection.publishQueue(source.id, []);
+    projection.publishQueue(target.id, queue.list(target.id));
+    return projection.summary(target.id)!;
   }
 
   browserExtension?.setLifecycle({
@@ -3885,7 +3940,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string }; Body: CreateProjectThreadRequest }>(
+  app.post<{ Params: { id: string }; Body: { clientCreationId?: string } }>(
     "/api/v1/projects/:id/threads",
     async (request, reply) => {
       if (!store.view().projects.some((project) => project.id === request.params.id)) {
@@ -3899,15 +3954,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ) {
         return apiError(reply, 400, "validation_failed", "A stable clientCreationId is required");
       }
-      const resumeEmpty = request.body?.resumeEmpty;
-      if (resumeEmpty !== undefined && typeof resumeEmpty !== "boolean") {
-        return apiError(reply, 400, "validation_failed", "resumeEmpty must be a boolean");
-      }
-      const thread = await getOrCreateProjectThread(
-        request.params.id,
-        clientCreationId,
-        resumeEmpty,
-      );
+      const thread = await getOrCreateProjectThread(request.params.id, clientCreationId);
       const draft = cloneView<CreateProjectThreadResponse["draft"]>(
         store.view().threadMeta[thread.id]?.draft ?? null,
       );
@@ -4871,11 +4918,49 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   app.post<{ Params: { id: string; messageId: string } }>(
     "/api/v1/threads/:id/queue/:messageId/send",
     async (request, reply) => {
-      const summary = projection.summary(request.params.id);
-      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-      assertWritableThread(summary);
-      await cancelCapacityRetry(request.params.id);
-      return { turnId: await queue.sendNow(request.params.id, request.params.messageId) };
+      return withKeyLock(firstSessionRecoveryLocks, request.params.id, async () => {
+        const summary = projection.summary(request.params.id);
+        if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+        assertWritableThread(summary);
+        const recoveredId = store.view().threadCreations?.[`recover-first:${summary.id}`]?.threadId;
+        if (recoveredId && !queue.list(summary.id).length) {
+          const thread = projection.summary(recoveredId);
+          if (thread) return sendRecoveredFirstMessage(thread, request.params.messageId);
+        }
+        await cancelCapacityRetry(summary.id);
+        const savedMessage = queue
+          .list(summary.id)
+          .find((pending) => pending.id === request.params.messageId);
+        if (
+          savedMessage?.deliveryError?.message === "Сессия недоступна. Сообщение сохранено." &&
+          store.view().messageReceipts?.[request.params.messageId]?.status === "rejected" &&
+          projection.canRecoverMissingFirstSession(summary.id)
+        ) {
+          // Native delivery remembers an explicit rejection. Confirm that its
+          // empty session is actually missing before replacing the session.
+          try {
+            await bridge.request("thread/turns/list", {
+              threadId: summary.id,
+              cursor: null,
+              limit: 1,
+              sortDirection: "asc",
+              itemsView: "notLoaded",
+            });
+          } catch (error) {
+            if (!isMissingThreadError(error)) throw error;
+            const thread = await recoverMissingFirstSession(summary);
+            return sendRecoveredFirstMessage(thread, request.params.messageId);
+          }
+        }
+        try {
+          return { turnId: await queue.sendNow(summary.id, request.params.messageId) };
+        } catch (error) {
+          if (!isMissingThreadError(error) || !projection.canRecoverMissingFirstSession(summary.id))
+            throw error;
+          const thread = await recoverMissingFirstSession(summary);
+          return sendRecoveredFirstMessage(thread, request.params.messageId);
+        }
+      });
     },
   );
 

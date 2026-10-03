@@ -65,7 +65,13 @@ export type LocalNewSessionDraft = {
   revision?: number;
   settings?: SessionSettings;
   submission?: NewSessionSubmission;
+  attachments?: NewSessionAttachment[];
   updatedAt: number;
+};
+
+export type NewSessionAttachment = {
+  attachment: ThreadFileAttachment;
+  file: Blob;
 };
 
 export type NewSessionSubmission = {
@@ -275,6 +281,7 @@ export async function saveNewSessionDraft(
     revision: number;
     settings?: SessionSettings;
     submission?: NewSessionSubmission;
+    attachments?: NewSessionAttachment[];
   },
   updatedAt = Date.now(),
 ): Promise<boolean> {
