@@ -453,15 +453,13 @@ describe("NewSession", () => {
     const loading = deferred<LocalNewSessionDraft | null>();
     drafts.load.mockReturnValue(loading.promise);
     const createProjectThread = vi.fn().mockResolvedValue({ thread });
-    const uploadAttachment = vi
-      .fn()
-      .mockResolvedValue({
-        id: "uploaded",
-        name: "fresh.txt",
-        path: "/attachments/fresh.txt",
-        size: 5,
-        mediaType: "text/plain",
-      });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      id: "uploaded",
+      name: "fresh.txt",
+      path: "/attachments/fresh.txt",
+      size: 5,
+      mediaType: "text/plain",
+    });
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(
       mockConnection({ createProjectThread, uploadAttachment, sendReliable }),
