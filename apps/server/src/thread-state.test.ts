@@ -48,6 +48,14 @@ describe("removeThreadState", () => {
     expect(isMissingThreadError(unloaded)).toBe(false);
     expect(isThreadNotLoadedError(missing)).toBe(false);
     expect(isMissingThreadError(missing)).toBe(true);
+    expect(
+      isMissingThreadError(
+        new RpcError(
+          -32600,
+          "invalid paginated history lineage for thread: missing source rollout",
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("protects queued messages and drafts from automatic cleanup", async () => {

@@ -1028,7 +1028,7 @@ export class AppProjection extends EventEmitter {
     return draft;
   }
 
-  canRecoverMissingFirstSession(threadId: string): boolean {
+  canRecoverMissingFirstSession(threadId: string, retryUnconfirmedMessageId?: string): boolean {
     const cached = this.threads.get(threadId);
     const state = this.store.view();
     const meta = state.threadMeta[threadId];
@@ -1052,17 +1052,27 @@ export class AppProjection extends EventEmitter {
       Object.values(state.threadCreations ?? {}).some(
         (creation) => creation.threadId === threadId,
       ) &&
-      !Object.values(state.messageReceipts ?? {}).some(
-        (receipt) =>
+      !Object.entries(state.messageReceipts ?? {}).some(
+        ([id, receipt]) =>
           receipt.threadId === threadId &&
           receipt.status !== "rejected" &&
-          receipt.status !== "canceled",
+          receipt.status !== "canceled" &&
+          !(
+            id === retryUnconfirmedMessageId &&
+            receipt.deliveryVersion !== 1 &&
+            receipt.status === "prepared" &&
+            !receipt.turnId &&
+            receipt.request?.method === "turn/start"
+          ),
       ) &&
       !Object.values(state.voiceTranscriptions ?? {}).some((job) => job.threadId === threadId) &&
       state.messageQueues?.[threadId]?.length &&
       state.messageQueues[threadId].every(
         (message) =>
-          message.status === "queued" &&
+          (message.status === "queued" ||
+            (message.id === retryUnconfirmedMessageId &&
+              message.status === "dispatching" &&
+              Boolean(message.deliveryError))) &&
           !message.replyToAsyncQuestion &&
           !message.replyToUserInput &&
           !message.dismissUserInput,

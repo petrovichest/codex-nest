@@ -251,6 +251,79 @@ describe("DurableDelivery", () => {
     expect(store.view().messageReceipts?.message?.status).toBe("delivered");
   });
 
+  it("repeats the frozen ordinary command only after an explicit retry and a complete history scan", async () => {
+    const { store, request } = await setup();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    request.mockResolvedValueOnce({ data: [], nextCursor: "older" } as never);
+    request.mockResolvedValueOnce({ data: [], nextCursor: null } as never);
+    request.mockResolvedValueOnce({ turn } as never);
+
+    await expect(sender.replay("message", true)).resolves.toMatchObject({ turnId: "turn" });
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      "turn/start",
+      "thread/turns/list",
+      "thread/turns/list",
+      "turn/start",
+    ]);
+    expect(request.mock.calls.at(-1)).toEqual(["turn/start", params]);
+    await expect(sender.replay("message", true)).resolves.toEqual({ turnId: "turn" });
+    expect(request).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a manual ordinary retry parked when history is unavailable", async () => {
+    const { store, request } = await setup();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    request.mockRejectedValueOnce(new RpcError(-32603, "history unavailable"));
+    await expect(sender.replay("message", true)).rejects.toThrow("history unavailable");
+    expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+    expect(store.view().messageReceipts?.message?.request).toEqual({
+      method: "turn/start",
+      params,
+    });
+  });
+
+  it("does not repeat a command canceled while its history is being checked", async () => {
+    const { store, request } = await setup();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    request.mockImplementationOnce(async () => {
+      await store.update((state) => {
+        state.messageReceipts!.message!.status = "canceled";
+      });
+      return { data: [], nextCursor: null } as never;
+    });
+    await expect(sender.replay("message", true)).rejects.toThrow("Состояние доставки изменилось");
+    expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+  });
+
+  it("does not retry ordinary input when pagination loops before history is fully scanned", async () => {
+    const { store, request } = await setup();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    request.mockResolvedValue({ data: [], nextCursor: "same-cursor" } as never);
+    await expect(sender.replay("message", true)).rejects.toThrow("без повторной отправки");
+    expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+  });
+
+  it("does not resend when history contains turns whose items are not loaded", async () => {
+    const { store, request } = await setup();
+    const sender = new DurableDelivery(store, { request } as unknown as DeliveryBridge);
+    request.mockRejectedValueOnce(new Error("reply lost"));
+    await expect(sender.send("thread", "message", hash, "turn/start", params)).rejects.toThrow();
+    request.mockResolvedValueOnce({
+      data: [{ ...turn, itemsView: "notLoaded" }],
+      nextCursor: null,
+    } as never);
+    await expect(sender.replay("message", true)).rejects.toThrow("без повторной отправки");
+    expect(request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
+  });
+
   it("retains the terminal turn when an ambiguous ordinary delivery is found in history", async () => {
     const { store, request } = await setup();
     const bridge = { request } as unknown as DeliveryBridge;
@@ -268,7 +341,10 @@ describe("DurableDelivery", () => {
     };
     request.mockResolvedValueOnce({ data: [completed], nextCursor: null } as never);
 
-    await expect(sender.replay("message")).resolves.toEqual({ turnId: "turn", turn: completed });
+    await expect(sender.replay("message", true)).resolves.toEqual({
+      turnId: "turn",
+      turn: completed,
+    });
     await expect(sender.replay("message")).resolves.toEqual({ turnId: "turn" });
     expect(request.mock.calls.map(([method]) => method)).toEqual([
       "turn/start",

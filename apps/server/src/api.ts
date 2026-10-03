@@ -1515,16 +1515,17 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         message.dismissUserInput,
         message,
       ),
-    deliveredTurnId: async (threadId, messageId) => {
+    deliveredTurnId: async (threadId, messageId, retryUnconfirmed = false) => {
       const receipt = store.view().messageReceipts?.[messageId];
       if (receipt?.threadId !== threadId) return null;
       let delivered;
+      const retry = retryUnconfirmed && !projection.summary(threadId)?.currentTurnId;
       try {
-        delivered = await durableDelivery.replay(messageId);
+        delivered = await durableDelivery.replay(messageId, retry);
       } catch (error) {
         if (!isThreadResumeRequiredError(error, threadId)) throw error;
         await bridge.request("thread/resume", { threadId, excludeTurns: true });
-        delivered = await durableDelivery.replay(messageId);
+        delivered = await durableDelivery.replay(messageId, retry);
       }
       const message = store
         .view()
@@ -5014,54 +5015,84 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     },
   );
 
-  app.post<{ Params: { id: string; messageId: string } }>(
-    "/api/v1/threads/:id/queue/:messageId/send",
-    async (request, reply) => {
-      return withKeyLock(firstSessionRecoveryLocks, request.params.id, async () => {
-        const summary = projection.summary(request.params.id);
-        if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
-        assertWritableThread(summary);
-        const recoveredId = store.view().threadCreations?.[`recover-first:${summary.id}`]?.threadId;
-        if (recoveredId && !queue.list(summary.id).length) {
-          const thread = projection.summary(recoveredId);
-          if (thread) return sendRecoveredFirstMessage(thread, request.params.messageId);
-        }
-        await cancelCapacityRetry(summary.id);
-        const savedMessage = queue
-          .list(summary.id)
-          .find((pending) => pending.id === request.params.messageId);
-        if (
-          savedMessage?.deliveryError?.message === "Сессия недоступна. Сообщение сохранено." &&
-          store.view().messageReceipts?.[request.params.messageId]?.status === "rejected" &&
-          projection.canRecoverMissingFirstSession(summary.id)
-        ) {
-          // Native delivery remembers an explicit rejection. Confirm that its
-          // empty session is actually missing before replacing the session.
-          try {
-            await bridge.request("thread/turns/list", {
-              threadId: summary.id,
-              cursor: null,
-              limit: 1,
-              sortDirection: "asc",
-              itemsView: "notLoaded",
-            });
-          } catch (error) {
-            if (!isMissingThreadError(error)) throw error;
-            const thread = await recoverMissingFirstSession(summary);
-            return sendRecoveredFirstMessage(thread, request.params.messageId);
-          }
-        }
+  app.post<{
+    Params: { id: string; messageId: string };
+    Body: { retryUnconfirmed?: boolean } | undefined;
+  }>("/api/v1/threads/:id/queue/:messageId/send", async (request, reply) => {
+    return withKeyLock(firstSessionRecoveryLocks, request.params.id, async () => {
+      const summary = projection.summary(request.params.id);
+      if (!summary) return apiError(reply, 404, "not_found", "Thread not found");
+      assertWritableThread(summary);
+      if (
+        request.body?.retryUnconfirmed !== undefined &&
+        typeof request.body.retryUnconfirmed !== "boolean"
+      ) {
+        return apiError(reply, 400, "validation_failed", "retryUnconfirmed must be a boolean");
+      }
+      const retryUnconfirmed = request.body?.retryUnconfirmed === true;
+      const recoveredId = store.view().threadCreations?.[`recover-first:${summary.id}`]?.threadId;
+      if (recoveredId && !queue.list(summary.id).length) {
+        const thread = projection.summary(recoveredId);
+        if (thread) return sendRecoveredFirstMessage(thread, request.params.messageId);
+      }
+      await cancelCapacityRetry(summary.id);
+      const savedMessage = queue
+        .list(summary.id)
+        .find((pending) => pending.id === request.params.messageId);
+      if (
+        savedMessage?.deliveryError?.message === "Сессия недоступна. Сообщение сохранено." &&
+        store.view().messageReceipts?.[request.params.messageId]?.status === "rejected" &&
+        projection.canRecoverMissingFirstSession(summary.id)
+      ) {
+        // Native delivery remembers an explicit rejection. Confirm that its
+        // empty session is actually missing before replacing the session.
         try {
-          return { turnId: await queue.sendNow(summary.id, request.params.messageId) };
+          await bridge.request("thread/turns/list", {
+            threadId: summary.id,
+            cursor: null,
+            limit: 1,
+            sortDirection: "asc",
+            itemsView: "notLoaded",
+          });
         } catch (error) {
-          if (!isMissingThreadError(error) || !projection.canRecoverMissingFirstSession(summary.id))
-            throw error;
+          if (!isMissingThreadError(error)) throw error;
           const thread = await recoverMissingFirstSession(summary);
           return sendRecoveredFirstMessage(thread, request.params.messageId);
         }
-      });
-    },
-  );
+      }
+      try {
+        return {
+          turnId: await queue.sendNow(summary.id, request.params.messageId, retryUnconfirmed),
+        };
+      } catch (error) {
+        if (
+          retryUnconfirmed &&
+          isMissingThreadError(error) &&
+          projection.canRecoverMissingFirstSession(summary.id, request.params.messageId)
+        ) {
+          // The user explicitly retries a preserved first message. A lost
+          // empty ordinary session has no native command to replay safely;
+          // release just this claim before the existing session recovery.
+          await store.update((state) => {
+            if (!projection.canRecoverMissingFirstSession(summary.id, request.params.messageId)) {
+              throw new ProjectConflictError("The saved message changed during recovery");
+            }
+            const message = state.messageQueues?.[summary.id]?.find(
+              (item) => item.id === request.params.messageId,
+            );
+            if (!message)
+              throw new ProjectConflictError("The saved message changed during recovery");
+            delete state.messageReceipts?.[message.id];
+            message.status = "queued";
+          });
+        }
+        if (!isMissingThreadError(error) || !projection.canRecoverMissingFirstSession(summary.id))
+          throw error;
+        const thread = await recoverMissingFirstSession(summary);
+        return sendRecoveredFirstMessage(thread, request.params.messageId);
+      }
+    });
+  });
 
   app.patch<{
     Params: { id: string; messageId: string };

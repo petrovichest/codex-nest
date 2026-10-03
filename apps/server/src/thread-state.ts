@@ -2,7 +2,7 @@ import { RpcError } from "./codex/transport";
 import type { StateStore } from "./state/store";
 
 const MISSING_THREAD_ERROR =
-  /missing thread|not found|unknown thread|does not exist|no rollout found for thread id/i;
+  /missing thread|not found|unknown thread|does not exist|no rollout found for thread id|missing source rollout/i;
 
 export function isThreadNotLoadedError(error: unknown): boolean {
   return error instanceof RpcError && /thread not loaded/i.test(error.message);

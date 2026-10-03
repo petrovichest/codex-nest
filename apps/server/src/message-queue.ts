@@ -26,7 +26,11 @@ export interface MessageQueueDelivery {
   shouldSteerQueuedMessage(threadId: string, turnId: string): boolean;
   start(threadId: string, message: QueuedMessage): Promise<string>;
   steer(threadId: string, turnId: string, message: QueuedMessage): Promise<string>;
-  deliveredTurnId(threadId: string, messageId: string): Promise<string | null>;
+  deliveredTurnId(
+    threadId: string,
+    messageId: string,
+    retryUnconfirmed?: boolean,
+  ): Promise<string | null>;
   publish(threadId: string, messages: QueuedMessage[]): void;
 }
 
@@ -193,7 +197,7 @@ export class MessageQueue {
     return stored;
   }
 
-  sendNow(threadId: string, messageId: string): Promise<string> {
+  sendNow(threadId: string, messageId: string, retryUnconfirmed = false): Promise<string> {
     return this.withLock(threadId, async () => {
       if (this.delivery.paused())
         throw new MessageQueuePausedError("Codex maintenance is in progress");
@@ -204,7 +208,7 @@ export class MessageQueue {
         throw new MessageQueueNotFoundError("Queued message not found");
       }
       if (message.status === "dispatching") {
-        if (!(await this.reconcile(threadId, message))) {
+        if (!(await this.reconcile(threadId, message, retryUnconfirmed))) {
           throw new MessageQueueConflictError("Delivery is still being confirmed");
         }
         const receipt = this.store.view().messageReceipts?.[messageId];
@@ -359,7 +363,11 @@ export class MessageQueue {
     await this.drain(threadId).catch(() => undefined);
   }
 
-  private async reconcile(threadId: string, message: QueuedMessage): Promise<boolean> {
+  private async reconcile(
+    threadId: string,
+    message: QueuedMessage,
+    retryUnconfirmed = false,
+  ): Promise<boolean> {
     try {
       const receipt = this.store.view().messageReceipts?.[message.id];
       if (
@@ -371,12 +379,17 @@ export class MessageQueue {
           "Старый Codex не подтвердил доставку. Автоматическая повторная отправка остановлена, чтобы избежать дубля.",
         );
       }
-      const turnId = receipt?.turnId ?? (await this.delivery.deliveredTurnId(threadId, message.id));
+      const turnId =
+        receipt?.turnId ??
+        (await (retryUnconfirmed
+          ? this.delivery.deliveredTurnId(threadId, message.id, true)
+          : this.delivery.deliveredTurnId(threadId, message.id)));
       if (turnId) await this.remove(threadId, message.id, turnId, message);
       else await this.setStatus(threadId, message.id, "queued");
       return true;
     } catch (error) {
       await this.recordFailure(threadId, message.id, "dispatching", error);
+      if (retryUnconfirmed) throw error;
       return false;
     }
   }

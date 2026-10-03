@@ -45,6 +45,7 @@ import type { CodexManager } from "./codex-management";
 import { loadConfig } from "./config";
 import { AppProjection } from "./projection";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
+import { messageContentHash } from "./message-queue";
 import { StateStore } from "./state/store";
 import { computeTeamWorkspaceDelta, createTeamWorkspace } from "./team-workspace";
 import type { ThreadTitleGenerator } from "./thread-title";
@@ -10366,6 +10367,105 @@ describe.each([1, 0])("reliable first messages (delivery version %s)", (delivery
 });
 
 describe.each([1, 0])("missing first-session recovery (delivery version %s)", (deliveryVersion) => {
+  it.skipIf(deliveryVersion !== 0)(
+    "recovers a stalled first message only on explicit retry without losing pasted text or photos",
+    async () => {
+      const { app, bridge, headers, store } = await createForkHarness(deliveryVersion);
+      try {
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+          payload: { clientCreationId: "original" },
+        });
+        const images = [
+          "data:image/png;base64,AA==",
+          "data:image/png;base64,AQ==",
+          "data:image/png;base64,Ag==",
+        ];
+        const pasteBlocks = [{ id: "paste", text: "Полный исходный текст" }];
+        const hash = messageContentHash("", images, [], false, undefined, undefined, {
+          pasteBlocks,
+        });
+        await store.update((state) => {
+          state.messageQueues ??= {};
+          state.messageQueues.created = [
+            {
+              id: "stalled",
+              threadId: "created",
+              text: "",
+              images,
+              pasteBlocks,
+              createdAt: 1,
+              status: "dispatching",
+              deliveryError: {
+                message: "Проверяем, было ли сообщение отправлено.",
+                retryable: false,
+              },
+            },
+          ];
+          state.messageReceipts ??= {};
+          state.messageReceipts.stalled = {
+            threadId: "created",
+            turnId: null,
+            contentHash: hash,
+            createdAt: 1,
+            status: "prepared",
+            request: {
+              method: "turn/start",
+              params: { threadId: "created", clientUserMessageId: "stalled", input: [] },
+            },
+          };
+        });
+        const original = bridge.request.getMockImplementation()!;
+        bridge.request.mockImplementation(async (method, params = {}) => {
+          if (
+            ["thread/turns/list", "thread/resume"].includes(method) &&
+            params.threadId === "created"
+          ) {
+            throw new RpcError(
+              -32600,
+              "invalid paginated history lineage for created: missing source rollout",
+            );
+          }
+          return original(method, params);
+        });
+        const retry = (explicit = false) =>
+          app.inject({
+            method: "POST",
+            url: "/api/v1/threads/created/queue/stalled/send",
+            headers,
+            ...(explicit ? { payload: { retryUnconfirmed: true } } : {}),
+          });
+        expect((await retry()).statusCode).toBe(409);
+        expect(store.view().messageReceipts?.stalled?.status).toBe("prepared");
+        bridge.nextCreatedThreadId = "replacement";
+        const responses = await Promise.all([retry(true), retry(true)]);
+        for (const response of responses) {
+          expect(response.statusCode, response.body).toBe(200);
+          expect(response.json()).toMatchObject({
+            thread: { id: "replacement" },
+            turnId: "turn-replacement",
+          });
+        }
+        const started = bridge.request.mock.calls.filter(([method]) => method === "turn/start");
+        expect(started).toHaveLength(1);
+        expect(started[0]![1]).toMatchObject({
+          threadId: "replacement",
+          clientUserMessageId: "stalled",
+          input: expect.arrayContaining(images.map((url) => ({ type: "image", url }))),
+        });
+        expect(JSON.stringify(started[0]![1].input)).toContain("Полный исходный текст");
+        expect(store.view().messageQueues?.created).toEqual([]);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+        ).toHaveLength(2);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it("moves the preserved first message and its attachment once when explicitly retried", async () => {
     const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
     try {

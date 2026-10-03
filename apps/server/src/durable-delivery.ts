@@ -155,6 +155,7 @@ export class DurableDelivery {
 
   async replay(
     clientId: string,
+    retryUnconfirmed = false,
   ): Promise<(DeliveryReceipt | { turnId: string | null }) & { turn?: Turn }> {
     const saved = this.store.view().messageReceipts?.[clientId];
     if (!saved || saved.status === "canceled") {
@@ -163,6 +164,7 @@ export class DurableDelivery {
     if (saved.deliveryVersion !== 1) {
       if (saved.turnId) return { turnId: saved.turnId };
       let cursor: string | null = null;
+      let historyComplete = true;
       const seen = new Set<string>();
       do {
         const page = parseTurnsList(
@@ -177,6 +179,7 @@ export class DurableDelivery {
         const delivered = page.data.find((turn) =>
           turn.items.some((item) => item.type === "userMessage" && item.clientId === clientId),
         );
+        if (page.data.some((turn) => turn.itemsView !== "full")) historyComplete = false;
         if (delivered) {
           await this.acceptCompatible(clientId, delivered.id);
           return { turnId: delivered.id, turn: delivered };
@@ -185,6 +188,27 @@ export class DurableDelivery {
         if (cursor && seen.has(cursor)) break;
         if (cursor) seen.add(cursor);
       } while (cursor);
+      if (
+        retryUnconfirmed &&
+        historyComplete &&
+        !cursor &&
+        saved.request?.method === "turn/start"
+      ) {
+        // Only an explicit user retry may repeat an ordinary command after a
+        // complete history scan. Keep its original identity and frozen input.
+        const current = this.store.view().messageReceipts?.[clientId];
+        if (
+          current?.status !== "prepared" ||
+          current.threadId !== saved.threadId ||
+          current.contentHash !== saved.contentHash
+        ) {
+          throw new DeliveryContractError("Состояние доставки изменилось.");
+        }
+        const result = await this.bridge.request(saved.request.method, saved.request.params);
+        const turn = parseTurnStart(result).turn;
+        await this.acceptCompatible(clientId, turn.id);
+        return { turnId: turn.id, turn };
+      }
       throw new Error(
         "Codex пока не подтвердил доставку. Сообщение сохранено; проверяем историю без повторной отправки.",
       );

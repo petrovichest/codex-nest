@@ -410,6 +410,16 @@ describe("ApiClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("marks only an explicit queued-message retry as an unconfirmed resend", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+    await api.sendQueuedNow("thread", "message");
+    expect(fetchMock.mock.calls[0]![1].body).toBeUndefined();
+    await api.sendQueuedNow("thread", "message", true);
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body)).toEqual({ retryUnconfirmed: true });
+  });
+
   it.each([
     ["successful", 200],
     ["error", 500],

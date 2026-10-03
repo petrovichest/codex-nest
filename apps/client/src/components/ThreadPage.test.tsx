@@ -3739,6 +3739,48 @@ describe("Activity", () => {
     });
   });
 
+  it("allows retrying a confirmed stalled message while keeping edit and delete disabled", async () => {
+    const api = threadApi();
+    mockThreadConnection(api, summary, {
+      queuedMessages: [
+        {
+          id: "stalled",
+          threadId: "thread",
+          text: "Сохранённое сообщение",
+          createdAt: 1,
+          status: "dispatching",
+          images: ["data:image/png;base64,AA=="],
+          deliveryError: { message: "Проверяем, было ли сообщение отправлено.", retryable: false },
+        },
+      ],
+    });
+    renderThread();
+    const retry = screen.getByRole("button", { name: "Повторить отправку" });
+    expect(retry).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Изменить сообщение в очереди" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Удалить сообщение из очереди" })).toBeDisabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("thread", "stalled", true));
+    expect(api.sendQueuedNow).toHaveBeenCalledOnce();
+  });
+
+  it("keeps retry disabled while a confirmed message is still being dispatched", () => {
+    mockThreadConnection(threadApi(), summary, {
+      queuedMessages: [
+        {
+          id: "sending",
+          threadId: "thread",
+          text: "Ещё отправляется",
+          createdAt: 1,
+          status: "dispatching",
+        },
+      ],
+    });
+    renderThread();
+    expect(screen.queryByRole("button", { name: "Повторить отправку" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
+  });
+
   it("shows a local draft even when the missing session has no summary", async () => {
     const context = mockThreadConnection(threadApi(), summary);
     context.state.snapshot.threads = [];

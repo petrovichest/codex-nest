@@ -612,10 +612,11 @@ export class ApiClient {
   sendQueuedNow(
     id: string,
     messageId: string,
+    retryUnconfirmed = false,
   ): Promise<{ turnId: string; thread?: ThreadSummary }> {
     return this.request(
       `/api/v1/threads/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}/send`,
-      { method: "POST" },
+      { method: "POST", ...(retryUnconfirmed ? { body: { retryUnconfirmed: true } } : {}) },
     );
   }
 

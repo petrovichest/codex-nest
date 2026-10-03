@@ -3180,7 +3180,11 @@ export function ThreadPage({
     try {
       await flushComposerDraftEvent(threadId);
       const editRevision = composerEditRevisionRef.current;
-      const result = await api.sendQueuedNow(threadId, messageId);
+      const message = queuedMessages.find((item) => item.id === messageId);
+      const retryUnconfirmed = message?.status === "dispatching" && Boolean(message.deliveryError);
+      const result = await (retryUnconfirmed
+        ? api.sendQueuedNow(threadId, messageId, true)
+        : api.sendQueuedNow(threadId, messageId));
       if (result?.thread && result.thread.id !== threadId) {
         dispatch({ type: "thread", thread: result.thread });
         if (preparationAliveRef.current && activeThreadIdRef.current === threadId) {
@@ -6408,6 +6412,8 @@ export function QueuedMessages({
           const busy = action?.messageId === message.id;
           const actionsDisabled =
             action !== null || !message.confirmed || message.status === "dispatching";
+          const retryUnconfirmed =
+            message.confirmed && message.status === "dispatching" && Boolean(message.deliveryError);
           const editValue = editing ? editor.value : "";
           const canSave =
             Boolean(
@@ -6592,12 +6598,12 @@ export function QueuedMessages({
                       <button
                         type="button"
                         className="icon-button queued-message-send"
-                        aria-label={t("Отправить сейчас")}
-                        title={t("Отправить сейчас")}
-                        disabled={actionsDisabled}
+                        aria-label={t(retryUnconfirmed ? "Повторить отправку" : "Отправить сейчас")}
+                        title={t(retryUnconfirmed ? "Повторить отправку" : "Отправить сейчас")}
+                        disabled={retryUnconfirmed ? action !== null : actionsDisabled}
                         onClick={() => void onSendNow(message.id)}
                       >
-                        <SendIcon />
+                        {retryUnconfirmed ? <RefreshIcon /> : <SendIcon />}
                       </button>
                     )}
                   </span>
