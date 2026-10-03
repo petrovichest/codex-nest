@@ -180,6 +180,126 @@ describe("session result viewing", () => {
     },
   );
 
+  it("persists legacy result recovery for a large session list in one batch", async () => {
+    const { store, bridge, projection } = await searchHarness();
+    let activeReads = 0;
+    let peakReads = 0;
+    let resultReads = 0;
+    const threads = Array.from({ length: 1_110 }, (_, index) =>
+      thread(`legacy-${index}`, "/work", 20, { type: "notLoaded" }),
+    );
+    await store.update((state) => {
+      for (const item of threads) {
+        state.threadMeta[item.id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastViewedUpdatedAt: 10_000,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: 20_000,
+          awaitingPlanResponse: false,
+        };
+      }
+    });
+    const request = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : threads,
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        resultReads += 1;
+        activeReads += 1;
+        peakReads = Math.max(peakReads, activeReads);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        activeReads -= 1;
+        return { data: [result], nextCursor: null, backwardsCursor: null };
+      }
+      return request(method, params);
+    });
+    const update = vi.spyOn(store, "update");
+
+    await projection.sync();
+
+    // One snapshot write and one result write, independent of session count.
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(resultReads).toBe(threads.length);
+    expect(peakReads).toBe(4);
+    expect(projection.snapshot().threads).toHaveLength(threads.length);
+    expect(projection.snapshot().threads.every((item) => item.unread && !item.unseen)).toBe(true);
+    bridge.emit("state", "unavailable");
+    const reloaded = new StateStore(store.path);
+    await reloaded.load();
+    for (const item of threads) {
+      expect(reloaded.view().threadMeta[item.id]).toMatchObject({
+        lastReadUpdatedAt: 0,
+        lastViewedUpdatedAt: 10_000,
+        lastResult: { turnId: result.id, completedAt: 10_000 },
+      });
+    }
+  });
+
+  it("does not overwrite a live result that arrives while legacy results are collected", async () => {
+    const { store, bridge, projection } = await searchHarness();
+    await store.update((state) => {
+      for (const id of ["one", "two"]) {
+        state.threadMeta[id] = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastViewedUpdatedAt: 10_000,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: 20_000,
+          awaitingPlanResponse: false,
+        };
+      }
+    });
+    const next = { ...result, id: "next", completedAt: 30 };
+    const request = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [thread("one", "/work", 20), thread("two", "/work", 20)],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        if (params.threadId === "two") {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          await projection.setCurrentTurn("one", next.id);
+          bridge.emit("notification", {
+            method: "turn/completed",
+            params: { threadId: "one", turn: next },
+          } satisfies ServerNotification);
+          await vi.waitFor(() =>
+            expect(store.view().threadMeta.one?.lastResult?.turnId).toBe(next.id),
+          );
+        }
+        return { data: [result], nextCursor: null, backwardsCursor: null };
+      }
+      return request(method, params);
+    });
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(20_000);
+    try {
+      await projection.sync();
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(store.view().threadMeta.one?.lastResult).toEqual({
+      turnId: next.id,
+      completedAt: 30_000,
+    });
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: true });
+    expect(projection.summary("two")).toMatchObject({ unread: true, unseen: false });
+    bridge.emit("state", "unavailable");
+  });
+
   it("keeps viewed results green across metadata updates, reconnects and reloads until Finish", async () => {
     const { store, bridge, projection } = await searchHarness();
     let updatedAt = 10;

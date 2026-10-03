@@ -2795,7 +2795,8 @@ export class AppProjection extends EventEmitter {
 
   private async reconcileOutcomes(recoveryTurns: ReadonlyMap<string, string>): Promise<void> {
     const state = this.store.view();
-    for (const cached of this.threads.values()) {
+    const updates: Array<(draft: CodexNestState) => void> = [];
+    const reconcile = async (cached: CachedThread): Promise<void> => {
       const meta = state.threadMeta[cached.thread.id];
       const currentTurnId = cached.currentTurnId;
       const needsRecovery =
@@ -2805,17 +2806,23 @@ export class AppProjection extends EventEmitter {
         !(cached.thread.status.type === "notLoaded" && meta?.lastOutcome !== undefined) &&
         !needsRecovery
       )
-        continue;
-      if (isSpawnedSubagent(cached.thread)) continue;
-      if (this.isUnmaterialized(cached.thread.id)) continue;
+        return;
+      if (isSpawnedSubagent(cached.thread)) return;
+      if (this.isUnmaterialized(cached.thread.id)) return;
       const updatedAt = cached.thread.updatedAt * 1_000;
+      const revision = this.historyRevision(cached.thread.id);
+      const isCurrent = () =>
+        this.threads.get(cached.thread.id) === cached &&
+        cached.currentTurnId === currentTurnId &&
+        cached.thread.updatedAt * 1_000 === updatedAt &&
+        this.historyRevision(cached.thread.id) === revision;
       if (
         !currentTurnId &&
         meta?.outcomeUpdatedAt === updatedAt &&
         meta.lastResult !== undefined &&
         meta.awaitingPlanResponse !== undefined
       ) {
-        continue;
+        return;
       }
       const planMode = meta?.settings?.collaborationMode === "plan";
       if (
@@ -2824,11 +2831,12 @@ export class AppProjection extends EventEmitter {
         meta.lastResult !== undefined &&
         !planMode
       ) {
-        await this.store.update((draft) => {
+        updates.push((draft) => {
+          if (!isCurrent()) return;
           const item = draft.threadMeta[cached.thread.id];
           if (item) item.awaitingPlanResponse = false;
         });
-        continue;
+        return;
       }
       let page;
       try {
@@ -2847,38 +2855,56 @@ export class AppProjection extends EventEmitter {
       } catch (error) {
         if (isMissingThreadError(error)) {
           await this.removeOrphanedThread(cached.thread.id);
-          continue;
+          return;
         }
-        if (isThreadNotLoadedError(error)) continue;
+        if (isThreadNotLoadedError(error)) return;
         throw error;
       }
-      if (this.threads.get(cached.thread.id) !== cached || cached.currentTurnId !== currentTurnId)
-        continue;
-      if (await this.reconcileCompletedTurn(cached.thread.id, page.data)) continue;
-      if (currentTurnId) continue;
+      if (!isCurrent()) return;
+      if (await this.reconcileCompletedTurn(cached.thread.id, page.data)) return;
+      if (currentTurnId) return;
       const latestTurn = page.data[0];
       const outcome = normalizeOutcome(latestTurn?.status);
       const awaitingPlanResponse =
         planMode && outcome === "completed" && Boolean(latestTurn && turnContainsPlan(latestTurn));
-      await this.store.update((draft) => {
+      const lastResult =
+        latestTurn && latestTurn.status !== "inProgress"
+          ? {
+              turnId: latestTurn.id,
+              completedAt:
+                latestTurn.completedAt === null ? updatedAt : latestTurn.completedAt * 1_000,
+            }
+          : null;
+      updates.push((draft) => {
+        if (!isCurrent()) return;
         const item = draft.threadMeta[cached.thread.id] ?? {
           pinned: false,
           lastReadUpdatedAt: updatedAt,
         };
         item.lastOutcome = outcome;
         item.outcomeUpdatedAt = updatedAt;
-        if (!latestTurn || latestTurn.status === "inProgress") {
+        if (!lastResult) {
           item.lastResult = null;
-        } else if (item.lastResult?.turnId !== latestTurn.id) {
-          item.lastResult = {
-            turnId: latestTurn.id,
-            completedAt:
-              latestTurn.completedAt === null ? updatedAt : latestTurn.completedAt * 1_000,
-          };
+        } else if (item.lastResult?.turnId !== lastResult.turnId) {
+          item.lastResult = lastResult;
         }
         item.awaitingPlanResponse =
-          awaitingPlanResponse && item.dismissedPlanTurnId !== latestTurn?.id;
+          awaitingPlanResponse && item.dismissedPlanTurnId !== lastResult?.turnId;
         draft.threadMeta[cached.thread.id] = item;
+      });
+    };
+    const candidates = [...this.threads.values()];
+    // Bound simultaneous rollout reads because old sessions can have large histories.
+    for (let index = 0; index < candidates.length; index += 4) {
+      const results = await Promise.allSettled(candidates.slice(index, index + 4).map(reconcile));
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+    }
+    // Backfilling hundreds of old sessions must not validate and persist the
+    // entire state once per session while startup waits for its health check.
+    if (updates.length) {
+      await this.store.update((draft) => {
+        for (const update of updates) update(draft);
       });
     }
   }
