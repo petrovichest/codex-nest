@@ -10,6 +10,7 @@ import type {
   CodexManagementStatus,
   CreateDirectoryRequest,
   CreateProjectRequest,
+  CreateProjectThreadRequest,
   CreateProjectThreadResponse,
   DirectoryListing,
   DismissPlanRequest,
@@ -314,10 +315,11 @@ export class ApiClient {
   createProjectThread(
     projectId: string,
     clientCreationId: string = crypto.randomUUID(),
+    options: Pick<CreateProjectThreadRequest, "resumeEmpty"> = {},
   ): Promise<CreateProjectThreadResponse> {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
-      body: { clientCreationId },
+      body: { clientCreationId, ...options } satisfies CreateProjectThreadRequest,
       retry: true,
     });
   }

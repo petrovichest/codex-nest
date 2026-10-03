@@ -1032,25 +1032,37 @@ export class AppProjection extends EventEmitter {
     projectId: string,
   ): Array<{ thread: ThreadSummary; knownUnmaterialized: boolean }> {
     const state = this.store.view();
+    const sentThreadIds = new Set(
+      Object.values(state.messageReceipts ?? {})
+        .filter((receipt) => receipt.status !== "rejected" && receipt.status !== "canceled")
+        .map((receipt) => receipt.threadId),
+    );
+    for (const job of Object.values(state.voiceTranscriptions ?? {})) {
+      if (job.mode !== "draft" && job.status !== "completed") sentThreadIds.add(job.threadId);
+    }
     return [...this.threads.values()]
       .map((cached) => ({ cached, summary: this.toSummary(cached, state) }))
       .filter(({ cached, summary }) => {
         const unmaterialized = state.threadMeta[cached.thread.id]?.unmaterialized;
         return (
           !isSpawnedSubagent(cached.thread) &&
+          summary.relation.kind === "session" &&
+          !cached.thread.forkedFromId &&
           !cached.archived &&
           summary.projectId === projectId &&
           cached.currentTurnId === null &&
+          cached.thread.turns.length === 0 &&
+          !sentThreadIds.has(cached.thread.id) &&
+          state.threadMeta[cached.thread.id]?.lastOutcome === undefined &&
           !cached.thread.name?.trim() &&
           (unmaterialized === true || !cached.thread.preview.trim()) &&
-          (state.messageQueues?.[cached.thread.id]?.length ?? 0) === 0 &&
-          unmaterialized !== false
+          (state.messageQueues?.[cached.thread.id]?.length ?? 0) === 0
         );
       })
       .sort((a, b) => {
-        const aKnown = state.threadMeta[a.cached.thread.id]?.unmaterialized === true ? 1 : 0;
-        const bKnown = state.threadMeta[b.cached.thread.id]?.unmaterialized === true ? 1 : 0;
-        return bKnown - aKnown || b.cached.thread.updatedAt - a.cached.thread.updatedAt;
+        const aDraft = state.threadMeta[a.cached.thread.id]?.draft?.updatedAt ?? 0;
+        const bDraft = state.threadMeta[b.cached.thread.id]?.draft?.updatedAt ?? 0;
+        return bDraft - aDraft || b.cached.thread.updatedAt - a.cached.thread.updatedAt;
       })
       .map(({ cached, summary }) => ({
         thread: summary,

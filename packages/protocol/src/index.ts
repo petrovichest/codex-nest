@@ -1388,6 +1388,12 @@ export type ForkOperationDetailResponse = ForkOperationResponse & {
   draft: ThreadDraft | null;
 };
 
+export type CreateProjectThreadRequest = {
+  clientCreationId: string;
+  /** Continue the project's unsent first-message session instead of creating another. */
+  resumeEmpty?: boolean;
+};
+
 export type CreateProjectThreadResponse = {
   thread: ThreadSummary;
   draft?: ThreadDraft | null;

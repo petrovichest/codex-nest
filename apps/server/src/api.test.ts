@@ -9451,6 +9451,319 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
   };
 }
 
+describe.each([1, 0])("project draft recovery (delivery version %s)", (deliveryVersion) => {
+  it("reopens a first-message draft with new creation ids, preserving settings without RPC", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
+    try {
+      const create = (clientCreationId: string, resumeEmpty = true) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+          payload: { clientCreationId, resumeEmpty },
+        });
+      expect((await create("first")).statusCode).toBe(201);
+      await projection.setSettings("created", {
+        collaborationMode: "plan",
+        model: "gpt-b",
+        reasoningEffort: "low",
+      });
+      const draft = await projection.setDraft("created", {
+        input: "  Не потерять черновик  ",
+        images: [{ id: "image", name: "image.png", url: "data:image/png;base64,AA==" }],
+        files: [
+          {
+            id: "file",
+            name: "notes.txt",
+            path: "/work/notes.txt",
+            size: 5,
+            mediaType: "text/plain",
+          },
+        ],
+        goalMode: true,
+        annotations: [],
+      });
+      const callsBefore = bridge.request.mock.calls.length;
+      const reopened = await create("second");
+      expect(reopened.statusCode).toBe(201);
+      expect(reopened.json()).toMatchObject({
+        thread: {
+          id: "created",
+          settings: { collaborationMode: "plan", model: "gpt-b", reasoningEffort: "low" },
+        },
+        draft,
+      });
+      expect((await create("third")).json().draft).toEqual(draft);
+      expect((await create("second")).json().thread.id).toBe("created");
+      expect(store.view().threadCreations?.second?.threadId).toBe("created");
+      expect(bridge.request.mock.calls.slice(callsBefore)).toEqual([]);
+
+      bridge.nextCreatedThreadId = "team-created";
+      const explicit = await create("team-upgrade:thread", false);
+      expect(explicit.json().thread.id).toBe("team-created");
+      expect(store.view().threadMeta.created?.draft).toEqual(draft);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("serializes simultaneous openings with different creation ids", async () => {
+    const { app, bridge, headers, store } = await createForkHarness(deliveryVersion);
+    try {
+      const responses = await Promise.all(
+        ["one", "two", "three"].map((clientCreationId) =>
+          app.inject({
+            method: "POST",
+            url: "/api/v1/projects/project/threads",
+            headers,
+            payload: { clientCreationId, resumeEmpty: true },
+          }),
+        ),
+      );
+      expect(responses.map((response) => response.statusCode)).toEqual([201, 201, 201]);
+      expect(responses.map((response) => response.json().thread.id)).toEqual([
+        "created",
+        "created",
+        "created",
+      ]);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+      ).toHaveLength(1);
+      for (const id of ["one", "two", "three"]) {
+        expect(store.view().threadCreations?.[id]?.threadId).toBe("created");
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("restores a persisted draft after restart and opens a new session after its first send", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "first", resumeEmpty: true },
+      });
+      await projection.setDraft("created", {
+        input: "Survive restart",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      });
+      await store.flushed();
+    } finally {
+      await app.close();
+    }
+    // A real restart also removes the old projection's notification listeners.
+    bridge.removeAllListeners();
+    const reopenedStore = new StateStore(store.path);
+    await reopenedStore.load();
+    const attention = new AttentionManager();
+    const reopenedProjection = new AppProjection(
+      bridge as unknown as CodexBridge,
+      reopenedStore,
+      attention,
+    );
+    await reopenedProjection.sync();
+    const reopened = await buildApp(
+      loadConfig({
+        statePath: store.path,
+        clientDist: join(dirname(store.path), "missing"),
+        allowedOrigins: new Set(["http://localhost"]),
+      }),
+      {
+        bridge: bridge as unknown as CodexBridge,
+        store: reopenedStore,
+        projection: reopenedProjection,
+        attention,
+      },
+    );
+    try {
+      const create = (clientCreationId: string) =>
+        reopened.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+          payload: { clientCreationId, resumeEmpty: true },
+        });
+      const callsBefore = bridge.request.mock.calls.length;
+      const restored = await create("after-restart");
+      expect(restored.statusCode).toBe(201);
+      expect(restored.json()).toMatchObject({
+        thread: { id: "created" },
+        draft: { input: "Survive restart" },
+      });
+      expect(
+        bridge.request.mock.calls
+          .slice(callsBefore)
+          .filter(([method]) => method.startsWith("thread/")),
+      ).toEqual([]);
+      const sent = await reopened.inject({
+        method: "POST",
+        url: "/api/v1/threads/created/queue",
+        headers,
+        payload: { input: "Survive restart", clientMessageId: "first-message" },
+      });
+      expect(sent.statusCode).toBe(202);
+      await vi.waitFor(() =>
+        expect(reopenedStore.view().messageReceipts?.["first-message"]?.turnId).toBeTruthy(),
+      );
+      bridge.nextCreatedThreadId = "next";
+      expect((await create("next-session")).json().thread.id).toBe("next");
+      expect((await create("after-restart")).json().thread.id).toBe("created");
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it.each([
+    "prepared",
+    "delivered",
+    "legacy-delivered",
+    "queued",
+    "known-turn",
+    "archived",
+    "foreign-project",
+    "fork",
+    "old-tools",
+  ] as const)("creates another session instead of reusing a %s candidate", async (reason) => {
+    const { app, bridge, headers, store, projection } = await createForkHarness(deliveryVersion);
+    try {
+      const create = (clientCreationId: string) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+          payload: { clientCreationId, resumeEmpty: true },
+        });
+      await create("first");
+      await projection.setDraft("created", {
+        input: "Keep",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      });
+      if (reason === "known-turn") {
+        projection.upsertThread({
+          ...testThread("created"),
+          turns: [testTurn("completed", "completed")],
+        });
+      }
+      if (reason === "foreign-project") {
+        projection.upsertThread({ ...testThread("created"), cwd: "/elsewhere" });
+      }
+      if (reason === "archived") await projection.setArchived("created", true);
+      await store.update((state) => {
+        if (["prepared", "delivered", "legacy-delivered"].includes(reason)) {
+          state.messageReceipts!.first = {
+            threadId: "created",
+            turnId: reason === "prepared" ? null : "completed",
+            contentHash: "a".repeat(64),
+            createdAt: 1,
+            ...(reason !== "legacy-delivered"
+              ? { status: reason as "prepared" | "delivered" }
+              : {}),
+          };
+        }
+        if (reason === "queued") {
+          state.messageQueues!.created = [
+            {
+              id: "first",
+              threadId: "created",
+              text: "Sent",
+              images: [],
+              createdAt: 1,
+              status: "queued",
+            },
+          ];
+        }
+        if (reason === "fork") {
+          state.threadMeta.created!.logicalFork = {
+            sourceThreadId: "thread",
+            operationId: "fork",
+            mode: "exact",
+          };
+        }
+        if (reason === "old-tools") delete state.threadMeta.created!.sessionArtifactsVersion;
+      });
+      bridge.nextCreatedThreadId = "next";
+      const response = await create("second");
+      expect(response.statusCode).toBe(201);
+      expect(response.json().thread.id).toBe("next");
+      expect(store.view().threadMeta.created?.draft?.input).toBe("Keep");
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+      ).toHaveLength(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prefers the freshest draft over newer blank sessions", async () => {
+    const { app, bridge, headers, projection, store } = await createForkHarness(deliveryVersion);
+    try {
+      for (const id of ["created", "blank", "latest-draft"]) {
+        bridge.nextCreatedThreadId = id;
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/projects/project/threads",
+          headers,
+          payload: { clientCreationId: id },
+        });
+        projection.upsertThread({
+          ...testThread(id),
+          preview: "",
+          updatedAt: id === "blank" ? 10 : 2,
+        });
+      }
+      await projection.setDraft("created", {
+        input: "Older",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      });
+      await projection.setDraft("latest-draft", {
+        input: "Latest",
+        images: [],
+        goalMode: false,
+        annotations: [],
+      });
+      await store.update((state) => {
+        state.threadMeta.created!.draft!.updatedAt = 1;
+        state.threadMeta["latest-draft"]!.draft!.updatedAt = 2;
+      });
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "reopen", resumeEmpty: true },
+      });
+      expect(response.json().thread.id).toBe("latest-draft");
+      expect(response.json().draft.input).toBe("Latest");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a non-boolean recovery option before creating a session", async () => {
+    const { app, bridge, headers } = await createForkHarness(deliveryVersion);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "first", resumeEmpty: "true" },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(bridge.request.mock.calls.some(([method]) => method === "thread/start")).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
   it.each([false, true])(
     "restores an acknowledged start and its question without a start notification (interrupted=%s)",

@@ -766,6 +766,7 @@ describe("App routing and navigation", () => {
         expect(api.createProjectThread).toHaveBeenCalledExactlyOnceWith(
           "second",
           expect.any(String),
+          { resumeEmpty: true },
         ),
       );
       expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
@@ -3368,7 +3369,9 @@ describe("App routing and navigation", () => {
     expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     await waitFor(() =>
-      expect(api.createProjectThread).toHaveBeenCalledWith("second", expect.any(String)),
+      expect(api.createProjectThread).toHaveBeenCalledWith("second", expect.any(String), {
+        resumeEmpty: true,
+      }),
     );
   });
 
@@ -3415,11 +3418,15 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Первый" }));
     await waitFor(() =>
-      expect(api.createProjectThread).toHaveBeenCalledWith("first-project", expect.any(String)),
+      expect(api.createProjectThread).toHaveBeenCalledWith("first-project", expect.any(String), {
+        resumeEmpty: true,
+      }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Второй" }));
     await waitFor(() =>
-      expect(api.createProjectThread).toHaveBeenCalledWith("second-project", expect.any(String)),
+      expect(api.createProjectThread).toHaveBeenCalledWith("second-project", expect.any(String), {
+        resumeEmpty: true,
+      }),
     );
 
     secondCreation.resolve({
@@ -3491,10 +3498,15 @@ describe("App routing and navigation", () => {
     const secondProject = testProject("second", "Второй");
     const api = mockConnection(snapshot([baseThread], [defaultProject(), secondProject]));
     const serverDrafts = new Map<string, ThreadDraft>();
-    api.createProjectThread.mockImplementation(async (projectId: string) => ({
-      thread: { ...baseThread, id: `empty-${projectId}`, projectId, title: "Новая задача" },
-      draft: serverDrafts.get(`empty-${projectId}`) ?? null,
-    }));
+    api.createProjectThread.mockImplementation(
+      async (projectId: string, creationId: string, options?: { resumeEmpty?: boolean }) => {
+        const id = options?.resumeEmpty ? `empty-${projectId}` : creationId;
+        return {
+          thread: { ...baseThread, id, projectId, title: "Новая задача" },
+          draft: serverDrafts.get(id) ?? null,
+        };
+      },
+    );
     api.updateThreadDraft.mockImplementation(async (id, value) => {
       const draft = { ...value, updatedAt: Date.now() };
       serverDrafts.set(id, draft);
@@ -3542,10 +3554,16 @@ describe("App routing and navigation", () => {
   it("restores the locally flushed first message when reopening before its server save completes", async () => {
     const pendingSave = deferred<ThreadDraft>();
     const api = mockConnection(snapshot([baseThread]));
-    api.createProjectThread.mockResolvedValue({
-      thread: { ...baseThread, id: "created", title: "Новая задача" },
-      draft: null,
-    });
+    api.createProjectThread.mockImplementation(
+      async (_projectId: string, creationId: string, options?: { resumeEmpty?: boolean }) => ({
+        thread: {
+          ...baseThread,
+          id: options?.resumeEmpty ? "created" : creationId,
+          title: "Новая задача",
+        },
+        draft: null,
+      }),
+    );
     api.updateThreadDraft.mockReturnValueOnce(pendingSave.promise);
     loadLocalDraft.mockImplementation(async (_settings, threadId: string) => {
       const saved = saveLocalDraft.mock.calls.filter((call) => call[1] === threadId).at(-1);

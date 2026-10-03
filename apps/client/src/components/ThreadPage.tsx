@@ -1401,6 +1401,7 @@ export function ThreadPage({
             const created = await api.createProjectThread(
               activeProject.id,
               preparationRef.current.clientCreationId,
+              { resumeEmpty: true },
             );
             assertPreparationGeneration(generation);
             thread = created.thread;

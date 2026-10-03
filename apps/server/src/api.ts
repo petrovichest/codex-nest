@@ -32,6 +32,7 @@ import type {
   CodexRateLimitsResponse,
   CreateDirectoryRequest,
   CreateProjectRequest,
+  CreateProjectThreadRequest,
   CreateProjectThreadResponse,
   GlobalPermissionSettings,
   InterruptTurnRequest,
@@ -534,6 +535,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   const attachments = new AttachmentStore(store.path);
   const downloadTickets = new Map<string, DownloadTicket>();
   const projectThreadCreations = new Map<string, Promise<ThreadSummary>>();
+  const projectThreadCreationLocks = new Map<string, Promise<unknown>>();
   const turnStartLocks = new Map<string, Promise<unknown>>();
   const teamParentLocks = new Map<string, Promise<unknown>>();
   const teamToolOperationLocks = new Map<string, Promise<unknown>>();
@@ -931,11 +933,12 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
   function getOrCreateProjectThread(
     projectId: string,
     clientCreationId: string,
+    resumeEmpty = false,
   ): Promise<ThreadSummary> {
     const key = `${projectId}:${clientCreationId}`;
     const current = projectThreadCreations.get(key);
     if (current) return current;
-    const request = (async () => {
+    const request = withKeyLock(projectThreadCreationLocks, projectId, async () => {
       const previous = store.view().threadCreations?.[clientCreationId];
       if (previous && previous.projectId !== projectId)
         throw new ProjectConflictError("Creation id has already been used");
@@ -955,7 +958,20 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       codexManager?.assertTurnsAllowed();
       const project = store.view().projects.find((candidate) => candidate.id === projectId);
       if (!project) throw new ProjectNotFoundError("Project not found");
-      const settings = projection.newSessionSettings;
+      const existing =
+        !previous && resumeEmpty
+          ? projection.emptyThreadCandidates(projectId).find(({ thread, knownUnmaterialized }) => {
+              const meta = store.view().threadMeta[thread.id];
+              return (
+                !knownUnmaterialized &&
+                meta?.managedTeamToolsAvailable === true &&
+                meta.sessionArtifactsVersion === 1 &&
+                !meta.logicalFork &&
+                !teamOrchestrationHasWork(store, thread.id)
+              );
+            })?.thread
+          : undefined;
+      const settings = existing?.settings ?? projection.newSessionSettings;
       if (!previous) {
         const params = {
           clientCreationId,
@@ -971,10 +987,11 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
             projectId,
             params,
             settings,
-            threadId: null,
+            threadId: existing?.id ?? null,
           };
         });
       }
+      if (existing) return existing;
       const prepared = store.view().threadCreations![clientCreationId]!;
       const response = await bridge.request<unknown>("thread/start", prepared.params);
       const started = parseThreadStart(response);
@@ -995,7 +1012,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       }
       // Both receivers now have a persisted empty thread before the first message.
       return projection.setSettings(started.thread.id, prepared.settings ?? settings);
-    })().finally(() => {
+    }).finally(() => {
       if (projectThreadCreations.get(key) === request) projectThreadCreations.delete(key);
     });
     projectThreadCreations.set(key, request);
@@ -3868,7 +3885,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string }; Body: { clientCreationId?: string } }>(
+  app.post<{ Params: { id: string }; Body: CreateProjectThreadRequest }>(
     "/api/v1/projects/:id/threads",
     async (request, reply) => {
       if (!store.view().projects.some((project) => project.id === request.params.id)) {
@@ -3882,7 +3899,15 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       ) {
         return apiError(reply, 400, "validation_failed", "A stable clientCreationId is required");
       }
-      const thread = await getOrCreateProjectThread(request.params.id, clientCreationId);
+      const resumeEmpty = request.body?.resumeEmpty;
+      if (resumeEmpty !== undefined && typeof resumeEmpty !== "boolean") {
+        return apiError(reply, 400, "validation_failed", "resumeEmpty must be a boolean");
+      }
+      const thread = await getOrCreateProjectThread(
+        request.params.id,
+        clientCreationId,
+        resumeEmpty,
+      );
       const draft = cloneView<CreateProjectThreadResponse["draft"]>(
         store.view().threadMeta[thread.id]?.draft ?? null,
       );

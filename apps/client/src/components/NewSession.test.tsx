@@ -332,7 +332,9 @@ describe("NewSession", () => {
     expect(screen.queryByRole("combobox", { name: "Проект" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
     await waitFor(() =>
-      expect(createProjectThread).toHaveBeenCalledWith(project.id, expect.any(String)),
+      expect(createProjectThread).toHaveBeenCalledWith(project.id, expect.any(String), {
+        resumeEmpty: true,
+      }),
     );
 
     fireEvent.change(textbox, { target: { value: "Не потерять этот текст" } });
