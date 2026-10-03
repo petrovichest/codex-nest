@@ -236,14 +236,55 @@ describe("BrowserNotificationTracker", () => {
     ]);
   });
 
-  it("catches up a missed needs-attention state after a reconnect", () => {
+  it.each([10, 20])(
+    "catches up a missed needs-attention state at %s after a reconnect",
+    (updatedAt) => {
+      const tracker = new BrowserNotificationTracker();
+      tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+
+      tracker.acceptSnapshot(snapshot([thread("needsAttention", updatedAt)]));
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.title).toBe("Codex ждёт решения");
+    },
+  );
+
+  it("combines missed attention requests into one notification per session", () => {
     const tracker = new BrowserNotificationTracker();
     tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+    tracker.acceptSnapshot(
+      snapshot([thread("needsAttention", 20)], [attentionRequest(21), attentionRequest(22)]),
+    );
+    expect(notifications).toHaveLength(1);
+  });
 
-    tracker.acceptSnapshot(snapshot([thread("needsAttention", 20)]));
-
+  it("notifies once while async questions need attention, including reconnect and additional requests", () => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+    const waiting = { ...thread("needsAttention", 20), currentTurnId: "turn" };
+    tracker.acceptEvent({ type: "thread.upserted", thread: waiting });
+    tracker.acceptEvent({ type: "thread.upserted", thread: { ...waiting, updatedAt: 21 } });
+    tracker.acceptSnapshot(snapshot([{ ...waiting, updatedAt: 30 }], [attentionRequest(31)]));
+    tracker.acceptEvent({ type: "attention.upserted", attention: attentionRequest(32) });
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.title).toBe("Codex ждёт решения");
+    expect(notifications[0]?.options).toMatchObject({ tag: "needs-attention:thread" });
+    tracker.acceptEvent({ type: "attention.removed", attentionId: "attention-31" });
+    tracker.acceptEvent({ type: "attention.removed", attentionId: "attention-32" });
+    tracker.acceptEvent({ type: "thread.upserted", thread: thread("running", 40) });
+    tracker.acceptEvent({ type: "thread.upserted", thread: { ...waiting, updatedAt: 50 } });
+    expect(notifications).toHaveLength(2);
+  });
+
+  it("keeps async question notifications silent in the foreground and on reconnect", () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+    const waiting = { ...thread("needsAttention", 20), currentTurnId: "turn" };
+    tracker.acceptEvent({ type: "thread.upserted", thread: waiting });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    tracker.acceptSnapshot(snapshot([{ ...waiting, updatedAt: 30 }]));
+    expect(notifications).toHaveLength(0);
   });
 });
 

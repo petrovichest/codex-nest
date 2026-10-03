@@ -73,6 +73,7 @@ final class NotificationEventTracker {
     private void acceptSnapshot(JSONObject snapshot, List<CodexNotification> notifications) {
         long cutoff = lastObservedAt;
         boolean firstConnection = cutoff == 0;
+        Map<String, String> previousThreadStates = new HashMap<>(threadStates);
         long newest = cutoff;
         threadStates.clear();
         threadTitles.clear();
@@ -80,6 +81,7 @@ final class NotificationEventTracker {
         attentionThreads.clear();
         List<JSONObject> missedThreads = new ArrayList<>();
         List<CodexNotification> missedAttention = new ArrayList<>();
+        Set<String> missedAttentionThreads = new HashSet<>();
 
         JSONArray threads = snapshot.optJSONArray("threads");
         if (threads != null) {
@@ -97,8 +99,11 @@ final class NotificationEventTracker {
                 if (
                     !firstConnection &&
                     parentThreadIds.contains(id) &&
-                    updatedAt > cutoff &&
-                    (thread.optBoolean("unread", false) || "needsAttention".equals(state))
+                    (updatedAt > cutoff ||
+                        ("needsAttention".equals(state) && previousThreadStates.containsKey(id))) &&
+                    (thread.optBoolean("unread", false) || "needsAttention".equals(state)) &&
+                    (!"needsAttention".equals(state) ||
+                        !"needsAttention".equals(previousThreadStates.get(id)))
                 ) {
                     missedThreads.add(thread);
                 }
@@ -119,7 +124,9 @@ final class NotificationEventTracker {
                     !firstConnection &&
                     threadId != null &&
                     parentThreadIds.contains(threadId) &&
-                    createdAt > cutoff
+                    createdAt > cutoff &&
+                    !"needsAttention".equals(previousThreadStates.get(threadId)) &&
+                    missedAttentionThreads.add(threadId)
                 ) {
                     missedAttention.add(
                         new CodexNotification(

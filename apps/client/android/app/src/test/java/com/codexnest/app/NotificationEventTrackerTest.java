@@ -183,6 +183,50 @@ public class NotificationEventTrackerTest {
     }
 
     @Test
+    public void asyncQuestionsOnlyNotifyOnceUntilAttentionClearsIncludingReconnect() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(0);
+        tracker.accept(snapshotFrame(notificationThread("running", 100, "\"currentTurnId\":\"turn\"")));
+        List<CodexNotification> first = tracker.accept(eventFrame(2,
+            notificationThread("needsAttention", 200, "\"currentTurnId\":\"turn\"")));
+        assertEquals(1, first.size());
+        assertEquals(CodexNotification.Kind.ATTENTION, first.get(0).kind);
+        assertEquals(0, tracker.accept(eventFrame(3,
+            notificationThread("needsAttention", 210, "\"currentTurnId\":\"turn\""))).size());
+        assertEquals(0, tracker.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"sequence\":4,\"threads\":[" +
+            notificationThread("needsAttention", 300, "\"currentTurnId\":\"turn\"") +
+            "],\"attention\":[{\"id\":\"attention-1\",\"threadId\":\"one\",\"createdAt\":310}]}}"
+        ).size());
+        tracker.accept("{\"type\":\"event\",\"sequence\":5,\"event\":{\"type\":\"attention.removed\",\"attentionId\":\"attention-1\"}}");
+        tracker.accept(eventFrame(6, notificationThread("running", 400, "\"currentTurnId\":\"turn\"")));
+        assertEquals(1, tracker.accept(eventFrame(7,
+            notificationThread("needsAttention", 500, "\"currentTurnId\":\"turn\""))).size());
+    }
+
+    @Test
+    public void reconnectDetectsAttentionEvenWhenTheTimestampHasNotAdvanced() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(0);
+        tracker.accept(snapshotFrame(notificationThread("running", 100, "")));
+        List<CodexNotification> missed = tracker.accept(snapshotFrame(
+            notificationThread("needsAttention", 100, "\"currentTurnId\":\"turn\"")));
+        assertEquals(1, missed.size());
+        assertEquals(CodexNotification.Kind.ATTENTION, missed.get(0).kind);
+    }
+
+    @Test
+    public void reconnectCombinesMissedAttentionRequestsForOneSession() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(100);
+        List<CodexNotification> missed = tracker.accept(
+            "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[" +
+            notificationThread("needsAttention", 200, "\"currentTurnId\":\"turn\"") +
+            "],\"attention\":[{\"id\":\"attention-1\",\"threadId\":\"one\",\"createdAt\":210}," +
+            "{\"id\":\"attention-2\",\"threadId\":\"one\",\"createdAt\":220}]}}"
+        );
+        assertEquals(1, missed.size());
+        assertEquals(CodexNotification.Kind.ATTENTION, missed.get(0).kind);
+    }
+
+    @Test
     public void observedForegroundOutcomeDoesNotNotifyAgainAfterBackgroundReconnect()
         throws Exception {
         NotificationEventTracker foreground = new NotificationEventTracker(0);

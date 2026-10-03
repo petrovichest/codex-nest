@@ -1,4 +1,8 @@
-import { appendUserInputRecordings, pastedText } from "@codexnest/protocol";
+import {
+  appendUserInputRecordings,
+  asyncQuestionReplyMessageId,
+  pastedText,
+} from "@codexnest/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
@@ -3425,9 +3429,21 @@ export class AppProjection extends EventEmitter {
         ) {
           item.timestamp = previous.timestamp;
         }
+        const affectsAsyncQuestion =
+          (item.type === "agentMessage" && !!item.questions?.length) ||
+          (item.type === "userMessage" && item.id.startsWith("async-answer:"));
+        const previousState = affectsAsyncQuestion
+          ? this.summary(notification.params.threadId)?.state
+          : undefined;
         this.activity.set(key, item);
         this.publishActivityUpsert(notification.params.threadId, notification.params.turnId, item);
-        this.touchThreadActivity(notification.params.threadId, eventTimestamp);
+        if (
+          !this.touchThreadActivity(notification.params.threadId, eventTimestamp) &&
+          previousState !== undefined &&
+          previousState !== this.summary(notification.params.threadId)?.state
+        ) {
+          this.publishThread(notification.params.threadId);
+        }
         break;
       }
       case "item/agentMessage/delta":
@@ -3728,12 +3744,8 @@ export class AppProjection extends EventEmitter {
     if (
       this.attention
         .list()
-        .some(
-          (item) =>
-            item.threadId === cached.thread.id &&
-            item.kind !== "unsupported" &&
-            (item.kind !== "userInput" || item.isBlocking !== false),
-        )
+        .some((item) => item.threadId === cached.thread.id && item.kind !== "unsupported") ||
+      this.hasPendingAsyncQuestion(cached, state)
     ) {
       return "needsAttention";
     }
@@ -3761,6 +3773,49 @@ export class AppProjection extends EventEmitter {
       return "needsAttention";
     }
     return cached.liveOutcome ?? stored ?? "idle";
+  }
+
+  private hasPendingAsyncQuestion(cached: CachedThread, state: CodexNestStateView): boolean {
+    const turnId = cached.currentTurnId;
+    if (!turnId) return false;
+    const turn =
+      this.turnStates.get(turnKey(cached.thread.id, turnId)) ??
+      cached.thread.turns.find((candidate) => candidate.id === turnId);
+    if (!turn || turn.status !== "inProgress") return false;
+    const occurrences = new Map<string, number>();
+    for (const item of turn.items) {
+      if (item.type !== "agentMessage" || !item.questions?.length) continue;
+      const key =
+        "questionKey" in item && typeof item.questionKey === "string"
+          ? item.questionKey
+          : createHash("sha256").update(JSON.stringify(item.questions)).digest("hex");
+      const occurrence = occurrences.get(key) ?? 0;
+      occurrences.set(key, occurrence + 1);
+      const messageId = asyncQuestionReplyMessageId(
+        cached.thread.id,
+        turnId,
+        occurrence ? `${key}:${occurrence}` : key,
+      );
+      if (state.messageQueues?.[cached.thread.id]?.some((message) => message.id === messageId))
+        continue;
+      const receipt = state.messageReceipts?.[messageId];
+      if (
+        receipt?.threadId === cached.thread.id &&
+        (receipt.status === "delivered" || (!receipt.status && receipt.turnId !== null))
+      )
+        continue;
+      if (
+        turn.items.some(
+          (candidate) =>
+            candidate.type === "userMessage" &&
+            ("clientId" in candidate ? (candidate.clientId ?? candidate.id) : candidate.id) ===
+              messageId,
+        )
+      )
+        continue;
+      return true;
+    }
+    return false;
   }
 
   private sortedThreads(state: CodexNestStateView): ThreadSummary[] {

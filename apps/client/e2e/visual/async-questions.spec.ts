@@ -6,7 +6,11 @@ test("async replies preserve the composer and survive acceptance and history rel
   page,
 }, testInfo) => {
   await page.setViewportSize(PHONE_VIEWPORT);
-  const summary = { ...mainThread, state: "running" as const, currentTurnId: "questions-turn" };
+  const summary = {
+    ...mainThread,
+    state: "needsAttention" as const,
+    currentTurnId: "questions-turn",
+  };
   const fixtureSnapshot = {
     ...snapshot,
     threads: snapshot.threads.map((thread) => (thread.id === mainThread.id ? summary : thread)),
@@ -107,6 +111,9 @@ test("async replies preserve the composer and survive acceptance and history rel
     return route.fallback();
   });
   await page.goto("/threads/session-main");
+  const sessionStatus = page.locator('.thread-link[href="/threads/session-main"] .status').first();
+  await expect(sessionStatus).toHaveClass(/status-needsAttention/u);
+  await expect(sessionStatus).toHaveCSS("background-color", "rgb(229, 166, 43)");
   const activity = page.locator(".turn-activity-row");
   await expect(activity).toContainText("Codex работает");
   await expect(activity.locator(".spinner")).toHaveCount(1);

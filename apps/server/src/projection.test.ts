@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { asyncQuestionReplyMessageId } from "@codexnest/protocol";
 import type {
   ActivityItem,
   AttentionRequest,
@@ -1663,6 +1664,11 @@ describe("AppProjection", () => {
         }),
       ),
     );
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    expect(events).toContainEqual({
+      type: "thread.upserted",
+      thread: expect.objectContaining({ state: "needsAttention", updatedAt: 10000 }),
+    });
     bridge.emit("notification", {
       method: "item/agentMessage/delta",
       params: { threadId: "one", turnId: "live", itemId: question.id, delta: "Уточнение" },
@@ -1694,7 +1700,151 @@ describe("AppProjection", () => {
       delivery: "async",
       questionKey: "questionKey" in live ? live.questionKey : undefined,
     });
+    expect(reloaded.summary("one")?.state).toBe("needsAttention");
+    await store.update((state) => {
+      state.messageReceipts ??= {};
+      state.messageReceipts[asyncQuestionReplyMessageId("one", "live", restored!.questionKey!)] = {
+        threadId: "one",
+        turnId: "live",
+        status: "delivered",
+        contentHash: "a".repeat(64),
+        createdAt: 12000,
+      };
+    });
+    reloaded.upsertThread(
+      thread("one", "/work", 12, { type: "active", activeFlags: [] }, [canonical]),
+    );
+    expect(reloaded.summary("one")?.state).toBe("running");
+    await store.flushed();
   });
+
+  it("keeps async questions needing attention through work and viewing until an answer is accepted", async () => {
+    const { projection, bridge, store, receive, events } = await createAsyncQuestionHarness();
+    const question = receive();
+    expect(projection.summary("one")).toMatchObject({
+      state: "needsAttention",
+      currentTurnId: "questions-turn",
+    });
+    await projection.markViewed("one", 10000);
+    bridge.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "one",
+        turnId: "questions-turn",
+        itemId: "continuation",
+        delta: "Продолжаю работу",
+      },
+    } satisfies ServerNotification);
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    expect(bridge.request).not.toHaveBeenCalled();
+    const messageId = asyncQuestionReplyMessageId("one", "questions-turn", question.questionKey!);
+    const message = {
+      id: messageId,
+      threadId: "one",
+      text: "Быстро",
+      createdAt: 10000,
+      status: "queued" as const,
+      replyToAsyncQuestion: { turnId: "questions-turn", itemId: question.id },
+    };
+    await store.update((state) => {
+      state.messageQueues = { one: [message] };
+    });
+    projection.publishQueue("one", [message]);
+    expect(projection.summary("one")?.state).toBe("running");
+    expect(events.at(-1)).toMatchObject({
+      type: "thread.upserted",
+      thread: { state: "running", currentTurnId: "questions-turn" },
+    });
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.update((state) => {
+      delete state.messageQueues!.one;
+    });
+    projection.publishQueue("one", []);
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    await store.flushed();
+  });
+
+  it("treats repeated async questions independently and ignores rejected or unrelated replies", async () => {
+    const { projection, bridge, store, receive } = await createAsyncQuestionHarness();
+    const first = receive("first");
+    const second = receive("second");
+    const firstId = asyncQuestionReplyMessageId("one", "questions-turn", first.questionKey!);
+    const secondId = asyncQuestionReplyMessageId(
+      "one",
+      "questions-turn",
+      `${second.questionKey}:1`,
+    );
+    await store.update((state) => {
+      state.messageReceipts = {
+        [firstId]: {
+          threadId: "one",
+          turnId: "questions-turn",
+          status: "delivered",
+          contentHash: "a".repeat(64),
+          createdAt: 10000,
+        },
+        [secondId]: {
+          threadId: "one",
+          turnId: null,
+          status: "rejected",
+          contentHash: "b".repeat(64),
+          createdAt: 10000,
+        },
+      };
+    });
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    await store.update((state) => {
+      state.messageReceipts![secondId]!.status = "prepared";
+    });
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    await store.update((state) => {
+      state.messageReceipts![secondId]!.status = "delivered";
+      state.messageReceipts![secondId]!.threadId = "other-session";
+    });
+    expect(projection.summary("one")?.state).toBe("needsAttention");
+    await store.update((state) => {
+      state.messageReceipts![secondId]!.threadId = "one";
+      state.messageReceipts![secondId]!.turnId = "questions-turn";
+    });
+    expect(projection.summary("one")?.state).toBe("running");
+    expect(bridge.request).not.toHaveBeenCalled();
+    await store.flushed();
+  });
+
+  it.each(["completed", "failed", "interrupted", "stop"] as const)(
+    "retires async question attention on %s and ignores it in the next turn",
+    async (outcome) => {
+      const { projection, bridge, store, receive } = await createAsyncQuestionHarness();
+      receive();
+      if (outcome === "stop") await projection.markInterrupted("one", ["questions-turn"]);
+      else
+        bridge.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "one",
+            turn: { ...testTurn("questions-turn", "completed"), status: outcome },
+          },
+        } satisfies ServerNotification);
+      await vi.waitFor(() =>
+        expect(projection.summary("one")).toMatchObject({
+          state: outcome === "stop" ? "interrupted" : outcome,
+          currentTurnId: null,
+        }),
+      );
+      bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "one", turn: testTurn("next-turn", "inProgress") },
+      } satisfies ServerNotification);
+      await vi.waitFor(() =>
+        expect(projection.summary("one")).toMatchObject({
+          state: "running",
+          currentTurnId: "next-turn",
+        }),
+      );
+      expect(bridge.request).not.toHaveBeenCalled();
+      await store.flushed();
+    },
+  );
 
   it("keeps quiz replies in dialogue order when the agent outruns draft persistence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-quiz-test-"));
@@ -4877,7 +5027,7 @@ describe("AppProjection", () => {
         } as unknown as JsonlTransport,
       );
       expect(projection.summary("one")).toMatchObject({
-        state: isBlocking === false ? "running" : "needsAttention",
+        state: "needsAttention",
         currentTurnId: "question-turn",
         unread: false,
       });
@@ -7274,6 +7424,49 @@ async function createUserInputLifecycleHarness(unrelatedThreads = 0) {
   const events: ServerEvent[] = [];
   projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
   return { store, bridge, attention, projection, transport, receive, events };
+}
+
+async function createAsyncQuestionHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "codexnest-async-question-test-"));
+  directories.push(directory);
+  const store = new StateStore(join(directory, "state.json"));
+  await store.load();
+  const bridge = new FakeBridge();
+  const projection = new AppProjection(
+    bridge as unknown as CodexBridge,
+    store,
+    new AttentionManager(),
+  );
+  projection.upsertThread(
+    thread("one", "/work", 10, { type: "active", activeFlags: [] }, [
+      testTurn("questions-turn", "inProgress"),
+    ]),
+  );
+  const events: ServerEvent[] = [];
+  projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+  const receive = (id = "question") => {
+    bridge.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: "one",
+        turnId: "questions-turn",
+        startedAtMs: 10000,
+        item: {
+          type: "agentMessage",
+          id,
+          text: "",
+          phase: "commentary",
+          memoryCitation: null,
+          delivery: "async",
+          questions: [{ title: "Как проверить?", options: ["Быстро", "Подробно"] }],
+        },
+      },
+    } satisfies ServerNotification);
+    const item = events.filter((event) => event.type === "activity.upserted").at(-1)!.item;
+    if (item.type !== "agentMessage") throw new Error("Expected async question");
+    return item;
+  };
+  return { projection, bridge, store, receive, events };
 }
 
 function userInputServerRequest(

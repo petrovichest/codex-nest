@@ -37,13 +37,14 @@ export class BrowserNotificationTracker {
       snapshot.uiLanguage === "en" || snapshot.uiLanguage === "ru" ? snapshot.uiLanguage : "ru";
     const cutoff = this.lastObservedAt;
     const firstConnection = cutoff === 0;
+    const previousThreadStates = new Map(this.threadStates);
     let newest = cutoff;
     this.threadStates.clear();
     this.threadTitles.clear();
     this.parentThreadIds.clear();
     this.attentionThreads.clear();
     const missedThreads: AppSnapshot["threads"] = [];
-    const missedAttention: AppSnapshot["attention"] = [];
+    const missedAttention = new Map<string, AppSnapshot["attention"][number]>();
 
     for (const thread of snapshot.threads) {
       this.threadStates.set(thread.id, notificationState(thread));
@@ -53,8 +54,11 @@ export class BrowserNotificationTracker {
       if (
         !firstConnection &&
         this.parentThreadIds.has(thread.id) &&
-        thread.updatedAt > cutoff &&
-        (thread.unread || thread.state === "needsAttention")
+        (thread.updatedAt > cutoff ||
+          (thread.state === "needsAttention" && previousThreadStates.has(thread.id))) &&
+        (thread.unread || thread.state === "needsAttention") &&
+        (thread.state !== "needsAttention" ||
+          previousThreadStates.get(thread.id) !== "needsAttention")
       ) {
         missedThreads.push(thread);
       }
@@ -67,15 +71,16 @@ export class BrowserNotificationTracker {
         !firstConnection &&
         attention.threadId !== null &&
         this.parentThreadIds.has(attention.threadId) &&
-        attention.createdAt > cutoff
+        attention.createdAt > cutoff &&
+        previousThreadStates.get(attention.threadId) !== "needsAttention"
       ) {
-        missedAttention.push(attention);
+        missedAttention.set(attention.threadId, attention);
       }
     }
     for (const thread of missedThreads) {
       this.showThreadState(thread);
     }
-    for (const attention of missedAttention) {
+    for (const attention of missedAttention.values()) {
       this.show(
         translate(this.language, "Codex ждёт решения"),
         this.titleFor(attention.threadId),
