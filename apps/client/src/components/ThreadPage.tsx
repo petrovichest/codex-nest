@@ -189,12 +189,6 @@ type EarlySubmission = {
   staged?: boolean;
 };
 
-type AcceptedDraftClearGuard = {
-  editRevision: number;
-  generation: number;
-  pendingRevision: number;
-};
-
 type PendingSettingsField = Exclude<keyof UpdateThreadSettingsRequest, "serviceTier">;
 type ClientSessionSettings = Omit<SessionSettings, "serviceTier">;
 
@@ -2443,32 +2437,6 @@ export function ThreadPage({
   ): void {
     draftTouchedThreadsRef.current.add(targetThreadId);
     scheduleDraftSave(targetThreadId, value, true);
-  }
-
-  function reconcileAcceptedDraftAfterClear(
-    targetThreadId: string,
-    guard: AcceptedDraftClearGuard,
-    clearFailed: boolean,
-  ): boolean {
-    if (!preparationAliveRef.current || preparationGenerationRef.current !== guard.generation) {
-      return false;
-    }
-    const pending = pendingDraftsRef.current.get(targetThreadId);
-    const editorHasNewerDraft =
-      composerDraftRef.current.threadId === targetThreadId &&
-      composerEditRevisionRef.current !== guard.editRevision;
-    if (editorHasNewerDraft || (pending?.revision ?? 0) > guard.pendingRevision) {
-      persistDraftAfterAcceptedSend(
-        targetThreadId,
-        structuredClone(editorHasNewerDraft ? composerDraftRef.current.value : pending!.value),
-      );
-      return false;
-    }
-    if (!clearFailed) return true;
-    if ((pendingDraftsRef.current.get(targetThreadId)?.revision ?? 0) <= guard.pendingRevision) {
-      persistDraftAfterAcceptedSend(targetThreadId, emptyComposerDraft());
-    }
-    return false;
   }
 
   async function cleanupAcceptedDraft(
