@@ -161,6 +161,61 @@ describe("model capacity recovery", () => {
     }
   });
 
+  it("keeps a terminal overload running while retry persistence overlaps systemError", async () => {
+    const context = await harness();
+    const states: string[] = [];
+    context.projection.on("event", (_sequence, event: ServerEvent) => {
+      if (event.type === "thread.upserted" && event.thread.id === "thread")
+        states.push(event.thread.state);
+    });
+    let release!: () => void;
+    try {
+      const turn: Turn = {
+        ...testTurn("overlap", "failed"),
+        error: {
+          message: "Selected model is at capacity.",
+          codexErrorInfo: "serverOverloaded",
+          additionalDetails: null,
+          misalignment: null,
+        },
+      };
+      context.bridge.threadTurns.set("thread", [turn]);
+      context.bridge.emit("notification", {
+        method: "turn/started",
+        params: { threadId: "thread", turn: { ...turn, status: "inProgress", error: null } },
+      });
+      await vi.waitFor(() =>
+        expect(context.projection.summary("thread")?.currentTurnId).toBe(turn.id),
+      );
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const update = context.store.update.bind(context.store);
+      vi.spyOn(context.store, "update").mockImplementationOnce(async (mutate) => {
+        await gate;
+        return update(mutate);
+      });
+      context.bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "thread", turn },
+      });
+      context.bridge.emit("notification", {
+        method: "thread/status/changed",
+        params: { threadId: "thread", status: { type: "systemError" } },
+      });
+      expect(context.projection.summary("thread")?.state).toBe("running");
+      expect(states).not.toContain("failed");
+      release();
+      await vi.waitFor(() =>
+        expect(context.projection.summary("thread")?.capacityRetry?.failedTurnId).toBe(turn.id),
+      );
+      expect(states).not.toContain("failed");
+    } finally {
+      release?.();
+      await context.app.close();
+    }
+  });
+
   it.each(["default", "plan"] as const)(
     "retries %s every five minutes without changing settings or duplicating input",
     async (mode) => {

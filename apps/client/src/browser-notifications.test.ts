@@ -38,6 +38,41 @@ afterEach(() => {
 });
 
 describe("BrowserNotificationTracker", () => {
+  it.each([
+    { capacityRetry: { failedTurnId: "failed", nextAttemptAt: 300_000 } },
+    { currentTurnId: "active-turn" },
+    { queuedMessageCount: 1 },
+  ])("only notifies a failed task after automatic work stops: %j", (recovery) => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...thread("failed", 20), ...recovery },
+    });
+    tracker.acceptSnapshot(snapshot([{ ...thread("failed", 30), unread: true, ...recovery }]));
+    expect(notifications).toHaveLength(0);
+    tracker.acceptEvent({ type: "thread.upserted", thread: thread("failed", 40) });
+    tracker.acceptEvent({ type: "thread.upserted", thread: thread("failed", 41) });
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Задача завершилась с ошибкой");
+  });
+
+  it("does not announce completion during a retry and still announces eventual success", () => {
+    const tracker = new BrowserNotificationTracker();
+    tracker.acceptSnapshot(snapshot([thread("running", 10)]));
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: {
+        ...thread("completed", 20),
+        capacityRetry: { failedTurnId: "failed", nextAttemptAt: 300_000 },
+      },
+    });
+    expect(notifications).toHaveLength(0);
+    tracker.acceptEvent({ type: "thread.upserted", thread: thread("completed", 30) });
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Задача завершена");
+  });
+
   it("stays silent during capacity retries, including reconnect, and notifies eventual completion", () => {
     const tracker = new BrowserNotificationTracker();
     const running = thread("running", 10);
@@ -54,7 +89,7 @@ describe("BrowserNotificationTracker", () => {
     expect(notifications).toHaveLength(0);
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...running, state: "completed", updatedAt: 50 },
+      thread: { ...running, state: "completed", currentTurnId: null, updatedAt: 50 },
     });
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.title).toBe("Задача завершена");
@@ -69,11 +104,11 @@ describe("BrowserNotificationTracker", () => {
 
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...running, state: "completed", unread: true, updatedAt: 20 },
+      thread: { ...running, state: "completed", currentTurnId: null, unread: true, updatedAt: 20 },
     });
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...running, state: "completed", unread: true, updatedAt: 21 },
+      thread: { ...running, state: "completed", currentTurnId: null, unread: true, updatedAt: 21 },
     });
 
     expect(notifications).toHaveLength(1);
@@ -109,7 +144,7 @@ describe("BrowserNotificationTracker", () => {
 
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...running, state: "failed", updatedAt: 20 },
+      thread: { ...running, state: "failed", currentTurnId: null, updatedAt: 20 },
     });
 
     expect(notifications[0]?.title).toBe("Task failed");
@@ -145,7 +180,7 @@ describe("BrowserNotificationTracker", () => {
 
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...child, state: "completed", unread: true, updatedAt: 20 },
+      thread: { ...child, state: "completed", currentTurnId: null, unread: true, updatedAt: 20 },
     });
     tracker.acceptEvent({
       type: "attention.upserted",
@@ -165,7 +200,7 @@ describe("BrowserNotificationTracker", () => {
     });
     tracker.acceptSnapshot(
       snapshot(
-        [{ ...child, state: "failed", unread: true, updatedAt: 30 }],
+        [{ ...child, state: "failed", currentTurnId: null, unread: true, updatedAt: 30 }],
         [attentionRequest(31, child.id)],
       ),
     );
@@ -181,7 +216,7 @@ describe("BrowserNotificationTracker", () => {
 
     tracker.acceptEvent({
       type: "thread.upserted",
-      thread: { ...running, state: "failed", updatedAt: 20 },
+      thread: { ...running, state: "failed", currentTurnId: null, updatedAt: 20 },
     });
 
     expect(notifications).toHaveLength(0);

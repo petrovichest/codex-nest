@@ -9,6 +9,58 @@ import org.junit.Test;
 public class NotificationEventTrackerTest {
 
     @Test
+    public void recoveryNeverNotifiesAnErrorButActualFailureStillDoes() throws Exception {
+        String[] recoveryStates = {
+            "\"capacityRetry\":{\"failedTurnId\":\"failed\",\"nextAttemptAt\":300000}",
+            "\"currentTurnId\":\"active-turn\"",
+            "\"queuedMessageCount\":1"
+        };
+        for (String recovery : recoveryStates) {
+            NotificationEventTracker tracker = new NotificationEventTracker(0);
+            tracker.accept(snapshotFrame(notificationThread("running", 100, "")));
+            assertEquals(0, tracker.accept(eventFrame(2, notificationThread("failed", 200, recovery))).size());
+            assertEquals(0, tracker.accept(snapshotFrame(notificationThread("failed", 300, recovery))).size());
+            List<CodexNotification> stopped = tracker.accept(eventFrame(4, notificationThread("failed", 400, "")));
+            assertEquals(1, stopped.size());
+            assertEquals(CodexNotification.Kind.FAILED, stopped.get(0).kind);
+            assertEquals(0, tracker.accept(eventFrame(5, notificationThread("failed", 401, ""))).size());
+        }
+    }
+
+    @Test
+    public void reconnectAfterServiceRestartStaysSilentForCapacityRetry() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(100);
+        assertEquals(0, tracker.accept(snapshotFrame(notificationThread("failed", 200,
+            "\"capacityRetry\":{\"failedTurnId\":\"failed\",\"nextAttemptAt\":300000}"))).size());
+        List<CodexNotification> stopped = tracker.accept(eventFrame(3, notificationThread("failed", 300, "")));
+        assertEquals(1, stopped.size());
+        assertEquals(CodexNotification.Kind.FAILED, stopped.get(0).kind);
+    }
+
+    @Test
+    public void completionOnlyNotifiesOnceAutomaticWorkHasStopped() throws Exception {
+        NotificationEventTracker tracker = new NotificationEventTracker(0);
+        tracker.accept(snapshotFrame(notificationThread("running", 100, "")));
+        assertEquals(0, tracker.accept(eventFrame(2, notificationThread("completed", 200,
+            "\"capacityRetry\":{\"failedTurnId\":\"failed\",\"nextAttemptAt\":300000}"))).size());
+        List<CodexNotification> done = tracker.accept(eventFrame(3, notificationThread("completed", 300, "")));
+        assertEquals(1, done.size());
+        assertEquals(CodexNotification.Kind.COMPLETED, done.get(0).kind);
+    }
+
+    private static String notificationThread(String state, long updatedAt, String extra) {
+        return "{\"id\":\"one\",\"relation\":{\"kind\":\"session\",\"sessionId\":\"session\"},\"title\":\"Task\",\"state\":\"" + state + "\",\"unread\":true,\"updatedAt\":" + updatedAt + (extra.isEmpty() ? "" : "," + extra) + "}";
+    }
+
+    private static String snapshotFrame(String thread) {
+        return "{\"type\":\"snapshot\",\"snapshot\":{\"threads\":[" + thread + "],\"attention\":[]}}";
+    }
+
+    private static String eventFrame(long sequence, String thread) {
+        return "{\"type\":\"event\",\"sequence\":" + sequence + ",\"event\":{\"type\":\"thread.upserted\",\"thread\":" + thread + "}}";
+    }
+
+    @Test
     public void initialSnapshotDoesNotNotifyForOldThreads() throws Exception {
         NotificationEventTracker tracker = new NotificationEventTracker(0);
         List<CodexNotification> notifications = tracker.accept(

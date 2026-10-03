@@ -3699,10 +3699,13 @@ export class AppProjection extends EventEmitter {
   private hasLiveCapacityError(cached: CachedThread): boolean {
     return (
       cached.currentTurnId !== null &&
-      (this.turnStates
-        .get(turnKey(cached.thread.id, cached.currentTurnId))
-        ?.items.some((item) => item.type === "error" && item.failureKind === "modelCapacity") ??
-        false)
+      (cached.thread.turns.some(
+        (turn) => turn.id === cached.currentTurnId && isCapacityFailure(turn),
+      ) ||
+        (this.turnStates
+          .get(turnKey(cached.thread.id, cached.currentTurnId))
+          ?.items.some((item) => item.type === "error" && item.failureKind === "modelCapacity") ??
+          false))
     );
   }
 

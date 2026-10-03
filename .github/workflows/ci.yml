@@ -128,7 +128,7 @@ jobs:
         run: |
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/codexnest.jks"
           chmod 0600 "$RUNNER_TEMP/codexnest.jks"
-      - name: Build signed rolling APK
+      - name: Test Android and build signed rolling APK
         if: steps.head.outputs.current == 'true'
         id: apk
         env:
@@ -141,7 +141,7 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           export CODEXNEST_ANDROID_VERSION_NAME="$package_version-$short_sha"
           export CODEXNEST_ANDROID_VERSION_CODE="$((1000000 + GITHUB_RUN_NUMBER))"
-          ./gradlew assembleRelease
+          ./gradlew testDebugUnitTest assembleRelease
           test -s app/build/outputs/apk/release/app-release.apk
           mkdir -p ../../../release
           cp app/build/outputs/apk/release/app-release.apk ../../../release/CodexNest-latest.apk

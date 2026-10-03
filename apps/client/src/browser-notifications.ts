@@ -1,6 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 
-import type { AppSnapshot, ServerEvent, UiLanguage } from "@codexnest/protocol";
+import type { AppSnapshot, ServerEvent, ThreadSummary, UiLanguage } from "@codexnest/protocol";
 
 import { localizeKnownServerText, translate } from "./i18n";
 
@@ -46,7 +46,7 @@ export class BrowserNotificationTracker {
     const missedAttention: AppSnapshot["attention"] = [];
 
     for (const thread of snapshot.threads) {
-      this.threadStates.set(thread.id, thread.state);
+      this.threadStates.set(thread.id, notificationState(thread));
       this.threadTitles.set(thread.id, thread.title);
       if (thread.relation.kind === "session") this.parentThreadIds.add(thread.id);
       newest = Math.max(newest, thread.updatedAt);
@@ -73,7 +73,7 @@ export class BrowserNotificationTracker {
       }
     }
     for (const thread of missedThreads) {
-      this.showThreadState(thread.state, thread.id, thread.title);
+      this.showThreadState(thread);
     }
     for (const attention of missedAttention) {
       this.show(
@@ -91,15 +91,16 @@ export class BrowserNotificationTracker {
       this.language = event.language;
     } else if (event.type === "thread.upserted") {
       const previous = this.threadStates.get(event.thread.id);
-      this.threadStates.set(event.thread.id, event.thread.state);
+      const state = notificationState(event.thread);
+      this.threadStates.set(event.thread.id, state);
       this.threadTitles.set(event.thread.id, event.thread.title);
       if (event.thread.relation.kind === "session") {
         this.parentThreadIds.add(event.thread.id);
       } else {
         this.parentThreadIds.delete(event.thread.id);
       }
-      if (previous !== event.thread.state) {
-        this.showThreadState(event.thread.state, event.thread.id, event.thread.title);
+      if (previous !== state) {
+        this.showThreadState(event.thread);
       }
       this.lastObservedAt = Math.max(this.lastObservedAt, event.thread.updatedAt);
     } else if (event.type === "thread.removed") {
@@ -128,7 +129,9 @@ export class BrowserNotificationTracker {
     }
   }
 
-  private showThreadState(state: string, threadId: string, threadTitle: string): void {
+  private showThreadState(thread: ThreadSummary): void {
+    const { id: threadId, title: threadTitle } = thread;
+    const state = notificationState(thread);
     if (!this.parentThreadIds.has(threadId)) return;
     if (state === "completed") {
       this.show(
@@ -207,4 +210,11 @@ export class BrowserNotificationTracker {
       window.dispatchEvent(new PopStateEvent("popstate"));
     };
   }
+}
+
+function notificationState(thread: ThreadSummary): ThreadSummary["state"] {
+  return (thread.state === "completed" || thread.state === "failed") &&
+    (thread.currentTurnId || thread.capacityRetry || thread.queuedMessageCount > 0)
+    ? "running"
+    : thread.state;
 }

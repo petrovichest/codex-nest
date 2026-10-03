@@ -87,7 +87,7 @@ final class NotificationEventTracker {
                 JSONObject thread = threads.optJSONObject(index);
                 if (thread == null) continue;
                 String id = thread.optString("id");
-                String state = thread.optString("state");
+                String state = notificationState(thread);
                 String title = thread.optString("title", defaultThreadTitle);
                 long updatedAt = thread.optLong("updatedAt", 0);
                 threadStates.put(id, state);
@@ -132,13 +132,7 @@ final class NotificationEventTracker {
             }
         }
         for (JSONObject thread : missedThreads) {
-            addStateNotification(
-                notifications,
-                thread.optString("state"),
-                thread.optString("id"),
-                thread.optString("title", defaultThreadTitle),
-                thread.optInt("queuedMessageCount", 0)
-            );
+            addStateNotification(notifications, thread);
         }
         notifications.addAll(missedAttention);
         lastObservedAt = newest;
@@ -150,7 +144,7 @@ final class NotificationEventTracker {
         if ("thread.upserted".equals(type)) {
             JSONObject thread = event.getJSONObject("thread");
             String id = thread.optString("id");
-            String state = thread.optString("state");
+            String state = notificationState(thread);
             String title = thread.optString("title", defaultThreadTitle);
             String previous = threadStates.put(id, state);
             threadTitles.put(id, title);
@@ -160,13 +154,7 @@ final class NotificationEventTracker {
                 parentThreadIds.remove(id);
             }
             if (!state.equals(previous)) {
-                addStateNotification(
-                    notifications,
-                    state,
-                    id,
-                    title,
-                    thread.optInt("queuedMessageCount", 0)
-                );
+                addStateNotification(notifications, thread);
             }
             lastObservedAt = Math.max(lastObservedAt, thread.optLong("updatedAt", 0));
         } else if ("thread.removed".equals(type)) {
@@ -202,13 +190,13 @@ final class NotificationEventTracker {
 
     private void addStateNotification(
         List<CodexNotification> notifications,
-        String state,
-        String threadId,
-        String title,
-        int queuedMessageCount
+        JSONObject thread
     ) {
+        String state = notificationState(thread);
+        String threadId = thread.optString("id");
+        String title = thread.optString("title", defaultThreadTitle);
         if (!parentThreadIds.contains(threadId)) return;
-        if ("completed".equals(state) && queuedMessageCount == 0) {
+        if ("completed".equals(state)) {
             notifications.add(
                 new CodexNotification(
                     CodexNotification.Kind.COMPLETED,
@@ -216,7 +204,7 @@ final class NotificationEventTracker {
                     displayTitle(title)
                 )
             );
-        } else if ("failed".equals(state) && queuedMessageCount == 0) {
+        } else if ("failed".equals(state)) {
             notifications.add(
                 new CodexNotification(CodexNotification.Kind.FAILED, threadId, displayTitle(title))
             );
@@ -245,6 +233,17 @@ final class NotificationEventTracker {
     private static boolean isParentThread(JSONObject thread) {
         JSONObject relation = thread.optJSONObject("relation");
         return relation != null && "session".equals(relation.optString("kind"));
+    }
+
+    private static String notificationState(JSONObject thread) {
+        String state = thread.optString("state");
+        if (
+            ("completed".equals(state) || "failed".equals(state)) &&
+            (nullableString(thread, "currentTurnId") != null ||
+                thread.optJSONObject("capacityRetry") != null ||
+                thread.optInt("queuedMessageCount", 0) > 0)
+        ) return "running";
+        return state;
     }
 
     private static String nullableString(JSONObject object, String key) {
