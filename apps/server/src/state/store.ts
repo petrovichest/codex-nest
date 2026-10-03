@@ -363,6 +363,7 @@ export interface CodexNestState {
   projects: Project[];
   dismissedProjectPaths?: string[];
   threadMeta: Record<string, ThreadMetaState>;
+  projectDrafts?: Record<string, ThreadDraft>;
   transcriptionTimings?: Record<string, TranscriptionTimingSampleState[]>;
   uiLanguage: UiLanguage;
   defaultReasoningEffort?: string;
@@ -834,6 +835,7 @@ function uncloneablePath(value: unknown, path = "state"): string {
 
 const ROOT_NAMESPACE = "root";
 const MAP_NAMESPACES = [
+  "projectDrafts",
   "threadMeta",
   "transcriptionTimings",
   "messageQueues",
@@ -1114,6 +1116,12 @@ function validateState(value: unknown): CodexNestState {
   }
   if (!isRecord(value.threadMeta)) {
     throw new Error("Corrupt CodexNest state");
+  }
+  if (
+    value.projectDrafts !== undefined &&
+    (!isRecord(value.projectDrafts) || !Object.values(value.projectDrafts).every(isThreadDraft))
+  ) {
+    throw new Error("Corrupt project drafts in CodexNest state");
   }
   const transcriptionTimings = normalizeTranscriptionTimings(value.transcriptionTimings);
   if (value.messageQueues !== undefined && !isRecord(value.messageQueues)) {

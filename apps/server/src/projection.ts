@@ -1262,6 +1262,10 @@ export class AppProjection extends EventEmitter {
     this.publish({ type: "resync.required" });
   }
 
+  publishProjectDraft(projectId: string, draft: ThreadDraft): void {
+    this.publish({ type: "projectDraft.changed", projectId, draft });
+  }
+
   publishProjectsReordered(projects: Project[]): void {
     this.publish({ type: "projects.reordered", projects });
   }

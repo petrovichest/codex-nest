@@ -26,6 +26,7 @@ import {
 export interface ClientState {
   snapshot: AppSnapshot | null;
   details: Record<string, ThreadDetail>;
+  projectDrafts?: Record<string, ThreadDraft>;
   expandedHistory: Record<string, boolean>;
   optimisticMessages: Record<string, OptimisticMessage[]>;
   userInputDrafts: Record<string, ClientUserInputDraft>;
@@ -79,6 +80,7 @@ export type ClientAction =
   | { type: "history.rebase"; detail: ThreadDetail; page: ThreadHistoryPage }
   | { type: "turn.items"; threadId: string; turnId: string; items: ActivityItem[] }
   | { type: "draft"; threadId: string; draft: ThreadDraft | null }
+  | { type: "projectDraft"; projectId: string; draft: ThreadDraft }
   | { type: "thread"; thread: ThreadSummary }
   | { type: "thread.remove"; threadId: string }
   | { type: "forkOperation"; operation: ForkOperationSummary }
@@ -369,6 +371,13 @@ export function clientReducer(state: ClientState, action: ClientAction): ClientS
         ...state,
         userInputDrafts: withoutKey(state.userInputDrafts, action.attentionId),
       };
+    case "projectDraft":
+      if ((state.projectDrafts?.[action.projectId]?.updatedAt ?? -1) >= action.draft.updatedAt)
+        return state;
+      return {
+        ...state,
+        projectDrafts: { ...state.projectDrafts, [action.projectId]: action.draft },
+      };
     case "event":
       if (!state.snapshot) return state;
       return applyEvent(state, action.version, action.event);
@@ -500,6 +509,15 @@ function applyVersionedEvent(
     case "codexRateLimits.changed":
       snapshot.codexRateLimits = event.codexRateLimits;
       break;
+    case "projectDraft.changed":
+      return {
+        ...clientReducer(state, {
+          type: "projectDraft",
+          projectId: event.projectId,
+          draft: event.draft,
+        }),
+        snapshot,
+      };
     case "project.upserted":
       snapshot.projects = upsert(snapshot.projects, event.project);
       break;

@@ -737,6 +737,7 @@ export function ConnectionProvider({
                         ? { planImplementationMode: message.planImplementationMode }
                         : {}),
                       clientMessageId: message.id,
+                      ...(message.projectDraft ? { projectDraft: message.projectDraft } : {}),
                       ...(message.replyToAsyncQuestion
                         ? { replyToAsyncQuestion: message.replyToAsyncQuestion }
                         : {}),
@@ -854,6 +855,7 @@ export function ConnectionProvider({
         images: body.images ?? [],
         files: body.files ?? [],
         goal: body.goal ?? false,
+        ...(body.projectDraft ? { projectDraft: body.projectDraft } : {}),
         ...(body.planImplementationMode
           ? { planImplementationMode: body.planImplementationMode }
           : {}),

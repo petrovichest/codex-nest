@@ -13,6 +13,8 @@ import type {
   UpdateThreadDraftRequest,
 } from "@codexnest/protocol";
 
+import { mergeProjectDraft } from "@codexnest/protocol";
+
 import { App } from "./App";
 import { useTheme } from "./useTheme";
 import type { ForkOperationSummary } from "./forks";
@@ -22,6 +24,7 @@ const connection = vi.hoisted(() => vi.fn());
 const manualNavigationIntent = vi.hoisted(() => vi.fn());
 const loadLocalDraft = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 const newSessionDrafts = vi.hoisted(() => new Map<string, object>());
+const sharedProjectDrafts = vi.hoisted(() => new Map<string, ThreadDraft>());
 const saveLocalDraft = vi.hoisted(() =>
   vi.fn(
     async (
@@ -107,6 +110,7 @@ const baseThread: ThreadSummary = {
 beforeEach(() => {
   vi.clearAllMocks();
   newSessionDrafts.clear();
+  sharedProjectDrafts.clear();
   loadLocalDraft.mockReset().mockResolvedValue(null);
   vi.stubGlobal(
     "matchMedia",
@@ -3461,7 +3465,7 @@ describe("App routing and navigation", () => {
       const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
       fireEvent.change(textbox, { target: { value: `Первое сообщение: ${projectName}` } });
       fireEvent.click(screen.getByRole("link", { name: "Новая задача в истории" }));
-      await waitFor(() => expect(newSessionDrafts.size).toBe(projectName === "Проект" ? 1 : 2));
+      await waitFor(() => expect(sharedProjectDrafts.size).toBe(projectName === "Проект" ? 1 : 2));
     }
     for (const projectName of ["Проект", "Второй"]) {
       fireEvent.click(
@@ -3496,9 +3500,12 @@ describe("App routing and navigation", () => {
 
   it("opens a blank new session after sending a restored project draft", async () => {
     const api = mockConnection(snapshot([baseThread]));
-    newSessionDrafts.set("project", {
-      projectId: "project",
-      value: { input: "Дописанное сообщение", images: [], goalMode: false, annotations: [] },
+    sharedProjectDrafts.set("project", {
+      input: "Дописанное сообщение",
+      images: [],
+      goalMode: false,
+      annotations: [],
+      updatedAt: 1,
     });
     api.createProjectThread.mockResolvedValue({
       thread: { ...baseThread, id: "created", title: "Новая задача" },
@@ -3545,9 +3552,9 @@ describe("App routing and navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     expect(api.createProjectThread).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Модель и уровень рассуждений" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Модель и уровень рассуждений" }));
     expect(screen.getByRole("dialog", { name: "Настройки модели" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Выключить режим планирования" }));
     expect(api.updateThreadSettings).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
@@ -3608,7 +3615,7 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     expect(api.createProjectThread).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Выключить режим планирования" }));
 
     fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
       target: { value: "Первое сообщение" },
@@ -3661,7 +3668,7 @@ describe("App routing and navigation", () => {
     renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     expect(api.createProjectThread).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Выключить режим планирования" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Выключить режим планирования" }));
     fireEvent.click(screen.getByRole("button", { name: "Включить режим планирования" }));
 
     fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
@@ -4616,6 +4623,18 @@ function mockConnection(
     archive: vi.fn().mockResolvedValue(undefined),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn" }),
     interrupt: vi.fn().mockResolvedValue(undefined),
+    readProjectDraft: vi.fn(async (id: string) => sharedProjectDrafts.get(id) ?? null),
+    updateProjectDraft: vi.fn(
+      async (id: string, base: UpdateThreadDraftRequest, value: UpdateThreadDraftRequest) => {
+        const current = sharedProjectDrafts.get(id);
+        const draft = {
+          ...mergeProjectDraft(current ?? base, base, value),
+          updatedAt: Math.max(Date.now(), (current?.updatedAt ?? 0) + 1),
+        };
+        sharedProjectDrafts.set(id, draft);
+        return draft;
+      },
+    ),
     createProjectThread: vi.fn(),
     updateThreadDraft: vi.fn().mockImplementation(async (_id, draft) => ({
       ...draft,
@@ -4717,7 +4736,12 @@ function mockConnection(
     ) => {
       const delivery = api.sendReliable(threadId, body);
       onCommitted?.();
-      return delivery;
+      return delivery.then((result: "delivered" | "pending") => {
+        const source = body.projectDraft;
+        if (source && sharedProjectDrafts.get(source.projectId)?.updatedAt === source.updatedAt)
+          sharedProjectDrafts.delete(source.projectId);
+        return result;
+      });
     },
     queueVoiceRecording: api.queueVoiceRecording,
   });

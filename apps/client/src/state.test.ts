@@ -2172,3 +2172,27 @@ function turn(id: string) {
     items: [],
   };
 }
+
+describe("shared project draft events", () => {
+  it("applies versioned broadcasts and ignores older HTTP responses", () => {
+    const draft = { input: "Shared", images: [], goalMode: false, annotations: [], updatedAt: 2 };
+    let state = clientReducer(initialState, {
+      type: "snapshot",
+      snapshot: { ...snapshot, instanceId: "server", sequence: 1 },
+    });
+    state = clientReducer(state, {
+      type: "event",
+      version: { instanceId: "server", sequence: 2 },
+      event: { type: "projectDraft.changed", projectId: "project", draft },
+    });
+    expect(state.projectDrafts?.project).toEqual(draft);
+    expect(state.snapshot?.sequence).toBe(2);
+    expect(
+      clientReducer(state, {
+        type: "projectDraft",
+        projectId: "project",
+        draft: { ...draft, input: "Stale", updatedAt: 1 },
+      }),
+    ).toBe(state);
+  });
+});

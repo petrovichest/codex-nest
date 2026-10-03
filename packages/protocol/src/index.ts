@@ -1,4 +1,4 @@
-import type { PastedText } from "./pasted-text.js";
+import { pastedText, type PastedText } from "./pasted-text.js";
 export * from "./pasted-text.js";
 
 export type AppServerState = "starting" | "ready" | "unavailable" | "stopped";
@@ -984,6 +984,7 @@ export type ServerEvent =
   | { type: "project.upserted"; project: Project }
   | { type: "projects.reordered"; projects: Project[] }
   | { type: "project.removed"; projectId: string }
+  | { type: "projectDraft.changed"; projectId: string; draft: ThreadDraft }
   | { type: "thread.upserted"; thread: ThreadSummary }
   | { type: "thread.removed"; threadId: string }
   | { type: "forkOperation.upserted"; operation: ForkOperationSummary }
@@ -1412,6 +1413,7 @@ export type StartTurnRequest = PastedText & {
 };
 
 export type QueueMessageRequest = PastedText & {
+  projectDraft?: { projectId: string; updatedAt: number };
   input: string;
   images?: string[];
   files?: ThreadFileAttachment[];
@@ -1793,4 +1795,41 @@ function nonEmptyString(value: unknown): value is string {
 
 export function bearerHeader(token: string): string {
   return `Bearer ${token}`;
+}
+
+/** Apply only fields changed by this editor, preserving changes from other devices. */
+export function mergeProjectDraft(
+  current: UpdateThreadDraftRequest,
+  base: UpdateThreadDraftRequest,
+  value: UpdateThreadDraftRequest,
+): UpdateThreadDraftRequest {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const mergeItems = <T extends { id: string }>(remote: T[], previous: T[], next: T[]): T[] => {
+    const removed = new Set(
+      previous.filter((item) => !next.some((entry) => entry.id === item.id)).map((item) => item.id),
+    );
+    const changed = next.filter(
+      (item) =>
+        !same(
+          item,
+          previous.find((entry) => entry.id === item.id),
+        ),
+    );
+    const result = remote.filter((item) => !removed.has(item.id));
+    for (const item of changed) {
+      const index = result.findIndex((entry) => entry.id === item.id);
+      if (index < 0) result.push(item);
+      else result[index] = item;
+    }
+    return result;
+  };
+  const textChanged = !same([base.input, pastedText(base)], [value.input, pastedText(value)]);
+  return {
+    input: textChanged ? value.input : current.input,
+    ...pastedText(textChanged ? value : current),
+    images: mergeItems(current.images, base.images, value.images),
+    files: mergeItems(current.files ?? [], base.files ?? [], value.files ?? []),
+    goalMode: base.goalMode !== value.goalMode ? value.goalMode : current.goalMode,
+    annotations: mergeItems(current.annotations, base.annotations, value.annotations),
+  };
 }

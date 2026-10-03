@@ -5,6 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
+import { mergeProjectDraft } from "@codexnest/protocol";
 import type { LocalNewSessionDraft } from "../offline-store";
 import { NewSession } from "./NewSession";
 
@@ -70,49 +71,48 @@ afterEach(() => {
 });
 
 describe("NewSession", () => {
-  it("persists a fast Enter and moves it into the timeline before creation completes", async () => {
-    const hydration = deferred<null>();
+  it("loads the server state before enabling input and persists a fast Enter", async () => {
+    const hydration = deferred<ThreadDraft | null>();
     const creation = deferred<{ thread: ThreadSummary }>();
     const delivery = deferred<"delivered">();
-    drafts.load.mockReturnValue(hydration.promise);
     const createProjectThread = vi.fn().mockReturnValue(creation.promise);
     let commit: (() => void) | undefined;
     const sendReliable = vi.fn((_id, _body, onCommitted) => {
       commit = onCommitted;
       return delivery.promise;
     });
-    connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
+    connection.mockReturnValue(
+      mockConnection({
+        readProjectDraft: vi.fn().mockReturnValue(hydration.promise),
+        createProjectThread,
+        sendReliable,
+      }),
+    );
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
+    expect(createProjectThread).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(null));
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Быстрое первое сообщение" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     fireEvent.keyDown(textbox, { key: "Enter" });
-    await waitFor(() =>
-      expect(drafts.save).toHaveBeenCalledWith(
-        connectionSettings,
-        project.id,
-        expect.anything(),
-        expect.objectContaining({
-          submission: expect.objectContaining({
-            id: expect.any(String),
-            input: "Быстрое первое сообщение",
-          }),
-        }),
-      ),
-    );
-    expect(createProjectThread).not.toHaveBeenCalled();
-    hydration.resolve(null);
     await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
+    expect(drafts.save).toHaveBeenCalledWith(
+      connectionSettings,
+      project.id,
+      expect.anything(),
+      expect.objectContaining({
+        submission: expect.objectContaining({
+          id: expect.any(String),
+          input: "Быстрое первое сообщение",
+        }),
+      }),
+    );
     expect(textbox).toHaveValue("");
     expect(screen.getByText("Быстрое первое сообщение")).toBeInTheDocument();
-    expect(screen.getByText("Отправляется…")).toBeInTheDocument();
     creation.resolve({ thread });
     await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(textbox).toHaveValue("");
-    expect(screen.queryByText("Созданная сессия")).not.toBeInTheDocument();
     act(() => commit!());
-    expect(textbox).toHaveValue("");
-    expect(screen.getByText("Созданная сессия")).toBeInTheDocument();
     delivery.resolve("delivered");
     await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
   });
@@ -154,7 +154,7 @@ describe("NewSession", () => {
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Повтори после сбоя" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() =>
@@ -194,7 +194,7 @@ describe("NewSession", () => {
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
     const view = renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Пережить перезагрузку" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
@@ -221,7 +221,7 @@ describe("NewSession", () => {
       }),
     );
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
 
     fireEvent.change(textbox, { target: { value: "Отправь сразу" } });
     fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
@@ -238,7 +238,7 @@ describe("NewSession", () => {
     const sendReliable = vi.fn();
     connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Не очищать без копии" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() =>
@@ -263,7 +263,7 @@ describe("NewSession", () => {
       }),
     );
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Первое" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() => expect(textbox).toHaveValue(""));
@@ -296,7 +296,7 @@ describe("NewSession", () => {
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(mockConnection({ createProjectThread, sendReliable }));
     renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Повторить вручную" } });
     fireEvent.keyDown(textbox, { key: "Enter" });
     expect(await screen.findByText("Не отправлено")).toBeInTheDocument();
@@ -311,136 +311,110 @@ describe("NewSession", () => {
     expect(sendReliable.mock.calls[0]?.[1].clientMessageId).toBe(id);
   });
 
-  it("keeps a project draft without creating a Codex session until Enter", async () => {
-    let stored: LocalNewSessionDraft | null = null;
-    drafts.load.mockImplementation(async () => stored);
-    drafts.save.mockImplementation(async (_settings, projectId, value, preparation) => {
-      stored = structuredClone({
-        key: "new",
-        connectionKey: "test",
-        projectId,
-        value,
-        ...preparation,
-        updatedAt: 1,
-      });
-      return true;
-    });
-    drafts.delete.mockImplementation(async () => {
-      stored = null;
+  it("keeps the project draft on the server across reopening without starting a session", async () => {
+    let shared: ThreadDraft | null = null;
+    const readProjectDraft = vi.fn(async () => shared);
+    const updateProjectDraft = vi.fn(async (_id, base, value) => {
+      shared = { ...mergeProjectDraft(shared ?? base, base, value), updatedAt: Date.now() };
+      return shared;
     });
     const createProjectThread = vi.fn().mockResolvedValue({ thread });
-    const sendReliable = vi.fn().mockResolvedValue("delivered");
-    const updateThreadDraft = vi.fn();
+    const sendReliable = vi.fn().mockImplementation(async () => {
+      shared = null;
+      return "delivered";
+    });
     connection.mockReturnValue(
-      mockConnection({ createProjectThread, sendReliable, updateThreadDraft }),
+      mockConnection({ readProjectDraft, updateProjectDraft, createProjectThread, sendReliable }),
     );
     let view = renderNewSession();
-    const textbox = screen.getByRole("textbox", { name: "Сообщение для Codex" });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(textbox, { target: { value: "Не потерять черновик" } });
     view.unmount();
-    await waitFor(() => expect(stored?.value.input).toBe("Не потерять черновик"));
-    expect((stored as LocalNewSessionDraft | null)?.threadId).toBeNull();
+    await waitFor(() => expect(shared?.input).toBe("Не потерять черновик"));
     expect(createProjectThread).not.toHaveBeenCalled();
-    expect(updateThreadDraft).not.toHaveBeenCalled();
+    expect(drafts.save).not.toHaveBeenCalled();
     view = renderNewSession();
     expect(await screen.findByDisplayValue("Не потерять черновик")).toBeInTheDocument();
-    expect(createProjectThread).not.toHaveBeenCalled();
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
       key: "Enter",
     });
     await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(createProjectThread).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(String));
+    expect(sendReliable.mock.calls[0]?.[1]).toMatchObject({
+      projectDraft: { projectId: project.id, updatedAt: expect.any(Number) },
+    });
     await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
     view.unmount();
     renderNewSession();
-    await waitFor(() => expect(drafts.load).toHaveBeenCalledTimes(3));
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
+    expect(await screen.findByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue("");
     expect(createProjectThread).toHaveBeenCalledOnce();
   });
 
-  it("retains file bytes across reopening and uploads only on the first send", async () => {
-    let stored: LocalNewSessionDraft | null = null;
-    drafts.load.mockImplementation(async () => stored);
-    drafts.save.mockImplementation(async (_settings, projectId, value, preparation) => {
-      stored = {
-        key: "new",
-        connectionKey: "test",
-        projectId,
-        value,
-        ...preparation,
-        updatedAt: 1,
-      };
-      return true;
-    });
-    const createProjectThread = vi.fn().mockResolvedValue({ thread });
-    const uploadAttachment = vi.fn().mockResolvedValue({
-      id: "uploaded",
+  it("uploads files to the project without creating a session and sends transferred files", async () => {
+    const projectFile = {
+      id: "project-file",
       name: "notes.txt",
-      path: "/attachments/notes.txt",
+      path: "/project/notes.txt",
       size: 5,
       mediaType: "text/plain",
-    });
+    };
+    const nativeFile = { ...projectFile, id: "native-file", path: "/thread/notes.txt" };
+    const uploadProjectAttachment = vi.fn().mockResolvedValue(projectFile);
+    const createProjectThread = vi.fn(async (_id, _key, draft) => ({
+      thread,
+      draft: { ...draft, files: [nativeFile], updatedAt: 1 },
+    }));
+    const uploadAttachment = vi.fn();
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(
-      mockConnection({ createProjectThread, sendReliable, uploadAttachment }),
+      mockConnection({
+        createProjectThread,
+        sendReliable,
+        uploadAttachment,
+        uploadProjectAttachment,
+      }),
     );
     const view = renderNewSession();
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
     fireEvent.change(view.container.querySelector('input[type="file"]')!, {
       target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
     });
     expect(
       await screen.findByRole("button", { name: "Удалить файл notes.txt" }),
     ).toBeInTheDocument();
-    view.unmount();
-    await waitFor(() => expect(stored?.attachments?.[0]?.file.size).toBe(5));
-    expect(createProjectThread).not.toHaveBeenCalled();
-    expect(uploadAttachment).not.toHaveBeenCalled();
-    renderNewSession();
-    expect(
-      await screen.findByRole("button", { name: "Удалить файл notes.txt" }),
-    ).toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      key: "Enter",
-    });
-    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(uploadAttachment).toHaveBeenCalledWith(
-      thread.id,
+    expect(uploadProjectAttachment).toHaveBeenCalledWith(
+      project.id,
       expect.objectContaining({ name: "notes.txt", size: 5 }),
     );
-    const fileContents = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsText(uploadAttachment.mock.calls[0]?.[1]);
-    });
-    expect(fileContents).toBe("hello");
-    expect(sendReliable.mock.calls[0]?.[1].files).toEqual([
-      {
-        id: "uploaded",
-        name: "notes.txt",
-        path: "/attachments/notes.txt",
-        size: 5,
-        mediaType: "text/plain",
-      },
-    ]);
+    expect(createProjectThread).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
+    expect(createProjectThread.mock.calls[0]?.[2].files).toEqual([projectFile]);
+    expect(sendReliable.mock.calls[0]?.[1].files).toEqual([nativeFile]);
+    expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
-  it("ignores a legacy created-thread binding when only an unsent draft is restored", async () => {
+  it("uses server state instead of a stale local draft and legacy thread binding", async () => {
     drafts.load.mockResolvedValue({
       projectId: project.id,
       clientCreationId: "obsolete-id",
       threadId: "missing",
-      thread: { ...thread, id: "missing" },
       value: { input: "Старый черновик", images: [], annotations: [], goalMode: false },
-      revision: 1,
+    });
+    const readProjectDraft = vi.fn().mockResolvedValue({
+      input: "Серверный черновик",
+      images: [],
+      annotations: [],
+      goalMode: false,
+      updatedAt: 5,
     });
     const createProjectThread = vi.fn().mockResolvedValue({ thread });
     const readThread = vi.fn();
     const sendReliable = vi.fn().mockResolvedValue("delivered");
-    connection.mockReturnValue(mockConnection({ createProjectThread, readThread, sendReliable }));
+    connection.mockReturnValue(
+      mockConnection({ readProjectDraft, createProjectThread, readThread, sendReliable }),
+    );
     renderNewSession();
-    expect(await screen.findByDisplayValue("Старый черновик")).toBeInTheDocument();
-    expect(createProjectThread).not.toHaveBeenCalled();
+    expect(await screen.findByDisplayValue("Серверный черновик")).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
       key: "Enter",
     });
@@ -449,51 +423,89 @@ describe("NewSession", () => {
     expect(readThread).not.toHaveBeenCalled();
   });
 
-  it("keeps user edits made while the project draft is being restored", async () => {
-    const loading = deferred<LocalNewSessionDraft | null>();
-    drafts.load.mockReturnValue(loading.promise);
+  it("loads text from one device, adds an image on another and sends both", async () => {
+    const remote = {
+      input: "Текст с первого устройства",
+      images: [],
+      files: [],
+      annotations: [],
+      goalMode: false,
+      updatedAt: 7,
+    };
+    const readProjectDraft = vi.fn().mockResolvedValue(remote);
+    const updateProjectDraft = vi.fn(async (_id, base, value) => ({
+      ...mergeProjectDraft(remote, base, value),
+      updatedAt: 8,
+    }));
     const createProjectThread = vi.fn().mockResolvedValue({ thread });
-    const uploadAttachment = vi.fn().mockResolvedValue({
-      id: "uploaded",
-      name: "fresh.txt",
-      path: "/attachments/fresh.txt",
-      size: 5,
-      mediaType: "text/plain",
-    });
     const sendReliable = vi.fn().mockResolvedValue("delivered");
     connection.mockReturnValue(
-      mockConnection({ createProjectThread, uploadAttachment, sendReliable }),
+      mockConnection({ readProjectDraft, updateProjectDraft, createProjectThread, sendReliable }),
     );
     const view = renderNewSession();
-    fireEvent.change(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      target: { value: "Свежий текст" },
-    });
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    expect(textbox).toHaveValue(remote.input);
     fireEvent.change(view.container.querySelector('input[type="file"]')!, {
-      target: { files: [new File(["fresh"], "fresh.txt", { type: "text/plain" })] },
+      target: { files: [new File(["image"], "second.png", { type: "image/png" })] },
     });
-    expect(
-      await screen.findByRole("button", { name: "Удалить файл fresh.txt" }),
-    ).toBeInTheDocument();
-    await act(async () =>
-      loading.resolve({
-        key: "new",
-        connectionKey: "test",
-        projectId: project.id,
-        updatedAt: 1,
-        attachments: [],
-        value: { input: "Старый текст", images: [], annotations: [], goalMode: false },
-      } as LocalNewSessionDraft),
-    );
-    expect(screen.getByRole("textbox", { name: "Сообщение для Codex" })).toHaveValue(
-      "Свежий текст",
-    );
-    expect(createProjectThread).not.toHaveBeenCalled();
-    fireEvent.keyDown(screen.getByRole("textbox", { name: "Сообщение для Codex" }), {
-      key: "Enter",
-    });
+    expect(await screen.findByAltText("second.png")).toBeInTheDocument();
+    fireEvent.keyDown(textbox, { key: "Enter" });
     await waitFor(() => expect(sendReliable).toHaveBeenCalledOnce());
-    expect(uploadAttachment).toHaveBeenCalledOnce();
-    expect(sendReliable.mock.calls[0]?.[1].files?.[0]?.path).toBe("/attachments/fresh.txt");
+    expect(sendReliable.mock.calls[0]?.[1]).toMatchObject({
+      input: remote.input,
+      images: [expect.stringMatching(/^data:image\/png/)],
+      projectDraft: { projectId: project.id, updatedAt: 8 },
+    });
+  });
+
+  it("keeps input unavailable after a failed server load and retries", async () => {
+    const readProjectDraft = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Не удалось загрузить черновик"))
+      .mockResolvedValue({
+        input: "Восстановлен с сервера",
+        images: [],
+        annotations: [],
+        goalMode: false,
+        updatedAt: 1,
+      });
+    connection.mockReturnValue(mockConnection({ readProjectDraft }));
+    renderNewSession();
+    expect(await screen.findByText("Не удалось загрузить черновик")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Сообщение для Codex" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByDisplayValue("Восстановлен с сервера")).toBeInTheDocument();
+    expect(readProjectDraft).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies broadcasts to an open composer while preserving unsaved local text", async () => {
+    const empty = { input: "", images: [], annotations: [], goalMode: false, updatedAt: 1 };
+    const mock = mockConnection({ readProjectDraft: vi.fn().mockResolvedValue(empty) });
+    connection.mockReturnValue(mock);
+    const view = renderNewSession();
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Локальный текст" } });
+    const image = { id: "remote-image", name: "remote.png", url: "data:image/png;base64,aGVsbG8=" };
+    Object.assign(mock.state, {
+      projectDrafts: { [project.id]: { ...empty, images: [image], updatedAt: 2 } },
+    });
+    view.rerender(newSessionElement());
+    expect(await screen.findByAltText("remote.png")).toBeInTheDocument();
+    expect(textbox).toHaveValue("Локальный текст");
+    Object.assign(mock.state, {
+      projectDrafts: {
+        [project.id]: {
+          ...empty,
+          input: "Текст на другом устройстве",
+          images: [image],
+          updatedAt: 3,
+        },
+      },
+    });
+    fireEvent.change(textbox, { target: { value: "" } });
+    view.rerender(newSessionElement());
+    // Returning to the base text leaves that field free to follow the server.
+    expect(textbox).toHaveValue("Текст на другом устройстве");
   });
 
   it("does not create a session when /new is opened directly", async () => {
@@ -637,6 +649,9 @@ describe("NewSession", () => {
     );
 
     renderNewSession();
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Отправить" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
 
     expect(
       await screen.findByText(
@@ -654,13 +669,17 @@ describe("NewSession", () => {
     renderNewSession();
 
     expect(screen.queryByLabelText("Сведения о новой задаче")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Показать сведения" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Показать сведения" }));
     expect(await screen.findByLabelText("Сведения о новой задаче")).toBeInTheDocument();
   });
 });
 
 function renderNewSession() {
-  return render(
+  return render(newSessionElement());
+}
+
+function newSessionElement() {
+  return (
     <MemoryRouter
       initialEntries={[
         {
@@ -673,7 +692,7 @@ function renderNewSession() {
       <Routes>
         <Route path="*" element={<PersistentNewSessionRoute />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -688,6 +707,12 @@ function PersistentNewSessionRoute() {
 }
 
 function mockConnection({
+  readProjectDraft = vi.fn().mockResolvedValue(null),
+  updateProjectDraft = vi.fn(async (_id, base, value) => ({
+    ...mergeProjectDraft(base, base, value),
+    updatedAt: Date.now(),
+  })),
+  uploadProjectAttachment = vi.fn(),
   createProjectThread = vi.fn(),
   uploadAttachment = vi.fn(),
   models = [],
@@ -698,6 +723,9 @@ function mockConnection({
   updateThreadDraft = vi.fn(),
   dispatch = vi.fn(),
 }: {
+  readProjectDraft?: ReturnType<typeof vi.fn>;
+  updateProjectDraft?: ReturnType<typeof vi.fn>;
+  uploadProjectAttachment?: ReturnType<typeof vi.fn>;
   createProjectThread?: ReturnType<typeof vi.fn>;
   uploadAttachment?: ReturnType<typeof vi.fn>;
   models?: ModelOption[];
@@ -715,6 +743,9 @@ function mockConnection({
 }) {
   return {
     api: {
+      readProjectDraft,
+      updateProjectDraft,
+      uploadProjectAttachment,
       createProjectThread,
       uploadAttachment,
       readThread,

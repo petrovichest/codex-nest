@@ -9451,6 +9451,159 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
   };
 }
 
+describe("shared project drafts", () => {
+  const empty = { input: "", images: [], files: [], goalMode: false, annotations: [] };
+
+  it("merges text and images from two devices, broadcasts and persists without starting a session", async () => {
+    const { app, headers, bridge, projection, store } = await createForkHarness();
+    try {
+      bridge.request.mockClear();
+      const events = vi.fn();
+      projection.on("event", events);
+      const initial = await app.inject({
+        method: "GET",
+        url: "/api/v1/projects/project/draft",
+        headers,
+      });
+      expect(initial.json()).toBeNull();
+      const first = await app.inject({
+        method: "PUT",
+        url: "/api/v1/projects/project/draft",
+        headers,
+        payload: { base: empty, value: { ...empty, input: "Текст с первого устройства" } },
+      });
+      expect(first.statusCode).toBe(200);
+      const image = { id: "image", name: "photo.png", url: "data:image/png;base64,aGVsbG8=" };
+      const second = await app.inject({
+        method: "PUT",
+        url: "/api/v1/projects/project/draft",
+        headers,
+        payload: { base: empty, value: { ...empty, images: [image] } },
+      });
+      expect(second.statusCode).toBe(200);
+      expect(second.json()).toMatchObject({ input: "Текст с первого устройства", images: [image] });
+      expect(second.json().updatedAt).toBeGreaterThan(first.json().updatedAt);
+      expect(events).toHaveBeenCalledWith(
+        expect.any(Number),
+        expect.objectContaining({
+          type: "projectDraft.changed",
+          projectId: "project",
+          draft: second.json(),
+        }),
+      );
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method !== "account/rateLimits/read"),
+      ).toEqual([]);
+      const reopened = new StateStore(store.path);
+      await reopened.load();
+      expect(reopened.view().projectDrafts?.project).toEqual(second.json());
+      const fetched = await app.inject({
+        method: "GET",
+        url: "/api/v1/projects/project/draft",
+        headers,
+      });
+      expect(fetched.json()).toEqual(second.json());
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("clears the consumed draft after durable enqueue and retains later edits", async () => {
+    const { app, headers, store, bridge } = await createForkHarness();
+    try {
+      const save = (input: string) =>
+        app.inject({
+          method: "PUT",
+          url: "/api/v1/projects/project/draft",
+          headers,
+          payload: { base: empty, value: { ...empty, input } },
+        });
+      const saved = (await save("Первое сообщение")).json();
+      const enqueue = (id: string, updatedAt: number) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/threads/thread/queue",
+          headers,
+          payload: {
+            input: "Первое сообщение",
+            clientMessageId: id,
+            projectDraft: { projectId: "project", updatedAt },
+          },
+        });
+      bridge.request.mockClear();
+      const accepted = await enqueue("shared-send", saved.updatedAt);
+      expect(accepted.statusCode).toBe(202);
+      expect(store.view().projectDrafts?.project?.input).toBe("");
+      expect(store.view().projectDrafts?.project?.updatedAt).toBeGreaterThan(saved.updatedAt);
+      const next = (await save("Следующий запрос")).json();
+      expect((await enqueue("shared-send", saved.updatedAt)).statusCode).toBe(202);
+      expect(store.view().projectDrafts?.project).toEqual(next);
+      const another = (await save("Дополнение с другого устройства")).json();
+      expect((await enqueue("shared-send-later", next.updatedAt)).statusCode).toBe(202);
+      expect(store.view().projectDrafts?.project).toEqual(another);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uploads project files before first send and transfers them when creating the session", async () => {
+    const { app, headers, bridge } = await createForkHarness();
+    try {
+      bridge.request.mockClear();
+      const uploaded = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/attachments?name=notes.txt&mediaType=text/plain",
+        headers: { ...headers, "content-type": "application/octet-stream" },
+        payload: Buffer.from("hello"),
+      });
+      expect(uploaded.statusCode).toBe(201);
+      const value = { ...empty, input: "Прочитай файл", files: [uploaded.json()] };
+      const saved = await app.inject({
+        method: "PUT",
+        url: "/api/v1/projects/project/draft",
+        headers,
+        payload: { base: empty, value },
+      });
+      expect(saved.statusCode).toBe(200);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method !== "account/rateLimits/read"),
+      ).toEqual([]);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "shared-file", draft: value },
+      });
+      expect(created.statusCode).toBe(201);
+      const draft = created.json().draft;
+      expect(draft.files).toHaveLength(1);
+      expect(draft.files[0].path).not.toBe(uploaded.json().path);
+      expect(await readFile(draft.files[0].path, "utf8")).toBe("hello");
+      const retry = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "shared-file", draft: value },
+      });
+      expect(retry.json().draft).toEqual(draft);
+      const queued = await app.inject({
+        method: "POST",
+        url: `/api/v1/threads/${created.json().thread.id}/queue`,
+        headers,
+        payload: {
+          input: value.input,
+          files: draft.files,
+          clientMessageId: "shared-file-send",
+          projectDraft: { projectId: "project", updatedAt: saved.json().updatedAt },
+        },
+      });
+      expect(queued.statusCode).toBe(202);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe.each([1, 0])("reliable first messages (delivery version %s)", (deliveryVersion) => {
   it.each([false, true])(
     "restores an acknowledged start and its question without a start notification (interrupted=%s)",

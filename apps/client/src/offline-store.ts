@@ -65,6 +65,7 @@ export type LocalNewSessionDraft = {
   revision?: number;
   settings?: SessionSettings;
   submission?: NewSessionSubmission;
+  sharedDraftUpdatedAt?: number;
   attachments?: NewSessionAttachment[];
   updatedAt: number;
 };
@@ -85,6 +86,7 @@ export type NewSessionSubmission = {
 };
 
 export type OutboxMessage = PastedText & {
+  projectDraft?: { projectId: string; updatedAt: number };
   id: string;
   connectionKey: string;
   threadId: string;
@@ -281,6 +283,7 @@ export async function saveNewSessionDraft(
     revision: number;
     settings?: SessionSettings;
     submission?: NewSessionSubmission;
+    sharedDraftUpdatedAt?: number;
     attachments?: NewSessionAttachment[];
   },
   updatedAt = Date.now(),
@@ -353,6 +356,7 @@ export function outboxMessageIntent(value: OutboxMessage): string {
     pastedText(value),
     value.planImplementationMode,
     value.userInputSubmission,
+    value.projectDraft,
   ]);
 }
 

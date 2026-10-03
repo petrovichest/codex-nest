@@ -6,6 +6,7 @@ import { PasteMessageEditor } from "./PasteEditor";
 import { PastedMarkdown } from "./PastedMarkdown";
 import {
   pastedText,
+  mergeProjectDraft,
   rebasePastedText,
   trimPastedMessage,
   copyPastedMessage,
@@ -174,6 +175,8 @@ type NewSessionPreparation = {
   threadId: string | null;
   thread: ThreadSummary | null;
   revision: number;
+  sharedBase?: ThreadDraft | null;
+  sharedDraftUpdatedAt?: number;
   submission?: NewSessionSubmission;
   attachments?: NewSessionAttachment[];
 };
@@ -266,7 +269,7 @@ function normalizeNewSessionDraft(value: UpdateThreadDraftRequest): UpdateThread
     input: value.input,
     ...pastedText(value),
     images: value.images,
-    ...(value.files ? { files: value.files } : {}),
+    ...(value.files?.length ? { files: value.files } : {}),
     goalMode: value.goalMode,
     annotations: value.annotations,
   });
@@ -786,7 +789,10 @@ export function ThreadPage({
     [],
   );
   const onDraftFlush = useCallback(() => {
-    void flushComposerDraftEvent();
+    void flushComposerDraftEvent().catch((caught: unknown) => {
+      if (preparationAliveRef.current)
+        setError(caught instanceof Error ? caught.message : String(caught));
+    });
   }, [flushComposerDraftEvent]);
   const draftTouchedThreadsRef = useRef(new Set<string>());
   const hydratedDraftSourcesRef = useRef(new Map<string, ThreadDraft | null>());
@@ -1212,21 +1218,69 @@ export function ThreadPage({
     const request = (pendingNewSessionDraftSaves.get(key) ?? preparationDraftSaveChainRef.current)
       .catch(() => undefined)
       .then(async () => {
-        const saved = await saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
-          clientCreationId: snapshot.clientCreationId,
-          phase: snapshot.phase,
-          threadId: snapshot.threadId,
-          thread: snapshot.thread,
-          revision: snapshot.revision,
-          settings: snapshot.settings,
-          ...(snapshot.submission ? { submission: snapshot.submission } : {}),
-          attachments: snapshot.attachments,
-        });
+        const persistSubmission = async () => {
+          if (!snapshot.submission) return true;
+          return saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
+            clientCreationId: snapshot.clientCreationId,
+            phase: snapshot.phase,
+            threadId: snapshot.threadId,
+            thread: snapshot.thread,
+            revision: snapshot.revision,
+            settings: snapshot.settings,
+            submission: snapshot.submission,
+            sharedDraftUpdatedAt: snapshot.sharedDraftUpdatedAt,
+            attachments: snapshot.attachments,
+          });
+        };
+        let saved = await persistSubmission();
         if (!saved && preparationAliveRef.current) setStorageWarning(true);
+        // Staging clears the local composer, but the shared draft remains until enqueue succeeds.
+        if (!snapshot.submission?.staged && snapshot.sharedBase !== undefined) {
+          const value = snapshot.submission?.draft ?? snapshot.value;
+          const base = normalizeNewSessionDraft(snapshot.sharedBase ?? emptyComposerDraft());
+          if (JSON.stringify(normalizeNewSessionDraft(value)) !== JSON.stringify(base)) {
+            const draft = await api.updateProjectDraft(snapshot.projectId, base, value);
+            snapshot.sharedDraftUpdatedAt = draft.updatedAt;
+            snapshot.sharedBase = draft;
+            dispatch({ type: "projectDraft", projectId: snapshot.projectId, draft });
+            if (
+              preparationAliveRef.current &&
+              preparationRef.current.projectId === snapshot.projectId
+            ) {
+              const current = preparationRef.current;
+              current.sharedBase = draft;
+              current.sharedDraftUpdatedAt = draft.updatedAt;
+              if (earlySubmissionRef.current && !earlySubmissionRef.current.staged) {
+                earlySubmissionRef.current.draft = mergeProjectDraft(
+                  draft,
+                  value,
+                  earlySubmissionRef.current.draft,
+                );
+                earlySubmissionRef.current.input = formatAnnotatedMessage(
+                  earlySubmissionRef.current.draft.input,
+                  earlySubmissionRef.current.draft.annotations,
+                  language,
+                );
+                if (current.submission) {
+                  current.submission.draft = earlySubmissionRef.current.draft;
+                  current.submission.input = earlySubmissionRef.current.input;
+                }
+                snapshot.submission = current.submission;
+              } else if (!current.submission) {
+                current.value = mergeProjectDraft(draft, value, current.value);
+                commitComposerDraft({ threadId, value: current.value });
+              }
+            }
+            saved = (await persistSubmission()) && saved;
+          }
+        }
         return saved;
       });
     const completion = request
-      .then(() => undefined)
+      .then(
+        () => undefined,
+        () => undefined,
+      )
       .finally(() => {
         if (pendingNewSessionDraftSaves.get(key) === completion)
           pendingNewSessionDraftSaves.delete(key);
@@ -1264,7 +1318,10 @@ export function ThreadPage({
         preparationDraftTimerRef.current = null;
       }
       if (!preparationDiscardRef.current) {
-        void enqueuePreparationSave(snapshotPreparation());
+        void enqueuePreparationSave(snapshotPreparation()).catch((caught: unknown) => {
+          if (preparationAliveRef.current)
+            setError(caught instanceof Error ? caught.message : t("Не удалось сохранить черновик"));
+        });
       }
     }, DRAFT_SAVE_DELAY_MS);
     preparationDraftTimerRef.current = timer;
@@ -1336,9 +1393,17 @@ export function ThreadPage({
             const created = await api.createProjectThread(
               activeProject.id,
               preparationRef.current.clientCreationId,
+              earlySubmissionRef.current?.draft.files?.some((file) => file.path)
+                ? structuredClone(earlySubmissionRef.current.draft)
+                : undefined,
             );
             assertPreparationGeneration(generation);
             thread = created.thread;
+            if (created.draft && earlySubmissionRef.current) {
+              earlySubmissionRef.current.draft.files = created.draft.files ?? [];
+              if (preparationRef.current.submission)
+                preparationRef.current.submission.draft.files = created.draft.files ?? [];
+            }
           }
           assertPreparationGeneration(generation);
         }
@@ -1609,21 +1674,10 @@ export function ThreadPage({
   async function uploadFiles(selected: readonly File[]): Promise<ThreadFileAttachment[]> {
     const targetThreadId = preparationRef.current.threadId || activeThreadIdRef.current;
     if (preparationRef.current.active && !preparationRef.current.threadId) {
-      const attachments = selected.map((file) => ({
-        file,
-        attachment: {
-          id: crypto.randomUUID(),
-          name: file.name,
-          path: "",
-          size: file.size,
-          mediaType: file.type || "application/octet-stream",
-        },
-      }));
-      preparationRef.current.attachments = [
-        ...(preparationRef.current.attachments ?? []),
-        ...attachments,
-      ];
-      return attachments.map(({ attachment }) => attachment);
+      const uploaded: ThreadFileAttachment[] = [];
+      for (const file of selected)
+        uploaded.push(await api.uploadProjectAttachment(preparationRef.current.projectId, file));
+      return uploaded;
     }
     if (!targetThreadId) throw new Error(t("Не удалось создать сессию"));
     const uploaded: ThreadFileAttachment[] = [];
@@ -1647,6 +1701,7 @@ export function ThreadPage({
       );
       return;
     }
+    if (preparationRef.current.active && !preparationRef.current.threadId) return;
     const targetThreadId = preparationRef.current.threadId || activeThreadIdRef.current;
     if (targetThreadId) await api.deleteAttachment(targetThreadId, file.id);
   }
@@ -1819,9 +1874,16 @@ export function ThreadPage({
       await pendingNewSessionDraftSaves.get(
         newSessionDraftSaveKey(api.settings, newSessionProject.id),
       );
-      const stored = await loadNewSessionDraft(api.settings, newSessionProject.id);
+      const remote = await api.readProjectDraft(newSessionProject.id);
       if (!active || !preparationGenerationActive(generation)) return;
-      if (!stored && !initialNewSessionRef.current.admitted) {
+      if (preparationRef.current.sharedBase !== undefined) {
+        acceptProjectDraft(remote);
+        return;
+      }
+      const local = await loadNewSessionDraft(api.settings, newSessionProject.id);
+      const stored = local?.submission ? local : null;
+      if (!active || !preparationGenerationActive(generation)) return;
+      if (!stored && !remote && !initialNewSessionRef.current.admitted) {
         setNewSessionRejected(true);
         setNewSessionHydrated(true);
         return;
@@ -1831,7 +1893,7 @@ export function ThreadPage({
       const value =
         stored && !preparationDraftTouchedRef.current
           ? normalizeNewSessionDraft(stored.value)
-          : current.value;
+          : normalizeNewSessionDraft(remote ?? emptyComposerDraft());
       const settings =
         stored?.settings && pendingSettingsTouchedRef.current.size === 0
           ? clientSessionSettings(stored.settings)
@@ -1861,6 +1923,8 @@ export function ThreadPage({
             : (stored?.clientCreationId ?? current.clientCreationId),
         value,
         settings,
+        sharedBase: remote,
+        sharedDraftUpdatedAt: stored?.sharedDraftUpdatedAt ?? remote?.updatedAt,
         phase: storedThreadId ? "transferring" : "creating",
         threadId: storedThreadId,
         thread: stored?.thread?.id === storedThreadId ? stored.thread : null,
@@ -1868,11 +1932,11 @@ export function ThreadPage({
         submission: current.submission ?? stored?.submission,
         attachments: [...(stored?.attachments ?? []), ...(current.attachments ?? [])],
       };
-      if (stored && !preparationDraftTouchedRef.current) {
+      if (!preparationDraftTouchedRef.current) {
         const next = { threadId, value };
         commitComposerDraft(next);
         preparationDraftTouchedRef.current =
-          (stored.revision ?? 0) > 0 || composerDraftHasContent(value);
+          (stored?.revision ?? 0) > 0 || composerDraftHasContent(value);
       }
       if (stored?.submission?.staged) {
         setPendingOptimisticMessage({
@@ -1893,11 +1957,34 @@ export function ThreadPage({
       if (active && preparationGenerationActive(generation)) setNewSessionHydrated(true);
     })();
     preparationHydrationRef.current = hydration;
-    void hydration.catch(() => undefined);
+    void hydration.catch((caught: unknown) => {
+      if (active && preparationGenerationActive(generation))
+        setError(caught instanceof Error ? caught.message : t("Не удалось загрузить черновик"));
+    });
     return () => {
       active = false;
     };
-  }, [api.settings, newSessionProject?.id]);
+  }, [api.settings, newSessionProject?.id, foregroundEpoch, streamRecoveryEpoch, preparationRetry]);
+
+  function acceptProjectDraft(remote: ThreadDraft | null): void {
+    const current = preparationRef.current;
+    if (!current.active || current.submission || current.sharedBase === undefined) return;
+    if (remote && (current.sharedBase?.updatedAt ?? -1) >= remote.updatedAt) return;
+    const value = mergeProjectDraft(
+      remote ?? emptyComposerDraft(),
+      current.sharedBase ?? emptyComposerDraft(),
+      current.value,
+    );
+    current.sharedBase = remote;
+    current.sharedDraftUpdatedAt = remote?.updatedAt;
+    current.value = value;
+    commitComposerDraft({ threadId, value });
+  }
+
+  useEffect(() => {
+    const remote = state.projectDrafts?.[newSessionProject?.id ?? ""];
+    if (newSessionHydrated && remote) acceptProjectDraft(remote);
+  }, [state.projectDrafts, newSessionProject?.id, newSessionHydrated]);
 
   useEffect(() => {
     schedulePreparationDraftSave();
@@ -1962,7 +2049,7 @@ export function ThreadPage({
     preparationAliveRef.current = true;
     return () => {
       if (!preparationDiscardRef.current && preparationRef.current.active) {
-        void flushComposerDraftEvent();
+        void flushComposerDraftEvent().catch(() => undefined);
       }
       invalidatePreparation();
       if (preparationSendRetryRef.current !== null)
@@ -2084,7 +2171,7 @@ export function ThreadPage({
 
   useEffect(() => {
     const flushBeforePageExit = () => {
-      void flushComposerDraftEvent(undefined, true);
+      void flushComposerDraftEvent(undefined, true).catch(() => undefined);
     };
     const flushWhenHidden = () => {
       if (document.visibilityState === "hidden") flushBeforePageExit();
@@ -2751,7 +2838,7 @@ export function ThreadPage({
       assertPreparationGeneration(generation);
       const submission = earlySubmissionRef.current;
       let completeDraft = structuredClone(submission?.draft ?? submittedDraft);
-      const completeInput = submittedInput;
+      const completeInput = submission?.input ?? submittedInput;
       preparationRef.current.submission = {
         id: clientMessageId,
         intent,
@@ -2843,6 +2930,14 @@ export function ThreadPage({
           ...(completeDraft.files?.length ? { files: completeDraft.files } : {}),
           ...(completeDraft.goalMode ? { goal: true } : {}),
           clientMessageId,
+          ...(preparationRef.current.sharedDraftUpdatedAt !== undefined
+            ? {
+                projectDraft: {
+                  projectId: activeProject.id,
+                  updatedAt: preparationRef.current.sharedDraftUpdatedAt,
+                },
+              }
+            : {}),
         },
         commitDelivery,
         { draft: completeDraft, projectId: activeProject.id },
@@ -3348,6 +3443,27 @@ export function ThreadPage({
   ) {
     return <Navigate to="/" replace />;
   }
+  if (preparationRef.current.active && !newSessionHydrated)
+    return (
+      <div className="center-state" role="status">
+        {error ? (
+          <>
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setError(null);
+                setPreparationRetry((value) => value + 1);
+              }}
+            >
+              {t("Повторить")}
+            </button>
+          </>
+        ) : (
+          <p>{t("Загрузка…")}</p>
+        )}
+      </div>
+    );
   if (preparationRef.current.active && !newSessionAdmitted) return null;
   if (!summary && !preparationRef.current.active && !preparationRef.current.thread)
     return (

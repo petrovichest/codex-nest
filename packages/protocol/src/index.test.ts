@@ -20,6 +20,7 @@ import {
   BROWSER_TOOL_RESULT_CHUNK_BYTES,
   BROWSER_TOOL_NAMES,
   bearerHeader,
+  mergeProjectDraft,
   isActiveFeedEligible,
   isBrowserExtensionClientFrame,
   isBrowserExtensionServerFrame,
@@ -555,5 +556,35 @@ describe("protocol guards", () => {
     } satisfies ThreadArtifactsResponse;
     expect(explicit.artifacts[0]?.label).toBe("Final report");
     expect(unavailable.artifacts).toEqual([]);
+  });
+});
+
+describe("shared project draft edits", () => {
+  const empty = { input: "", images: [], goalMode: false, annotations: [] };
+  const one = { id: "one", name: "one.png", url: "data:image/png;base64,b25l" };
+  const two = { id: "two", name: "two.png", url: "data:image/png;base64,dHdv" };
+
+  it("keeps pasted text coherent while merging attachments from another device", () => {
+    const remote = {
+      ...empty,
+      input: "Read [Paste #1]",
+      pasteBlocks: [{ id: "log", text: "long log" }],
+      images: [one],
+    };
+    const merged = mergeProjectDraft(remote, empty, { ...empty, images: [two] });
+    expect(merged).toMatchObject({
+      input: remote.input,
+      pasteBlocks: remote.pasteBlocks,
+      images: [one, two],
+    });
+    expect(mergeProjectDraft(merged, { ...empty, images: [one] }, empty).images).toEqual([two]);
+  });
+
+  it("keeps a cleared draft empty when a stale editor adds only an image", () => {
+    const old = { ...empty, input: "Already sent", images: [one] };
+    expect(mergeProjectDraft(empty, old, { ...old, images: [one, two] })).toMatchObject({
+      input: "",
+      images: [two],
+    });
   });
 });

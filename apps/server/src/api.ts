@@ -1,4 +1,5 @@
 import {
+  mergeProjectDraft,
   copyPastedMessage,
   pastedText,
   trimPastedMessage,
@@ -3932,35 +3933,117 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
     }
     await store.update((state) => {
       state.projects = state.projects.filter((candidate) => candidate.id !== project.id);
+      if (state.projectDrafts) delete state.projectDrafts[project.id];
       state.dismissedProjectPaths = [
         ...new Set([...(state.dismissedProjectPaths ?? []), project.path]),
       ];
     });
+    await attachments.removeThread(`project:${project.id}`);
     projection.removeProject(project.id);
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string }; Body: { clientCreationId?: string } }>(
-    "/api/v1/projects/:id/threads",
-    async (request, reply) => {
-      if (!store.view().projects.some((project) => project.id === request.params.id)) {
-        return apiError(reply, 404, "not_found", "Project not found");
-      }
-      const clientCreationId = request.body?.clientCreationId;
-      if (
-        typeof clientCreationId !== "string" ||
-        !clientCreationId.trim() ||
-        clientCreationId.length > 512
-      ) {
-        return apiError(reply, 400, "validation_failed", "A stable clientCreationId is required");
-      }
-      const thread = await getOrCreateProjectThread(request.params.id, clientCreationId);
-      const draft = cloneView<CreateProjectThreadResponse["draft"]>(
-        store.view().threadMeta[thread.id]?.draft ?? null,
+  app.get<{ Params: { id: string } }>("/api/v1/projects/:id/draft", async (request, reply) => {
+    if (!store.view().projects.some((project) => project.id === request.params.id))
+      return apiError(reply, 404, "not_found", "Project not found");
+    return cloneView<ThreadDraft | null>(store.view().projectDrafts?.[request.params.id] ?? null);
+  });
+
+  app.put<{
+    Params: { id: string };
+    Body: { base: UpdateThreadDraftRequest; value: UpdateThreadDraftRequest };
+  }>("/api/v1/projects/:id/draft", { bodyLimit: CHAT_BODY_LIMIT * 2 }, async (request, reply) => {
+    if (!store.view().projects.some((project) => project.id === request.params.id))
+      return apiError(reply, 404, "not_found", "Project not found");
+    const base = validateThreadDraft(request.body?.base);
+    const value = validateThreadDraft(request.body?.value);
+    await attachments.validate(`project:${request.params.id}`, value.files ?? []);
+    const updated = await store.update((state) => {
+      const current = state.projectDrafts?.[request.params.id];
+      const merged = validateThreadDraft(
+        mergeProjectDraft(
+          current ?? { input: "", images: [], goalMode: false, annotations: [] },
+          base,
+          value,
+        ),
       );
-      return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
+      (state.projectDrafts ??= {})[request.params.id] = {
+        ...merged,
+        updatedAt: Math.max(Date.now(), (current?.updatedAt ?? 0) + 1),
+      };
+    });
+    const draft = cloneView<ThreadDraft>(updated.projectDrafts![request.params.id]!);
+    projection.publishProjectDraft(request.params.id, draft);
+    return draft;
+  });
+
+  app.post<{
+    Params: { id: string };
+    Querystring: { name?: string; mediaType?: string };
+    Body: Readable;
+  }>(
+    "/api/v1/projects/:id/attachments",
+    { bodyLimit: MAX_ATTACHMENT_BYTES },
+    async (request, reply) => {
+      if (!store.view().projects.some((project) => project.id === request.params.id))
+        return apiError(reply, 404, "not_found", "Project not found");
+      if (typeof request.query.name !== "string" || !request.query.name.trim())
+        throw new AttachmentValidationError("File name is required");
+      if (!request.body || typeof request.body[Symbol.asyncIterator] !== "function")
+        throw new AttachmentValidationError("File body is required");
+      const length = request.headers["content-length"];
+      const saved = await attachments.save(
+        `project:${request.params.id}`,
+        request.query.name,
+        request.query.mediaType ?? "application/octet-stream",
+        request.body,
+        typeof length === "string" && /^\d+$/u.test(length) ? Number(length) : undefined,
+      );
+      return reply.code(201).send(saved);
     },
   );
+
+  app.post<{
+    Params: { id: string };
+    Body: { clientCreationId?: string; draft?: UpdateThreadDraftRequest };
+  }>("/api/v1/projects/:id/threads", { bodyLimit: CHAT_BODY_LIMIT }, async (request, reply) => {
+    if (!store.view().projects.some((project) => project.id === request.params.id)) {
+      return apiError(reply, 404, "not_found", "Project not found");
+    }
+    const clientCreationId = request.body?.clientCreationId;
+    if (
+      typeof clientCreationId !== "string" ||
+      !clientCreationId.trim() ||
+      clientCreationId.length > 512
+    ) {
+      return apiError(reply, 400, "validation_failed", "A stable clientCreationId is required");
+    }
+    const submittedDraft =
+      request.body?.draft === undefined ? null : validateThreadDraft(request.body.draft);
+    if (submittedDraft)
+      await attachments.validate(`project:${request.params.id}`, submittedDraft.files ?? []);
+    const thread = await getOrCreateProjectThread(request.params.id, clientCreationId);
+    if (submittedDraft && !store.view().threadMeta[thread.id]?.draft) {
+      const files: ThreadFileAttachment[] = [];
+      for (const file of submittedDraft.files ?? []) {
+        files.push(
+          await attachments.save(
+            thread.id,
+            file.name,
+            file.mediaType,
+            createReadStream(file.path),
+            file.size,
+          ),
+        );
+      }
+      await projection.setDraft(thread.id, { ...submittedDraft, files });
+    }
+
+    const draft = cloneView<CreateProjectThreadResponse["draft"]>(
+      store.view().threadMeta[thread.id]?.draft ?? null,
+    );
+    return reply.code(201).send({ thread, draft } satisfies CreateProjectThreadResponse);
+  });
 
   app.get<{ Querystring: { q?: string; archived?: string; cursor?: string; scope?: string } }>(
     "/api/v1/threads/search",
@@ -4911,6 +4994,22 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
           dismissUserInput: body.dismissUserInput,
         },
       );
+      if (body.projectDraft && body.projectDraft.projectId === summary.projectId) {
+        let cleared: ThreadDraft | undefined;
+        await store.update((state) => {
+          const current = state.projectDrafts?.[body.projectDraft!.projectId];
+          if (current?.updatedAt !== body.projectDraft!.updatedAt) return;
+          cleared = {
+            input: "",
+            images: [],
+            goalMode: false,
+            annotations: [],
+            updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+          };
+          state.projectDrafts![body.projectDraft!.projectId] = cleared;
+        });
+        if (cleared) projection.publishProjectDraft(body.projectDraft.projectId, cleared);
+      }
       return reply.code(202).send(message satisfies QueuedMessage);
     },
   );
@@ -8651,6 +8750,7 @@ function validateQueueMessageBody(value: unknown): PastedText & {
   replyToAsyncQuestion?: AsyncQuestionReference;
   replyToUserInput?: UserInputReply;
   dismissUserInput?: AsyncQuestionReference;
+  projectDraft?: QueueMessageRequest["projectDraft"];
 } {
   const body = requireRecord<QueueMessageRequest>(value);
   if (
@@ -8664,6 +8764,7 @@ function validateQueueMessageBody(value: unknown): PastedText & {
           "files",
           "goal",
           "planImplementationMode",
+          "projectDraft",
           "clientMessageId",
           "replyToAsyncQuestion",
           "replyToUserInput",
@@ -8675,6 +8776,16 @@ function validateQueueMessageBody(value: unknown): PastedText & {
   }
   if (typeof body.input === "string" && !validPastedText(body, body.input))
     throw new ProjectValidationError("Invalid pasted text");
+  if (
+    body.projectDraft !== undefined &&
+    (!isRecord(body.projectDraft) ||
+      typeof body.projectDraft.projectId !== "string" ||
+      !body.projectDraft.projectId.trim() ||
+      !Number.isSafeInteger(body.projectDraft.updatedAt) ||
+      body.projectDraft.updatedAt < 0)
+  ) {
+    throw new ProjectValidationError("Invalid project draft revision");
+  }
   const images = validateImages(body.images);
   const files = validateFiles(body.files);
   validateAttachmentPayloadSize(images, files);
@@ -8749,6 +8860,7 @@ function validateQueueMessageBody(value: unknown): PastedText & {
     replyToAsyncQuestion = { turnId: reference.turnId, itemId: reference.itemId };
   }
   return {
+    ...(body.projectDraft ? { projectDraft: body.projectDraft } : {}),
     input: body.input,
     ...pastedText(body),
     images,

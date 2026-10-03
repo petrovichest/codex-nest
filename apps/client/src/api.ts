@@ -314,11 +314,42 @@ export class ApiClient {
   createProjectThread(
     projectId: string,
     clientCreationId: string = crypto.randomUUID(),
+    draft?: UpdateThreadDraftRequest,
   ): Promise<CreateProjectThreadResponse> {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
-      body: { clientCreationId },
+      body: { clientCreationId, ...(draft ? { draft } : {}) },
       retry: true,
+    });
+  }
+
+  readProjectDraft(id: string): Promise<ThreadDraft | null> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/draft`, { cache: "no-store" });
+  }
+
+  updateProjectDraft(
+    id: string,
+    base: UpdateThreadDraftRequest,
+    value: UpdateThreadDraftRequest,
+  ): Promise<ThreadDraft> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/draft`, {
+      method: "PUT",
+      body: { base, value },
+      keepalive: JSON.stringify({ base, value }).length < 60_000,
+      timeoutMs: 15_000,
+    });
+  }
+
+  uploadProjectAttachment(id: string, file: File): Promise<ThreadFileAttachment> {
+    const query = new URLSearchParams({
+      name: file.name || "file",
+      mediaType: file.type || "application/octet-stream",
+    });
+    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/attachments?${query}`, {
+      method: "POST",
+      rawBody: file,
+      contentType: "application/octet-stream",
+      timeoutMs: null,
     });
   }
 
