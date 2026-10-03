@@ -38,6 +38,28 @@ afterEach(() => {
 });
 
 describe("BrowserNotificationTracker", () => {
+  it("stays silent during capacity retries, including reconnect, and notifies eventual completion", () => {
+    const tracker = new BrowserNotificationTracker();
+    const running = thread("running", 10);
+    tracker.acceptSnapshot(snapshot([running]));
+    const waiting = {
+      ...running,
+      updatedAt: 20,
+      unread: true,
+      capacityRetry: { failedTurnId: "failed", nextAttemptAt: 300_000 },
+    };
+    tracker.acceptEvent({ type: "thread.upserted", thread: waiting });
+    tracker.acceptSnapshot(snapshot([{ ...waiting, updatedAt: 30 }]));
+    tracker.acceptEvent({ type: "thread.upserted", thread: { ...running, updatedAt: 40 } });
+    expect(notifications).toHaveLength(0);
+    tracker.acceptEvent({
+      type: "thread.upserted",
+      thread: { ...running, state: "completed", updatedAt: 50 },
+    });
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("Задача завершена");
+  });
+
   it("uses the initial snapshot as a baseline and notifies terminal state changes", () => {
     const tracker = new BrowserNotificationTracker();
     const running = thread("running", 10);

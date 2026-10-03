@@ -130,6 +130,7 @@ import {
   CAPACITY_RETRY_MESSAGE,
   capacityRetryMessageId,
   isCapacityFailure,
+  isTemporaryCapacityRpcError,
 } from "./capacity-retry";
 import { readGitChanges } from "./git-changes";
 import { safeError } from "./logging";
@@ -2467,13 +2468,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
     } catch (error) {
       app.log.warn({ err: safeError(error), threadId }, "Failed to continue after model overload");
-      if (error instanceof RpcError) {
+      if (error instanceof RpcError && !isTemporaryCapacityRpcError(error)) {
         await projection.cancelCapacityRetry(threadId, retry.failedTurnId);
       } else {
         await store.update((state) => {
           const current = state.threadMeta[threadId]?.capacityRetry;
           if (current?.failedTurnId === retry.failedTurnId) {
             current.nextAttemptAt = Date.now() + CAPACITY_RETRY_INTERVAL_MS;
+            // A rejected command cannot have been accepted. An uncertain delivery
+            // stays prepared and must still be reconciled before another start.
+            const markerId = capacityRetryMessageId(retry.failedTurnId);
+            const receipt = state.messageReceipts?.[markerId];
+            if (receipt?.status === "rejected") delete state.messageReceipts![markerId];
           }
         });
         projection.publishThreadState(threadId);

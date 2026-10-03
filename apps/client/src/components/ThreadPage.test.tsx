@@ -116,13 +116,21 @@ describe("model capacity waiting", () => {
         ],
       });
       const view = renderThread();
-      expect(screen.getByText("Модель перегружена — следующая попытка через 5м 0с")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Возникла ошибка перегрузки модели. Продолжаем попытки — следующая через 5м 0с",
+        ),
+      ).toBeVisible();
       expect(
         screen.queryByText("Selected model is at capacity. Please try a different model."),
       ).not.toBeInTheDocument();
       expect(screen.queryByText(/^Ошибка через/)).not.toBeInTheDocument();
       act(() => vi.advanceTimersByTime(1_000));
-      expect(screen.getByText("Модель перегружена — следующая попытка через 4м 59с")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Возникла ошибка перегрузки модели. Продолжаем попытки — следующая через 4м 59с",
+        ),
+      ).toBeVisible();
       fireEvent.click(screen.getByRole("button", { name: "Остановить задачу" }));
       await act(async () => {});
       expect(api.interrupt).toHaveBeenCalledWith("thread", undefined);
@@ -131,6 +139,94 @@ describe("model capacity waiting", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["inProgress", "completed"] as const)(
+    "keeps previous capacity failures neutral while the next turn is %s",
+    (status) => {
+      mockThreadConnection(
+        threadApi(),
+        {
+          ...summary,
+          state: status === "inProgress" ? "running" : "completed",
+          currentTurnId: status === "inProgress" ? "next" : null,
+        },
+        {
+          turns: [
+            {
+              id: "failed",
+              status: "failed",
+              failureKind: "modelCapacity",
+              startedAt: 1,
+              completedAt: 2,
+              durationMs: 1,
+              progress: progress(),
+              items: [
+                {
+                  type: "error",
+                  id: "error",
+                  status: "failed",
+                  failureKind: "modelCapacity",
+                  message: "Selected model is at capacity.",
+                },
+              ],
+            },
+            {
+              id: "next",
+              status,
+              startedAt: 3,
+              completedAt: status === "completed" ? 4 : null,
+              durationMs: null,
+              progress: progress(),
+              items: [],
+            },
+          ],
+        },
+      );
+      const view = renderThread();
+      expect(screen.getByText("Перегрузка модели")).toBeVisible();
+      expect(screen.queryByText(/^Ошибка через/)).not.toBeInTheDocument();
+      expect(view.container.querySelector(".turn-activity-state-failed")).toBeNull();
+      expect(screen.queryByText("Selected model is at capacity.")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Технические детали" }));
+      expect(screen.getByText("Selected model is at capacity.").closest("article")).toHaveClass(
+        "activity-capacity",
+      );
+    },
+  );
+
+  it("shows a live overload neutrally before the turn completes", () => {
+    mockThreadConnection(
+      threadApi(),
+      { ...summary, state: "running", currentTurnId: "live" },
+      {
+        turns: [
+          {
+            id: "live",
+            status: "inProgress",
+            startedAt: 1,
+            completedAt: null,
+            durationMs: null,
+            progress: progress(),
+            items: [
+              {
+                type: "error",
+                id: "live-error",
+                status: "failed",
+                failureKind: "modelCapacity",
+                message: "Selected model is at capacity.",
+              },
+            ],
+          },
+        ],
+      },
+    );
+    const view = renderThread();
+    expect(
+      screen.getByText("Возникла ошибка перегрузки модели. Продолжаем попытки…"),
+    ).toBeVisible();
+    expect(screen.queryByText("Selected model is at capacity.")).not.toBeInTheDocument();
+    expect(view.container.querySelector(".turn-activity-state-failed")).toBeNull();
   });
 });
 
@@ -7278,6 +7374,7 @@ function mockThreadConnection(
     turns: Array<{
       id: string;
       status: "inProgress" | "completed" | "failed" | "interrupted";
+      failureKind?: "modelCapacity";
       startedAt: number | null;
       completedAt: number | null;
       durationMs: number | null;

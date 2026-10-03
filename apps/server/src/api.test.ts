@@ -81,6 +81,7 @@ describe("model capacity recovery", () => {
     context: Awaited<ReturnType<typeof harness>>,
     id = "capacity-0",
     threadId = "thread",
+    notifyError = false,
   ) {
     const previous = context.bridge.threadTurns.get(threadId) ?? [];
     const turn: Turn = {
@@ -101,6 +102,16 @@ describe("model capacity recovery", () => {
       method: "turn/started",
       params: { threadId, turn: { ...turn, status: "inProgress", error: null } },
     });
+    if (notifyError) {
+      context.bridge.emit("notification", {
+        method: "error",
+        params: { threadId, turnId: id, error: turn.error!, willRetry: false },
+      });
+      context.bridge.emit("notification", {
+        method: "thread/status/changed",
+        params: { threadId, status: { type: "systemError" } },
+      });
+    }
     context.bridge.emit("notification", { method: "turn/completed", params: { threadId, turn } });
     await vi.waitFor(() =>
       expect(context.projection.summary(threadId)?.capacityRetry?.failedTurnId).toBe(id),
@@ -120,6 +131,34 @@ describe("model capacity recovery", () => {
     );
     return context.projection.summary(threadId)!.currentTurnId!;
   }
+
+  it("never publishes a failed state for a live overload and keeps its history classified", async () => {
+    const context = await harness();
+    const states: string[] = [];
+    context.projection.on("event", (_sequence, event: ServerEvent) => {
+      if (event.type === "thread.upserted" && event.thread.id === "thread")
+        states.push(event.thread.state);
+    });
+    try {
+      await fail(context, "capacity-0", "thread", true);
+      expect(states).not.toContain("failed");
+      const history = await context.projection.readThread("thread");
+      expect(history.turns.find((turn) => turn.id === "capacity-0")).toMatchObject({
+        failureKind: "modelCapacity",
+        items: expect.arrayContaining([
+          expect.objectContaining({ type: "error", failureKind: "modelCapacity" }),
+        ]),
+      });
+      await retry(context);
+      const continued = await context.projection.readThread("thread");
+      expect(continued.turns.find((turn) => turn.id === "capacity-0")?.failureKind).toBe(
+        "modelCapacity",
+      );
+      expect(states).not.toContain("failed");
+    } finally {
+      await context.app.close();
+    }
+  });
 
   it.each(["default", "plan"] as const)(
     "retries %s every five minutes without changing settings or duplicating input",
@@ -172,6 +211,74 @@ describe("model capacity recovery", () => {
       }
     },
   );
+
+  it.each([
+    { version: 1, code: -32000, data: { codexErrorInfo: "serverOverloaded" } },
+    {
+      version: 1,
+      code: -32602,
+      data: { delivery: "rejected", codexErrorInfo: "serverOverloaded" },
+    },
+    { version: undefined, code: -32600, data: undefined },
+  ])(
+    "keeps retrying a capacity RPC rejection with receiver $version and code $code",
+    async ({ version, code, data }) => {
+      const context = await harness();
+      try {
+        context.bridge.deliveryVersion = version;
+        await fail(context);
+        const original = context.bridge.request.getMockImplementation()!;
+        let failures = 2;
+        context.bridge.request.mockImplementation(async (method, params) => {
+          if (method === "turn/start" && failures > 0) {
+            failures--;
+            throw new RpcError(code, "Selected model is at capacity.", data);
+          }
+          return original(method, params);
+        });
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+          await vi.advanceTimersByTimeAsync(deadline - Date.now());
+          await vi.waitFor(() => expect(failures).toBe(1 - attempt));
+          await vi.waitFor(() =>
+            expect(context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt).toBe(
+              deadline + CAPACITY_RETRY_INTERVAL_MS,
+            ),
+          );
+          expect(context.projection.summary("thread")?.state).toBe("running");
+        }
+        await retry(context);
+        expect(context.bridge.managedTurnSequences.get("thread")).toBe(1);
+      } finally {
+        await context.app.close();
+      }
+    },
+  );
+
+  it("keeps a temporary history RPC failure pending but stops on a permanent rejection", async () => {
+    const context = await harness();
+    try {
+      await fail(context);
+      context.bridge.nextTurnListError = new RpcError(-32000, "Service temporarily unavailable");
+      let deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await vi.waitFor(() =>
+        expect(
+          context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt,
+        ).toBeGreaterThan(Date.now()),
+      );
+      expect(context.projection.summary("thread")?.state).toBe("running");
+      context.bridge.nextTurnListError = new RpcError(-32602, "Invalid request");
+      deadline = context.store.view().threadMeta.thread!.capacityRetry!.nextAttemptAt;
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await vi.waitFor(() =>
+        expect(context.store.view().threadMeta.thread?.capacityRetry).toBeUndefined(),
+      );
+      expect(context.projection.summary("thread")?.state).toBe("failed");
+    } finally {
+      await context.app.close();
+    }
+  });
 
   it("stops waiting without an RPC and ignores duplicate failure events", async () => {
     const context = await harness();

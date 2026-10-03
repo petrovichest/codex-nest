@@ -3021,6 +3021,9 @@ export class AppProjection extends EventEmitter {
           id: `${notification.params.turnId}-error-${Date.now()}`,
           status: "failed",
           message: notification.params.error.message,
+          ...(notification.params.error.codexErrorInfo === "serverOverloaded"
+            ? { failureKind: "modelCapacity" as const }
+            : {}),
         };
         this.activity.set(
           activityKey(notification.params.threadId, notification.params.turnId, item.id),
@@ -3055,7 +3058,10 @@ export class AppProjection extends EventEmitter {
           cached.thread.status = notification.params.status;
           if (notification.params.status.type === "notLoaded")
             cached.thread.canAcceptDirectInput = null;
-          if (notification.params.status.type === "systemError") {
+          if (
+            notification.params.status.type === "systemError" &&
+            !this.hasLiveCapacityError(cached)
+          ) {
             cached.currentTurnId = null;
             cached.liveOutcome = "failed";
           }
@@ -3645,6 +3651,7 @@ export class AppProjection extends EventEmitter {
         return managedTask.status as ThreadOutcome;
       }
     }
+    if (this.hasLiveCapacityError(cached)) return "running";
     if (cached.thread.status.type === "systemError") return "failed";
     if (cached.currentTurnId) return "running";
     if (isSpawnedSubagent(cached.thread) && cached.thread.status.type === "active")
@@ -3661,6 +3668,16 @@ export class AppProjection extends EventEmitter {
     return [...this.threads.values()]
       .map((cached) => this.toSummary(cached, state))
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  private hasLiveCapacityError(cached: CachedThread): boolean {
+    return (
+      cached.currentTurnId !== null &&
+      (this.turnStates
+        .get(turnKey(cached.thread.id, cached.currentTurnId))
+        ?.items.some((item) => item.type === "error" && item.failureKind === "modelCapacity") ??
+        false)
+    );
   }
 
   private enrichAttention(
@@ -4348,11 +4365,13 @@ function normalizeTurn(
       id: `${turn.id}-error`,
       status: "failed",
       message: turn.error.message,
+      ...(isCapacityFailure(turn) ? { failureKind: "modelCapacity" as const } : {}),
     });
   }
   return {
     id: turn.id,
     status,
+    ...(isCapacityFailure(turn) ? { failureKind: "modelCapacity" as const } : {}),
     startedAt,
     completedAt,
     durationMs: turn.durationMs,

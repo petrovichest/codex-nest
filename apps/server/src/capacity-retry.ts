@@ -1,4 +1,5 @@
 import type { Turn } from "./codex/generated/v2/Turn";
+import type { RpcError } from "./codex/transport";
 
 export const CAPACITY_RETRY_INTERVAL_MS = 5 * 60_000;
 export const CAPACITY_RETRY_MESSAGE_PREFIX = "codexnest-capacity-retry:";
@@ -11,4 +12,19 @@ export function isCapacityFailure(turn: Pick<Turn, "status" | "error">): boolean
 
 export function capacityRetryMessageId(turnId: string): string {
   return `${CAPACITY_RETRY_MESSAGE_PREFIX}${turnId}`;
+}
+
+/** Only known temporary RPC failures may keep a capacity retry alive. */
+export function isTemporaryCapacityRpcError(error: RpcError): boolean {
+  const data = error.data as {
+    codexErrorInfo?: unknown;
+    error?: { codexErrorInfo?: unknown };
+  } | null;
+  return (
+    data?.codexErrorInfo === "serverOverloaded" ||
+    data?.error?.codexErrorInfo === "serverOverloaded" ||
+    /\b(at capacity|server overloaded|model overloaded|temporarily unavailable|service unavailable)\b/i.test(
+      error.message,
+    )
+  );
 }

@@ -5650,6 +5650,11 @@ button.message-file:hover:not(:disabled) {
   margin: 5px 0 0;
 }
 
+.activity-capacity {
+  color: var(--muted);
+  background: var(--color-surface);
+}
+
 .global-attention {
   position: fixed;
   z-index: 90;

@@ -967,7 +967,11 @@ export function ThreadPage({
             activitiesForThreadDisplay(turn.items, isSubagent).filter(
               (item) =>
                 !isTechnicalActivity(item) &&
-                !(turn.id === summary?.capacityRetry?.failedTurnId && item.type === "error"),
+                !(
+                  item.type === "error" &&
+                  (item.failureKind === "modelCapacity" ||
+                    turn.id === summary?.capacityRetry?.failedTurnId)
+                ),
             ),
           );
           const completionResponseId =
@@ -1003,7 +1007,9 @@ export function ThreadPage({
                 : turn.items.filter(
                     (item) =>
                       isTechnicalActivity(item) ||
-                      (turn.id === summary?.capacityRetry?.failedTurnId && item.type === "error"),
+                      (item.type === "error" &&
+                        (item.failureKind === "modelCapacity" ||
+                          turn.id === summary?.capacityRetry?.failedTurnId)),
                   ),
             ] as const,
         ),
@@ -5700,7 +5706,9 @@ export function Activity({
   }
   if (item.type === "error" || item.type === "unsupported") {
     return (
-      <article className="error-banner activity-error">
+      <article
+        className={`error-banner activity-error${item.failureKind === "modelCapacity" ? " activity-capacity" : ""}`}
+      >
         <strong>{item.type === "unsupported" ? t("Несовместимое событие") : t("Ошибка")}</strong>
         <p>{localizeKnownServerText(language, item.message)}</p>
       </article>
@@ -6779,6 +6787,9 @@ function TurnActivityStatus({
 }) {
   const { language, t } = useI18n();
   const isActive = active;
+  const capacityFailure =
+    turn?.failureKind === "modelCapacity" ||
+    turn?.items.some((item) => item.type === "error" && item.failureKind === "modelCapacity");
   const isWaiting = (isActive && waitingForUserInput) || capacityRetryAt !== undefined;
   const retryRemaining = useCountdown(capacityRetryAt);
   const showSpinner = !isWaiting && (isActive || loading);
@@ -6797,25 +6808,32 @@ function TurnActivityStatus({
   const label =
     capacityRetryAt !== undefined
       ? retryRemaining > 0
-        ? t("Модель перегружена — следующая попытка через {{duration}}", {
-            duration: formatDuration(retryRemaining, language),
-          })
-        : t("Модель перегружена — повторяем попытку…")
+        ? t(
+            "Возникла ошибка перегрузки модели. Продолжаем попытки — следующая через {{duration}}",
+            {
+              duration: formatDuration(retryRemaining, language),
+            },
+          )
+        : t("Возникла ошибка перегрузки модели. Продолжаем попытки…")
       : isWaiting
         ? t("Ждёт вашего ответа")
-        : isActive
-          ? progress?.explanation?.trim() || t("Codex работает")
-          : turn
-            ? turnOutcomeLabel(turn.status, duration, language, t)
-            : t("Codex работает");
+        : capacityFailure
+          ? isActive
+            ? t("Возникла ошибка перегрузки модели. Продолжаем попытки…")
+            : t("Перегрузка модели")
+          : isActive
+            ? progress?.explanation?.trim() || t("Codex работает")
+            : turn
+              ? turnOutcomeLabel(turn.status, duration, language, t)
+              : t("Codex работает");
   const content = (
     <>
       {(isWaiting || showSpinner || turn?.status !== "completed") && (
         <span
-          className={`turn-activity-state turn-activity-state-${isWaiting ? "waiting" : showSpinner ? "active" : (turn?.status ?? "active")}`}
+          className={`turn-activity-state turn-activity-state-${isWaiting || capacityFailure ? "waiting" : showSpinner ? "active" : (turn?.status ?? "active")}`}
           aria-hidden="true"
         >
-          {isWaiting ? (
+          {isWaiting || capacityFailure ? (
             <ClockIcon />
           ) : showSpinner ? (
             <span className="spinner small" />

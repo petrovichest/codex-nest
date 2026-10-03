@@ -523,11 +523,13 @@ export type ActivityItem =
       id: string;
       status: "failed";
       message: string;
+      failureKind?: "modelCapacity";
     };
 
 export type TurnView = {
   id: string;
   status: "inProgress" | ThreadOutcome;
+  failureKind?: "modelCapacity";
   startedAt: number | null;
   completedAt: number | null;
   durationMs: number | null;
