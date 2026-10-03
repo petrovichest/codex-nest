@@ -319,6 +319,7 @@ export class ApiClient {
     return this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/threads`, {
       method: "POST",
       body: { clientCreationId, ...(draft ? { draft } : {}) },
+      timeoutMs: draft?.images.length ? null : undefined,
       retry: true,
     });
   }
@@ -339,7 +340,7 @@ export class ApiClient {
       keepalive:
         Boolean(options?.keepalive) &&
         new TextEncoder().encode(JSON.stringify({ base, value })).byteLength < 60_000,
-      timeoutMs: 15_000,
+      timeoutMs: base.images.length || value.images.length ? null : 15_000,
     });
   }
 
@@ -415,7 +416,7 @@ export class ApiClient {
         annotations: body.annotations,
       },
       keepalive: options?.keepalive,
-      timeoutMs: 15_000,
+      timeoutMs: body.images.length ? null : 15_000,
       retry: options?.retry ?? false,
     });
   }
@@ -516,7 +517,7 @@ export class ApiClient {
         annotations: body.annotations,
       },
       keepalive: options?.keepalive,
-      timeoutMs: 15_000,
+      timeoutMs: body.images.length ? null : 15_000,
     });
   }
 
@@ -524,7 +525,7 @@ export class ApiClient {
     return this.request(`/api/v1/fork-operations/${encodeURIComponent(id)}/queue`, {
       method: "POST",
       body,
-      timeoutMs: 15_000,
+      timeoutMs: body.images?.length ? null : 15_000,
     });
   }
 
@@ -587,7 +588,7 @@ export class ApiClient {
     return this.request(`/api/v1/threads/${encodeURIComponent(id)}/queue`, {
       method: "POST",
       body,
-      timeoutMs: 15_000,
+      timeoutMs: body.images?.length ? null : 15_000,
     });
   }
 

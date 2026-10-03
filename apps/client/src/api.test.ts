@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ThreadDraft } from "@codexnest/protocol";
+import type { ThreadDraft, UpdateThreadDraftRequest } from "@codexnest/protocol";
 
 import { ApiClient } from "./api";
 
@@ -117,6 +117,107 @@ describe("ApiClient", () => {
       annotations: [],
     });
   });
+
+  const emptyDraft: UpdateThreadDraftRequest = {
+    input: "",
+    images: [],
+    annotations: [],
+    goalMode: false,
+  };
+  const imageDraft: UpdateThreadDraftRequest = {
+    ...emptyDraft,
+    input: "Текст с тремя фото",
+    images: Array.from({ length: 3 }, (_, index) => ({
+      id: `image-${index}`,
+      name: `photo-${index}.png`,
+      url: `data:image/png;base64,${index}AA=`,
+    })),
+  };
+  const imageMessage = {
+    input: imageDraft.input,
+    clientMessageId: "stable-message",
+    images: imageDraft.images.map((image) => image.url),
+  };
+  const imageUploads: Array<[string, (api: ApiClient) => Promise<unknown>]> = [
+    ["project draft", (api) => api.updateProjectDraft("project", emptyDraft, imageDraft)],
+    ["removing project images", (api) => api.updateProjectDraft("project", imageDraft, emptyDraft)],
+    [
+      "creation with attachments",
+      (api) => api.createProjectThread("project", "stable-creation", imageDraft),
+    ],
+    ["thread draft", (api) => api.updateThreadDraft("thread", imageDraft)],
+    ["thread queue", (api) => api.enqueue("thread", imageMessage)],
+    ["fork draft", (api) => api.updateForkOperationDraft("fork", imageDraft)],
+    ["fork queue", (api) => api.enqueueForkOperation("fork", imageMessage)],
+  ];
+
+  it.each(imageUploads)("allows a slow %s image upload to finish once", async (_label, send) => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      (_url: URL, init: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          finish = resolve;
+          init.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Upload aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient({ baseUrl: "https://codexnest.example", token: "token" });
+    const request = send(api);
+    const result = expect(request).resolves.toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const sent = fetchMock.mock.calls[0]![1];
+    expect(sent.signal?.aborted).toBe(false);
+    for (const image of imageDraft.images) expect(String(sent.body)).toContain(image.url);
+    finish(new Response(null, { status: 204 }));
+    await result;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  const textWrites: Array<[string, (api: ApiClient) => Promise<unknown>]> = [
+    [
+      "project draft",
+      (api) => api.updateProjectDraft("project", emptyDraft, { ...emptyDraft, input: "text" }),
+    ],
+    ["thread draft", (api) => api.updateThreadDraft("thread", { ...emptyDraft, input: "text" })],
+    ["thread queue", (api) => api.enqueue("thread", { input: "text", clientMessageId: "message" })],
+    ["fork draft", (api) => api.updateForkOperationDraft("fork", { ...emptyDraft, input: "text" })],
+    [
+      "fork queue",
+      (api) => api.enqueueForkOperation("fork", { input: "text", clientMessageId: "message" }),
+    ],
+  ];
+  it.each(textWrites)(
+    "keeps the 15-second timeout for a %s without images",
+    async (_label, send) => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn(
+        (_url: URL, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Request aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const request = send(new ApiClient({ baseUrl: "https://codexnest.example", token: "token" }));
+      const failure = expect(request).rejects.toMatchObject({ code: "connection_failed" });
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(fetchMock.mock.calls[0]![1].signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await failure;
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it("cancels a voice transcription without deleting its thread", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
