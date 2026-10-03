@@ -1628,6 +1628,10 @@ export class AppProjection extends EventEmitter {
         meta.capacityRetryHandledTurnId = expectedTurnIds.at(-1);
       }
       meta.outcomeUpdatedAt = updatedAt;
+      const turnId = expectedTurnIds.at(-1);
+      if (turnId && meta.lastResult?.turnId !== turnId) {
+        meta.lastResult = { turnId, completedAt: updatedAt };
+      }
       for (const [turnId, items] of interruptedTextActivities) {
         retainedTextChanged =
           updateInterruptedTextActivities(meta, turnId, items, "merge") || retainedTextChanged;
@@ -2792,23 +2796,34 @@ export class AppProjection extends EventEmitter {
   private async reconcileOutcomes(recoveryTurns: ReadonlyMap<string, string>): Promise<void> {
     const state = this.store.view();
     for (const cached of this.threads.values()) {
+      const meta = state.threadMeta[cached.thread.id];
       const currentTurnId = cached.currentTurnId;
       const needsRecovery =
         currentTurnId !== null && recoveryTurns.get(cached.thread.id) === currentTurnId;
-      if (cached.thread.status.type !== "idle" && !needsRecovery) continue;
+      if (
+        cached.thread.status.type !== "idle" &&
+        !(cached.thread.status.type === "notLoaded" && meta?.lastOutcome !== undefined) &&
+        !needsRecovery
+      )
+        continue;
       if (isSpawnedSubagent(cached.thread)) continue;
       if (this.isUnmaterialized(cached.thread.id)) continue;
       const updatedAt = cached.thread.updatedAt * 1_000;
-      const meta = state.threadMeta[cached.thread.id];
       if (
         !currentTurnId &&
         meta?.outcomeUpdatedAt === updatedAt &&
+        meta.lastResult !== undefined &&
         meta.awaitingPlanResponse !== undefined
       ) {
         continue;
       }
       const planMode = meta?.settings?.collaborationMode === "plan";
-      if (!currentTurnId && meta?.outcomeUpdatedAt === updatedAt && !planMode) {
+      if (
+        !currentTurnId &&
+        meta?.outcomeUpdatedAt === updatedAt &&
+        meta.lastResult !== undefined &&
+        !planMode
+      ) {
         await this.store.update((draft) => {
           const item = draft.threadMeta[cached.thread.id];
           if (item) item.awaitingPlanResponse = false;
@@ -2852,6 +2867,15 @@ export class AppProjection extends EventEmitter {
         };
         item.lastOutcome = outcome;
         item.outcomeUpdatedAt = updatedAt;
+        if (!latestTurn || latestTurn.status === "inProgress") {
+          item.lastResult = null;
+        } else if (item.lastResult?.turnId !== latestTurn.id) {
+          item.lastResult = {
+            turnId: latestTurn.id,
+            completedAt:
+              latestTurn.completedAt === null ? updatedAt : latestTurn.completedAt * 1_000,
+          };
+        }
         item.awaitingPlanResponse =
           awaitingPlanResponse && item.dismissedPlanTurnId !== latestTurn?.id;
         draft.threadMeta[cached.thread.id] = item;
@@ -2915,6 +2939,20 @@ export class AppProjection extends EventEmitter {
     const cached = this.threads.get(threadId);
     const outcome = normalizeOutcome(turn.status);
     const wasCurrentTurn = cached?.currentTurnId === turn.id;
+    const lastResult = this.store.view().threadMeta[threadId]?.lastResult;
+    // A replay of an older result cannot replace the newest completed turn.
+    if (
+      !wasCurrentTurn &&
+      lastResult &&
+      lastResult.turnId !== turn.id &&
+      ((turn.completedAt !== null && turn.completedAt * 1_000 < lastResult.completedAt) ||
+        (turn.completedAt === null &&
+          cached?.thread.turns.some(
+            (candidate) => candidate.id === turn.id && candidate.status !== "inProgress",
+          )))
+    ) {
+      return null;
+    }
     const interruptedTextActivities =
       outcome === "interrupted"
         ? this.collectInterruptedTextActivities(threadId, turn.id, turn)
@@ -2947,7 +2985,11 @@ export class AppProjection extends EventEmitter {
       cached.thread.status = { type: "idle" };
       cached.thread.updatedAt = Math.max(
         cached.thread.updatedAt,
-        recovered ? (turn.completedAt ?? cached.thread.updatedAt) : Math.floor(Date.now() / 1_000),
+        lastResult?.turnId === turn.id
+          ? cached.thread.updatedAt
+          : recovered
+            ? (turn.completedAt ?? cached.thread.updatedAt)
+            : Math.floor(Date.now() / 1_000),
       );
       const updatedAt = cached.thread.updatedAt * 1_000;
       const hasPlan = turnContainsPlan(turn) || this.hasLivePlan(threadId, turn.id);
@@ -2973,6 +3015,9 @@ export class AppProjection extends EventEmitter {
         };
         meta.lastOutcome = outcome;
         meta.outcomeUpdatedAt = updatedAt;
+        if (meta.lastResult?.turnId !== turn.id) {
+          meta.lastResult = { turnId: turn.id, completedAt: completedAt ?? updatedAt };
+        }
         this.updateCapacityRetry(meta, cached, turn, recovered);
         retainedTextChanged = updateInterruptedTextActivities(
           meta,
@@ -3611,6 +3656,8 @@ export class AppProjection extends EventEmitter {
     const updatedAt = cached.thread.updatedAt * 1_000;
     const threadState = this.threadState(cached, meta.lastOutcome, state);
     const unread = updatedAt > meta.lastReadUpdatedAt && isTerminal(threadState);
+    const resultAt =
+      meta.lastResult === undefined ? updatedAt : (meta.lastResult?.completedAt ?? 0);
     return {
       id: cached.thread.id,
       projectId: projectForCwd(state.projects, cached.thread.cwd)?.id ?? null,
@@ -3619,7 +3666,7 @@ export class AppProjection extends EventEmitter {
       cwd: cached.thread.cwd,
       state: threadState,
       unread,
-      unseen: unread && updatedAt > (meta.lastViewedUpdatedAt ?? 0),
+      unseen: unread && resultAt > (meta.lastViewedUpdatedAt ?? 0),
       pinned: meta.pinned,
       archived: cached.archived,
       createdAt: cached.thread.createdAt * 1_000,

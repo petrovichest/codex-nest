@@ -181,6 +181,43 @@ describe("StateStore", () => {
     });
   });
 
+  it("persists stable result versions alongside legacy sessions and empty results", async () => {
+    const { path } = await temporaryState();
+    const store = new StateStore(path);
+    await store.load();
+    await store.update((state) => {
+      state.threadMeta.legacy = { pinned: false, lastReadUpdatedAt: 0 };
+      state.threadMeta.empty = { pinned: false, lastReadUpdatedAt: 0, lastResult: null };
+      state.threadMeta.viewed = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastViewedUpdatedAt: 10_000,
+        lastResult: { turnId: "result", completedAt: 10_000 },
+      };
+    });
+    const reloaded = new StateStore(path);
+    await reloaded.load();
+    expect(reloaded.view().threadMeta).toEqual(store.view().threadMeta);
+  });
+
+  it.each([
+    { turnId: 1, completedAt: 10_000 },
+    { turnId: "result", completedAt: "10000" },
+    { turnId: "result", completedAt: null },
+  ])("rejects malformed persisted results: %j", async (lastResult) => {
+    const { path } = await temporaryState();
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        auth: {},
+        projects: [],
+        threadMeta: { one: { pinned: false, lastReadUpdatedAt: 0, lastResult } },
+      }),
+    );
+    await expect(new StateStore(path).load()).rejects.toThrow("Corrupt thread metadata");
+  });
+
   it("strips legacy service tiers from persisted settings and task defaults", async () => {
     const { path } = await temporaryState();
     const store = new StateStore(path);

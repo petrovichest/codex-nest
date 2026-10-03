@@ -244,6 +244,8 @@ export interface ThreadMetaState {
   lastViewedUpdatedAt?: number;
   lastOutcome?: ThreadOutcome;
   outcomeUpdatedAt?: number;
+  /** Stable result timestamp in milliseconds; null means no completed turn was found. */
+  lastResult?: { turnId: string; completedAt: number } | null;
   capacityRetry?: CapacityRetryState;
   /** Do not revive a retry canceled by the user when terminal events are replayed. */
   capacityRetryHandledTurnId?: string;
@@ -1194,6 +1196,12 @@ function validateState(value: unknown): CodexNestState {
       (meta.lastOutcome !== undefined &&
         !["completed", "failed", "interrupted"].includes(String(meta.lastOutcome))) ||
       (meta.outcomeUpdatedAt !== undefined && typeof meta.outcomeUpdatedAt !== "number") ||
+      (meta.lastResult !== undefined &&
+        meta.lastResult !== null &&
+        (!isRecord(meta.lastResult) ||
+          typeof meta.lastResult.turnId !== "string" ||
+          typeof meta.lastResult.completedAt !== "number" ||
+          !Number.isFinite(meta.lastResult.completedAt))) ||
       (meta.capacityRetry !== undefined && !isCapacityRetry(meta.capacityRetry)) ||
       (meta.capacityRetryHandledTurnId !== undefined &&
         typeof meta.capacityRetryHandledTurnId !== "string") ||

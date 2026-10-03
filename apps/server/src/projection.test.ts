@@ -113,6 +113,218 @@ afterEach(async () =>
   ),
 );
 
+describe("session result viewing", () => {
+  const result: Thread["turns"][number] = {
+    id: "result",
+    items: [],
+    itemsView: "notLoaded",
+    status: "completed",
+    error: null,
+    startedAt: 9,
+    completedAt: 10,
+    durationMs: 1_000,
+  };
+
+  it.each([
+    { viewedAt: 5_000, status: "idle" },
+    { viewedAt: 10_000, status: "idle" },
+    { viewedAt: 5_000, status: "notLoaded" },
+    { viewedAt: 10_000, status: "notLoaded" },
+  ] as const)(
+    "backfills legacy $status results without changing a saved viewing mark of $viewedAt",
+    async ({ viewedAt, status }) => {
+      const { store, bridge, projection } = await searchHarness();
+      await store.update((state) => {
+        state.threadMeta.one = {
+          pinned: false,
+          lastReadUpdatedAt: 0,
+          lastViewedUpdatedAt: viewedAt,
+          lastOutcome: "completed",
+          outcomeUpdatedAt: 20_000,
+          awaitingPlanResponse: false,
+        };
+      });
+      const request = bridge.request.getMockImplementation()!;
+      bridge.request.mockImplementation(async (method, params) => {
+        if (method === "thread/list") {
+          return {
+            data: params.archived ? [] : [thread("one", "/work", 20, { type: status })],
+            nextCursor: null,
+            backwardsCursor: null,
+          };
+        }
+        if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+        if (method === "thread/turns/list") {
+          return { data: [result], nextCursor: null, backwardsCursor: null };
+        }
+        return request(method, params);
+      });
+
+      await projection.sync();
+      expect(projection.summary("one")).toMatchObject({
+        state: "completed",
+        unread: true,
+        unseen: viewedAt < 10_000,
+        updatedAt: 20_000,
+      });
+      expect(store.view().threadMeta.one).toMatchObject({
+        lastReadUpdatedAt: 0,
+        lastViewedUpdatedAt: viewedAt,
+        lastResult: { turnId: "result", completedAt: 10_000 },
+      });
+      await projection.sync();
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/turns/list"),
+      ).toHaveLength(1);
+      bridge.emit("state", "unavailable");
+    },
+  );
+
+  it("keeps viewed results green across metadata updates, reconnects and reloads until Finish", async () => {
+    const { store, bridge, projection } = await searchHarness();
+    let updatedAt = 10;
+    const request = bridge.request.getMockImplementation()!;
+    bridge.request.mockImplementation(async (method, params) => {
+      if (method === "thread/list") {
+        return {
+          data: params.archived ? [] : [thread("one", "/work", updatedAt)],
+          nextCursor: null,
+          backwardsCursor: null,
+        };
+      }
+      if (method === "thread/loaded/list") return { data: [], nextCursor: null };
+      if (method === "thread/turns/list") {
+        return { data: [result], nextCursor: null, backwardsCursor: null };
+      }
+      return request(method, params);
+    });
+    await store.update((state) => {
+      state.threadMeta.one = { pinned: false, lastReadUpdatedAt: 0 };
+    });
+    await projection.sync();
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: true });
+    await projection.markViewed("one", 10_000);
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+
+    updatedAt = 20;
+    projection.upsertThread(thread("one", "/work", updatedAt));
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+    bridge.emit("state", "unavailable");
+    bridge.emit("state", "ready");
+    await projection.sync();
+    expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+    await store.flushed();
+
+    const reloaded = new StateStore(store.path);
+    await reloaded.load();
+    const restored = new AppProjection(
+      bridge as unknown as CodexBridge,
+      reloaded,
+      new AttentionManager(),
+    );
+    expect(restored.summary("one")).toMatchObject({
+      state: "completed",
+      unread: true,
+      unseen: false,
+      updatedAt: 20_000,
+    });
+    await restored.markRead("one", 20_000);
+    expect(restored.summary("one")).toMatchObject({ unread: false, unseen: false });
+    bridge.emit("state", "unavailable");
+  });
+
+  it("announces a new result despite a late viewed mark and ignores an older completion replay", async () => {
+    const { store, bridge, projection } = await searchHarness();
+    await store.update((state) => {
+      state.threadMeta.one = {
+        pinned: false,
+        lastReadUpdatedAt: 0,
+        lastViewedUpdatedAt: 10_000,
+        lastOutcome: "completed",
+        outcomeUpdatedAt: 20_000,
+        lastResult: { turnId: result.id, completedAt: 10_000 },
+      };
+    });
+    projection.upsertThread(thread("one", "/work", 20, { type: "idle" }, [result]));
+    const next = { ...result, id: "next", startedAt: 25, completedAt: 30 };
+    const clock = vi.spyOn(Date, "now").mockReturnValue(30_000);
+    try {
+      await projection.setCurrentTurn("one", next.id);
+      bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "one", turn: next },
+      } satisfies ServerNotification);
+      await vi.waitFor(() => expect(store.view().threadMeta.one?.lastResult?.turnId).toBe("next"));
+      await projection.markViewed("one", 20_000);
+      expect(projection.summary("one")).toMatchObject({ unread: true, unseen: true });
+
+      bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "one", turn: result },
+      } satisfies ServerNotification);
+      bridge.emit("notification", {
+        method: "turn/completed",
+        params: { threadId: "one", turn: { ...result, completedAt: null } },
+      } satisfies ServerNotification);
+      await store.flushed();
+      expect(store.view().threadMeta.one?.lastResult).toEqual({
+        turnId: "next",
+        completedAt: 30_000,
+      });
+      expect(projection.summary("one")).toMatchObject({ unread: true, unseen: true });
+      await projection.markViewed("one", 30_000);
+      expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+      expect(bridge.request).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("keeps a viewed completion without a source timestamp stable when replayed", async () => {
+    const { store, bridge, projection } = await searchHarness();
+    const events: ServerEvent[] = [];
+    projection.on("event", (_sequence, event: ServerEvent) => events.push(event));
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    try {
+      projection.upsertThread(thread("one", "/work", 9));
+      const notification = {
+        method: "turn/completed",
+        params: { threadId: "one", turn: { ...result, completedAt: null } },
+      } satisfies ServerNotification;
+      bridge.emit("notification", notification);
+      await vi.waitFor(() =>
+        expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(1),
+      );
+      await projection.markViewed("one", 10_000);
+      expect(projection.summary("one")).toMatchObject({ unread: true, unseen: false });
+
+      clock.mockReturnValue(20_000);
+      bridge.emit("notification", notification);
+      await vi.waitFor(() =>
+        expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(2),
+      );
+      expect(store.view().threadMeta.one?.lastResult).toEqual({
+        turnId: result.id,
+        completedAt: 10_000,
+      });
+      expect(projection.summary("one")).toMatchObject({
+        unread: true,
+        unseen: false,
+        updatedAt: 10_000,
+      });
+      await projection.markRead("one", 10_000);
+      clock.mockReturnValue(30_000);
+      bridge.emit("notification", notification);
+      await vi.waitFor(() =>
+        expect(events.filter((event) => event.type === "turn.replaced")).toHaveLength(3),
+      );
+      expect(projection.summary("one")).toMatchObject({ unread: false, unseen: false });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
 describe("automatic session finishing", () => {
   const now = Date.UTC(2026, 8, 29);
   const threeDays = 72 * 60 * 60 * 1_000;
@@ -3313,6 +3525,7 @@ describe("AppProjection", () => {
         lastReadUpdatedAt: 4_000,
         lastOutcome: "completed",
         outcomeUpdatedAt: 4_000,
+        lastResult: { turnId: "last", completedAt: 4_000 },
         awaitingPlanResponse: false,
       };
     });
@@ -7063,6 +7276,7 @@ async function autoFinishHarness(now: number, activityTimes?: number[]) {
         lastReadUpdatedAt: 0,
         lastOutcome: "completed",
         outcomeUpdatedAt: item.updatedAt * 1_000,
+        lastResult: { turnId: `${item.id}-result`, completedAt: item.updatedAt * 1_000 },
         awaitingPlanResponse: false,
       };
   });
