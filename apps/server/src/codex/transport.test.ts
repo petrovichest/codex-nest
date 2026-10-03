@@ -26,6 +26,8 @@ class FakeChild extends EventEmitter {
 class FakeWebSocket extends EventEmitter implements WebSocketClient {
   readyState = 0;
   readonly frames: string[] = [];
+  readonly fragments: Array<{ data: Buffer; binary: boolean; fin: boolean }> = [];
+  private bufferedFragments: Buffer[] = [];
 
   constructor(private readonly autoRespond = true) {
     super();
@@ -36,11 +38,22 @@ class FakeWebSocket extends EventEmitter implements WebSocketClient {
     this.emit("open");
   }
 
-  send(data: string, callback: (error?: Error) => void): void {
-    this.frames.push(data);
-    const request = JSON.parse(data) as { id: number };
-    if (this.autoRespond) {
-      this.emit("message", Buffer.from(JSON.stringify({ id: request.id, result: { ok: true } })));
+  send(
+    data: string | Buffer,
+    options: { binary: boolean; fin: boolean },
+    callback: (error?: Error) => void,
+  ): void {
+    const bytes = Buffer.from(data);
+    this.fragments.push({ data: bytes, ...options });
+    this.bufferedFragments.push(bytes);
+    if (options.fin) {
+      const frame = Buffer.concat(this.bufferedFragments).toString();
+      this.bufferedFragments = [];
+      this.frames.push(frame);
+      const request = JSON.parse(frame) as { id: number };
+      if (this.autoRespond) {
+        this.emit("message", Buffer.from(JSON.stringify({ id: request.id, result: { ok: true } })));
+      }
     }
     callback();
   }
@@ -92,6 +105,38 @@ describe("JsonlTransport", () => {
     socket.emit("close", 1009, Buffer.from("message too big"));
 
     expect(stderr.join("")).toContain("WebSocket closed (1009: message too big)");
+  });
+
+  it("keeps large image inputs and UTF-8 intact without interleaving JSON-RPC messages", async () => {
+    const socket = new FakeWebSocket();
+    const child = connectUnixWebSocket("/tmp/app-server.sock", () => socket);
+    const transport = new JsonlTransport(child);
+    const params = {
+      input: [
+        { type: "text", text: "Я🧰".repeat(3 * 1024 * 1024) },
+        ...Array.from({ length: 3 }, () => ({
+          type: "image",
+          url: "data:image/png;base64,aW1hZ2U=",
+        })),
+      ],
+    };
+    const large = transport.request("turn/start", params);
+    const small = transport.request("thread/list", {});
+    socket.open();
+
+    await expect(large).resolves.toEqual({ ok: true });
+    await expect(small).resolves.toEqual({ ok: true });
+    expect(socket.frames).toHaveLength(2);
+    expect(JSON.parse(socket.frames[0]!)).toEqual({ id: 1, method: "turn/start", params });
+    expect(JSON.parse(socket.frames[1]!)).toEqual({ id: 2, method: "thread/list", params: {} });
+    expect(socket.fragments.length).toBeGreaterThan(2);
+    expect(
+      socket.fragments.every(({ data, binary }) => data.length <= 8 * 1024 * 1024 && !binary),
+    ).toBe(true);
+    expect(socket.fragments.filter(({ fin }) => fin)).toHaveLength(2);
+    expect(transport.pendingCount).toBe(0);
+    transport.shutdown();
+    child.kill();
   });
 
   it("keeps a multiline WebSocket frame as one JSON-RPC envelope", async () => {

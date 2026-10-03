@@ -770,12 +770,24 @@ for (const mobile of [false, true]) {
     const appActions = app.locator(".settings-actions > button, .settings-actions > a");
     await appActions.last().scrollIntoViewIfNeeded();
     const before = await geometry(appActions);
+    const feedback = app.locator(".settings-feedback-slot");
+    const feedbackHeight = (await feedback.boundingBox())!.height;
     await app.getByRole("button", { name: "Проверить обновления", exact: true }).click();
     await expect(app.getByRole("button", { name: "Проверяем…", exact: true })).toBeVisible();
     unchanged(before, await geometry(appActions));
     checking.resolve();
     await expect(app.getByRole("alert")).toBeVisible();
-    unchanged(before, await geometry(appActions));
+    // Adding an error below the active-turn warning can expand the feedback
+    // region. Controls move together by that height, with no size/layout change.
+    const feedbackGrowth = (await feedback.boundingBox())!.height - feedbackHeight;
+    expect(feedbackGrowth).toBeGreaterThanOrEqual(0);
+    unchanged(
+      before.map((box) => ({ ...box, y: box.y + feedbackGrowth })),
+      await geometry(appActions),
+    );
+    expect(
+      await feedback.evaluate((element) => element.scrollHeight - element.clientHeight),
+    ).toBeLessThanOrEqual(1);
     const restarting = deferred();
     await page.route("**/api/v1/settings/codex/force-restart", async (route) => {
       if (route.request().method() === "OPTIONS") return route.fallback();

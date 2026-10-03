@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import { once } from "node:events";
 
 import { afterEach, beforeEach, describe, expect, it as test, vi } from "vitest";
 
-import { JsonlTransport } from "./transport";
+import { connectUnixWebSocket, JsonlTransport } from "./transport";
 import { DurableDelivery, type DeliveryBridge } from "../durable-delivery";
 import { StateStore } from "../state/store";
 import { messageContentHash } from "../message-queue";
@@ -122,7 +122,7 @@ describe.skipIf(!binary)("real Codex delivery", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  async function connect() {
+  async function connect(unixSocket = false) {
     const env = { ...process.env, CODEX_HOME: directory };
     delete env.OPENAI_API_KEY;
     delete env.CODEX_API_KEY;
@@ -144,14 +144,23 @@ describe.skipIf(!binary)("real Codex delivery", () => {
       process.env.CODEXNEST_DURABLE_CODEX_KIND === "app-server"
         ? ["--session-source", "cli"]
         : ["app-server"];
-    const child = spawn(binary!, [...args, ...command, "--listen", "stdio://"], {
-      env,
-      cwd: directory,
-      detached: process.platform !== "win32",
-    });
+    const socketPath = join(directory, "app-server.sock");
+    const child = spawn(
+      binary!,
+      [...args, ...command, "--listen", unixSocket ? `unix://${socketPath}` : "stdio://"],
+      {
+        env,
+        cwd: directory,
+        detached: process.platform !== "win32",
+      },
+    );
     children.push(child);
     child.stderr.resume();
-    const rpc = new JsonlTransport(child);
+    if (unixSocket) {
+      child.stdout.resume();
+      await vi.waitFor(() => access(socketPath), { timeout: 10_000 });
+    }
+    const rpc = new JsonlTransport(unixSocket ? connectUnixWebSocket(socketPath) : child);
     const initialization = await rpc.request(
       "initialize",
       {
@@ -229,6 +238,50 @@ describe.skipIf(!binary)("real Codex delivery", () => {
       cleanup();
     }
   }
+
+  test("delivers three large images over a Unix WebSocket as one turn", async () => {
+    const { rpc } = await connect(true);
+    const { thread } = await start(rpc);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+      "base64",
+    );
+    // Valid PNG with trailing padding, so the transport sees phone-sized data
+    // while the local model fixture needs no large decoded image.
+    const url = `data:image/png;base64,${Buffer.concat([png, Buffer.alloc(5 * 1024 * 1024)]).toString("base64")}`;
+    const params = {
+      ...input(thread.id, randomUUID()),
+      input: [
+        { type: "text", text: "Reply ACK: три изображения 🧰", text_elements: [] },
+        ...Array.from({ length: 3 }, () => ({ type: "image", url })),
+      ],
+    };
+    expect(Buffer.byteLength(JSON.stringify(params))).toBeGreaterThan(16 * 1024 * 1024);
+    await complete(rpc, () => rpc.request("turn/start", params, 30_000));
+    expect(modelRequests).toBe(1);
+    expect(receivedInputs[0]).toMatchObject({
+      input: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.arrayContaining([
+            expect.objectContaining({ type: "input_text", text: "Reply ACK: три изображения 🧰" }),
+            expect.objectContaining({ type: "input_image" }),
+          ]),
+        }),
+      ]),
+    });
+    const content = (
+      receivedInputs[0] as { input: Array<{ role?: string; content?: Array<{ type: string }> }> }
+    ).input
+      .filter((item) => item.role === "user")
+      .flatMap((item) => item.content ?? []);
+    expect(content.filter((item) => item.type === "input_image")).toHaveLength(3);
+    expect(
+      await rpc.request("thread/turns/list", { threadId: thread.id, itemsView: "full" }),
+    ).toMatchObject({
+      data: [expect.objectContaining({ status: "completed" })],
+    });
+  }, 90_000);
 
   test.skipIf(!compatibleBinary)(
     "delivers through ordinary Codex and reconciles a lost response after restart",

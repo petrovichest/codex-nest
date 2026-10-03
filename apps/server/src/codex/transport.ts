@@ -17,11 +17,19 @@ export interface JsonlProcess {
 
 export interface WebSocketClient extends EventEmitter {
   readyState: number;
-  send(data: string, callback: (error?: Error) => void): void;
+  send(
+    data: string | Buffer,
+    options: { binary: boolean; fin: boolean },
+    callback: (error?: Error) => void,
+  ): void;
   terminate(): void;
 }
 
 export type WebSocketFactory = (url: string) => WebSocketClient;
+
+// Codex's receiver limits individual frames to 16 MiB. Fragment large image
+// inputs into smaller frames while keeping each JSON-RPC envelope one message.
+const WEBSOCKET_FRAME_BYTES = 8 * 1024 * 1024;
 
 export function connectUnixWebSocket(
   socketPath: string,
@@ -92,11 +100,26 @@ class WebSocketJsonlProcess extends EventEmitter implements JsonlProcess {
   }
 
   private send(frame: string): void {
-    this.socket.send(frame, (error) => {
-      if (!error) return;
+    let failed = false;
+    const onSent = (error?: Error) => {
+      if (!error || failed || this.exited) return;
+      failed = true;
       this.stderr.write(`${error.message}\n`);
       this.socket.terminate();
-    });
+    };
+    if (Buffer.byteLength(frame) <= WEBSOCKET_FRAME_BYTES) {
+      this.socket.send(frame, { binary: false, fin: true }, onSent);
+      return;
+    }
+    const bytes = Buffer.from(frame);
+    for (let offset = 0; offset < bytes.length && !failed; offset += WEBSOCKET_FRAME_BYTES) {
+      const end = Math.min(offset + WEBSOCKET_FRAME_BYTES, bytes.length);
+      this.socket.send(
+        bytes.subarray(offset, end),
+        { binary: false, fin: end === bytes.length },
+        onSent,
+      );
+    }
   }
 }
 
