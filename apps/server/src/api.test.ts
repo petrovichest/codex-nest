@@ -9510,6 +9510,37 @@ async function createForkHarness(deliveryVersion: number | undefined = 1) {
 describe("shared project drafts", () => {
   const empty = { input: "", images: [], files: [], goalMode: false, annotations: [] };
 
+  it("clears an accepted first-voice draft only when its revision is still current", async () => {
+    const { app, headers, store } = await createForkHarness();
+    try {
+      const save = (input: string) =>
+        app.inject({
+          method: "PUT",
+          url: "/api/v1/projects/project/draft",
+          headers,
+          payload: { base: empty, value: { ...empty, input } },
+        });
+      const original = (await save("Контекст первого голосового")).json();
+      const newer = (await save("Новый черновик с другого устройства")).json();
+      const clear = (updatedAt: number) =>
+        app.inject({
+          method: "PUT",
+          url: `/api/v1/projects/project/draft?expectedUpdatedAt=${updatedAt}`,
+          headers,
+          payload: { base: { ...empty, input: original.input }, value: empty },
+        });
+      const stale = await clear(original.updatedAt);
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json().error.code).toBe("draft_conflict");
+      expect(store.view().projectDrafts?.project).toEqual(newer);
+      const accepted = await clear(newer.updatedAt);
+      expect(accepted.statusCode).toBe(200);
+      expect(store.view().projectDrafts?.project).toMatchObject(empty);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("merges text and images from two devices, broadcasts and persists without starting a session", async () => {
     const { app, headers, bridge, projection, store } = await createForkHarness();
     try {

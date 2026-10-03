@@ -2,7 +2,13 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router";
 
-import type { ModelOption, Project, ThreadDraft, ThreadSummary } from "@codexnest/protocol";
+import type {
+  ModelOption,
+  Project,
+  ThreadDraft,
+  ThreadSummary,
+  TranscriptionConfigResponse,
+} from "@codexnest/protocol";
 
 import { ApiClientError } from "../api";
 import { mergeProjectDraft } from "@codexnest/protocol";
@@ -67,10 +73,224 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
 
 describe("NewSession", () => {
+  it("stages a minute of voice before creation, shows it immediately, and uploads it once", async () => {
+    const microphone = installRecorder();
+    const creation = deferred<{ thread: ThreadSummary }>();
+    const upload = deferred<void>();
+    const createProjectThread = vi.fn().mockReturnValue(creation.promise);
+    const queueVoiceRecording = vi.fn().mockReturnValue(upload.promise);
+    const context = mockConnection({ createProjectThread, queueVoiceRecording });
+    connection.mockReturnValue(context);
+    renderNewSession(voiceConfig);
+    const textbox = await screen.findByRole("textbox", { name: "Сообщение для Codex" });
+    fireEvent.change(textbox, { target: { value: "Контекст перед голосом" } });
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    const stop = await screen.findByRole("button", { name: "Остановить запись" });
+    expect(createProjectThread).not.toHaveBeenCalled();
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+    fireEvent.click(stop);
+    fireEvent.click(stop);
+
+    expect(await screen.findByRole("status", { name: "Отправляем запись" })).toHaveTextContent(
+      "Контекст перед голосом",
+    );
+    expect(screen.queryByRole("button", { name: "Остановить запись" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Распознаём запись" })).not.toBeInTheDocument();
+    expect(context.api.transcribe).not.toHaveBeenCalled();
+    await waitFor(() => expect(createProjectThread).toHaveBeenCalledOnce());
+    const staged = drafts.save.mock.calls.find((call) => call[3]?.voiceSubmission)?.[3];
+    expect(staged.voiceSubmission.recording.durationMs).toBeGreaterThanOrEqual(60_000);
+    expect(staged.voiceSubmission.recording.audio.size).toBeGreaterThan(0);
+    expect(drafts.save.mock.invocationCallOrder[0]).toBeLessThan(
+      createProjectThread.mock.invocationCallOrder[0],
+    );
+    expect(drafts.delete).not.toHaveBeenCalled();
+    expect(context.api.updateProjectDraft).not.toHaveBeenCalled();
+    creation.resolve({ thread });
+    await waitFor(() => expect(queueVoiceRecording).toHaveBeenCalledOnce());
+    expect(queueVoiceRecording).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: staged.voiceSubmission.recording.id,
+        threadId: thread.id,
+        mode: "send",
+        audio: staged.voiceSubmission.recording.audio,
+        draft: expect.objectContaining({ input: "Контекст перед голосом" }),
+      }),
+    );
+    expect(drafts.delete).not.toHaveBeenCalled();
+    expect(context.api.updateProjectDraft).not.toHaveBeenCalled();
+    upload.resolve();
+    await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
+    expect(microphone.getUserMedia).toHaveBeenCalledOnce();
+    expect(microphone.start).toHaveBeenCalledOnce();
+    expect(microphone.stop).toHaveBeenCalledOnce();
+    expect(context.sendReliable).not.toHaveBeenCalled();
+  });
+
+  it.each(["creation", "upload"])(
+    "recovers voice after a %s failure and reopening without a new recording",
+    async (failure) => {
+      const microphone = installRecorder();
+      const offline = new ApiClientError("connection_failed", "Нет связи");
+      const createProjectThread =
+        failure === "creation"
+          ? vi.fn().mockRejectedValueOnce(offline).mockResolvedValue({ thread })
+          : vi.fn().mockResolvedValue({
+              thread,
+              draft: { input: "", images: [], annotations: [], goalMode: false, updatedAt: 17 },
+            });
+      const queueVoiceRecording =
+        failure === "upload"
+          ? vi.fn().mockRejectedValueOnce(offline).mockResolvedValue(undefined)
+          : vi.fn().mockResolvedValue(undefined);
+      let persisted!: LocalNewSessionDraft;
+      drafts.save.mockImplementation((_settings, _project, value, preparation) => {
+        persisted = {
+          ...preparation,
+          value,
+          voiceSubmission: preparation.voiceSubmission
+            ? {
+                ...preparation.voiceSubmission,
+                recording: { ...preparation.voiceSubmission.recording },
+              }
+            : undefined,
+        };
+        return Promise.resolve(true);
+      });
+      const context = mockConnection({ createProjectThread, queueVoiceRecording });
+      connection.mockReturnValue(context);
+      const view = renderNewSession(voiceConfig);
+      fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+      await screen.findByRole("button", { name: "Повторить отправку" });
+      expect(drafts.delete).not.toHaveBeenCalled();
+      const id = persisted.voiceSubmission!.recording.id;
+      const creationId = persisted.clientCreationId;
+      view.unmount();
+      await act(async () => undefined);
+      drafts.load.mockResolvedValue(persisted);
+      renderNewSession(voiceConfig);
+      await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
+      expect(queueVoiceRecording.mock.calls.at(-1)?.[0]).toMatchObject({
+        id,
+        threadId: thread.id,
+        mode: "send",
+        draftUpdatedAt: failure === "upload" ? 17 : null,
+      });
+      expect(createProjectThread).toHaveBeenCalledTimes(failure === "creation" ? 2 : 1);
+      expect(createProjectThread.mock.calls.at(-1)?.[1]).toBe(creationId);
+      expect(microphone.getUserMedia).toHaveBeenCalledOnce();
+      expect(context.api.transcribe).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps voice available for retry when local staging fails before any network request", async () => {
+    const microphone = installRecorder();
+    const createProjectThread = vi.fn().mockResolvedValue({ thread });
+    const queueVoiceRecording = vi.fn().mockResolvedValue(undefined);
+    const context = mockConnection({ createProjectThread, queueVoiceRecording });
+    connection.mockReturnValue(context);
+    drafts.save.mockResolvedValue(false);
+    renderNewSession(voiceConfig);
+    fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+    const retry = await screen.findByRole("button", { name: "Повторить отправку" });
+    expect(createProjectThread).not.toHaveBeenCalled();
+    expect(queueVoiceRecording).not.toHaveBeenCalled();
+    drafts.save.mockResolvedValue(true);
+    fireEvent.click(retry);
+    await waitFor(() => expect(queueVoiceRecording).toHaveBeenCalledOnce());
+    expect(microphone.getUserMedia).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the first voice draft, cursor, goal and transferred project files", async () => {
+    installRecorder();
+    const file = {
+      id: "project-file",
+      path: "/project/source.txt",
+      name: "source.txt",
+      size: 5,
+      mediaType: "text/plain",
+    };
+    const transferred = { ...file, id: "thread-file", path: "/thread/source.txt" };
+    const draft = {
+      input: "До после",
+      images: [{ id: "image", name: "image", url: "data:image/png;base64,aA==" }],
+      files: [file],
+      goalMode: true,
+      annotations: [],
+      updatedAt: 3,
+    };
+    const createProjectThread = vi
+      .fn()
+      .mockResolvedValue({ thread, draft: { ...draft, files: [transferred], updatedAt: 19 } });
+    const upload = deferred<void>();
+    const queueVoiceRecording = vi.fn().mockReturnValue(upload.promise);
+    const context = mockConnection({
+      readProjectDraft: vi.fn().mockResolvedValue(draft),
+      createProjectThread,
+      queueVoiceRecording,
+    });
+    connection.mockReturnValue(context);
+    renderNewSession(voiceConfig);
+    const textarea = (await screen.findByRole("textbox", {
+      name: "Сообщение для Codex",
+    })) as HTMLTextAreaElement;
+    textarea.setSelectionRange(3, 3);
+    fireEvent.select(textarea);
+    fireEvent.click(screen.getByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+    await waitFor(() => expect(queueVoiceRecording).toHaveBeenCalledOnce());
+    expect(createProjectThread).toHaveBeenCalledWith(
+      project.id,
+      expect.any(String),
+      expect.objectContaining({ files: [file] }),
+    );
+    expect(queueVoiceRecording).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectionStart: 3,
+        selectionEnd: 3,
+        draftUpdatedAt: 19,
+        newSessionProjectId: project.id,
+        draft: expect.objectContaining({
+          input: draft.input,
+          images: draft.images,
+          files: [transferred],
+          goalMode: true,
+        }),
+      }),
+    );
+    expect(context.api.updateProjectDraft).not.toHaveBeenCalled();
+    upload.resolve();
+    await waitFor(() => expect(drafts.delete).toHaveBeenCalled());
+    expect(context.api.updateProjectDraft).toHaveBeenCalledWith(
+      project.id,
+      { input: draft.input, images: draft.images, files: [file], goalMode: true, annotations: [] },
+      expect.objectContaining({ input: "", images: [], goalMode: false }),
+      { expectedUpdatedAt: draft.updatedAt },
+    );
+  });
+
+  it("cancels a first recording without creating a session or submitting audio", async () => {
+    installRecorder();
+    const context = mockConnection({});
+    connection.mockReturnValue(context);
+    renderNewSession(voiceConfig);
+    fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить запись" }));
+    await screen.findByRole("button", { name: "Начать запись" });
+    expect(context.api.createProjectThread).not.toHaveBeenCalled();
+    expect(context.queueVoiceRecording).not.toHaveBeenCalled();
+    expect(drafts.save.mock.calls.some((call) => call[3]?.voiceSubmission)).toBe(false);
+  });
+
   it("loads the server state before enabling input and persists a fast Enter", async () => {
     const hydration = deferred<ThreadDraft | null>();
     const creation = deferred<{ thread: ThreadSummary }>();
@@ -674,11 +894,11 @@ describe("NewSession", () => {
   });
 });
 
-function renderNewSession() {
-  return render(newSessionElement());
+function renderNewSession(transcriptionConfig?: TranscriptionConfigResponse) {
+  return render(newSessionElement(transcriptionConfig));
 }
 
-function newSessionElement() {
+function newSessionElement(transcriptionConfig?: TranscriptionConfigResponse) {
   return (
     <MemoryRouter
       initialEntries={[
@@ -690,17 +910,29 @@ function newSessionElement() {
       ]}
     >
       <Routes>
-        <Route path="*" element={<PersistentNewSessionRoute />} />
+        <Route
+          path="*"
+          element={<PersistentNewSessionRoute transcriptionConfig={transcriptionConfig} />}
+        />
       </Routes>
     </MemoryRouter>
   );
 }
 
-function PersistentNewSessionRoute() {
+function PersistentNewSessionRoute({
+  transcriptionConfig,
+}: {
+  transcriptionConfig?: TranscriptionConfigResponse;
+}) {
   const location = useLocation();
   return (
     <>
-      <NewSession projects={[project]} onOpenNavigation={() => undefined} />
+      <NewSession
+        projects={[project]}
+        onOpenNavigation={() => undefined}
+        transcriptionConfig={transcriptionConfig}
+        transcriptionProvider={transcriptionConfig?.provider}
+      />
       {location.pathname.startsWith("/threads/") && <div>Созданная сессия</div>}
     </>
   );
@@ -722,6 +954,7 @@ function mockConnection({
   taskDefaults,
   updateThreadDraft = vi.fn(),
   dispatch = vi.fn(),
+  queueVoiceRecording = vi.fn(),
 }: {
   readProjectDraft?: ReturnType<typeof vi.fn>;
   updateProjectDraft?: ReturnType<typeof vi.fn>;
@@ -740,6 +973,7 @@ function mockConnection({
   };
   updateThreadDraft?: ReturnType<typeof vi.fn>;
   dispatch?: ReturnType<typeof vi.fn>;
+  queueVoiceRecording?: ReturnType<typeof vi.fn>;
 }) {
   return {
     api: {
@@ -756,6 +990,7 @@ function mockConnection({
     },
     dispatch,
     sendReliable,
+    queueVoiceRecording,
     state: {
       details: {},
       snapshot: { connection: { state: "ready" }, models, taskDefaults, threads: [] },
@@ -772,4 +1007,47 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+const voiceConfig = {
+  providers: ["local"],
+  provider: "local",
+  maxRecordingSeconds: 300,
+  maxUploadBytes: 24 * 1024 * 1024,
+} as TranscriptionConfigResponse;
+
+function installRecorder() {
+  const start = vi.fn();
+  const stop = vi.fn();
+  class Recorder extends EventTarget {
+    static isTypeSupported() {
+      return true;
+    }
+    state = "inactive";
+    constructor(
+      _stream: MediaStream,
+      readonly options: MediaRecorderOptions,
+    ) {
+      super();
+    }
+    start() {
+      this.state = "recording";
+      start();
+    }
+    stop() {
+      if (this.state === "inactive") return;
+      this.state = "inactive";
+      stop();
+      const event = new Event("dataavailable");
+      Object.defineProperty(event, "data", {
+        value: new Blob(["voice"], { type: this.options.mimeType }),
+      });
+      this.dispatchEvent(event);
+      this.dispatchEvent(new Event("stop"));
+    }
+  }
+  vi.stubGlobal("MediaRecorder", Recorder);
+  const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop() {} }] }));
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia } });
+  return { start, stop, getUserMedia };
 }

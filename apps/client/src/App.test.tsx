@@ -4033,7 +4033,7 @@ describe("App routing and navigation", () => {
     expect(textarea).toHaveValue("Черновик A\n\nНовый черновик B");
   });
 
-  it("transcribes a recording into the project draft without creating a session", async () => {
+  it("creates a session on voice stop and queues the recording for automatic sending", async () => {
     installMediaRecorder(async () => {
       return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
     });
@@ -4062,16 +4062,26 @@ describe("App routing and navigation", () => {
     });
     localStorage.setItem("codexnest.voiceInputMode", "draft");
 
-    renderApp("/threads/newer");
+    const view = renderApp("/threads/newer");
     fireEvent.click(screen.getByRole("button", { name: "Создать новую сессию в проекте Проект" }));
     expect(api.createProjectThread).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole("button", { name: "Начать запись" }));
-    api.transcribe.mockResolvedValue({ text: "Распознанный черновик" });
-    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
-    await waitFor(() => expect(api.transcribe).toHaveBeenCalledOnce());
-    expect(await screen.findByDisplayValue("Распознанный черновик")).toBeInTheDocument();
     expect(api.createProjectThread).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Остановить запись" }));
+    expect(await screen.findByText("Отправляем запись")).toBeInTheDocument();
+    expect(view.container.querySelector(".composer .microphone")).not.toHaveClass("recording");
+    await waitFor(() => expect(api.createProjectThread).toHaveBeenCalledOnce());
     expect(api.queueVoiceRecording).not.toHaveBeenCalled();
+    creation.resolve({ thread: { ...baseThread, id: "created", title: "Новая задача" } });
+    await waitFor(() => expect(api.queueVoiceRecording).toHaveBeenCalledOnce());
+    expect(api.queueVoiceRecording).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "created", audio: expect.any(Blob), mode: "send" }),
+    );
+    expect(api.transcribe).not.toHaveBeenCalled();
+    upload.resolve();
+    expect(
+      await screen.findByRole("heading", { name: "Новая задача", level: 1 }),
+    ).toBeInTheDocument();
   });
 
   it("restores an early draft after creation fails without replacing the editor", async () => {

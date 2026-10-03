@@ -1386,7 +1386,9 @@ export function ConnectionProvider({
         if (!active) return;
         pendingVoiceRecordings.current.clear();
         for (const recording of recordings) {
-          recoveredVoiceRecordingIds.current.add(recording.id);
+          // First-message audio resumes through its persisted preparation, which
+          // also owns creation/settings and keeps a stable session identity.
+          if (!recording.newSessionProjectId) recoveredVoiceRecordingIds.current.add(recording.id);
           pendingVoiceRecordings.current.set(recording.id, {
             id: recording.id,
             userInput: recording.userInput,

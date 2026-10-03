@@ -85,6 +85,7 @@ import {
   saveNewSessionDraft,
   type NewSessionSubmission,
   type NewSessionAttachment,
+  type NewSessionVoiceSubmission,
 } from "../offline-store";
 import { acknowledgePendingThread, releaseActiveThread } from "../push";
 import type { OptimisticMessage } from "../state";
@@ -178,6 +179,7 @@ type NewSessionPreparation = {
   sharedBase?: ThreadDraft | null;
   sharedDraftUpdatedAt?: number;
   submission?: NewSessionSubmission;
+  voiceSubmission?: NewSessionVoiceSubmission;
   attachments?: NewSessionAttachment[];
 };
 
@@ -597,6 +599,7 @@ export function ThreadPage({
   const settingsApplyPromiseRef = useRef<Promise<ThreadSummary> | null>(null);
   const creationPromiseRef = useRef<Promise<ThreadSummary> | null>(null);
   const preparationOperationRef = useRef<Promise<void> | null>(null);
+  const preparationVoiceOperationRef = useRef<Promise<void> | null>(null);
   const preparationGenerationRef = useRef(1);
   const preparationAliveRef = useRef(true);
   const preparationDiscardRef = useRef(false);
@@ -845,6 +848,9 @@ export function ThreadPage({
   const localActiveVoiceJob =
     activeVoiceJob && localVoiceJobIdsRef.current.has(activeVoiceJob.id) ? activeVoiceJob : null;
   const voiceUpload = voiceUploads[threadId] ?? null;
+  const preparingVoiceSubmission = preparationRef.current.active
+    ? preparationRef.current.voiceSubmission
+    : undefined;
   const optimisticMessages = state.optimisticMessages?.[threadId] ?? [];
   const optimisticTurnMessages = optimisticMessages.filter(
     (message) => message.destination === "turn",
@@ -1067,7 +1073,13 @@ export function ThreadPage({
             elapsedSeconds: transcriptionElapsedSeconds,
             estimatedTotalSeconds: null,
           }
-        : null;
+        : preparingVoiceSubmission
+          ? {
+              status: "uploading",
+              elapsedSeconds: transcriptionElapsedSeconds,
+              estimatedTotalSeconds: null,
+            }
+          : null;
   const autoVoiceProgressKey = autoVoiceProgress
     ? `${activeVoiceJob?.id ?? `upload:${threadId}`}:${autoVoiceProgress.status}`
     : null;
@@ -1076,6 +1088,7 @@ export function ThreadPage({
   const hideVoiceDraftInComposer =
     (activeVoiceJob !== null && activeVoiceJob.mode !== "draft") ||
     (voiceUpload !== null && voiceUpload.mode !== "draft") ||
+    Boolean(preparingVoiceSubmission) ||
     pendingVoiceSendRemoval;
   const activeProgress = summary?.currentTurnId
     ? detail?.turns.find((turn) => turn.id === summary.currentTurnId)?.progress
@@ -1222,7 +1235,7 @@ export function ThreadPage({
       .catch(() => undefined)
       .then(async () => {
         const persistSubmission = async () => {
-          if (!snapshot.submission) return true;
+          if (!snapshot.submission && !snapshot.voiceSubmission) return true;
           return saveNewSessionDraft(api.settings, snapshot.projectId, snapshot.value, {
             clientCreationId: snapshot.clientCreationId,
             phase: snapshot.phase,
@@ -1231,14 +1244,20 @@ export function ThreadPage({
             revision: snapshot.revision,
             settings: snapshot.settings,
             submission: snapshot.submission,
+            voiceSubmission: snapshot.voiceSubmission,
             sharedDraftUpdatedAt: snapshot.sharedDraftUpdatedAt,
             attachments: snapshot.attachments,
           });
         };
         let saved = await persistSubmission();
         if (!saved && preparationAliveRef.current) setStorageWarning(true);
+        if (!saved && snapshot.voiceSubmission) return false;
         // Staging clears the local composer, but the shared draft remains until enqueue succeeds.
-        if (!snapshot.submission?.staged && snapshot.sharedBase !== undefined) {
+        if (
+          !snapshot.submission?.staged &&
+          !snapshot.voiceSubmission &&
+          snapshot.sharedBase !== undefined
+        ) {
           const value = snapshot.submission?.draft ?? snapshot.value;
           const base = normalizeNewSessionDraft(snapshot.sharedBase ?? emptyComposerDraft());
           if (JSON.stringify(normalizeNewSessionDraft(value)) !== JSON.stringify(base)) {
@@ -1395,15 +1414,25 @@ export function ThreadPage({
               throw new Error(t("Не удалось сохранить черновик на устройстве"));
             }
             assertPreparationGeneration(generation);
+            const submittedDraft =
+              earlySubmissionRef.current?.draft ?? preparationRef.current.voiceSubmission?.draft;
             const created = await api.createProjectThread(
               activeProject.id,
               preparationRef.current.clientCreationId,
-              earlySubmissionRef.current?.draft.files?.some((file) => file.path)
-                ? structuredClone(earlySubmissionRef.current.draft)
+              submittedDraft?.files?.some((file) => file.path)
+                ? structuredClone(submittedDraft)
                 : undefined,
             );
             assertPreparationGeneration(generation);
             thread = created.thread;
+            const voice = preparationRef.current.voiceSubmission;
+            if (voice) {
+              voice.draftUpdatedAt = created.draft?.updatedAt ?? null;
+              if (created.draft) {
+                voice.draft.files = created.draft.files ?? [];
+                preparationRef.current.value.files = created.draft.files ?? [];
+              }
+            }
             if (created.draft && earlySubmissionRef.current) {
               earlySubmissionRef.current.draft.files = created.draft.files ?? [];
               if (preparationRef.current.submission)
@@ -1779,6 +1808,104 @@ export function ThreadPage({
   }
   flushComposerDraftRef.current = flushComposerDraft;
 
+  function beginPreparingVoice(recording: ComposerRecording): Promise<void> {
+    if (preparationVoiceOperationRef.current) return preparationVoiceOperationRef.current;
+    const activeProject = newSessionProject;
+    if (!activeProject || !preparationRef.current.active) return Promise.resolve();
+    const generation = preparationGenerationRef.current;
+    const current = preparationRef.current;
+    const submission = (current.voiceSubmission ??= {
+      recording,
+      draft: structuredClone(currentComposerDraft()),
+    });
+    delete submission.deliveryError;
+    setError(null);
+    setVoiceUploads((uploads) => ({ ...uploads, "": { mode: "send", startedAt: Date.now() } }));
+    const operation = (async () => {
+      try {
+        // Own the audio on disk before creating a session or making an upload request.
+        if (!(await enqueuePreparationSave(snapshotPreparation()))) {
+          throw new Error(t("Не удалось надежно сохранить запись на устройстве"));
+        }
+        assertPreparationGeneration(generation);
+        await waitForPendingAttachments();
+        assertPreparationGeneration(generation);
+        submission.draft = structuredClone(preparationRef.current.value);
+        let thread = await ensureCreatedThread(activeProject, generation);
+        thread = await applyPendingSettings(thread, generation);
+        await uploadPreparationFiles(thread.id, generation);
+        assertPreparationGeneration(generation);
+        submission.draft = structuredClone(preparationRef.current.value);
+        if (!(await enqueuePreparationSave(snapshotPreparation()))) {
+          throw new Error(t("Не удалось надежно сохранить запись на устройстве"));
+        }
+        assertPreparationGeneration(generation);
+        localVoiceJobIdsRef.current.add(submission.recording.id);
+        await queueVoiceRecording({
+          id: submission.recording.id,
+          threadId: thread.id,
+          newSessionProjectId: activeProject.id,
+          audio: submission.recording.audio,
+          durationMs: submission.recording.durationMs,
+          mode: "send",
+          selectionStart: submission.recording.selection.start,
+          selectionEnd: submission.recording.selection.end,
+          draftUpdatedAt: submission.draftUpdatedAt ?? null,
+          draft: submission.draft,
+        });
+        // The server owns the recording now; cleanup must never retry an accepted upload.
+        const projectDraftBase = preparationRef.current.sharedBase;
+        if (preparationGenerationActive(generation)) {
+          activateCreatedThread(
+            thread,
+            { ...submission.draft, updatedAt: submission.draftUpdatedAt ?? Date.now() },
+            generation,
+          );
+        }
+        delete current.voiceSubmission;
+        delete preparationRef.current.voiceSubmission;
+        await deletePreparationPersistence(activeProject.id);
+        if (projectDraftBase) {
+          void api
+            .updateProjectDraft(
+              activeProject.id,
+              normalizeNewSessionDraft(projectDraftBase),
+              emptyComposerDraft(),
+              { expectedUpdatedAt: projectDraftBase.updatedAt },
+            )
+            .then((draft) => dispatch({ type: "projectDraft", projectId: activeProject.id, draft }))
+            .catch(() => undefined);
+        }
+      } catch (caught) {
+        if (caught === PREPARATION_SUPERSEDED) return;
+        submission.deliveryError = {
+          message:
+            caught instanceof Error ? caught.message : t("Не удалось отправить запись на сервер"),
+          retryable: isRetryableApiError(caught),
+        };
+        await enqueuePreparationSave(snapshotPreparation()).catch(() => undefined);
+        if (preparationGenerationActive(generation)) setError(submission.deliveryError.message);
+        throw caught;
+      } finally {
+        if (preparationAliveRef.current) {
+          setVoiceUploads((uploads) => {
+            const next = { ...uploads };
+            delete next[""];
+            return next;
+          });
+        }
+      }
+    })();
+    preparationVoiceOperationRef.current = operation;
+    void operation
+      .finally(() => {
+        if (preparationVoiceOperationRef.current === operation)
+          preparationVoiceOperationRef.current = null;
+      })
+      .catch(() => undefined);
+    return operation;
+  }
+
   async function beginTranscription(
     targetThreadId: string,
     recording: ComposerRecording,
@@ -1886,7 +2013,7 @@ export function ThreadPage({
         return;
       }
       const local = await loadNewSessionDraft(api.settings, newSessionProject.id);
-      const stored = local?.submission ? local : null;
+      const stored = local?.submission || local?.voiceSubmission ? local : null;
       if (!active || !preparationGenerationActive(generation)) return;
       if (!stored && !remote && !initialNewSessionRef.current.admitted) {
         setNewSessionRejected(true);
@@ -1918,12 +2045,13 @@ export function ThreadPage({
         pendingSettingsRevisionRef.current += 1;
         setPendingSettings(settings);
       }
-      const storedThreadId = stored?.submission ? (stored.threadId ?? null) : null;
+      const storedThreadId =
+        stored?.submission || stored?.voiceSubmission ? (stored.threadId ?? null) : null;
       preparationRef.current = {
         ...current,
         projectId: newSessionProject.id,
         clientCreationId:
-          stored?.threadId && !stored.submission
+          stored?.threadId && !stored.submission && !stored.voiceSubmission
             ? current.clientCreationId
             : (stored?.clientCreationId ?? current.clientCreationId),
         value,
@@ -1935,6 +2063,7 @@ export function ThreadPage({
         thread: stored?.thread?.id === storedThreadId ? stored.thread : null,
         revision: Math.max(current.revision, stored?.revision ?? 0),
         submission: current.submission ?? stored?.submission,
+        voiceSubmission: current.voiceSubmission ?? stored?.voiceSubmission,
         attachments: [...(stored?.attachments ?? []), ...(current.attachments ?? [])],
       };
       if (!preparationDraftTouchedRef.current) {
@@ -1971,9 +2100,40 @@ export function ThreadPage({
     };
   }, [api.settings, newSessionProject?.id, foregroundEpoch, streamRecoveryEpoch, preparationRetry]);
 
+  useEffect(() => {
+    const voice = preparationRef.current.voiceSubmission;
+    if (
+      preparationRef.current.active &&
+      newSessionHydrated &&
+      newSessionAdmitted &&
+      transcriptionProvider &&
+      state.network === "connected" &&
+      voice &&
+      voice.deliveryError?.retryable !== false &&
+      !preparationVoiceOperationRef.current
+    ) {
+      void beginPreparingVoice(voice.recording).catch(() => undefined);
+    }
+    // Resume a persisted upload on open/reconnect, or after an explicit retry.
+  }, [
+    newSessionHydrated,
+    newSessionAdmitted,
+    transcriptionProvider,
+    state.network,
+    foregroundEpoch,
+    streamRecoveryEpoch,
+    preparationRetry,
+  ]);
+
   function acceptProjectDraft(remote: ThreadDraft | null): void {
     const current = preparationRef.current;
-    if (!current.active || current.submission || current.sharedBase === undefined) return;
+    if (
+      !current.active ||
+      current.submission ||
+      current.voiceSubmission ||
+      current.sharedBase === undefined
+    )
+      return;
     if (remote && (current.sharedBase?.updatedAt ?? -1) >= remote.updatedAt) return;
     const value = mergeProjectDraft(
       remote ?? emptyComposerDraft(),
@@ -4237,7 +4397,18 @@ export function ThreadPage({
                     {!isSubagent && autoVoiceProgress && (
                       <VoiceTranscriptionBubble
                         progress={autoVoiceProgress}
-                        draft={activeComposerDraft}
+                        draft={preparingVoiceSubmission?.draft ?? activeComposerDraft}
+                        deliveryError={preparingVoiceSubmission?.deliveryError?.message}
+                        onRetry={
+                          preparingVoiceSubmission?.deliveryError
+                            ? () => {
+                                setPreparationRetry((value) => value + 1);
+                                void beginPreparingVoice(preparingVoiceSubmission.recording).catch(
+                                  () => undefined,
+                                );
+                              }
+                            : undefined
+                        }
                         cwd={workspaceSummary.cwd}
                         onDownload={downloadFile}
                         onOpenArtifact={openLinkedArtifact}
@@ -4384,26 +4555,19 @@ export function ThreadPage({
             transcriptionConfig={transcriptionConfig}
             transcriptionProvider={transcriptionProvider}
             voiceUploadPending={Boolean(voiceUpload)}
-            voiceInputLocked={Boolean(activeVoiceJob || voiceUpload || pendingVoiceSendRemoval)}
+            voiceInputLocked={Boolean(
+              activeVoiceJob || voiceUpload || pendingVoiceSendRemoval || preparingVoiceSubmission,
+            )}
             onCancelVoiceTranscription={
               activeVoiceJob ? () => void cancelVoiceTranscription() : undefined
             }
             voiceCancellationPending={voiceCancellationPending}
-            onTranscribe={
-              preparationRef.current.active
-                ? async (audio, durationMs) => {
-                    const result = await api.transcribe(audio, durationMs);
-                    if (result.timingEstimate) {
-                      onTranscriptionTimingEstimateChange?.(result.timingEstimate);
-                    }
-                    return result.text;
-                  }
-                : undefined
-            }
             onRecordingReady={
-              !preparationRef.current.active && backgroundVoiceContext
-                ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
-                : undefined
+              preparationRef.current.active
+                ? beginPreparingVoice
+                : backgroundVoiceContext
+                  ? (recording) => beginTranscription(threadId, recording, backgroundVoiceContext)
+                  : undefined
             }
             preserveRecordingOnSessionChange={backgroundVoiceContext !== null}
             transcriptionStatus={draftVoiceProgress}
@@ -4596,6 +4760,8 @@ export function VoiceTranscriptionBubble({
   onDownload,
   onOpenArtifact,
   onLoadImage,
+  deliveryError,
+  onRetry,
 }: {
   progress: VoiceProgress;
   draft: UpdateThreadDraftRequest;
@@ -4603,13 +4769,16 @@ export function VoiceTranscriptionBubble({
   onDownload?(path: string): Promise<void>;
   onOpenArtifact?(artifact: ArtifactDescriptor, opener: HTMLButtonElement | null): void;
   onLoadImage?: LocalImageLoader;
+  deliveryError?: string;
+  onRetry?(): void;
 }) {
   const { t } = useI18n();
   const hasContent = Boolean(
     draft.input.trim() || draft.pasteBlocks?.length || draft.images.length || draft.files?.length,
   );
-  const label =
-    progress.status === "uploading"
+  const label = deliveryError
+    ? t("Не удалось отправить запись на сервер")
+    : progress.status === "uploading"
       ? t("Отправляем запись")
       : progress.status === "queued"
         ? t("На сервере · ожидание")
@@ -4632,9 +4801,16 @@ export function VoiceTranscriptionBubble({
         )}
       </span>
       <span className="voice-transcription-status-label">{label}</span>
-      <span className="voice-transcription-timer" aria-hidden="true">
-        {timer}
-      </span>
+      {!deliveryError && (
+        <span className="voice-transcription-timer" aria-hidden="true">
+          {timer}
+        </span>
+      )}
+      {deliveryError && onRetry && (
+        <button type="button" onClick={onRetry}>
+          {t("Повторить отправку")}
+        </button>
+      )}
     </>
   );
 

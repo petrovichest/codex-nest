@@ -65,6 +65,7 @@ export type LocalNewSessionDraft = {
   revision?: number;
   settings?: SessionSettings;
   submission?: NewSessionSubmission;
+  voiceSubmission?: NewSessionVoiceSubmission;
   sharedDraftUpdatedAt?: number;
   attachments?: NewSessionAttachment[];
   updatedAt: number;
@@ -73,6 +74,18 @@ export type LocalNewSessionDraft = {
 export type NewSessionAttachment = {
   attachment: ThreadFileAttachment;
   file: Blob;
+};
+
+export type NewSessionVoiceSubmission = {
+  recording: {
+    id: string;
+    audio: Blob;
+    durationMs: number;
+    selection: { start: number; end: number };
+  };
+  draft: UpdateThreadDraftRequest;
+  draftUpdatedAt?: number | null;
+  deliveryError?: { message: string; retryable: boolean };
 };
 
 export type NewSessionSubmission = {
@@ -116,6 +129,8 @@ export type PendingVoiceRecording = {
   id: string;
   connectionKey: string;
   threadId: string;
+  /** The persisted new-session preparation owns recovery until server acceptance. */
+  newSessionProjectId?: string;
   audio: Blob;
   durationMs: number;
   mode: VoiceTranscriptionMode;
@@ -283,6 +298,7 @@ export async function saveNewSessionDraft(
     revision: number;
     settings?: SessionSettings;
     submission?: NewSessionSubmission;
+    voiceSubmission?: NewSessionVoiceSubmission;
     sharedDraftUpdatedAt?: number;
     attachments?: NewSessionAttachment[];
   },

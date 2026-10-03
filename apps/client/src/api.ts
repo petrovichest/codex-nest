@@ -332,9 +332,13 @@ export class ApiClient {
     id: string,
     base: UpdateThreadDraftRequest,
     value: UpdateThreadDraftRequest,
-    options?: { keepalive?: boolean },
+    options?: { keepalive?: boolean; expectedUpdatedAt?: number },
   ): Promise<ThreadDraft> {
-    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/draft`, {
+    const query =
+      options?.expectedUpdatedAt !== undefined
+        ? `?expectedUpdatedAt=${options.expectedUpdatedAt}`
+        : "";
+    return this.request(`/api/v1/projects/${encodeURIComponent(id)}/draft${query}`, {
       method: "PUT",
       body: { base, value },
       keepalive:

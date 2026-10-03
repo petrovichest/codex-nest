@@ -3952,15 +3952,20 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
 
   app.put<{
     Params: { id: string };
+    Querystring: { expectedUpdatedAt?: string };
     Body: { base: UpdateThreadDraftRequest; value: UpdateThreadDraftRequest };
   }>("/api/v1/projects/:id/draft", { bodyLimit: CHAT_BODY_LIMIT * 2 }, async (request, reply) => {
     if (!store.view().projects.some((project) => project.id === request.params.id))
       return apiError(reply, 404, "not_found", "Project not found");
     const base = validateThreadDraft(request.body?.base);
     const value = validateThreadDraft(request.body?.value);
+    const expectedUpdatedAt = parseExpectedDraftRevision(request.query.expectedUpdatedAt);
     await attachments.validate(`project:${request.params.id}`, value.files ?? []);
     const updated = await store.update((state) => {
       const current = state.projectDrafts?.[request.params.id];
+      if (expectedUpdatedAt !== undefined && (current?.updatedAt ?? null) !== expectedUpdatedAt) {
+        throw new ThreadDraftConflictError("Project draft was updated elsewhere");
+      }
       const merged = validateThreadDraft(
         mergeProjectDraft(
           current ?? { input: "", images: [], goalMode: false, annotations: [] },

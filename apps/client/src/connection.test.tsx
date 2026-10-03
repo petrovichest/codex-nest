@@ -636,6 +636,48 @@ describe("ConnectionProvider", () => {
     },
   );
 
+  it("leaves first-message voice recovery to its persisted new-session preparation", async () => {
+    listPendingVoiceRecordings.mockResolvedValue([
+      {
+        id: "first-voice",
+        connectionKey: "saved-connection",
+        threadId: "thread",
+        newSessionProjectId: "project",
+        audio: new Blob(["audio"], { type: "audio/webm" }),
+        durationMs: 60_000,
+        mode: "send",
+        selectionStart: 0,
+        selectionEnd: 0,
+        draftUpdatedAt: null,
+        draft: { input: "", images: [], goalMode: false, annotations: [] },
+        localDraftUpdatedAt: 1,
+        serverDraftUpdatedAt: null,
+        createdAt: 1,
+        attempts: 1,
+        lastError: "offline",
+      },
+    ]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let controls: ReturnType<typeof useConnection> | undefined;
+    const view = render(
+      <ConnectionProvider settings={{ baseUrl: "https://codexnest.example", token: "token" }}>
+        <ConnectionProbe
+          onConnection={(value) => {
+            controls = value;
+          }}
+        />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(controls!.pendingVoiceRecordingThreadIds).toEqual(["thread"]));
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(async () => Promise.resolve());
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deletePendingVoiceRecording).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it("restores question recordings before submitting answers without touching the composer", async () => {
     const { connectionCacheKey } = await import("./offline-store");
     const settings = { baseUrl: "https://codexnest.example", token: "token" };
