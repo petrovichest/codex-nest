@@ -767,7 +767,7 @@ for (const mobile of [false, true]) {
       return json(route, { error: "Fixture failure" }, 500);
     });
     const app = page.locator(".application-settings-card");
-    const appActions = app.locator(".settings-actions > *");
+    const appActions = app.locator(".settings-actions > button, .settings-actions > a");
     await appActions.last().scrollIntoViewIfNeeded();
     const before = await geometry(appActions);
     await app.getByRole("button", { name: "Проверить обновления", exact: true }).click();
@@ -1161,8 +1161,8 @@ for (const mobile of [false, true]) {
     const card = page.locator(".application-settings-card");
     const check = card.getByRole("button", { name: "Check for updates", exact: true });
     await expect(check).toBeEnabled();
-    await card.locator(".settings-actions > *").last().scrollIntoViewIfNeeded();
-    const controls = card.locator(".settings-actions > *");
+    const controls = card.locator(".settings-actions > button, .settings-actions > a");
+    await controls.last().scrollIntoViewIfNeeded();
     const before = await geometry(controls);
     await check.click();
     await expect(card.getByRole("button", { name: "Checking…", exact: true })).toBeVisible();

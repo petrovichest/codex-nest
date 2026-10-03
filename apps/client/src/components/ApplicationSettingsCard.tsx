@@ -1,5 +1,5 @@
 import { ActionLabel } from "./ActionLabel";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { App as CapacitorApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
@@ -9,7 +9,14 @@ import type { AppUpdateStatus } from "@codexnest/protocol";
 import { useConnection } from "../connection";
 import { localizeKnownServerText, useI18n, type Translate } from "../i18n";
 import { openDownloadUrl } from "../downloads";
-import { ServerIcon } from "./Icons";
+import {
+  ArrowUpIcon,
+  BrowserIcon,
+  DownloadIcon,
+  GitHubIcon,
+  RefreshIcon,
+  ServerIcon,
+} from "./Icons";
 import { SettingsGroup } from "./SettingsPresentation";
 
 type Action = "checking" | "updating" | null;
@@ -29,6 +36,7 @@ export function ApplicationSettingsCard({
 }) {
   const { api, state } = useConnection();
   const { language, t } = useI18n();
+  const actionsId = useId();
   const localizationRef = useRef({ language, t });
   localizationRef.current = { language, t };
   const [status, setStatus] = useState<AppUpdateStatus | null>(initialStatus ?? null);
@@ -244,50 +252,83 @@ export function ApplicationSettingsCard({
             </div>
           )}
         </div>
-        <div className="settings-actions codex-actions">
-          <a
-            className="settings-action-link"
-            href={REPOSITORY_URL}
-            rel="noopener noreferrer"
-            target="_blank"
-            onClick={(event) => {
-              if (!nativePlatform) return;
-              event.preventDefault();
-              void openRepository();
-            }}
+        <div className="application-settings-actions">
+          <div
+            aria-labelledby={`${actionsId}-update`}
+            className="application-settings-action-group"
+            role="group"
           >
-            {t("Открыть GitHub")}
-          </a>
-          <button type="button" onClick={() => void downloadApk()}>
-            {t("Скачать свежий APK")}
-          </button>
-          <button type="button" onClick={() => void downloadChromeExtension()}>
-            {t("Скачать расширение для Chrome")}
-          </button>
-          <button disabled={!status?.supported || busy} type="button" onClick={() => void check()}>
-            <ActionLabel
-              idle={t("Проверить обновления")}
-              busy={t("Проверяем…")}
-              pending={action === "checking"}
-            />
-          </button>
-          <button
-            className="primary"
-            disabled={
-              !status?.supported ||
-              busy ||
-              activeTurnsBlockUpdate ||
-              status?.updateAvailable !== true
-            }
-            type="button"
-            onClick={() => void update()}
+            <p className="application-settings-action-label" id={`${actionsId}-update`}>
+              {t("Обновление")}
+            </p>
+            <div className="settings-actions application-update-actions">
+              <button
+                disabled={!status?.supported || busy}
+                type="button"
+                onClick={() => void check()}
+              >
+                <RefreshIcon />
+                <ActionLabel
+                  idle={t("Проверить обновления")}
+                  busy={t("Проверяем…")}
+                  pending={action === "checking"}
+                />
+              </button>
+              <button
+                className="primary"
+                disabled={
+                  !status?.supported ||
+                  busy ||
+                  activeTurnsBlockUpdate ||
+                  status?.updateAvailable !== true
+                }
+                type="button"
+                onClick={() => void update()}
+              >
+                <ArrowUpIcon />
+                <ActionLabel
+                  idle={t("Обновить CodexNest")}
+                  busy={t("Обновляем…")}
+                  pending={
+                    action === "updating" || (status !== null && status.operation !== "idle")
+                  }
+                />
+              </button>
+            </div>
+          </div>
+          <div
+            aria-labelledby={`${actionsId}-downloads`}
+            className="application-settings-action-group"
+            role="group"
           >
-            <ActionLabel
-              idle={t("Обновить CodexNest")}
-              busy={t("Обновляем…")}
-              pending={action === "updating" || (status !== null && status.operation !== "idle")}
-            />
-          </button>
+            <p className="application-settings-action-label" id={`${actionsId}-downloads`}>
+              {t("Загрузки и ссылки")}
+            </p>
+            <div className="settings-actions application-download-actions">
+              <a
+                className="settings-action-link"
+                href={REPOSITORY_URL}
+                rel="noopener noreferrer"
+                target="_blank"
+                onClick={(event) => {
+                  if (!nativePlatform) return;
+                  event.preventDefault();
+                  void openRepository();
+                }}
+              >
+                <GitHubIcon />
+                <span>{t("Открыть GitHub")}</span>
+              </a>
+              <button type="button" onClick={() => void downloadApk()}>
+                <DownloadIcon />
+                <span>{t("Скачать свежий APK")}</span>
+              </button>
+              <button type="button" onClick={() => void downloadChromeExtension()}>
+                <BrowserIcon />
+                <span>{t("Скачать расширение для Chrome")}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </>
     </SettingsGroup>

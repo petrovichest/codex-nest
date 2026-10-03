@@ -1870,6 +1870,106 @@
   margin-top: var(--space-4);
 }
 
+.application-settings-actions {
+  display: grid;
+  gap: var(--space-5);
+  margin-top: var(--space-4);
+  min-width: 0;
+}
+
+.application-settings-action-group {
+  min-width: 0;
+}
+
+.application-settings-action-group + .application-settings-action-group {
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-line);
+}
+
+.application-settings-action-label {
+  margin: 0 0 var(--space-3);
+  color: var(--color-muted);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-medium);
+}
+
+.application-settings-card .settings-actions {
+  justify-content: flex-start;
+  margin-top: 0;
+  gap: var(--space-2-5);
+}
+
+.application-settings-actions :is(button, a) {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.application-settings-actions :is(button, a) > span {
+  min-width: 0;
+}
+
+.application-settings-actions svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
+.application-update-actions button {
+  min-height: 42px;
+  padding: var(--space-2) 15px;
+  border-color: var(--color-line-strong);
+  background: var(--color-canvas);
+}
+
+.application-update-actions button.primary {
+  padding-inline: var(--space-4);
+  border-color: transparent;
+  background: var(--color-hover);
+}
+
+.application-update-actions button:active:not(:disabled) {
+  background: var(--sidebar-control-active);
+}
+
+.application-settings-card .application-download-actions {
+  gap: 14px;
+  margin-left: calc(-1 * var(--space-2));
+}
+
+.application-download-actions :is(button, a) {
+  min-height: 40px;
+  gap: var(--space-2);
+  padding: 7px var(--space-2);
+  text-align: left;
+}
+
+.application-download-actions svg {
+  color: var(--color-muted-strong);
+}
+
+@media (max-width: 520px) {
+  .application-settings-card .settings-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .application-update-actions button {
+    min-height: 44px;
+  }
+
+  .application-settings-card .application-download-actions {
+    gap: var(--space-1);
+    margin-left: 0;
+  }
+
+  .application-download-actions :is(button, a) {
+    min-height: 44px;
+    justify-content: flex-start;
+    padding: var(--space-2) 0;
+  }
+}
+
 .settings-check-control {
   min-height: var(--control-height);
   justify-content: flex-end;

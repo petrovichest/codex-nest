@@ -118,6 +118,18 @@ export const ArrowDownIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const DownloadIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 3v12m-5-5 5 5 5-5M5 17v3h14v-3" />
+  </Icon>
+);
+
+export const GitHubIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7m12 5v-3.6c0-1 .1-1.6-.5-2.2 3.1-.4 6.3-1.5 6.3-6.9A5.4 5.4 0 0 0 19.3 5c.2-.8.2-2.4-.4-3.4 0 0-1.2-.4-3.9 1.4a13.5 13.5 0 0 0-7 0C5.3 1.2 4.1 1.6 4.1 1.6c-.6 1-.6 2.6-.4 3.4a5.4 5.4 0 0 0-1.5 3.6c0 5.4 3.2 6.5 6.3 6.9-.6.6-.5 1.2-.5 2.2v3.6" />
+  </Icon>
+);
+
 export const PlusIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M12 5v14M5 12h14" />
