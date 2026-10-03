@@ -4182,7 +4182,8 @@ button.message-file:hover:not(:disabled) {
 }
 
 .goal-picker {
-  position: relative;
+  /* Keep the panel anchored to the composer box, outside the toolbar. */
+  position: static;
   flex: 0 0 auto;
 }
 
@@ -4197,11 +4198,13 @@ button.message-file:hover:not(:disabled) {
 
 .goal-popover {
   position: absolute;
-  right: 0;
+  right: var(--space-3);
   bottom: calc(100% + 10px);
-  left: auto;
+  left: var(--space-3);
   z-index: 65;
-  width: min(360px, calc(100vw - var(--sidebar-footprint) - 60px));
+  width: auto;
+  max-height: 60dvh;
+  overflow: auto;
   display: grid;
   gap: var(--space-2-5);
   padding: var(--space-4);
@@ -4212,6 +4215,8 @@ button.message-file:hover:not(:disabled) {
 
 .goal-popover-heading {
   display: flex;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
@@ -4225,10 +4230,11 @@ button.message-file:hover:not(:disabled) {
 .goal-popover-heading span {
   color: var(--muted);
   font-size: var(--text-caption);
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .goal-popover p {
+  min-width: 0;
   max-height: 150px;
   overflow: auto;
   margin: 0;
@@ -4236,6 +4242,7 @@ button.message-file:hover:not(:disabled) {
   font-size: var(--text-label);
   line-height: var(--leading-copy);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .goal-popover-actions {

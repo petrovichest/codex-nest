@@ -158,28 +158,6 @@
     flex: 1 0 auto;
   }
 
-  /* Anchor outside the scrolling toolbar so the goal panel remains reachable. */
-  .goal-picker {
-    position: static;
-  }
-
-  .goal-popover-heading {
-    flex-wrap: wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .goal-popover-heading span {
-    white-space: normal;
-  }
-
-  @media (min-width: 821px) {
-    .goal-popover {
-      right: var(--space-3);
-      max-height: 60dvh;
-      overflow: auto;
-    }
-  }
-
   .composer-toolbar .setting-control:not(.icon-only),
   .composer-toolbar .project-picker select {
     height: auto;
